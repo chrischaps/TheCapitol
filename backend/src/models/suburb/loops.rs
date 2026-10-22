@@ -43,6 +43,12 @@ type P = (f64, f64);
 
 /// The chance that a stem and the next one are joined into a loop street.
 const LOOP_CHANCE: f64 = 0.25;
+/// Pattern (b) wants a frame this many street spacings across at its first
+/// row. A whole sector is about 6, a split half about 3. The bar was 3 until
+/// #456: in Plots v2's band, at a warp of 25, some halves cleared it by a
+/// hair and got a racetrack round a park with one stem in each comb. In the
+/// default world no frame moves across 4, so nothing changes there.
+const ACROSS: f64 = 4.0;
 /// Neighbouring stems are at least this share of a street spacing apart.
 const MIN_SPACING: f64 = 0.9;
 /// The racetrack's corners, in ring order, as (side, row): 0 is the lo side
@@ -51,14 +57,14 @@ const MIN_SPACING: f64 = 0.9;
 /// back, the lo leg down.
 const CORNERS: [(usize, usize); 4] = [(0, 0), (1, 0), (1, 1), (0, 1)];
 
-/// Pattern (b) fits a frame of three rows or more, at least 4S deep and 3S
-/// across at its first row, where S is a nominal street spacing. That leaves
-/// each comb room for a stem.
+/// Pattern (b) fits a frame of three rows or more, at least 4S deep and
+/// `ACROSS`·S across at its first row, where S is a nominal street spacing.
+/// That leaves each comb room for a stem.
 pub(crate) fn fits(frame: &Frame, p: &NeighbourhoodParams) -> bool {
     let Some(fit) = &frame.fit else { return false };
     let s = 2.0 * p.lot_depth + p.local_width;
     let r = frame.base + fit.rows[0];
-    fit.rows.len() >= 3 && frame.depth >= 4.0 * s && r * frame.span(r) >= 3.0 * s
+    fit.rows.len() >= 3 && frame.depth >= 4.0 * s && r * frame.span(r) >= ACROSS * s
 }
 
 /// World units per unit of u at depth v, the warp aside.
@@ -482,6 +488,46 @@ pub(crate) mod tests {
         let mut shallow = all[0].frame.clone();
         shallow.depth = 3.0 * (2.0 * p.lot_depth + p.local_width);
         assert!(!fits(&shallow, p));
+    }
+
+    /// Plots v2's suburb, as `loops_world`.
+    fn grown_loops_world(seed: u64) -> WorldGenParams {
+        let mut params = crate::models::suburb::tests::grown_world(seed);
+        params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::LoopsAndLollipops);
+        params.suburban.neighbourhood.pattern_weights.central_loop = 0.0;
+        params
+    }
+
+    /// In Plots v2's suburb too, (b) fits every whole sector and no split
+    /// half, which `ACROSS` keeps (#456).
+    #[test]
+    fn grown_whole_sectors_fit_and_halves_do_not() {
+        for seed in [42, 7, 1234, 99999] {
+            let params = grown_loops_world(seed).suburban_params();
+            let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
+            for n in &all {
+                let whole = all.iter().filter(|m| m.sector == n.sector).count() == 1;
+                assert_eq!(fits(&n.frame, &params.neighbourhood), whole, "seed {seed} sector {} nbhd {}", n.sector, n.index);
+            }
+        }
+    }
+
+    /// Acceptance for #456, pattern (b) in Plots v2's suburb, at the four
+    /// report seeds. Its band between the combs is a green spine, as today.
+    #[test]
+    fn grown_loops_and_lollipops_meet_their_targets() {
+        for seed in [42, 7, 1234, 99999] {
+            let params = grown_loops_world(seed);
+            let t = TerrainConfig::from_params(&params);
+            let plan = crate::models::suburb::plan(&params.suburban_params(), (t.center_x, t.center_y));
+            let loops = plan.roads.iter().filter(|r| r.id.starts_with("loop_")).count();
+            let stems = plan.roads.iter().filter(|r| r.id.starts_with("culdesac_") && r.id.contains("_i")).count();
+            assert!(loops >= 1 && stems >= 5, "seed {seed}: {loops} loops, {stems} inner-comb stems");
+            let m = metrics::measure_world(&params, None).measured.metrics;
+            let why = format!("seed {seed}: {m:#?}");
+            metrics::Grown::assert_streets(&m, &why);
+            metrics::Grown { takes_eight: 0.42, area_max: 19000.0, depth_min: 120.0, green_max: 0.29 }.assert_lots(&m, &why);
+        }
     }
 
     /// Acceptance for #109: the WP4 street invariants and the WP5 lot

@@ -401,6 +401,26 @@ mod tests {
         }
     }
 
+    /// In Plots v2's suburb, r2160 to r3600 with a warp of 10, every
+    /// neighbourhood fits 5 rows of lots 134 deep, and every drawn split
+    /// stands (#456).
+    #[test]
+    fn every_grown_neighbourhood_fits_five_rows_134_deep() {
+        for seed in 0..50 {
+            let p = crate::models::suburb::tests::grown_world(seed).suburban_params();
+            let all = neighbourhoods(&p, C);
+            for n in &all {
+                let fit = n.frame.fit.as_ref().expect("rows fit");
+                assert_eq!(fit.rows.len(), 5, "seed {seed} sector {} nbhd {}", n.sector, n.index);
+                assert!((fit.lot_depth - 134.0).abs() < 1e-9, "seed {seed}: lots {} deep", fit.lot_depth);
+            }
+            let drawn = (0..8u64)
+                .filter(|&s| SplitMix64::stream(p.seed, &[s]).next_f64() < p.neighbourhood.split_chance)
+                .count();
+            assert_eq!(all.len() - 8, drawn, "seed {seed}: a drawn split didn't fit");
+        }
+    }
+
     #[test]
     fn side_lines_sit_off_the_arterials_by_the_inset() {
         let p = params(42);

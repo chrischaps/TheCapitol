@@ -65,7 +65,7 @@ pub(crate) fn plan(params: &SuburbanGenParams, center: (f64, f64)) -> SuburbPlan
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::f64::consts::FRAC_PI_4;
 
     use capitol_protocol::fmath::StableMath;
@@ -86,6 +86,15 @@ mod tests {
         let mut params = mixed_world(seed);
         params.canal_inner_width = 50.0;
         params.canal_outer_width = 50.0;
+        params
+    }
+
+    /// The grown world of Plots v2 (`WorldGenParams::grown`, #454), with
+    /// the suburb's own v2 lots (`NeighbourhoodParams::grown`, #456): the
+    /// suburb at r2160 to r3600.
+    pub(crate) fn grown_world(seed: u64) -> WorldGenParams {
+        let mut params = WorldGenParams { seed, ..WorldGenParams::grown() };
+        params.suburban.neighbourhood = crate::models::terrain::NeighbourhoodParams::grown();
         params
     }
 
@@ -161,6 +170,42 @@ mod tests {
         }
     }
 
+    /// Acceptance for #456 (Plots v2's suburb, V1.2): the mixed suburb at
+    /// r2160 to r3600 with `NeighbourhoodParams::grown`, at the four report
+    /// seeds. About 1000 lots of about 18.5k, each pattern as it is today.
+    #[test]
+    fn grown_suburb_meets_its_targets() {
+        let measured: Vec<_> = [42, 7, 1234, 99999].into_iter().map(|s| (s, metrics::measure_world(&grown_world(s), None))).collect();
+        for (seed, world) in &measured {
+            let m = &world.measured.metrics;
+            let pct = |v: Option<f64>| 100.0 * v.unwrap_or(f64::NAN);
+            eprintln!(
+                "seed {seed}: {} lots, area {:.0}, {:.0} × {:.0}, {:.0}% take 8, lots {:.0}%, green {:.0}%, gap {:.1}%",
+                m.lots,
+                m.lot_area_median.unwrap_or(f64::NAN),
+                m.lot_width_median.unwrap_or(f64::NAN),
+                m.lot_depth_median.unwrap_or(f64::NAN),
+                pct(m.takes_eight_share),
+                pct(m.cover_lots),
+                pct(m.cover_green),
+                pct(m.cover_gap),
+            );
+        }
+        for (seed, world) in measured {
+            let m = world.measured.metrics;
+            let why = format!("seed {seed}: {m:#?}");
+            let allocated: Vec<usize> = world.neighbourhoods.iter().map(|n| n.entrances.len()).collect();
+            assert_eq!(m.entrances, allocated, "{why}");
+            assert!(m.entrances_min.unwrap() >= 2.0 && m.entrances_max.unwrap() <= 4.0, "{why}");
+            metrics::Grown::assert_streets(&m, &why);
+            // About 1000 (plots plan v2 §3).
+            assert!((900..=1100).contains(&m.lots), "{why}");
+            metrics::Grown { takes_eight: 0.50, area_max: 19000.0, depth_min: 120.0, green_max: 0.25 }.assert_lots(&m, &why);
+            let least = 0.5 * 140.0 * 134.0;
+            assert!(m.parks > 0 && m.park_area_min.is_none_or(|a| a >= least - 1e-6), "{why}");
+        }
+    }
+
     /// A split sector's entrances are counted in each of its two
     /// neighbourhoods, not lumped together, and an entrance on the sector's
     /// edge counts though it sits on the arterial's centre line (#115).
@@ -183,7 +228,17 @@ mod tests {
     /// so there's no 4-way, and one side's are `ENTRANCE_SPACING` apart.
     #[test]
     fn entrances_line_up_across_the_arterials() {
-        for (name, params) in worlds() {
+        entrances_line_up(worlds());
+    }
+
+    /// The same in Plots v2's suburb (#456).
+    #[test]
+    fn grown_entrances_line_up_across_the_arterials() {
+        entrances_line_up([42, 7, 1234, 99999].into_iter().map(|s| (format!("grown, seed {s}"), grown_world(s))).collect());
+    }
+
+    fn entrances_line_up(worlds: Vec<(String, WorldGenParams)>) {
+        for (name, params) in worlds {
             let t = TerrainConfig::from_params(&params);
             let c = (t.center_x, t.center_y);
             let arterials: Vec<_> = t.roads.iter().filter(|r| r.road_type == RoadType::Arterial).collect();

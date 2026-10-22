@@ -87,6 +87,10 @@ impl Default for PatternWeights {
 pub struct NeighbourhoodParams {
     /// Lot width along the street.
     pub lot_frontage: f64,
+    /// The narrowest a lot in a run may be, at mid-depth: a run takes fewer
+    /// lots rather than any narrower. 0, the default, leaves the count to
+    /// `lot_frontage` alone (#456).
+    pub lot_width_min: f64,
     /// Lot depth wanted, and the range a row fit may use.
     pub lot_depth: f64,
     pub lot_depth_min: f64,
@@ -123,6 +127,7 @@ impl Default for NeighbourhoodParams {
             // of about 10k, most taking 4 stations (#422, plots plan §5.2).
             // 64 before, which kept the suburb plan's 60 × 110 (#108).
             lot_frontage: 100.0,
+            lot_width_min: 0.0,
             lot_depth: 110.0,
             lot_depth_min: 95.0,
             lot_depth_max: 130.0,
@@ -138,6 +143,35 @@ impl Default for NeighbourhoodParams {
             warp_wavelength: 1200.0,
             pattern_weights: PatternWeights::default(),
             force_pattern: None,
+        }
+    }
+}
+
+impl NeighbourhoodParams {
+    /// The suburb of Plots v2 (`the-capitol-plots-v2.md` V1.2, #456), for
+    /// the grown world's band, r2160 to r3600. #459 makes these the
+    /// defaults when the world grows. Measured over seeds 42, 7, 1234 and
+    /// 99999: 970 to 1000 lots of about 18.5k (140 × 130), about half of
+    /// them taking 8 stations, not the plots plan's 80%: pies and the fans
+    /// round U-turns can't (#466). `the-capitol-suburb-v2.md` §4.4.
+    /// - **Warp 10.** The 1440 band less the warp fits five rows of lots
+    ///   134 deep. At 30 they're 130 by the fit, and about 127 as laid
+    ///   (the warp tilts the rows), under the 128 a lot needs to take 8.
+    /// - **Frontage 140, and none under 136.** A lot takes 8 from about
+    ///   130 × 128, so a run takes one lot fewer rather than any narrower.
+    /// - **Stems to 400,** so pattern (b)'s combs still reach the middle of
+    ///   its band, as they do at 300 in today's.
+    #[cfg(test)]
+    pub fn grown() -> Self {
+        Self {
+            lot_frontage: 140.0,
+            lot_width_min: 136.0,
+            lot_depth: 134.0,
+            lot_depth_min: 118.0,
+            lot_depth_max: 140.0,
+            cul_de_sac_max: 400.0,
+            warp_amplitude: 10.0,
+            ..Self::default()
         }
     }
 }

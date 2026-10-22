@@ -13,6 +13,8 @@
 //! - **Widths.** A run is measured at mid-depth, so a lot on a curve becomes
 //!   a pie, and is cut into `n = round(L / frontage)` equal widths there.
 //!   The frontage is 100 since #422 (64 before), so most lots take 4 stations.
+//!   With a `lot_width_min`, a run takes fewer lots rather than any narrower
+//!   (#456: Plots v2's lots, which must be about 130 wide to take 8).
 //! - **Depth.** A ray-march to the first road or the neighbourhood's edge. A
 //!   fronted road within `2·lot_depth_max` gives half the distance, so lots
 //!   back to back share a rear line. Otherwise `min(hit, lot_depth)`, or up
@@ -144,8 +146,8 @@ pub(crate) fn lay(roads: &[RoadSegment], plan: &SuburbPlan, params: &SuburbanGen
         };
         if m.fronted != (false, false) {
             let region = region_of(n, params, center);
-            let bulb_radius = params.neighbourhood.bulb_radius;
-            candidates.extend(Street { world: &world, road, meta: m, street, region, p: &p, bulb_radius }.lots());
+            let (bulb_radius, width_min) = (params.neighbourhood.bulb_radius, params.neighbourhood.lot_width_min);
+            candidates.extend(Street { world: &world, road, meta: m, street, region, p: &p, bulb_radius, width_min }.lots());
         }
     }
     // The overlap pass's order: 0 for pies, 1 for through roads, 2 for
@@ -163,6 +165,8 @@ struct Street<'a> {
     region: Region,
     p: &'a LotParams,
     bulb_radius: f64,
+    /// `NeighbourhoodParams::lot_width_min`.
+    width_min: f64,
 }
 
 impl Street<'_> {
@@ -333,7 +337,11 @@ impl Street<'_> {
         if total < MIN_RUN * self.p.frontage {
             return Vec::new();
         }
-        let lots = (total / self.p.frontage).round().max(1.0) as usize;
+        let mut lots = (total / self.p.frontage).round().max(1.0) as usize;
+        // Fewer lots rather than any under the narrowest (#456).
+        while lots > 1 && total / (lots as f64) < self.width_min {
+            lots -= 1;
+        }
         let mut rays: Vec<Ray> = (0..=lots)
             .map(|j| {
                 let want = total * j as f64 / lots as f64;

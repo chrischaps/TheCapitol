@@ -11,7 +11,8 @@ use std::fmt::Write as _;
 
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot, WaterRing};
 
-use super::metrics::{self, fmt_num, Marker, Metrics, Scope, Violation, TARGETS};
+use super::metrics::{self, fmt_num, Marker, Metrics, Scope, Target, Violation};
+use crate::models::station_room;
 use super::neighbourhood::{BufferKind, Neighbourhood};
 use super::parks::{Ground, Greens, CELL};
 
@@ -25,6 +26,8 @@ const LEGEND_PX: f64 = 480.0;
 const AREA_LO: f64 = 6000.0;
 /// ...to this one, the p5 and p95 targets.
 const AREA_HI: f64 = 15000.0;
+/// A lot that doesn't take `View::takes` stations is this colour.
+const SHORT: &str = "#d8c9a3";
 
 pub(crate) const PAPER: &str = "#f3eee2";
 pub(crate) const INK: &str = "#2e2a24";
@@ -127,6 +130,11 @@ pub struct View<'a> {
     pub neighbourhoods: &'a [Neighbourhood],
     /// Each neighbourhood's ground, for its parks (#111).
     pub greens: &'a [Greens],
+    /// Lots are shaded by area over this range: the p5 and p95 targets.
+    pub area: (f64, f64),
+    /// Lots that don't take this many stations are drawn in `SHORT`, so
+    /// the plan shows where they are (8 for Plots v2's lots, #456).
+    pub takes: Option<usize>,
 }
 
 fn hex(c: &str) -> (f64, f64, f64) {
@@ -141,8 +149,8 @@ pub(crate) fn mix(a: &str, b: &str, t: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
-fn lot_fill(area: f64) -> String {
-    mix("#e4ebcb", "#4b7a43", (area - AREA_LO) / (AREA_HI - AREA_LO))
+fn lot_fill(area: f64, (lo, hi): (f64, f64)) -> String {
+    mix("#e4ebcb", "#4b7a43", (area - lo) / (hi - lo))
 }
 
 pub(crate) fn pt(p: P) -> String {
@@ -242,16 +250,18 @@ pub fn svg(v: &View) -> String {
         }
         let is_trimmed = trimmed.contains(&key(&lot.corners));
         let (stroke, sw) = if is_trimmed { (TRIMMED, 2.4 * k) } else { ("#87986b", 0.8 * k) };
+        let short = v.takes.filter(|&n| !station_room::takes(&lot.corners, n));
         let _ = writeln!(
             s,
-            r##"<polygon points="{}" fill="{}" stroke="{stroke}" stroke-width="{sw:.2}"><title>{} · area {:.0} · {:.0}×{:.0}{}</title></polygon>"##,
+            r##"<polygon points="{}" fill="{}" stroke="{stroke}" stroke-width="{sw:.2}"><title>{} · area {:.0} · {:.0}×{:.0}{}{}</title></polygon>"##,
             poly(&lot.corners),
-            lot_fill(lot.area),
+            if short.is_some() { SHORT.to_string() } else { lot_fill(lot.area, v.area) },
             esc(&lot.id),
             lot.area,
             metrics::width_at_mid_depth(lot),
             metrics::depth(lot),
-            if is_trimmed { " · trimmed" } else { "" }
+            if is_trimmed { " · trimmed" } else { "" },
+            short.map(|n| format!(" · takes under {n}")).unwrap_or_default()
         );
         let (a, b) = street_edge(lot, &lot.corners);
         let _ = writeln!(
@@ -538,7 +548,7 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
             y - 18.0 * k,
             26.0 * k,
             16.0 * k,
-            lot_fill(AREA_LO + t * (AREA_HI - AREA_LO))
+            lot_fill(v.area.0 + t * (v.area.1 - v.area.0), v.area)
         );
     }
     let _ = writeln!(
@@ -546,10 +556,22 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
         r##"<text x="{:.1}" y="{y:.1}" font-size="{:.1}" fill="{INK}">lot area {}–{}</text>"##,
         tx + (steps as f64 * 26.0 + 14.0) * k,
         17.0 * k,
-        fmt_num(AREA_LO),
-        fmt_num(AREA_HI)
+        fmt_num(v.area.0),
+        fmt_num(v.area.1)
     );
     y += line;
+    if let Some(n) = v.takes {
+        let _ = writeln!(
+            s,
+            r##"<rect x="{tx:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="{SHORT}"/><text x="{:.1}" y="{y:.1}" font-size="{:.1}" fill="{INK}">takes under {n} stations</text>"##,
+            y - 18.0 * k,
+            26.0 * k,
+            16.0 * k,
+            tx + 40.0 * k,
+            17.0 * k,
+        );
+        y += line;
+    }
     for (colour, label, dashed) in [(TRIMMED, "trimmed by finish_lots", false), (DROPPED, "dropped by finish_lots", true)] {
         let dash = if dashed { format!(r##" stroke-dasharray="{:.1} {:.1}""##, 5.0 * k, 3.0 * k) } else { String::new() };
         let _ = writeln!(
@@ -656,7 +678,7 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
 }
 
 /// The markdown table: a row per target, a column per plan.
-pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
+pub fn table(plans: &[(String, Metrics, Vec<Violation>)], targets: &[&Target]) -> String {
     let mut s = String::new();
     let _ = write!(s, "| metric | target |");
     for (name, ..) in plans {
@@ -683,7 +705,7 @@ pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
         }
         s.push('\n');
     }
-    for t in TARGETS {
+    for t in targets {
         let label = if t.hard { format!("**{}**", t.label) } else { t.label.to_string() };
         let _ = write!(s, "| {label} | {} |", t.check.describe());
         for (_, m, viol) in plans {
@@ -705,9 +727,9 @@ pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
 }
 
 /// A page with the table and every plan view, in a grid.
-pub fn index_html(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
+pub fn index_html(plans: &[(String, Metrics, Vec<Violation>)], targets: &[&Target]) -> String {
     let names: Vec<&str> = plans.iter().map(|(name, ..)| name.as_str()).collect();
-    page("Suburb plan", &table(plans), &names)
+    page("Suburb plan", &table(plans, targets), &names)
 }
 
 /// A page titled `title`, with the markdown table `md` and the plan views
@@ -768,7 +790,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::models::suburb::metrics::Measurement;
+    use crate::models::suburb::metrics::{Measurement, TARGETS};
+    use crate::models::suburb::tests::grown_world;
     use crate::models::terrain::{NeighbourhoodParams, NeighbourhoodPattern, SuburbanGenParams, WorldGenParams};
     use capitol_protocol::rules::{SUBURBAN_OUTER_RADIUS, URBAN_OUTER_RADIUS};
 
@@ -783,6 +806,8 @@ mod tests {
     /// Env: `SUBURB_SEEDS` (comma-separated, default 42,7,1234,99999),
     /// `SUBURB_SECTOR` (0–7, one sector only),
     /// `SUBURB_INNER` and `SUBURB_OUTER` (the suburb's radii, to try other depths; #117),
+    /// `SUBURB_PARAMS` (`today`, the default, or `grown`: Plots v2's lots,
+    /// `NeighbourhoodParams::grown`, at r2160 to r3600 unless the radii say otherwise; #456),
     /// `SUBURB_PATTERN` (`warped_parallels`, `loops_and_lollipops` or `central_loop`: force one
     /// wherever it fits; #109) and `SUBURB_OUT` (default `target/suburb-plan/` at the workspace root).
     #[test]
@@ -820,9 +845,16 @@ mod tests {
         let radius = |name: &str, default: f64| -> f64 {
             env_or(name, &default.to_string()).trim().parse().unwrap_or_else(|_| panic!("{name} is a number"))
         };
-        let defaults = WorldGenParams::default();
+        let grown = match env_or("SUBURB_PARAMS", "today").trim().to_lowercase().as_str() {
+            "today" => false,
+            "grown" => true,
+            v => panic!("SUBURB_PARAMS={v}: today or grown"),
+        };
+        let defaults = if grown { grown_world(0) } else { WorldGenParams::default() };
         let inner = radius("SUBURB_INNER", defaults.urban_outer_radius);
         let outer = radius("SUBURB_OUTER", defaults.suburban_outer_radius);
+        let layout = if grown { format!("{layout}-grown") } else { layout };
+        let targets = metrics::targets(grown);
         assert!(
             defaults.guild_outer_radius < inner && inner < outer && outer < defaults.rural_outer_radius,
             "SUBURB_INNER and SUBURB_OUTER must sit between the guild district and the rural edge"
@@ -835,10 +867,10 @@ mod tests {
                 urban_outer_radius: inner,
                 suburban_outer_radius: outer,
                 suburban: SuburbanGenParams {
-                    neighbourhood: NeighbourhoodParams { force_pattern: pattern, ..Default::default() },
+                    neighbourhood: NeighbourhoodParams { force_pattern: pattern, ..defaults.suburban.neighbourhood.clone() },
                     ..Default::default()
                 },
-                ..Default::default()
+                ..defaults.clone()
             };
             let Measurement { terrain: t, before, cleared, neighbourhoods, greens, scope, measured } =
                 metrics::measure_world(&params, sector);
@@ -847,7 +879,7 @@ mod tests {
             let mut m = measured.metrics;
             m.layout = layout.clone();
             let gen_ms = m.gen_ms;
-            let viol = metrics::violations(&m);
+            let viol = metrics::violations_of(&m, &targets);
 
             let name = match sector {
                 Some(s) => format!("{layout}-{seed}-s{s}"),
@@ -870,6 +902,8 @@ mod tests {
                 violations: &viol,
                 neighbourhoods: &neighbourhoods,
                 greens: &greens,
+                area: if grown { (10000.0, 28000.0) } else { (AREA_LO, AREA_HI) },
+                takes: grown.then_some(8),
             };
             std::fs::write(out.join(format!("{name}.svg")), svg(&view)).unwrap();
             let json = serde_json::json!({ "metrics": m, "violations": viol, "markers": measured.markers });
@@ -884,9 +918,9 @@ mod tests {
             plans.push((name, m, viol));
         }
 
-        let table = table(&plans);
+        let table = table(&plans, &targets);
         std::fs::write(out.join("report.md"), &table).unwrap();
-        std::fs::write(out.join("index.html"), index_html(&plans)).unwrap();
+        std::fs::write(out.join("index.html"), index_html(&plans, &targets)).unwrap();
         eprintln!("\n{table}\nwrote {}", out.display());
     }
 
@@ -913,7 +947,7 @@ mod tests {
         let lots = vec![lot];
         let cleared = vec![Some(lots[0].corners)];
         let scope = Scope { center: (0.0, 0.0), inner: URBAN_OUTER_RADIUS, outer: SUBURBAN_OUTER_RADIUS, sector: Some(0) };
-        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true, greens: &[], streets: &[] });
+        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true, greens: &[], streets: &[], culdesac_max: 300.0 });
         let viol = metrics::violations(&measured.metrics);
         let view = View {
             title: "Test".into(),
@@ -928,12 +962,14 @@ mod tests {
             violations: &viol,
             neighbourhoods: &[],
             greens: &[],
+            area: (AREA_LO, AREA_HI),
+            takes: None,
         };
         let doc = svg(&view);
         assert!(doc.starts_with("<svg") && doc.trim_end().ends_with("</svg>"));
         assert!(doc.contains("culdesac_1 · cul-de-sac"));
         assert!(doc.contains(Role::Arterial.colour()));
-        let md = table(&[("t".into(), measured.metrics, viol)]);
+        let md = table(&[("t".into(), measured.metrics, viol)], &metrics::targets(false));
         assert_eq!(md.lines().count(), 2 + 7 + TARGETS.len() + 1);
     }
 }

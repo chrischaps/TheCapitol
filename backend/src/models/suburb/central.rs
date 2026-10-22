@@ -444,6 +444,47 @@ pub(crate) mod tests {
         }
     }
 
+    /// Plots v2's suburb, as `central_world`.
+    fn grown_central_world(seed: u64) -> WorldGenParams {
+        let mut params = crate::models::suburb::tests::grown_world(seed);
+        params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::CentralLoop);
+        params.suburban.neighbourhood.pattern_weights.loops_and_lollipops = 0.0;
+        params
+    }
+
+    /// In Plots v2's suburb, (c) still fits every split half with today's
+    /// `STEM`: the halves grew with the lots (#456).
+    #[test]
+    fn grown_split_halves_fit_and_whole_sectors_do_not() {
+        for seed in [42, 7, 1234, 99999] {
+            let params = grown_central_world(seed).suburban_params();
+            let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
+            for n in &all {
+                let whole = all.iter().filter(|m| m.sector == n.sector).count() == 1;
+                assert_eq!(fits(&n.frame, &params.neighbourhood), !whole, "seed {seed} sector {} nbhd {}", n.sector, n.index);
+            }
+        }
+    }
+
+    /// Acceptance for #456, pattern (c) in Plots v2's suburb, at the four
+    /// report seeds. The loop's inside and the corners' fans are the
+    /// shallowest lots.
+    #[test]
+    fn grown_central_loop_meets_its_targets() {
+        for seed in [42, 7, 1234, 99999] {
+            let params = grown_central_world(seed);
+            let sp = params.suburban_params();
+            let plan = crate::models::suburb::plan(&sp, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
+            let halves = plan.neighbourhoods.iter().filter(|n| fits(&n.frame, &sp.neighbourhood)).count();
+            let stems = plan.roads.iter().filter(|r| r.id.starts_with("culdesac_")).count();
+            assert!(halves == 0 || stems >= 5 * halves, "seed {seed}: {stems} stems in {halves} loops");
+            let m = metrics::measure_world(&params, None).measured.metrics;
+            let why = format!("seed {seed}: {m:#?}");
+            metrics::Grown::assert_streets(&m, &why);
+            metrics::Grown { takes_eight: 0.42, area_max: 19000.0, depth_min: 115.0, green_max: 0.29 }.assert_lots(&m, &why);
+        }
+    }
+
     #[test]
     fn the_ring_is_closed_anticlockwise_and_keeps_its_band() {
         let params = central_world(42).suburban_params();

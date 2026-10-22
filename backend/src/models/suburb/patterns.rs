@@ -624,6 +624,22 @@ pub(crate) mod tests {
         params
     }
 
+    /// Acceptance for #456, pattern (a): its streets and lots in Plots v2's
+    /// suburb, at the four report seeds. Its lots are the largest, over
+    /// 19k at the median, and take 8 the most: it has the fewest pies.
+    #[test]
+    fn grown_warped_parallels_meet_their_targets() {
+        for seed in [42, 7, 1234, 99999] {
+            let mut params = crate::models::suburb::tests::grown_world(seed);
+            params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::WarpedParallels);
+            let m = metrics::measure_world(&params, None).measured.metrics;
+            let why = format!("seed {seed}: {m:#?}");
+            metrics::Grown::assert_streets(&m, &why);
+            assert!(m.parallel_spacing_p5.unwrap() >= 240.0, "{why}");
+            metrics::Grown { takes_eight: 0.58, area_max: 19500.0, depth_min: 125.0, green_max: 0.20 }.assert_lots(&m, &why);
+        }
+    }
+
     #[test]
     fn side_options_pair_only_free_neighbours() {
         let all = side_options(&[None, None, None]);
@@ -657,7 +673,7 @@ pub(crate) mod tests {
                 outer: params.suburban_outer_radius,
                 sector: None,
             };
-            let plan = Plan { roads: &t.roads, lots: &[], before: &[], cleared: &[], scope, coverage: false, greens: &[], streets: &[] };
+            let plan = Plan { roads: &t.roads, lots: &[], before: &[], cleared: &[], scope, coverage: false, greens: &[], streets: &[], culdesac_max: 300.0 };
             let m = metrics::measure(&plan).metrics;
             let why = format!("seed {seed}: {m:#?}");
             assert!(m.suburban_roads > 50, "{why}");
