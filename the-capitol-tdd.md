@@ -257,13 +257,19 @@ PUT  /plots/{id}/permissions     → Update permissions
 
 **Guilds**
 ```
-GET  /guilds                     → List guilds
-GET  /guilds/{id}                → Guild details
-POST /guilds                     → Create guild (requires subscription)
-POST /guilds/{id}/join           → Request to join
-POST /guilds/{id}/leave          → Leave guild
-PUT  /guilds/{id}/members/{player_id}  → Update member role
+GET    /guilds                              → List guilds, the largest first
+GET    /guilds/{id}                         → Guild details (who's waiting, for officers)
+POST   /guilds                              → Found one (a subscriber, at the Exchange hall, 500)
+POST   /guilds/{id}/apply                   → Apply; joins if it invited you
+POST   /guilds/{id}/invites/{player_id}     → Invite (officer, leader); takes in an applicant
+DELETE /guilds/{id}/invites/{player_id}     → Decline or withdraw
+POST   /guilds/{id}/leave                   → Leave guild
+DELETE /guilds/{id}/members/{player_id}     → Expel
+PUT    /guilds/{id}/members/{player_id}     → Set a role, or hand on the lead
+GET    /player/guild                        → Your guild, your role, your invitations
 ```
+
+*As built in S4.1 (#397); see `the-capitol-commons.md`.*
 
 **Contracts**
 ```

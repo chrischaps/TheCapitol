@@ -148,9 +148,11 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
                 (SELECT pl.zone_id FROM plots pl WHERE pl.owner_id = p.id
                  ORDER BY pl.claimed_at NULLS LAST, pl.id LIMIT 1),
                 EXISTS (SELECT 1 FROM player_mutes m JOIN players me ON me.id = m.player_id
-                        WHERE me.account_id = $2 AND m.muted_id = p.id)
+                        WHERE me.account_id = $2 AND m.muted_id = p.id),
+                (SELECT g.name FROM guild_members gm JOIN guilds g ON g.id = gm.guild_id
+                 WHERE gm.player_id = p.id)
          FROM players p JOIN accounts a ON a.id = p.account_id";
-    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>, bool);
+    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>, bool, Option<String>);
     let row: Option<Row> = match who {
         Who::Id(id) => {
             sqlx::query_as(&format!("{CARD} WHERE p.id = $1"))
@@ -170,7 +172,7 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
             .await?
         }
     };
-    let (id, name, citizen, created, mine, home, muted) =
+    let (id, name, citizen, created, mine, home, muted, guild) =
         row.ok_or_else(|| AppError::NotFound("No one goes by that".into()))?;
     Ok(PlayerCard {
         id,
@@ -179,8 +181,7 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
         since: rules::day_number(created.timestamp_millis()),
         home,
         standing: standing::NEW_IN_TOWN.into(),
-        // Guilds come in S4.1 (#397)
-        guild: None,
+        guild,
         mine,
         muted,
     })

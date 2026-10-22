@@ -6,7 +6,7 @@ use axum::{
 use uuid::Uuid;
 
 use capitol_protocol::rest::{
-    CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse, MutesResponse,
+    CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse, MutesResponse, MyGuild,
     GrantRequest, GrantResponse, PlayerMeResponse, SubscribeRequest, Subscription,
 };
 use capitol_protocol::rules::{in_world, Zone};
@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/subscription", post(mock_subscribe))
         .route("/grant", post(dev_grant))
         .route("/mutes", get(get_mutes))
+        .route("/guild", get(get_guild))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -48,6 +49,28 @@ pub async fn get_mutes(
 ) -> Result<Json<MutesResponse>, AppError> {
     let player = super::players::player_of(&state.db, auth_user.account_id).await?;
     Ok(Json(MutesResponse { mutes: crate::mutes::list(&state.db, player).await? }))
+}
+
+/// Your guild, your role in it, and the invitations and applications that
+/// name you (S4.1)
+#[utoipa::path(
+    get,
+    path = "/player/guild",
+    responses(
+        (status = 200, description = "Your guild, if you're in one", body = MyGuild)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn get_guild(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<MyGuild>, AppError> {
+    let player = super::players::player_of(&state.db, auth_user.account_id).await?;
+    crate::engine::guilds::mine(&state.db, player)
+        .await
+        .map(Json)
+        .map_err(|e| AppError::Internal(e.message()))
 }
 
 /// Get the player's name, live position, zone and balance

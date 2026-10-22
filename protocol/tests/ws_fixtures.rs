@@ -78,6 +78,8 @@ const SERVER_TYPES: &[&str] = &[
     "commission_closed",
     "commission_delivered",
     "commission_expired",
+    "guild_changed",
+    "guild_notice",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

@@ -15,6 +15,7 @@ pub mod currency;
 mod events;
 mod extraction;
 pub mod gazette;
+pub mod guilds;
 pub mod grants;
 pub mod impound;
 pub mod interest;

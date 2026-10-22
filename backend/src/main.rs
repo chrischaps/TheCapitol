@@ -431,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/player", routes::player::router(app_state.clone()))
         .nest("/players", routes::players::router(app_state.clone()))
         .nest("/letters", routes::letters::router(app_state.clone()))
+        .nest("/guilds", routes::guilds::router(app_state.clone()))
         .nest("/world", routes::world::router(app_state.clone()))
         .nest("/recipes", routes::recipes::router(app_state.clone()))
         .route("/catalog", get(routes::catalog::get_catalog))

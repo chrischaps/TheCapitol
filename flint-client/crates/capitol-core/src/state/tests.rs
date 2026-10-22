@@ -242,6 +242,7 @@ fn test_for(message: &M) -> fn() {
         M::CommissionClosed { .. } => the_board_changes_nothing_yet,
         M::CommissionDelivered { .. } => commission_notices_are_reported,
         M::CommissionExpired { .. } => commission_notices_are_reported,
+        M::GuildChanged { .. } | M::GuildNotice { .. } => guild_messages_are_reported,
     }
 }
 
@@ -261,7 +262,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 65, "one fixture per ServerMessage variant");
+    assert_eq!(count, 67, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1459,6 +1460,35 @@ fn a_letter_is_reported() {
     assert_eq!(
         state.apply_ws(&letter),
         vec![StateEvent::LetterArrived { id, from, name: "Brin".into(), citizen: true, first_line: "Thank you…".into() }]
+    );
+}
+
+#[test]
+fn guild_messages_are_reported() {
+    use capitol_protocol::ws::GuildNoticeKind;
+    let mut state = connected();
+    let (guild_id, who) = (Uuid::from_u128(397), Uuid::from_u128(7));
+    assert_eq!(state.apply_ws(&M::GuildChanged { guild_id }), vec![StateEvent::GuildChanged { guild_id }]);
+    let notice = M::GuildNotice {
+        guild_id,
+        guild: "The Rope Walkers".into(),
+        tag: "ROPE".into(),
+        kind: GuildNoticeKind::Invited,
+        who,
+        name: "Brin".into(),
+        citizen: true,
+    };
+    assert_eq!(
+        state.apply_ws(&notice),
+        vec![StateEvent::GuildNotice {
+            guild_id,
+            guild: "The Rope Walkers".into(),
+            tag: "ROPE".into(),
+            kind: GuildNoticeKind::Invited,
+            who,
+            name: "Brin".into(),
+            citizen: true,
+        }]
     );
 }
 

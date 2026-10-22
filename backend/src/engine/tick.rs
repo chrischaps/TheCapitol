@@ -939,6 +939,13 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                             notice_id: l.notice_id,
                         });
                     }
+                    // S4.1: a guild whose leader has been lapsed four weeks
+                    // passes the lead on
+                    let events = game.event_sender.clone();
+                    drop(game);
+                    for told in super::guilds::pass_lapsed_leads(&db, chrono::Utc::now()).await {
+                        told.send(&db, &events).await;
+                    }
                 }
                 .instrument(tracing::info_span!("loop.subscriptions")),
             );

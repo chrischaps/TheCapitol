@@ -667,7 +667,7 @@ pub struct PlayerCard {
     pub home: Option<String>,
     /// What the city says of them, in words (D8): `rules::standing`
     pub standing: String,
-    /// Their guild's name, once there are guilds (S4.1)
+    /// Their guild's name (S4.1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guild: Option<String>,
     /// The card is your own
@@ -777,6 +777,139 @@ pub struct Mailbox {
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct LettersUnread {
     pub unread: u32,
+}
+
+/// `POST /guilds` (S4.1): found a guild, at the Exchange hall, for
+/// [`rules::guild::FOUNDING_FEE`]. Each is cleaned by `rules::guild`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct FoundGuild {
+    pub name: String,
+    pub tag: String,
+    #[serde(default)]
+    pub charter: String,
+}
+
+/// A guild in the registry's list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub tag: String,
+    pub members: u32,
+    pub leader: Correspondent,
+    pub founded_at: DateTime<Utc>,
+}
+
+/// `GET /guilds` (S4.1): every guild, the largest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildsResponse {
+    pub guilds: Vec<GuildSummary>,
+}
+
+/// Someone in a guild.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildMember {
+    pub id: Uuid,
+    pub name: String,
+    /// A citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+    pub role: rules::guild::GuildRole,
+    pub joined_at: DateTime<Utc>,
+    /// What's said of them ([`rules::standing`])
+    pub standing: String,
+}
+
+/// An invitation into a guild, or an application to one: either waits for
+/// the other side to accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum GuildInviteKind {
+    /// An officer or the leader asked them
+    Invite,
+    /// They asked
+    Apply,
+}
+
+impl GuildInviteKind {
+    /// The column's value, and the wire's.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GuildInviteKind::Invite => "invite",
+            GuildInviteKind::Apply => "apply",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<GuildInviteKind> {
+        match s {
+            "invite" => Some(GuildInviteKind::Invite),
+            "apply" => Some(GuildInviteKind::Apply),
+            _ => None,
+        }
+    }
+}
+
+/// An invitation or an application waiting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildInvite {
+    pub guild_id: Uuid,
+    pub guild: String,
+    pub tag: String,
+    pub kind: GuildInviteKind,
+    /// Who'd join
+    pub player: Correspondent,
+    /// Who asked: an officer or the leader for an invite, the player for an
+    /// application
+    pub by: Correspondent,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /guilds/{id}` (S4.1): a guild, its members by role and then by
+/// tenure, and, for its officers and leader, who's waiting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildDetail {
+    pub id: Uuid,
+    pub name: String,
+    pub tag: String,
+    pub charter: String,
+    pub founded_at: DateTime<Utc>,
+    pub founder: Correspondent,
+    pub leader: Correspondent,
+    pub members: Vec<GuildMember>,
+    /// Invitations out and applications in: only an officer or the leader
+    /// sees them
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<GuildInvite>,
+}
+
+/// `GET /player/guild` (S4.1), and the answer to every guild action: your
+/// guild as it stands, your place in it, and the invitations and
+/// applications that name you. A client never patches its own copy.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MyGuild {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild: Option<GuildDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<rules::guild::GuildRole>,
+    /// Guilds that invited you, and those you've applied to
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invites: Vec<GuildInvite>,
+}
+
+/// `PUT /guilds/{id}/members/{player_id}` (S4.1): make a member an officer,
+/// an officer a member, or hand them the lead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct SetGuildRole {
+    pub role: rules::guild::GuildRole,
 }
 
 /// `GET /player/inventory`

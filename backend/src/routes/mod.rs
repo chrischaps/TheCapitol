@@ -8,6 +8,7 @@ pub mod commissions;
 pub mod console;
 pub mod exchange;
 pub mod gazette;
+pub mod guilds;
 pub mod health;
 pub mod inventory;
 pub mod letters;

@@ -45,6 +45,10 @@
 //! `commissions.json` and `commission_delivery.json` are `POST /commissions`,
 //! `POST /commissions/{id}/deliver` and their answers (S2.1): a citizen's
 //! commission part delivered beside a person's, and the delivery that fills it.
+//! `fixtures/rest/my_guild.json` is `GET /player/guild` (S4.1) as a guild's
+//! leader sees it: a citizen among the members, a citizen's application and
+//! an officer's invitation waiting; `guilds.json` is `GET /guilds`, and
+//! `found_guild.json` is `POST /guilds`, a charter in paragraphs.
 
 use std::fs;
 use std::path::Path;
@@ -437,4 +441,35 @@ fn commissions_round_trip_marking_only_the_citizen() {
     assert_eq!((done.commission.status, done.commission.escrow_strands), (CommissionStatus::Filled, 0));
     assert_eq!(done.paid, commission_value(done.commission.price, done.units.count() as i32));
     assert_eq!(serde_json::to_string(&done).unwrap(), json);
+}
+
+#[test]
+fn a_guild_round_trips_as_its_leader_sees_it() {
+    use capitol_protocol::rest::{FoundGuild, GuildInviteKind, GuildsResponse, MyGuild};
+    use capitol_protocol::rules::guild::{self, GuildRole};
+    let json = fixture("my_guild.json");
+    let mine: MyGuild = serde_json::from_str(&json).unwrap();
+    assert_eq!(mine.role, Some(GuildRole::Leader));
+    assert!(mine.invites.is_empty());
+    let guild = mine.guild.as_ref().unwrap();
+    let roles: Vec<GuildRole> = guild.members.iter().map(|m| m.role).collect();
+    assert_eq!(roles, [GuildRole::Leader, GuildRole::Officer, GuildRole::Member], "by role, then tenure");
+    assert!(guild.members[2].citizen && !guild.members[0].citizen);
+    assert_eq!(guild.leader, guild.founder);
+    let kinds: Vec<GuildInviteKind> = guild.waiting.iter().map(|w| w.kind).collect();
+    assert_eq!(kinds, [GuildInviteKind::Apply, GuildInviteKind::Invite]);
+    assert_eq!(guild.waiting[0].by, guild.waiting[0].player, "an application is its own asking");
+    assert_eq!(serde_json::to_string(&mine).unwrap(), json);
+
+    let json = fixture("guilds.json");
+    let guilds: GuildsResponse = serde_json::from_str(&json).unwrap();
+    assert!(guilds.guilds.windows(2).all(|w| w[0].members >= w[1].members), "the largest first");
+    assert_eq!(serde_json::to_string(&guilds).unwrap(), json);
+
+    let json = fixture("found_guild.json");
+    let found: FoundGuild = serde_json::from_str(&json).unwrap();
+    assert_eq!(guild::clean_name(&found.name).unwrap(), found.name, "already clean");
+    assert_eq!(guild::clean_tag(&found.tag).unwrap(), found.tag);
+    assert_eq!(guild::clean_charter(&found.charter).unwrap(), found.charter);
+    assert_eq!(serde_json::to_string(&found).unwrap(), json);
 }

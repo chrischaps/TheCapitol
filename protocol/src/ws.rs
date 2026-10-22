@@ -678,6 +678,41 @@ pub enum ServerMessage {
         quantity: i32,
         refunded: i64,
     },
+    // Commons S4.1: guilds
+    /// Your guild's roster changed, or you joined, left or were expelled:
+    /// read it again with `GET /player/guild`.
+    #[serde(rename = "guild_changed")]
+    GuildChanged { guild_id: Uuid },
+    /// Something in a guild that names you (Commons D10). One sent while you
+    /// were away is sent as you come back, once. `who` is who did it: who
+    /// invited you, who applied, who expelled you, or who held the lead.
+    #[serde(rename = "guild_notice")]
+    GuildNotice {
+        guild_id: Uuid,
+        guild: String,
+        tag: String,
+        kind: GuildNoticeKind,
+        who: Uuid,
+        name: String,
+        /// `who` is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        citizen: bool,
+    },
+}
+
+/// What a [`ServerMessage::GuildNotice`] tells you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuildNoticeKind {
+    /// You're invited to join
+    Invited,
+    /// Someone applied to your guild (to its officers and leader)
+    Applied,
+    /// You were expelled
+    Expelled,
+    /// The lead is yours: handed on, or passed to you after the leader's
+    /// subscription lapsed four weeks
+    Lead,
 }
 
 impl ServerMessage {
@@ -750,6 +785,8 @@ impl ServerMessage {
             ServerMessage::CommissionClosed { .. } => "commission_closed",
             ServerMessage::CommissionDelivered { .. } => "commission_delivered",
             ServerMessage::CommissionExpired { .. } => "commission_expired",
+            ServerMessage::GuildChanged { .. } => "guild_changed",
+            ServerMessage::GuildNotice { .. } => "guild_notice",
         }
     }
 }

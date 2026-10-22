@@ -29,6 +29,10 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rest::{Commission, CommissionDelivery, CommissionsResponse, DeliverCommission, PostCommission};
 use capitol_protocol::rules::court::CommissionStatus;
+use capitol_protocol::rest::{
+    FoundGuild, GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary, GuildsResponse, MyGuild, SetGuildRole,
+};
+use capitol_protocol::rules::guild::GuildRole;
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{
     Bridge, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing,
@@ -76,6 +80,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         (name = "Health", description = "Server health checks"),
         (name = "Player", description = "Player state and movement"),
         (name = "Letters", description = "Letters that wait for someone who's away, for a Strand's postage"),
+        (name = "Guilds", description = "The guild registry: founding, roles and the roster"),
         (name = "World", description = "World state, resource nodes, and extraction"),
         (name = "Inventory", description = "Container and item management"),
         (name = "Recipes", description = "Crafting recipe information"),
@@ -121,6 +126,17 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::letters::get_letters,
         crate::routes::letters::read,
         crate::routes::letters::drop_letter,
+        // Guilds
+        crate::routes::guilds::list,
+        crate::routes::guilds::found,
+        crate::routes::guilds::get_guild,
+        crate::routes::guilds::apply,
+        crate::routes::guilds::invite,
+        crate::routes::guilds::withdraw,
+        crate::routes::guilds::leave,
+        crate::routes::guilds::expel,
+        crate::routes::guilds::set_role,
+        crate::routes::player::get_guild,
         // World
         crate::routes::world::get_nearby,
         crate::routes::world::get_all_nodes,
@@ -208,6 +224,17 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         PlayerCard,
         MutesResponse,
         MutedPlayer,
+        // Guilds
+        FoundGuild,
+        GuildDetail,
+        GuildInvite,
+        GuildInviteKind,
+        GuildMember,
+        GuildRole,
+        GuildSummary,
+        GuildsResponse,
+        MyGuild,
+        SetGuildRole,
         SendLetter,
         Correspondent,
         Letter,

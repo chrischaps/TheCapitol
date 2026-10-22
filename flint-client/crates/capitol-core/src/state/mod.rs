@@ -271,6 +271,23 @@ pub enum StateEvent {
         citizen: bool,
         first_line: String,
     },
+    /// Your guild changed, or you joined or left one (`guild_changed`,
+    /// Commons S4.1): read `GET /player/guild` again. The guild panel is
+    /// S4.4's (#400).
+    GuildChanged { guild_id: Uuid },
+    /// Something in a guild that names you (`guild_notice`, S4.1): live, or
+    /// as you come back.
+    GuildNotice {
+        guild_id: Uuid,
+        guild: String,
+        tag: String,
+        kind: crate::protocol::ws::GuildNoticeKind,
+        /// Who invited you, applied, expelled you or held the lead
+        who: Uuid,
+        name: String,
+        /// `who` is a citizen (C0.1)
+        citizen: bool,
+    },
     /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). Flint
     /// toasts it (E3.11).
     BazaarSale {
@@ -884,6 +901,16 @@ impl GameState {
                 name: name.clone(),
                 citizen: *citizen,
                 first_line: first_line.clone(),
+            }),
+            M::GuildChanged { guild_id } => out.push(StateEvent::GuildChanged { guild_id: *guild_id }),
+            M::GuildNotice { guild_id, guild, tag, kind, who, name, citizen } => out.push(StateEvent::GuildNotice {
+                guild_id: *guild_id,
+                guild: guild.clone(),
+                tag: tag.clone(),
+                kind: *kind,
+                who: *who,
+                name: name.clone(),
+                citizen: *citizen,
             }),
             // E3.10: to the merchant. The store takes the sale off your
             // listing, or closes your shop.

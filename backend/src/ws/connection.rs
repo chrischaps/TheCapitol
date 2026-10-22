@@ -1024,6 +1024,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             muted = read_mutes(&state, player_id, muted).await;
                         }
                     }
+                    // Their guild changed, or they joined or left one (S4.1)
+                    Ok(GameEvent::GuildChanged { guild_id, players }) => {
+                        if players.contains(&player_id) {
+                            let msg = ServerMessage::GuildChanged { guild_id };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     // Leaving goes to everyone, near or far: it ends their trades
                     Ok(GameEvent::PlayerLeft { player_id: left_id }) => {
                         let msg = ServerMessage::PlayerLeft { player_id: left_id };

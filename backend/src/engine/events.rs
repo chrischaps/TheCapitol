@@ -263,6 +263,9 @@ pub enum GameEvent {
     /// Commons S1.4: `player_id` muted or unmuted someone. Their sockets
     /// read their mutes again (`mutes::of`).
     MutesChanged { player_id: Uuid },
+    /// Commons S4.1: `guild_id`'s roster or waiting list changed. Each of
+    /// `players` is sent `guild_changed`, to read their guild again.
+    GuildChanged { guild_id: Uuid, players: Vec<Uuid> },
     /// D6.1: an admin moved a fee (to everyone)
     FeesChanged { fees: capitol_protocol::tunables::Fees },
     /// Commons S2.1: a commission went up on the hall's board, was delivered
