@@ -1305,7 +1305,7 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
             Roster::parse(&format!("[[citizen]]\nname = \"A\"\nrole = \"builder\"\nkey = \"k\"\n{line}"), path).unwrap_err()
         };
         assert!(with("market = \"pub\"").contains("\"hall\" or \"bazaar\""));
-        assert!(with("home = { zone = \"wilderness\", avenue = \"south\", depth = 0.5 }").contains("rural or suburban"));
+        assert!(with("home = { zone = \"wilderness\", avenue = \"south\", depth = 0.5 }").contains("rural, suburban or urban"));
         assert!(with("home = { zone = \"rural\", avenue = \"up\", depth = 0.5 }").contains("compass point"));
         assert!(with("home = { zone = \"rural\", avenue = \"south\", depth = 1.5 }").contains("depth"));
         assert!(with("schedule = { wake = \"6am\", market = \"09:30-11:00\", home = \"18:50\", bed = \"21:15\" }")
