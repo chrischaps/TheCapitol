@@ -48,6 +48,20 @@ pub const FARM_TRACK: u32 = 0x7a6a4e;
 /// New timber, on a house going up.
 pub const TIMBER: u32 = 0xb08a5c;
 pub const CHIMNEY: u32 = 0x6e4a3c;
+/// A building opened as you come close (V3.4), drawn as an architect's
+/// section: limewashed plaster inside, scrubbed boards underfoot, and the
+/// cut through the walls and floors in a dark umber, so the cut reads.
+pub const PLASTER: u32 = 0xe6dccb;
+pub const BOARDS: u32 = 0xa07c55;
+pub const CUT: u32 = 0x3b2f2a;
+/// A shop's carriage arch, in shadow, and its shop window's frame.
+pub const ARCH: u32 = 0x231d1a;
+pub const SHOPFRONT: u32 = 0x2f3a33;
+/// Scaffolding while a floor goes up: galvanised poles, timber boards.
+pub const SCAFFOLD: u32 = 0x8d9296;
+/// A station left out in the weather (V3.4): what its colours fade toward
+/// as its condition falls, greyed and greened with moss.
+pub const WEATHERED: [f32; 3] = [0.7, 0.76, 0.62];
 /// Window glass by day, and the lamp-light in it at night.
 pub const GLASS: u32 = 0x27313d;
 pub const LAMP: u32 = 0xffb766;

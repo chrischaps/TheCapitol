@@ -110,6 +110,9 @@ pub struct Lot {
     /// The quad's street-facing edge (`TerrainPlot::street_facing_edge`),
     /// server units, not inset: where a house on it faces (P8.6b).
     pub street: [P; 2],
+    /// The quad's corners as `/terrain` gives them, server units, street
+    /// side first: what `rules::building::footprint` reads (V3.4).
+    pub corners: [P; 4],
 }
 
 /// Every lot, built: one mesh per sector, and each lot's place in it.
@@ -322,6 +325,7 @@ pub fn build(plots: &[TerrainPlot]) -> Plots {
             zone,
             colour,
             street: street_edge(plot),
+            corners: plot.corners.map(|(x, y)| [x, y]),
         };
         out.lots.insert(plot.id.clone(), lot);
     }

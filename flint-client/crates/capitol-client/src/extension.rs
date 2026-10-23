@@ -121,6 +121,9 @@ pub struct CapitolExtension {
     /// The station sample is `--automation-sample`'s (E4.4), and how long
     /// it has run.
     automation_sample: Option<f32>,
+    /// `--building-sample` (V3.4): offline, the lots round where the camera
+    /// first looks, claimed and worked in, once it's there.
+    building_sample: Option<Option<crate::building_sample::Buildings>>,
     /// `--node-sample`: offline, every kind of node, laid out round where
     /// the camera first looks once it's there.
     node_sample: bool,
@@ -284,6 +287,7 @@ impl CapitolExtension {
             claim_sample: None,
             station_sample: None,
             automation_sample: None,
+            building_sample: None,
             node_sample: false,
             node_sampled: None,
             citizen_sample: None,
@@ -430,6 +434,15 @@ impl CapitolExtension {
         if self.session.is_none() && on {
             self.station_sample = Some(None);
             self.automation_sample = Some(0.0);
+        }
+        self
+    }
+
+    /// Offline, the lots round where the camera looks claimed, with floors,
+    /// scaffolding and stations indoors and out (`--building-sample`).
+    pub fn with_building_sample(mut self, on: bool) -> Self {
+        if self.session.is_none() && on {
+            self.building_sample = Some(None);
         }
         self
     }
@@ -1462,6 +1475,20 @@ impl PlayerExtension for CapitolExtension {
                 now,
                 dt,
             );
+        } else if let Some(sample) = &mut self.building_sample {
+            // Claimed once the camera has settled on its shot.
+            if sample.is_none() && ctx.clock.total_time > 0.5 && !self.lots.is_empty() {
+                let t = ctx.camera.target;
+                let focus = crate::coords::to_server(t.x, t.z);
+                *sample = Some(crate::building_sample::Buildings::new((focus[0], focus[1]), &self.lots));
+            }
+            if let Some(b) = sample {
+                let none = std::collections::HashSet::new();
+                let dt = ctx.clock.delta_time.min(0.1) as f32;
+                b.tick(dt);
+                self.stations
+                    .update(ctx, &b.state, None, &none, &[], dt, &self.shared);
+            }
         } else if let Some(sample) = &mut self.station_sample {
             // Placed once the camera has settled on its shot.
             if sample.is_none() && ctx.clock.total_time > 0.5 {
@@ -1579,8 +1606,9 @@ impl PlayerExtension for CapitolExtension {
         }
         set_material(ctx.world, lots::OWNED_MESH, &lots::owned_glow(glow));
         // Houses on everyone's claimed lots (P8.6b): online the store's set,
-        // offline `--claim-sample`'s.
+        // offline `--claim-sample`'s and `--building-sample`'s.
         let dt = ctx.clock.delta_time.min(0.1) as f32;
+        let buildings = self.building_sample.as_ref().and_then(|b| b.as_ref());
         if let Some(session) = &self.session {
             let state = session.state();
             let claims = state.claimed_lots();
@@ -1592,17 +1620,55 @@ impl PlayerExtension for CapitolExtension {
             };
             self.houses
                 .sync(state.claimed_version(), claims.keys(), fresh, &self.lots);
-        } else if let Some(sample) = &mut self.claim_sample {
-            let t = ctx.camera.target;
-            sample.update(dt, crate::coords::to_server(t.x, t.z), &self.lots);
-            let growing = &sample.growing;
+        } else if self.claim_sample.is_some() || buildings.is_some() {
+            if let Some(sample) = &mut self.claim_sample {
+                let t = ctx.camera.target;
+                sample.update(dt, crate::coords::to_server(t.x, t.z), &self.lots);
+            }
+            let sample = self.claim_sample.as_ref();
+            let growing = sample.map(|s| &s.growing);
+            let version = sample.map_or(0, |s| s.version) + ((buildings.is_some() as u64) << 32);
+            let claimed = sample.into_iter().flat_map(|s| &s.claimed);
             self.houses.sync(
-                sample.version,
-                &sample.claimed,
-                |id| growing.contains(id),
+                version,
+                claimed.chain(buildings.into_iter().flat_map(|b| &b.claimed)),
+                |id| growing.is_some_and(|g| g.contains(id)),
                 &self.lots,
             );
         }
+        // Floors (V3.3): offline the sample's. Online they come with #475.
+        for (id, floors, under_way) in buildings.into_iter().flat_map(|b| &b.floors) {
+            self.houses.set_floors(id, *floors, *under_way, &self.lots);
+        }
+        // A chimney over every kiln and forge indoors, smoking from the top
+        // (V3.4).
+        let stations = match (&self.session, buildings) {
+            (Some(session), _) => Some(session.state().stations()),
+            (None, Some(b)) => Some(b.state.stations()),
+            _ => None,
+        };
+        let mut fires: Vec<(uuid::Uuid, [f64; 2])> = stations
+            .into_iter()
+            .flatten()
+            .filter(|(_, s)| s.indoors && matches!(crate::stations::kind_of(&s.station_type), "kiln" | "forge"))
+            .map(|(id, s)| (*id, [s.x, s.y]))
+            .collect();
+        fires.sort_by_key(|(id, _)| *id);
+        let at: Vec<[f64; 2]> = fires.iter().map(|(_, p)| *p).collect();
+        self.houses.fires(&at, &self.lots);
+        let chimneys = self
+            .houses
+            .chimneys()
+            .filter_map(|(p, top)| fires.iter().find(|(_, q)| *q == p).map(|(id, _)| (*id, top)))
+            .collect();
+        self.stations.set_chimneys(chimneys);
+        // The buildings the camera comes close to open (V3.4): yours from
+        // further off.
+        let mine: std::collections::HashSet<String> = match buildings {
+            Some(b) => b.mine.clone(),
+            None => self.owned_drawn.iter().flatten().cloned().collect(),
+        };
+        self.houses.cutaway(dt, ctx.camera.position.to_array(), &mine);
         self.houses.advance(dt, &self.lots);
         if let Some(gpu) = ctx.gpu.as_mut() {
             let uploaded = self.houses.upload(gpu, &self.lots);

@@ -383,6 +383,9 @@ pub struct StationMark {
     /// Yours (#487): a gold mark floats over it, so yours stands out in a
     /// crowd of the same.
     pub mine: bool,
+    /// Out in the weather and below `rules::weather::NEEDS_REPAIR` (V3.4):
+    /// its condition, for the mark that says it needs repair.
+    pub worn: Option<i32>,
 }
 
 /// How near a stall you stand to be in the bazaar, in metres: its streets'
@@ -881,9 +884,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             .collect()
     });
     // `cap_stations() -> [#{ id, kind, x, z, radius, in_reach, reach, top,
-    // mine, paused }]`: the stations shown, in world metres. `in_reach` is
-    // whether you're within its interaction range; `reach` eases from 0 to
-    // 1 with it. `mine` is whether it's yours (#487).
+    // mine, paused, worn }]`: the stations shown, in world metres. `in_reach`
+    // is whether you're within its interaction range; `reach` eases from 0
+    // to 1 with it. `mine` is whether it's yours (#487). `worn` is its
+    // condition when the weather has worn it to needing repair, else ().
+    // (V3.4)
     let stations = shared.stations.clone();
     engine.register_fn("cap_stations", move || -> rhai::Array {
         let Ok(stations) = stations.lock() else {
@@ -1301,6 +1306,10 @@ fn station_map(s: &StationMark) -> rhai::Map {
         Some(why) => m.insert("paused".into(), why.clone().into()),
         None => m.insert("paused".into(), rhai::Dynamic::UNIT),
     };
+    match s.worn {
+        Some(c) => m.insert("worn".into(), (c as i64).into()),
+        None => m.insert("worn".into(), rhai::Dynamic::UNIT),
+    };
     m
 }
 
@@ -1578,6 +1587,7 @@ mod tests {
             top: 1.0,
             paused: None,
             mine,
+            worn: None,
         };
         *shared.stations.lock().unwrap() = vec![mark("bench", 0.0, false), mark("chest", 2.5, true)];
         let mut engine = rhai::Engine::new();

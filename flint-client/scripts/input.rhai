@@ -483,6 +483,7 @@ fn on_draw_ui() {
         let hovered = over != () && over.id == s.id;
         if s.mine { draw_station_mine(s, hovered, now); }
         if s.paused != () { draw_station_ember(s, hovered, now); }
+        if s.worn != () { draw_station_worn(s, hovered, now); }
     }
     // The tuft you're going to gather, if any. While you walk to it, the
     // sight round it stands in for the ring at your destination.
@@ -724,6 +725,54 @@ fn draw_station_ember(s, over, now) {
 // its point down at the station, hanging still but for a slow breath. It
 // keeps a few points' size however far you stand, and fades out past a
 // street or two, so a yard full of your own doesn't wear a field of them.
+// A station worn by the weather to needing repair (V3.4): a small rusted
+// tag beside it, a diamond of oxide with a dark rim and a pale crack down
+// it, swaying a little as if hung on a nail. It fades with distance as
+// the gold does, and on hover it says so, with what's left of it.
+fn draw_station_worn(s, over, now) {
+    let cam = get_camera_position();
+    let d = dist(s.x, s.z, cam.x, cam.z);
+    let fade = ((mine_mark_far() - d) / (mine_mark_far() - mine_mark_near())).max(0.0).min(1.0);
+    fade *= (s.top * 2.0).min(1.0);
+    if fade <= 0.01 { return; }
+    let p = world_to_screen(s.x, cap_ground_at(s.x, s.z) + s.top * 0.6, s.z);
+    if !p.visible { return; }
+    // Beside the station, clear of the gold and the ember over it.
+    let seed = s.x * 0.9 + s.z * 1.3;
+    let sway = 0.12 * (now * 1.7 + seed).sin();
+    let r = if over { 7.5 } else { 6.0 };
+    let cx = p.x + 18.0;
+    let cy = p.y;
+    let q = 1.570796;
+    let rim = [];
+    let tag = [];
+    for i in 0..4 {
+        rim.push(worn_point(cx, cy, q * i.to_float() + sway, r * 1.25));
+        tag.push(worn_point(cx, cy, q * i.to_float() + sway, r));
+    }
+    draw_polygon(rim, 0.13, 0.08, 0.05, 0.75 * fade, 2);
+    draw_polygon(tag, 0.69, 0.33, 0.16, 0.95 * fade, 2);
+    let a = worn_point(cx, cy, sway, r * 0.55);
+    let b = worn_point(cx, cy, q * 2.0 + sway, r * 0.15);
+    draw_line(a[0], a[1], b[0], b[1], 0.98, 0.86, 0.7, 0.95 * fade, 1.6);
+    let dot = worn_point(cx, cy, q * 2.0 + sway, r * 0.5);
+    draw_circle(dot[0], dot[1], 1.1, 0.98, 0.86, 0.7, 0.95 * fade);
+    if !over { return; }
+    let line = "Needs repair (" + s.worn + "%)";
+    let size = 13.0;
+    let m = measure_text_ex(line, size, "strong", 0.0);
+    let y = cy + r * 1.6 + 6.0;
+    draw_text_opts(cx - m.width / 2.0 + 1.0, y + 1.0, line, size, #{
+        font: "strong", color: [0.0, 0.0, 0.0, 0.6],
+    });
+    draw_text_opts(cx - m.width / 2.0, y, line, size, #{
+        font: "strong", color: [0.95, 0.62, 0.42, 0.95],
+    });
+}
+
+// A point `r` out from (cx, cy) at angle `a`, 0 straight up.
+fn worn_point(cx, cy, a, r) { [cx + a.sin() * r, cy - a.cos() * r] }
+
 fn mine_mark_height() { 13.0 }
 fn mine_mark_near() { 70.0 }
 fn mine_mark_far() { 160.0 }

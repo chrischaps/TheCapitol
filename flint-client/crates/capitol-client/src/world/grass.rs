@@ -141,9 +141,13 @@ const LOT_SOFT: f64 = 8.0;
 /// leaves the pasture growing right up to the hedge, with no bare rim:
 /// one 14 in bared a tenth of the ring round about 120 farms.
 const PAD_IN: f64 = 13.0;
-/// Round a farmstead's buildings: bare, then soft.
-const YARD: f64 = 10.0;
-const YARD_SOFT: f64 = 8.0;
+/// Round a farmstead's buildings: bare, then soft. Since V3.4 (#476) the
+/// buildings fill the rules' footprint, about 11 m by 9 across most of the
+/// farm's width, and the bare ground under them must stay bare, or the
+/// grass would grow through the boards when the barn opens. So the margin
+/// round them is narrow: the pasture comes up nearly to the walls.
+const YARD: f64 = 4.0;
+const YARD_SOFT: f64 = 5.0;
 /// A farm's drive: bare each side of its line, then soft. Narrower than a
 /// lane's 8 and its verges.
 const DRIVE_HALF: f64 = 3.0;
@@ -1034,8 +1038,9 @@ mod tests {
     /// Both rings sampled on a fine polar grid: most of the open ground has
     /// grass, and some of it is full. Since #423 the rural ring has about 380
     /// farms, not 117, and each clears its yard and drive, claimed or not:
-    /// about 79% of the ring has grass, against over 85% before. So the floor
-    /// is 75%.
+    /// about 79% of the ring has grass, against over 85% before. Since V3.4
+    /// (#476) each farmstead is the rules' building, about 11 m by 9, so
+    /// about 74.6% does. So the floor is 72%.
     fn mostly_grass(m: &Mask) {
         for (lo, hi) in [
             (Zone::Rural.radii().0 + 200.0, Zone::Rural.radii().1),
@@ -1053,7 +1058,7 @@ mod tests {
                 }
             }
             let (any, full) = (any as f64 / n as f64, full as f64 / n as f64);
-            assert!(any > 0.75, "{lo}..{hi}: {any} has grass");
+            assert!(any > 0.72, "{lo}..{hi}: {any} has grass");
             assert!(full > 0.25, "{lo}..{hi}: {full} full");
         }
     }
@@ -1322,7 +1327,9 @@ mod tests {
             }
         }
         assert!(high > 100 && wet > 10 && low > 1000, "{high} high, {wet} wet, {low} low");
-        assert!(low_grows * 10 > low * 8, "{low_grows} of {low} low meadows grow");
+        // The low ground sampled runs through the farms, whose farmsteads
+        // have been the rules' buildings since V3.4 (#476): 79.4% grows.
+        assert!(low_grows * 100 > low * 77, "{low_grows} of {low} low meadows grow");
         // The blades stand on the land.
         let heights = land.heights(&m);
         let (origin, size) = m.world_rect();

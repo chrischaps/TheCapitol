@@ -1,18 +1,27 @@
 //! Houses on claimed plots (P8.6b): the city fills in as players build.
 //!
-//! - **One house per claimed lot**, built from the lot as drawn (`Lot`'s
-//!   inset outline) and its street edge. The footprint is a rectangle
-//!   square to the street, set back from it and kept off the sides by the
-//!   zone's margins. Where the lot is too small for the zone's smallest
-//!   house, there's none.
-//! - **By zone** ([`style`]): urban terraces fill their lots' street
-//!   fronts, two or three storeys under slate or a flat roof with a
-//!   cornice, most with a workshop at the back of the yard (#421); the
-//!   suburbs are post-war houses, one storey or two, in pale render under
-//!   tile, some with a garage; rural lots get a steep-roofed farmhouse with
-//!   a chimney, set back from the lane on a drive, and often a barn behind
-//!   it (the grass keeps off that [`Farmyard`], R6); the guild district builds tall
-//!   stone workshops. Colours are the house tokens in `palette`.
+//! - **One building per claimed lot, on the rules' footprint** (V3.4,
+//!   #476): on a home lot its blocks fill `rules::building::footprint`
+//!   exactly, so a station indoors stands inside the walls drawn round it
+//!   and one in the yard outside them (#462). A home lot too small for a
+//!   footprint is all yard, with no house.
+//! - **By zone** ([`plan_on`]): the city's is a workshop house over the
+//!   whole lot, two or three storeys under slate or a flat roof, with a
+//!   shop front on the street (a carriage arch, the shop door and its
+//!   window); the suburb's a post-war house beside its lower workshop
+//!   wing; a farm's the farmhouse and its barn under one range, standing
+//!   back on a drive (the grass keeps off that [`Farmyard`], R6). Guild
+//!   halls keep a seeded stone box ([`GUILD`]). Colours are the house
+//!   tokens in `palette`.
+//! - **What it shows past its plan** ([`Look`]): a storey for each floor
+//!   built (V3.3), scaffolding while one goes up and then the storey
+//!   rising, and a chimney over each kiln or forge indoors.
+//! - **The cutaway** ([`Houses::cutaway`]): a building opens as the camera
+//!   comes within [`OPEN_MINE`] of one of yours or [`OPEN_OTHERS`] of
+//!   anyone's. The roof settles away and the walls toward the camera come
+//!   down to a sill, drawn as an architect's section, so you see and pick
+//!   the stations inside. An open one leaves its sector's mesh for
+//!   [`OPEN_MESH`].
 //! - **Seeded by the plot id** ([`Seed`]), so every client builds the same
 //!   house on the same lot.
 //! - **Windows** are meshes of their own, one per quarter of each ring, so
@@ -35,14 +44,15 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::coords::{layer, to_world, S};
+use crate::coords::{layer, to_server, to_world, S};
 use crate::daylight::PlotGlow;
 use crate::world::geom::*;
 use crate::world::mesh::{MeshBuf, RAY_TARGET, UP};
 use crate::world::palette::{self, hex};
 use crate::world::plots::Lot;
 use crate::world::sector::Sector;
-use capitol_protocol::rules::Zone;
+use capitol_protocol::rules::{building, Zone};
+use capitol_protocol::terrain::quad_contains;
 use flint_import::ImportedMaterial;
 use flint_player::ExtensionGpu;
 
@@ -82,7 +92,7 @@ pub fn lamp_meshes() -> impl Iterator<Item = String> {
     quarters
         .into_iter()
         .map(lamps_name)
-        .chain(std::iter::once(GROWING_LAMPS.to_owned()))
+        .chain([GROWING_LAMPS.to_owned(), OPEN_LAMPS.to_owned()])
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +153,8 @@ enum Roof {
     Flat,
 }
 
-/// How one zone builds. Lengths are metres.
+/// How a guild hall builds: the lots with no footprint of the rules' own
+/// (V3.4) get a seeded box set back from the street. Lengths are metres.
 struct Style {
     /// From the street edge to the front wall.
     setback: (f32, f32),
@@ -170,99 +181,27 @@ struct Style {
     bay: f32,
     /// The chance of a chimney, on a pitched roof.
     chimney: f32,
-    /// The chance of a garage (suburbs), a barn (fields) or a workshop at
-    /// the back of the yard (urban), room allowing.
-    outbuilding: f32,
 }
 
-fn style(zone: Zone) -> Style {
-    match zone {
-        Zone::Suburban => Style {
-            setback: (1.8, 2.8),
-            depth: (3.6, 4.6),
-            width: (4.2, 5.4),
-            // A bungalow on the odd lot: a sliver, or a shallow pie.
-            min_width: 2.2,
-            min_depth: 2.4,
-            side: 0.25,
-            back: 0.6,
-            storeys: &[1, 1, 1, 2],
-            storey: 2.5,
-            pitch: (24.0, 34.0),
-            roofs: &[Roof::Gable, Roof::Gable, Roof::Hip, Roof::FrontGable],
-            eave: 0.25,
-            walls: &palette::SUBURBAN_WALLS,
-            roof_colours: &palette::SUBURBAN_ROOFS,
-            window: 0.7,
-            bay: 1.35,
-            chimney: 0.45,
-            outbuilding: 0.55,
-        },
-        // A farmstead stands back from the lane on its drive (R6, #289).
-        Zone::Rural => Style {
-            setback: (6.0, 11.0),
-            depth: (3.6, 4.4),
-            width: (5.4, 7.0),
-            min_width: 3.4,
-            min_depth: 3.0,
-            side: 0.8,
-            back: 1.5,
-            storeys: &[1, 1, 2],
-            storey: 2.3,
-            pitch: (40.0, 48.0),
-            roofs: &[Roof::Gable, Roof::Gable, Roof::FrontGable],
-            eave: 0.3,
-            walls: &palette::RURAL_WALLS,
-            roof_colours: &palette::RURAL_ROOFS,
-            window: 0.6,
-            bay: 1.5,
-            chimney: 0.85,
-            outbuilding: 0.65,
-        },
-        Zone::GuildDistrict => Style {
-            setback: (0.8, 1.4),
-            depth: (6.0, 8.0),
-            width: (7.0, 9.5),
-            min_width: 4.0,
-            min_depth: 4.0,
-            side: 0.3,
-            back: 1.0,
-            storeys: &[2, 3, 3],
-            storey: 3.0,
-            pitch: (36.0, 46.0),
-            roofs: &[Roof::Gable, Roof::FrontGable, Roof::Flat],
-            eave: 0.3,
-            walls: &palette::GUILD_WALLS,
-            roof_colours: &palette::URBAN_ROOFS,
-            window: 0.8,
-            bay: 1.6,
-            chimney: 0.3,
-            outbuilding: 0.0,
-        },
-        // Urban, and anything else that ever carries lots. Since #421 a lot
-        // is about 8.5 m by 9.5: the house across its front, the yard behind.
-        _ => Style {
-            setback: (0.1, 0.3),
-            depth: (2.8, 3.6),
-            width: (9.0, 9.0),
-            min_width: 1.8,
-            min_depth: 2.0,
-            side: 0.04,
-            back: 0.1,
-            storeys: &[2, 2, 3],
-            storey: 2.3,
-            pitch: (30.0, 38.0),
-            roofs: &[Roof::Gable, Roof::Gable, Roof::Flat],
-            eave: 0.0,
-            walls: &palette::URBAN_WALLS,
-            roof_colours: &palette::URBAN_ROOFS,
-            window: 0.55,
-            bay: 1.1,
-            chimney: 0.35,
-            outbuilding: 0.7,
-        },
-    }
-}
+const GUILD: Style = Style {
+    setback: (0.8, 1.4),
+    depth: (6.0, 8.0),
+    width: (7.0, 9.5),
+    min_width: 4.0,
+    min_depth: 4.0,
+    side: 0.3,
+    back: 1.0,
+    storeys: &[2, 3, 3],
+    storey: 3.0,
+    pitch: (36.0, 46.0),
+    roofs: &[Roof::Gable, Roof::FrontGable, Roof::Flat],
+    eave: 0.3,
+    walls: &palette::GUILD_WALLS,
+    roof_colours: &palette::URBAN_ROOFS,
+    window: 0.8,
+    bay: 1.6,
+    chimney: 0.3,
+};
 
 // ---------------------------------------------------------------------------
 // The plan: every choice, before any geometry
@@ -312,6 +251,43 @@ impl Rect {
             ..*self
         }
     }
+
+    /// `p` in its own axes: (along, across) from the centre.
+    fn local(&self, p: P) -> (f64, f64) {
+        let d = sub(p, self.c);
+        (dot(d, self.ax), dot(d, self.ay))
+    }
+
+    fn contains(&self, p: P) -> bool {
+        let (s, t) = self.local(p);
+        s.abs() <= self.hx && t.abs() <= self.hy
+    }
+
+    /// How far `p` is from it, 0 inside.
+    fn distance(&self, p: P) -> f64 {
+        let (s, t) = self.local(p);
+        let (ds, dt) = ((s.abs() - self.hx).max(0.0), (t.abs() - self.hy).max(0.0));
+        ds.hypot(dt)
+    }
+
+    /// Cut in two along its x axis: `share` of it on the `left` (−x) side
+    /// or the right, and the rest.
+    fn split(&self, share: f64, left: bool) -> (Rect, Rect) {
+        let (a, b) = (self.hx * share, self.hx * (1.0 - share));
+        let sign = if left { -1.0 } else { 1.0 };
+        (
+            Rect {
+                c: self.at(sign * (self.hx - a), 0.0),
+                hx: a,
+                ..*self
+            },
+            Rect {
+                c: self.at(-sign * (self.hx - b), 0.0),
+                hx: b,
+                ..*self
+            },
+        )
+    }
 }
 
 /// One building: the house, a garage or a barn.
@@ -338,14 +314,20 @@ struct Block {
 enum Door {
     /// A front door at this share across the front, in this colour.
     Front(f32, [f32; 4]),
-    /// A garage's or a barn's wide door.
+    /// A garage's, a workshop's or a barn's wide door.
     Wide([f32; 4]),
+    /// A city workshop's front (V3.4): a carriage arch at one end, on the
+    /// left or not, the shop door at the other, and its window between.
+    Shop { arch_left: bool, colour: [f32; 4] },
 }
 
 /// Everything a house will be.
 #[derive(Clone, Debug, PartialEq)]
 struct Plan {
     blocks: Vec<Block>,
+    /// The rules' footprint the blocks fill, on a lot of a home zone (V3.4):
+    /// what opens as you come close, and what holds the fires.
+    building: Option<Rect>,
     /// A farm's drive, from the lane to the front door (R6).
     drive: Option<[P; 2]>,
     /// Its packed earth, drawn on the farm from inside the hedge bank.
@@ -474,28 +456,180 @@ fn metres(m: f32) -> f64 {
     m as f64 / S as f64
 }
 
+/// The building's footprint on `lot` as the rules set it
+/// (`rules::building::footprint`, V3.1): `ay` back from the street. `None`
+/// off the home zones, or on a lot too small for one.
+fn footprint(lot: &Lot) -> Option<Rect> {
+    let f = building::footprint(&lot.corners.map(|[x, y]| (x, y)), lot.zone)?.map(|(x, y)| [x, y]);
+    let (along, back) = (sub(f[1], f[0]), sub(f[3], f[0]));
+    Some(Rect {
+        c: scale(add(f[0], f[2]), 0.5),
+        ax: unit(along),
+        ay: unit(back),
+        hx: dist(f[0], f[1]) * 0.5,
+        hy: dist(f[0], f[3]) * 0.5,
+    })
+}
+
 /// The plan for the house on `lot`, from its id, or `None` if the lot
-/// has no room for the zone's smallest.
+/// has no room for one. On a home lot it's the rules' building (V3.4); a
+/// home lot too small for one is all yard.
 fn plan(id: &str, lot: &Lot) -> Option<Plan> {
-    let st = style(lot.zone);
+    if building::shape(lot.zone).is_some() {
+        return footprint(lot).map(|fp| plan_on(id, lot, fp));
+    }
+    plan_seeded(id, lot)
+}
+
+/// The building on a home lot (V3.4): it fills the rules' footprint, every
+/// block of it, so a station indoors stands inside the walls drawn round it
+/// (#462). The seed picks how it looks, never where it stands.
+fn plan_on(id: &str, lot: &Lot, fp: Rect) -> Plan {
+    let mut rng = Seed::of(id);
+    let shade = |rng: &mut Seed, colours: &[u32], (lo, hi): (f32, f32)| {
+        palette::shade(hex(rng.pick(colours)), rng.range((lo, hi)))
+    };
+    let mut blocks = Vec::with_capacity(2);
+    match lot.zone {
+        // A house and its workshop wing side by side, a garden behind.
+        Zone::Suburban => {
+            let share = rng.range((0.52, 0.64)) as f64;
+            let (house, wing) = fp.split(share, rng.chance(0.5));
+            let wall = shade(&mut rng, &palette::SUBURBAN_WALLS, (0.93, 1.05));
+            let roof_colour = shade(&mut rng, &palette::SUBURBAN_ROOFS, (0.9, 1.08));
+            blocks.push(Block {
+                rect: house,
+                storeys: rng.pick(&[1, 1, 2]),
+                storey: 2.6,
+                roof: rng.pick(&[Roof::Gable, Roof::Gable, Roof::Hip, Roof::FrontGable]),
+                pitch: rng.range((24.0, 34.0)),
+                eave: 0.25,
+                wall,
+                roof_colour,
+                chimney: None,
+                door: Door::Front(rng.range((0.3, 0.7)), hex(rng.pick(&palette::DOORS))),
+                window: 0.7,
+                bay: 1.35,
+            });
+            blocks.push(Block {
+                rect: wing,
+                storeys: 1,
+                storey: 2.8,
+                roof: Roof::FrontGable,
+                pitch: rng.range((18.0, 24.0)),
+                eave: 0.15,
+                wall: palette::shade(wall, 0.94),
+                roof_colour,
+                chimney: None,
+                door: Door::Wide(hex(palette::GARAGE_DOOR)),
+                window: 0.7,
+                bay: 99.0,
+            });
+        }
+        // The farmhouse and its barn under one long range.
+        Zone::Rural => {
+            let share = rng.range((0.38, 0.46)) as f64;
+            let (house, barn) = fp.split(share, rng.chance(0.5));
+            blocks.push(Block {
+                rect: house,
+                storeys: rng.pick(&[1, 2, 2]),
+                storey: 2.5,
+                roof: Roof::Gable,
+                pitch: rng.range((40.0, 48.0)),
+                eave: 0.3,
+                wall: shade(&mut rng, &palette::RURAL_WALLS, (0.93, 1.05)),
+                roof_colour: shade(&mut rng, &palette::RURAL_ROOFS, (0.9, 1.08)),
+                chimney: None,
+                door: Door::Front(rng.range((0.35, 0.65)), hex(rng.pick(&palette::DOORS))),
+                window: 0.6,
+                bay: 1.5,
+            });
+            blocks.push(Block {
+                rect: barn,
+                storeys: 1,
+                storey: rng.range((3.4, 3.8)),
+                roof: Roof::FrontGable,
+                pitch: rng.range((34.0, 42.0)),
+                eave: 0.25,
+                wall: shade(&mut rng, &palette::BARNS, (0.92, 1.05)),
+                roof_colour: hex(palette::BARN_ROOF),
+                chimney: None,
+                door: Door::Wide(hex(palette::BARN_DOOR)),
+                window: 0.5,
+                bay: 99.0,
+            });
+        }
+        // A workshop house across the whole lot: the shop on the street,
+        // a carriage arch through to the strip of yard behind.
+        _ => blocks.push(Block {
+            rect: fp,
+            storeys: rng.pick(&[2, 2, 3]),
+            storey: 2.7,
+            roof: rng.pick(&[Roof::Gable, Roof::Gable, Roof::Flat]),
+            pitch: rng.range((30.0, 38.0)),
+            eave: 0.0,
+            wall: shade(&mut rng, &palette::URBAN_WALLS, (0.93, 1.05)),
+            roof_colour: shade(&mut rng, &palette::URBAN_ROOFS, (0.9, 1.08)),
+            chimney: None,
+            door: Door::Shop {
+                arch_left: rng.chance(0.5),
+                colour: hex(rng.pick(&palette::DOORS)),
+            },
+            window: 0.55,
+            bay: 1.1,
+        }),
+    }
+    // Where a pie narrows past the building, the roof stops at its walls
+    // rather than overhang the lot next door.
+    let lot_quad = lot.corners.map(|[x, y]| (x, y));
+    for b in &mut blocks {
+        let over = b.rect.grown(metres(b.eave)).corners();
+        if !over.iter().all(|p| quad_contains(&lot_quad, p[0], p[1])) {
+            b.eave = 0.0;
+        }
+    }
+    // The drive runs straight in from the lane to the farmhouse door.
+    let drive = (lot.zone == Zone::Rural)
+        .then(|| {
+            let frame = Frame::of(lot)?;
+            let h = &blocks[0];
+            let Door::Front(k, _) = h.door else {
+                return None;
+            };
+            let door = h.rect.at(h.rect.hx * (2.0 * k as f64 - 1.0), -h.rect.hy);
+            let s = dot(sub(door, frame.o), frame.u);
+            let (near, _) = frame.depth();
+            let t1 = dot(sub(door, frame.o), frame.v);
+            let t0 = near + TRACK_FROM;
+            let track = (t1 > t0).then(|| Rect {
+                c: frame.at(s, (t0 + t1) * 0.5),
+                ax: frame.u,
+                ay: frame.v,
+                hx: TRACK_HALF,
+                hy: (t1 - t0) * 0.5,
+            });
+            Some(([frame.at(s, -DRIVE_OUT), door], track))
+        })
+        .flatten();
+    Plan {
+        blocks,
+        building: Some(fp),
+        drive: drive.map(|(d, _)| d),
+        track: drive.and_then(|(_, t)| t),
+        lights: rng.next(),
+    }
+}
+
+/// A guild hall's house: a seeded box square to the street, set back and
+/// kept off the sides, or `None` if the lot has no room for the smallest.
+fn plan_seeded(id: &str, lot: &Lot) -> Option<Plan> {
+    let st = &GUILD;
     let frame = Frame::of(lot)?;
     let mut rng = Seed::of(id);
     let (near, far) = frame.depth();
     let roof = rng.pick(st.roofs);
     let setback = rng.range(st.setback);
     let (want_depth, want_width) = (rng.range(st.depth), rng.range(st.width));
-    // A farm's barn, or the workshop at the back of an urban yard (#421),
-    // drawn first so the house leaves room behind for it: the gap to it,
-    // its width and its depth.
-    let workshop = lot.zone == Zone::Urban;
-    let barn = (matches!(lot.zone, Zone::Rural | Zone::Urban) && rng.chance(st.outbuilding)).then(|| {
-        if workshop {
-            (rng.range((1.6, 2.6)), rng.range((3.6, 5.6)), rng.range((2.4, 3.2)))
-        } else {
-            (rng.range((2.5, 4.5)), rng.range((4.0, 5.2)), rng.range((4.6, 6.0)))
-        }
-    });
-    let behind = barn.map_or(0.0, |(gap, _, bd)| gap + bd);
     // What stands out past the walls: the eaves, or a flat roof's cornice.
     let flat = roof == Roof::Flat;
     let eaves = if flat { 0.0 } else { st.eave };
@@ -505,10 +639,10 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
         // A shallow lot takes a shorter front garden before a smaller house.
         let lot_depth = (far - near) as f32 * S;
         let setback = setback
-            .min(lot_depth - st.back - overhang - want_depth.max(st.min_depth) - behind)
+            .min(lot_depth - st.back - overhang - want_depth.max(st.min_depth))
             .max(overhang + 0.05);
-        // On a wedge (a pie round a bulb) the street end is narrow, so
-        // step back to where it widens.
+        // On a wedge the street end is narrow, so step back to where it
+        // widens.
         (0..8).find_map(|k| {
             let t0 = near + metres(setback + k as f32 * 0.8);
             // As deep as asked, or as the lot allows.
@@ -523,158 +657,37 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
             // A centimetre spare, or a house that fills its lot misses by
             // rounding.
             let width = want_width.min(free - 0.01);
-            (width >= st.min_width).then_some((eave, overhang, t0, depth, width, free))
+            (width >= st.min_width).then_some((eave, overhang, t0, depth, width))
         })
     };
     // Too tight with eaves, the roof stops at the walls.
-    let (eave, overhang, t0, depth, width, free) = fit(eaves).or_else(|| fit(0.0))?;
-    let margin = st.side + overhang;
-    // Room left at the side for a garage?
-    let garage = 2.4;
-    let with_garage = lot.zone == Zone::Suburban
-        && rng.chance(st.outbuilding)
-        && free - width >= garage + 0.3 + st.side;
-    let along = rng.unit();
-    let main_along = if with_garage {
-        // The house to one side, the garage to the other.
-        if along < 0.5 {
-            0.0
-        } else {
-            1.0
-        }
-    } else {
-        0.35 + 0.3 * along
-    };
-    let house_rect = frame.place(t0, (width, depth), margin, overhang, main_along)?;
+    let (eave, overhang, t0, depth, width) = fit(eaves).or_else(|| fit(0.0))?;
+    let along = 0.35 + 0.3 * rng.unit();
+    let rect = frame.place(t0, (width, depth), st.side + overhang, overhang, along)?;
     let wall = palette::shade(hex(rng.pick(st.walls)), rng.range((0.93, 1.05)));
     let roof_colour = palette::shade(hex(rng.pick(st.roof_colours)), rng.range((0.9, 1.08)));
     let pitch = rng.range(st.pitch);
     let storeys = rng.pick(st.storeys);
-    let chimney = (roof != Roof::Flat && rng.chance(st.chimney)).then(|| {
-        if rng.chance(0.5) {
-            -0.62
-        } else {
-            0.62
-        }
-    });
-    let door_at = rng.range((0.25, 0.75));
-    let door = Door::Front(door_at, hex(rng.pick(&palette::DOORS)));
-    let mut blocks = vec![Block {
-        rect: house_rect,
-        storeys,
-        storey: st.storey,
-        roof,
-        pitch,
-        eave,
-        wall,
-        roof_colour,
-        chimney,
-        door,
-        window: st.window,
-        bay: st.bay,
-    }];
-    if with_garage {
-        let gap = metres(0.15);
-        let sign = if main_along == 0.0 { 1.0 } else { -1.0 };
-        let gw = metres(garage);
-        let gd = house_rect.hy * 2.0 * 0.85;
-        // Its front a little behind the house's.
-        let back = metres(0.6);
-        let c = add(
-            house_rect.c,
-            add(
-                scale(house_rect.ax, sign * (house_rect.hx + gap + gw * 0.5)),
-                scale(house_rect.ay, back + gd * 0.5 - house_rect.hy),
-            ),
-        );
-        let rect = Rect {
-            c,
-            ax: house_rect.ax,
-            ay: house_rect.ay,
-            hx: gw * 0.5,
-            hy: gd * 0.5,
-        };
-        if inside(&frame, &rect, st.side) {
-            blocks.push(Block {
-                rect,
-                storeys: 1,
-                storey: 2.3,
-                roof: Roof::Flat,
-                pitch: 0.0,
-                eave: 0.0,
-                wall: palette::shade(wall, 0.94),
-                roof_colour,
-                chimney: None,
-                door: Door::Wide(hex(palette::GARAGE_DOOR)),
-                window: st.window,
-                bay: 99.0,
-            });
-        }
-    }
-    if let Some((gap, bw, bd)) = barn {
-        let t1 = t0 + metres(depth + gap);
-        let fits = (far - t1) as f32 * S - st.back >= bd;
-        let along = rng.unit();
-        if workshop {
-            // A low shed of the house's brick, against the back line, under
-            // a flat roof, with wide timber doors onto the yard.
-            if let Some(rect) = fits.then(|| frame.place(t1, (bw, bd), st.side + 0.2, 0.0, along)).flatten() {
-                blocks.push(Block {
-                    rect,
-                    storeys: 1,
-                    storey: rng.range((2.5, 3.0)),
-                    roof: Roof::Flat,
-                    pitch: 0.0,
-                    eave: 0.0,
-                    wall: palette::shade(wall, 0.88),
-                    roof_colour,
-                    chimney: None,
-                    door: Door::Wide(hex(palette::BARN_DOOR)),
-                    window: 0.5,
-                    bay: 99.0,
-                });
-            }
-        } else if let Some(rect) = fits
-            .then(|| frame.place(t1, (bw, bd), st.side + 0.3, 0.25, along))
-            .flatten()
-        {
-            blocks.push(Block {
-                rect,
-                storeys: 1,
-                storey: rng.range((3.0, 3.6)),
-                roof: Roof::FrontGable,
-                pitch: rng.range((34.0, 42.0)),
-                eave: 0.25,
-                wall: palette::shade(hex(rng.pick(&palette::BARNS)), rng.range((0.92, 1.05))),
-                roof_colour: hex(palette::BARN_ROOF),
-                chimney: None,
-                door: Door::Wide(hex(palette::BARN_DOOR)),
-                window: 0.5,
-                bay: 99.0,
-            });
-        }
-    }
-    // The drive runs straight in from the lane to the front door.
-    let drive = (lot.zone == Zone::Rural).then(|| {
-        let door = house_rect.at(house_rect.hx * (2.0 * door_at as f64 - 1.0), -house_rect.hy);
-        let s = dot(sub(door, frame.o), frame.u);
-        [frame.at(s, -DRIVE_OUT), door]
-    });
-    let track = drive.and_then(|[_, door]| {
-        let (s, t1) = (dot(sub(door, frame.o), frame.u), dot(sub(door, frame.o), frame.v));
-        let t0 = near + TRACK_FROM;
-        (t1 > t0).then(|| Rect {
-            c: frame.at(s, (t0 + t1) * 0.5),
-            ax: frame.u,
-            ay: frame.v,
-            hx: TRACK_HALF,
-            hy: (t1 - t0) * 0.5,
-        })
-    });
+    let chimney = (!flat && rng.chance(st.chimney)).then(|| if rng.chance(0.5) { -0.62 } else { 0.62 });
+    let door = Door::Front(rng.range((0.25, 0.75)), hex(rng.pick(&palette::DOORS)));
     Some(Plan {
-        blocks,
-        drive,
-        track,
+        blocks: vec![Block {
+            rect,
+            storeys,
+            storey: st.storey,
+            roof,
+            pitch,
+            eave,
+            wall,
+            roof_colour,
+            chimney,
+            door,
+            window: st.window,
+            bay: st.bay,
+        }],
+        building: None,
+        drive: None,
+        track: None,
         lights: rng.next(),
     })
 }
@@ -713,6 +726,7 @@ pub fn farmyard(id: &str, lot: &Lot) -> Option<Farmyard> {
 }
 
 /// Whether `rect` is inside the lot with `margin` metres to spare.
+#[cfg(test)]
 fn inside(frame: &Frame, rect: &Rect, margin: f32) -> bool {
     let m = metres(margin);
     rect.corners().iter().all(|&p| {
@@ -741,6 +755,9 @@ pub struct Pane {
 pub struct House {
     pub body: MeshBuf,
     pub panes: Vec<Pane>,
+    /// Over each fire indoors (`Look::fires`), the fire and the top of its
+    /// chimney, world metres: where its smoke comes out.
+    pub chimneys: Vec<(P, [f32; 3])>,
 }
 
 /// The foot of every wall, sunk into the lot so no seam shows.
@@ -934,12 +951,64 @@ impl Stage {
     }
 }
 
-/// Builds `plan` as it stands at `stage`.
-fn raise(plan: &Plan, stage: Stage) -> House {
+/// What a building shows past its plan (V3.4): its floors, a floor going
+/// up, the fires inside it, and how far it's open.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Look {
+    /// Floors bought and built (V3.3), each a storey over the seeded ones.
+    pub floors: u8,
+    /// A floor going up: `Some(0)` while it stands in scaffolding, then
+    /// rising to 1 as its storey's walls go up.
+    pub raising: Option<f32>,
+    /// The kilns and forges indoors, server units: a chimney over each.
+    pub fires: Vec<P>,
+    /// Open as the camera comes close, and how far.
+    pub open: Option<Open>,
+}
+
+/// A building opening (V3.4): the roof settles away and the walls facing
+/// the camera are cut down to a sill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Open {
+    /// How far: 0 shut, 1 open.
+    pub p: f32,
+    /// Where the camera is, server units: the walls on its side are cut.
+    pub eye: P,
+    /// How many storeys stand, from the ground: the one aimed at and those
+    /// under it. The ones above are gone while it's open.
+    pub shown: u8,
+}
+
+impl Look {
+    /// How many storeys `b` has, with a floor going up counted.
+    fn storeys(&self, b: &Block) -> u8 {
+        b.storeys
+            .saturating_add(self.floors)
+            .saturating_add(self.raising.is_some() as u8)
+    }
+}
+
+/// How thick a wall shows where it's cut, and the sill it's cut to, metres.
+const WALL: f32 = 0.22;
+const SILL: f32 = 0.55;
+/// How far into opening the roof has gone, and when the walls begin to
+/// come down.
+const ROOF_GONE: f32 = 0.3;
+const CUT_FROM: f32 = 0.25;
+
+/// Builds `plan` as it stands at `stage`, looking as `look` says.
+fn raise(plan: &Plan, stage: Stage, look: &Look) -> House {
     let mut h = House::default();
     let mut lights = Seed(plan.lights);
+    let open = look.open.filter(|o| o.p > 0.0).zip(plan.building);
     for b in &plan.blocks {
-        block(&mut h, b, stage, &mut lights);
+        match open {
+            Some((o, fp)) => open_block(&mut h, b, look, &fp, o, &mut lights),
+            None => {
+                let fires: Vec<P> = look.fires.iter().copied().filter(|&p| b.rect.contains(p)).collect();
+                block(&mut h, b, stage, look, &fires, &mut lights);
+            }
+        }
     }
     if let Some(track) = &plan.track {
         top(&mut h.body, track, FLOOR + TRACK_LIFT, hex(palette::FARM_TRACK));
@@ -947,21 +1016,20 @@ fn raise(plan: &Plan, stage: Stage) -> House {
     h
 }
 
-fn block(h: &mut House, b: &Block, stage: Stage, lights: &mut Seed) {
+fn block(h: &mut House, b: &Block, stage: Stage, look: &Look, fires: &[P], lights: &mut Seed) {
     let m = &mut h.body;
     let r = &b.rect;
-    let height = b.storeys as f32 * b.storey;
+    let storeys = look.storeys(b);
+    let height = storeys as f32 * b.storey;
     let top_y = FLOOR + height;
-    // The frame: a post at each corner, and once they're up, the plates.
-    if stage != Stage::BUILT && stage.frame > 0.0 {
-        let timber = hex(palette::TIMBER);
-        let post = metres(POST);
-        let inner = Rect {
-            hx: r.hx - post * 0.5,
-            hy: r.hy - post * 0.5,
-            ..*r
-        };
-        let y = FLOOR + height * stage.frame;
+    let timber = hex(palette::TIMBER);
+    let post = metres(POST);
+    let inner = Rect {
+        hx: r.hx - post * 0.5,
+        hy: r.hy - post * 0.5,
+        ..*r
+    };
+    let posts = |m: &mut MeshBuf, y: f32| {
         for p in inner.corners() {
             let foot = Rect {
                 c: p,
@@ -971,6 +1039,10 @@ fn block(h: &mut House, b: &Block, stage: Stage, lights: &mut Seed) {
             };
             cuboid(m, &foot, FOOT, y, timber);
         }
+    };
+    // The frame: a post at each corner, and once they're up, the plates.
+    if stage != Stage::BUILT && stage.frame > 0.0 {
+        posts(m, FLOOR + height * stage.frame);
         if stage.frame >= 1.0 && stage.roof <= 0.0 {
             for (hx, hy) in [(inner.hx, post * 0.5), (post * 0.5, inner.hy)] {
                 for side in [-1.0, 1.0] {
@@ -986,10 +1058,19 @@ fn block(h: &mut House, b: &Block, stage: Stage, lights: &mut Seed) {
             }
         }
     }
-    // The walls, rising.
-    let wall_top = FLOOR + height * stage.walls;
+    // The walls, rising. A floor going up stands in its frame and its
+    // scaffolding, and then its walls rise under the roof (V3.4).
+    let built = match look.raising {
+        Some(t) => height - b.storey * (1.0 - smooth(t)),
+        None => height,
+    };
+    let wall_top = FLOOR + built * stage.walls;
     if stage.walls > 0.0 {
         walls(m, r, FOOT, wall_top, b.wall);
+    }
+    if look.raising.is_some_and(|t| t < 1.0) && stage == Stage::BUILT {
+        posts(m, top_y);
+        scaffold(m, r, top_y, b.storey, storeys);
     }
     // Doors and windows, once the wall has passed them.
     let c = r.corners();
@@ -997,19 +1078,27 @@ fn block(h: &mut House, b: &Block, stage: Stage, lights: &mut Seed) {
         .iter()
         .enumerate()
     {
-        let front = i == 0;
-        openings(h, b, a, z, front, wall_top, lights);
+        openings(h, b, a, z, i == 0, wall_top, storeys, lights);
     }
+    roof(h, b, top_y, stage.roof, fires);
+}
+
+/// The roof of `b` on walls up to `top_y`, `k` of the way built (or
+/// settled away, as the building opens), with a chimney over each of the
+/// `fires` once it's whole.
+fn roof(h: &mut House, b: &Block, top_y: f32, k: f32, fires: &[P]) {
     let m = &mut h.body;
-    if stage.roof <= 0.0 {
+    let r = &b.rect;
+    if k <= 0.0 {
         return;
     }
     let eave = metres(b.eave);
+    let brick = hex(palette::CHIMNEY);
     match b.roof {
         Roof::Flat => {
             let cornice = r.grown(metres(CORNICE));
             let stone = palette::shade(b.wall, 0.82);
-            cuboid(m, &cornice, top_y - 0.22 * stage.roof, top_y + 0.06, stone);
+            cuboid(m, &cornice, top_y - 0.22 * k, top_y + 0.06, stone);
             top(m, r, top_y + 0.065, b.roof_colour);
         }
         Roof::Gable | Roof::FrontGable | Roof::Hip => {
@@ -1018,7 +1107,7 @@ fn block(h: &mut House, b: &Block, stage: Stage, lights: &mut Seed) {
             } else {
                 *r
             };
-            let rise = along.hy as f32 * S * b.pitch.to_radians().tan() * stage.roof;
+            let rise = along.hy as f32 * S * b.pitch.to_radians().tan() * k;
             if rise < 0.05 {
                 return;
             }
@@ -1027,7 +1116,7 @@ fn block(h: &mut House, b: &Block, stage: Stage, lights: &mut Seed) {
             } else {
                 gable(m, &along, top_y, rise, eave, b.wall, b.roof_colour);
             }
-            if let (Some(k), true) = (b.chimney, stage.roof >= 1.0) {
+            if let (Some(at), true) = (b.chimney, k >= 1.0) {
                 // Up through the back slope, near one end of the ridge.
                 let ridge = if b.roof == Roof::Hip && along.hx < along.hy {
                     along.turned()
@@ -1037,35 +1126,214 @@ fn block(h: &mut House, b: &Block, stage: Stage, lights: &mut Seed) {
                 // In scale with the house: a terrace's is slighter.
                 let half = metres(0.28).min(ridge.hx.min(ridge.hy) * 0.16);
                 let stack = Rect {
-                    c: ridge.at(ridge.hx * k, ridge.hy * 0.3),
+                    c: ridge.at(ridge.hx * at, ridge.hy * 0.3),
                     hx: half,
                     hy: half,
                     ..ridge
                 };
-                let brick = hex(palette::CHIMNEY);
                 cuboid(m, &stack, top_y, top_y + rise + 0.55, brick);
             }
         }
     }
+    if k < 1.0 {
+        return;
+    }
+    // A chimney straight up over each fire indoors, through the roof
+    // above it, and a little over the ridge if it's near one.
+    let half = metres(0.32).min(r.hx.min(r.hy) * 0.2);
+    for &p in fires {
+        // Kept in from the walls, so it rises through the roof.
+        let (s, t) = r.local(p);
+        let (s, t) = (
+            s.clamp(-r.hx + half * 2.0, r.hx - half * 2.0),
+            t.clamp(-r.hy + half * 2.0, r.hy - half * 2.0),
+        );
+        let at = r.at(s, t);
+        let under = roof_height(b, top_y, at);
+        let up = under + 0.75;
+        let stack = Rect {
+            c: at,
+            hx: half,
+            hy: half,
+            ..*r
+        };
+        cuboid(m, &stack, top_y - 0.1, up, brick);
+        // Its cap, a course proud of the stack.
+        cuboid(m, &stack.grown(metres(0.05)), up - 0.12, up, palette::shade(brick, 0.8));
+        let [x, z] = to_world(at[0], at[1]);
+        h.chimneys.push((p, [x, up, z]));
+    }
+}
+
+/// How high `b`'s roof is over `p`, on walls up to `top_y`.
+fn roof_height(b: &Block, top_y: f32, p: P) -> f32 {
+    let r = if b.roof == Roof::FrontGable {
+        b.rect.turned()
+    } else {
+        b.rect
+    };
+    let rise = r.hy as f32 * S * b.pitch.to_radians().tan();
+    match b.roof {
+        Roof::Flat => top_y + 0.065,
+        Roof::Gable | Roof::FrontGable => {
+            let (_, t) = r.local(p);
+            top_y + rise * (1.0 - (t.abs() / r.hy) as f32).max(0.0)
+        }
+        Roof::Hip => {
+            let r = if r.hx >= r.hy { r } else { r.turned() };
+            let rise = r.hy as f32 * S * b.pitch.to_radians().tan();
+            let (s, t) = r.local(p);
+            let run = r.hx - r.hy;
+            let across = 1.0 - t.abs() / r.hy;
+            let along = 1.0 - (s.abs() - run).max(0.0) / r.hy;
+            top_y + rise * across.min(along).max(0.0) as f32
+        }
+    }
+}
+
+/// Scaffolding round `r` while a floor goes up (V3.4): poles a stride
+/// apart, a ledger at every storey and over the top, and boards to stand
+/// on at the storey going up.
+fn scaffold(m: &mut MeshBuf, r: &Rect, top_y: f32, storey: f32, storeys: u8) {
+    let pole = hex(palette::SCAFFOLD);
+    let board = hex(palette::TIMBER);
+    let g = r.grown(metres(0.6));
+    let thin = metres(0.04);
+    let stride = metres(2.1);
+    let c = g.corners();
+    for i in 0..4 {
+        let (a, z) = (c[i], c[(i + 1) % 4]);
+        let n = (dist(a, z) / stride).ceil().max(1.0) as usize;
+        for k in 0..n {
+            let p = lerp(a, z, k as f64 / n as f64);
+            let foot = Rect {
+                c: p,
+                hx: thin,
+                hy: thin,
+                ..*r
+            };
+            cuboid(m, &foot, FOOT, top_y + 1.0, pole);
+        }
+    }
+    let sides = [
+        (g.at(0.0, -g.hy), g.hx, thin),
+        (g.at(0.0, g.hy), g.hx, thin),
+        (g.at(-g.hx, 0.0), thin, g.hy),
+        (g.at(g.hx, 0.0), thin, g.hy),
+    ];
+    for k in 1..=storeys {
+        let y = FLOOR + k as f32 * storey;
+        for &(c, hx, hy) in &sides {
+            cuboid(m, &Rect { c, hx, hy, ..*r }, y - 0.06, y, pole);
+        }
+    }
+    for &(c, hx, hy) in &sides {
+        cuboid(m, &Rect { c, hx, hy, ..*r }, top_y + 0.9, top_y + 0.96, pole);
+    }
+    // The boards, between the wall and the poles, where the work is.
+    let y = top_y - storey;
+    let gap = metres(0.3);
+    let deck = [
+        (r.at(0.0, -r.hy - gap), g.hx, gap * 0.8),
+        (r.at(0.0, r.hy + gap), g.hx, gap * 0.8),
+        (r.at(-r.hx - gap, 0.0), gap * 0.8, r.hy),
+        (r.at(r.hx + gap, 0.0), gap * 0.8, r.hy),
+    ];
+    for (c, hx, hy) in deck {
+        cuboid(m, &Rect { c, hx, hy, ..*r }, y, y + 0.05, board);
+    }
+}
+
+/// `b` opened (V3.4), as an architect's section: the roof settles away,
+/// the walls on the camera's side and the ones between blocks are cut to a
+/// sill, the far ones stand as high as the storeys shown, each cut shows
+/// its thickness, and the floors are boards, every storey shown over the
+/// ground a cut slab.
+fn open_block(h: &mut House, b: &Block, look: &Look, fp: &Rect, o: Open, lights: &mut Seed) {
+    let r = &b.rect;
+    let storeys = b.storeys.saturating_add(look.floors);
+    let top_y = FLOOR + storeys as f32 * b.storey;
+    let shown = o.shown.clamp(1, storeys.max(1));
+    let k = smooth((o.p - CUT_FROM) / (1.0 - CUT_FROM));
+    let far_y = top_y + (FLOOR + shown as f32 * b.storey - top_y) * k;
+    let sill_y = top_y + (FLOOR + SILL - top_y) * k;
+    let w = metres(WALL);
+    let inner = Rect {
+        hx: r.hx - w,
+        hy: r.hy - w,
+        ..*r
+    };
+    let (c, ci) = (r.corners(), inner.corners());
+    let (plaster, cut) = (hex(palette::PLASTER), hex(palette::CUT));
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        let (a, z, ai, zi) = (c[i], c[j], ci[i], ci[j]);
+        let mid = scale(add(a, z), 0.5);
+        let out = level(sub(mid, r.c));
+        // A wall between two blocks of the building is inside it.
+        let (s, t) = fp.local(mid);
+        let shared = s.abs() < fp.hx - 0.5 && t.abs() < fp.hy - 0.5;
+        let near = shared || dot(sub(o.eye, mid), [out[0] as f64, out[2] as f64]) > 0.0;
+        let y = if near { sill_y } else { far_y };
+        let m = &mut h.body;
+        m.quad([lift(a, FOOT), lift(z, FOOT), lift(z, y), lift(a, y)], out, b.wall);
+        m.quad(
+            [lift(ai, FLOOR), lift(zi, FLOOR), lift(zi, y), lift(ai, y)],
+            out.map(|v| -v),
+            plaster,
+        );
+        m.quad([lift(a, y), lift(z, y), lift(zi, y), lift(ai, y)], UP, cut);
+        // Its ends, which show where the wall beside it is cut lower.
+        for (p, pi, away) in [(a, ai, sub(a, z)), (z, zi, sub(z, a))] {
+            let mut n = left(unit(sub(pi, p)));
+            if dot(n, away) < 0.0 {
+                n = scale(n, -1.0);
+            }
+            m.quad([lift(p, FLOOR), lift(pi, FLOOR), lift(pi, y), lift(p, y)], level(n), cut);
+        }
+        if !shared {
+            openings(h, b, a, z, i == 0, y, storeys, lights);
+        }
+    }
+    let m = &mut h.body;
+    top(m, &inner, FLOOR + 0.005, hex(palette::BOARDS));
+    for k in 1..shown {
+        let y = FLOOR + k as f32 * b.storey;
+        walls(m, &inner, y - 0.18, y, cut);
+        top(m, &inner, y, hex(palette::BOARDS));
+    }
+    roof(h, b, top_y, 1.0 - smooth(o.p / ROOF_GONE), &[]);
 }
 
 /// The doors and windows on the wall from `a` to `z` (server), as far up
-/// as `wall_top`.
-fn openings(h: &mut House, b: &Block, a: P, z: P, front: bool, wall_top: f32, lights: &mut Seed) {
+/// as `wall_top`, on `storeys` storeys.
+#[allow(clippy::too_many_arguments)]
+fn openings(
+    h: &mut House,
+    b: &Block,
+    a: P,
+    z: P,
+    front: bool,
+    wall_top: f32,
+    storeys: u8,
+    lights: &mut Seed,
+) {
     let length = dist(a, z) as f32 * S;
     let dir = unit(sub(z, a));
     let mid = scale(add(a, z), 0.5);
     let out = level(sub(mid, b.rect.c));
     let off = scale([out[0] as f64, out[2] as f64], metres(PROUD));
-    let at = |s: f32| add(add(a, scale(dir, metres(s))), off);
-    let quad = |s0: f32, s1: f32, y0: f32, y1: f32| {
+    // `k` times proud of the wall: a pane in a frame stands prouder.
+    let at = |s: f32, k: f64| add(add(a, scale(dir, metres(s))), scale(off, k));
+    let quad_at = |s0: f32, s1: f32, y0: f32, y1: f32, k: f64| {
         [
-            lift(at(s0), y0),
-            lift(at(s1), y0),
-            lift(at(s1), y1),
-            lift(at(s0), y1),
+            lift(at(s0, k), y0),
+            lift(at(s1, k), y0),
+            lift(at(s1, k), y1),
+            lift(at(s0, k), y1),
         ]
     };
+    let quad = |s0: f32, s1: f32, y0: f32, y1: f32| quad_at(s0, s1, y0, y1, 1.0);
     // The door, on the front.
     let mut door_at = None;
     if front {
@@ -1107,17 +1375,57 @@ fn openings(h: &mut House, b: &Block, a: P, z: P, front: bool, wall_top: f32, li
                 }
                 return;
             }
+            Door::Shop { arch_left, colour } => {
+                // The carriage arch at one end, under its lintel, the shop
+                // door at the other, and the shop window between.
+                let tall = (b.storey * 0.88).min(2.5);
+                let arch_w = (length * 0.28).min(2.3);
+                let (arch, door) = if arch_left {
+                    (0.3 + arch_w * 0.5, length - 0.8)
+                } else {
+                    (length - 0.3 - arch_w * 0.5, 0.8)
+                };
+                if wall_top >= FLOOR + tall + 0.2 {
+                    let (a0, a1) = (arch - arch_w * 0.5, arch + arch_w * 0.5);
+                    h.body.quad(quad(a0, a1, FLOOR, FLOOR + tall), out, hex(palette::ARCH));
+                    h.body.quad(
+                        quad(a0 - 0.12, a1 + 0.12, FLOOR + tall, FLOOR + tall + 0.2),
+                        out,
+                        palette::shade(b.wall, 0.78),
+                    );
+                    h.body.quad(quad(door - 0.45, door + 0.45, FLOOR, FLOOR + 2.05), out, colour);
+                    let (w0, w1) = if arch_left {
+                        (a1 + 0.4, door - 0.75)
+                    } else {
+                        (door + 0.75, a0 - 0.4)
+                    };
+                    if w1 - w0 > 0.8 {
+                        h.body.quad(quad(w0, w1, FLOOR + 0.4, FLOOR + 2.1), out, hex(palette::SHOPFRONT));
+                        h.panes.push(Pane {
+                            corners: quad_at(w0 + 0.1, w1 - 0.1, FLOOR + 0.5, FLOOR + 2.0, 2.0),
+                            normal: out,
+                            lit: lights.chance(0.85),
+                        });
+                    }
+                }
+                door_at = Some(door);
+            }
         }
     }
     if matches!(b.door, Door::Wide(_)) {
         return;
     }
+    let shop = matches!(b.door, Door::Shop { .. });
     let count = ((length - 0.5) / b.bay).floor().max(0.0) as usize;
     if count == 0 {
         return;
     }
     let step = length / count as f32;
-    for storey in 0..b.storeys {
+    for storey in 0..storeys {
+        // The shop's ground floor is its front, on the street side.
+        if storey == 0 && shop && front {
+            continue;
+        }
         let y0 = FLOOR + storey as f32 * b.storey + b.storey * 0.36;
         let y1 = y0 + b.storey * 0.42;
         for k in 0..count {
@@ -1141,9 +1449,17 @@ fn openings(h: &mut House, b: &Block, a: P, z: P, front: bool, wall_top: f32, li
 
 /// The house on the lot `id`, `progress` of the way up (1 is built), or
 /// `None` if the lot has no room for one.
+#[cfg(test)]
 pub fn house(id: &str, lot: &Lot, progress: f32) -> Option<House> {
+    build(id, lot, progress, &Look::default())
+}
+
+/// The house on the lot `id`, `progress` of the way up (1 is built), looking
+/// as `look` says: its floors, a floor going up, its
+/// fires and how far it's open (V3.4).
+pub fn build(id: &str, lot: &Lot, progress: f32, look: &Look) -> Option<House> {
     let plan = plan(id, lot)?;
-    Some(raise(&plan, Stage::at(progress)))
+    Some(raise(&plan, Stage::at(progress), look))
 }
 
 /// The material of every [`lamp_meshes`] entity at `glow`, set each frame
@@ -1202,16 +1518,64 @@ fn lamps_material(name: &str) -> ImportedMaterial {
 // The layer
 // ---------------------------------------------------------------------------
 
+/// How near the camera must come for a building to open (V3.4), metres:
+/// one of your own, and anyone else's. Chris, 2026-10-22: start there and
+/// see how it feels.
+pub const OPEN_MINE: f32 = 25.0;
+pub const OPEN_OTHERS: f32 = 10.0;
+/// How many stand open at once: the nearest.
+const OPEN_MOST: usize = 6;
+/// How long a building takes to open, or to shut, seconds.
+const OPEN_SECS: f32 = 0.7;
+/// The buildings standing open, and their lit windows.
+pub const OPEN_MESH: &str = "houses_open";
+pub const OPEN_LAMPS: &str = "houses_open_lamps";
+
+/// A house that's up.
+struct Up {
+    sector: Sector,
+    house: House,
+    /// Its building, the rules' footprint, and how tall it stands, metres:
+    /// what opens. `None` for a guild hall's.
+    building: Option<(Rect, f32)>,
+}
+
+/// What a lot's building shows past its plan, as the layer was told.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Shown {
+    /// Floors built (V3.3).
+    floors: u8,
+    /// The next is under way: it stands in scaffolding.
+    under_way: bool,
+    /// The last one finished at this time, and its storey is rising.
+    rising_since: Option<f32>,
+    /// The kilns and forges inside, server units.
+    fires: Vec<P>,
+}
+
 /// Every house in the city, and what needs building again.
 #[derive(Default)]
 pub struct Houses {
     /// The claims last followed (`sync`), by the version they came with.
     version: Option<u64>,
     claimed: HashSet<String>,
-    /// The houses that are up, by lot id, with their sector.
-    built: HashMap<String, (Sector, House)>,
+    /// The houses that are up, by lot id.
+    built: HashMap<String, Up>,
     /// The houses going up, by lot id: when they started.
     growing: HashMap<String, f32>,
+    /// Floors, scaffolding and fires, by lot id.
+    shown: HashMap<String, Shown>,
+    /// The fires last given (`fires`), to tell when they change.
+    fires_given: Vec<P>,
+    /// The buildings open or opening, by lot id: how far, 0 to 1.
+    open: HashMap<String, f32>,
+    /// Which of each open building's sides face the camera.
+    facing: HashMap<String, u8>,
+    /// Where the camera is, server units.
+    eye: P,
+    /// The open mesh is out of date, and whether it has anything in it.
+    open_dirty: bool,
+    open_drawn: bool,
     /// Sectors whose mesh is out of date.
     dirty: BTreeSet<Sector>,
     /// Whether the growing mesh has anything in it.
@@ -1227,6 +1591,9 @@ impl Houses {
         self.claimed.clear();
         self.built.clear();
         self.growing.clear();
+        self.open.clear();
+        self.facing.clear();
+        self.open_dirty = true;
         self.dirty.extend(Sector::all());
     }
 
@@ -1246,20 +1613,24 @@ impl Houses {
         self.version = Some(version);
         let now: HashSet<String> = ids.into_iter().cloned().collect();
         for gone in self.claimed.difference(&now) {
-            if let Some((sector, _)) = self.built.remove(gone) {
-                self.dirty.insert(sector);
+            if let Some(up) = self.built.remove(gone) {
+                self.dirty.insert(up.sector);
             }
             self.growing.remove(gone);
+            self.shown.remove(gone);
+            if self.open.remove(gone).is_some() {
+                self.open_dirty = true;
+            }
         }
-        for new in now.difference(&self.claimed) {
+        let new: Vec<String> = now.difference(&self.claimed).cloned().collect();
+        for new in &new {
             let Some(lot) = lots.get(new) else {
                 continue;
             };
             if fresh(new) {
                 self.growing.insert(new.clone(), self.time);
-            } else if let Some(h) = house(new, lot, 1.0) {
-                self.dirty.insert(lot.sector);
-                self.built.insert(new.clone(), (lot.sector, h));
+            } else {
+                self.put_up(new, lot);
             }
         }
         self.claimed = now;
@@ -1267,8 +1638,203 @@ impl Houses {
         tracing::debug!("houses: {up} up, {growing} growing");
     }
 
+    /// Builds the house on `id` as it stands now, into its sector.
+    fn put_up(&mut self, id: &str, lot: &Lot) {
+        let look = self.look(id);
+        let Some(house) = build(id, lot, 1.0, &look) else {
+            return;
+        };
+        let building = plan(id, lot).and_then(|plan| {
+            let tall = plan.blocks.iter().map(|b| look.storeys(b) as f32 * b.storey).fold(0.0, f32::max);
+            Some((plan.building?, tall))
+        });
+        self.dirty.insert(lot.sector);
+        self.built.insert(
+            id.to_owned(),
+            Up {
+                sector: lot.sector,
+                house,
+                building,
+            },
+        );
+    }
+
+    /// How `id`'s building looks now, shut.
+    fn look(&self, id: &str) -> Look {
+        let Some(s) = self.shown.get(id) else {
+            return Look::default();
+        };
+        let (floors, raising) = match (s.under_way, s.rising_since) {
+            (true, _) => (s.floors, Some(0.0)),
+            (false, Some(t0)) => (
+                s.floors.saturating_sub(1),
+                Some(((self.time - t0) / GROW_SECS).clamp(0.0, 1.0)),
+            ),
+            _ => (s.floors, None),
+        };
+        Look {
+            floors,
+            raising,
+            fires: s.fires.clone(),
+            open: None,
+        }
+    }
+
+    /// Whether `id`'s new storey is rising: it's drawn each frame then.
+    fn rising(&self, id: &str) -> bool {
+        self.shown.get(id).is_some_and(|s| s.rising_since.is_some())
+    }
+
+    /// The lot `id` has `floors` built (V3.3), and the next `under_way` or
+    /// not. A floor that has just finished rises over [`GROW_SECS`].
+    pub fn set_floors(&mut self, id: &str, floors: u8, under_way: bool, lots: &HashMap<String, Lot>) {
+        let s = self.shown.entry(id.to_owned()).or_default();
+        if s.floors == floors && s.under_way == under_way {
+            return;
+        }
+        let finished = s.under_way && !under_way && floors == s.floors + 1;
+        s.floors = floors;
+        s.under_way = under_way;
+        s.rising_since = finished.then_some(self.time);
+        if finished {
+            // It leaves its sector to rise in the growing mesh.
+            if let Some(up) = self.built.get(id) {
+                self.dirty.insert(up.sector);
+            }
+        } else if self.built.contains_key(id) {
+            if let Some(lot) = lots.get(id) {
+                self.put_up(id, lot);
+            }
+        }
+    }
+
+    /// The kilns and forges indoors, server units, wherever they are: each
+    /// house with one in it has a chimney over it.
+    pub fn fires(&mut self, fires: &[P], lots: &HashMap<String, Lot>) {
+        if self.fires_given == fires {
+            return;
+        }
+        self.fires_given = fires.to_vec();
+        let mut by_lot: HashMap<String, Vec<P>> = HashMap::new();
+        for &p in fires {
+            let home = self
+                .built
+                .iter()
+                .find(|(_, up)| up.building.is_some_and(|(fp, _)| fp.contains(p)));
+            if let Some((id, _)) = home {
+                by_lot.entry(id.clone()).or_default().push(p);
+            }
+        }
+        let lots_now: BTreeSet<String> = self
+            .shown
+            .iter()
+            .filter(|(_, s)| !s.fires.is_empty())
+            .map(|(id, _)| id.clone())
+            .chain(by_lot.keys().cloned())
+            .collect();
+        for id in lots_now {
+            let want = by_lot.remove(&id).unwrap_or_default();
+            let s = self.shown.entry(id.clone()).or_default();
+            if s.fires == want {
+                continue;
+            }
+            s.fires = want;
+            if let Some(lot) = lots.get(&id).filter(|_| self.built.contains_key(&id)) {
+                self.put_up(&id, lot);
+            }
+        }
+    }
+
+    /// The fires with a chimney over them, and the top of it, world
+    /// metres: where the smoke comes out. A building standing open has
+    /// none.
+    pub fn chimneys(&self) -> impl Iterator<Item = (P, [f32; 3])> + '_ {
+        self.built
+            .iter()
+            .filter(|(id, _)| !self.open.contains_key(*id) && !self.rising(id))
+            .flat_map(|(_, up)| up.house.chimneys.iter().copied())
+    }
+
+    /// Opens the buildings the camera has come close to, and shuts the
+    /// rest (V3.4): within [`OPEN_MINE`] of one of `mine`, [`OPEN_OTHERS`]
+    /// of anyone else's, the nearest few. `eye` is the camera, world metres.
+    /// By distance alone: opening on aim, and from 25 m for a plot that
+    /// admits you, are #496.
+    pub fn cutaway(&mut self, dt: f32, eye: [f32; 3], mine: &HashSet<String>) {
+        let at = to_server(eye[0], eye[2]);
+        let mut near: Vec<(f32, &String)> = self
+            .built
+            .iter()
+            .filter(|(id, _)| !self.rising(id))
+            .filter_map(|(id, up)| {
+                let (fp, tall) = up.building?;
+                let across = fp.distance(at) as f32 * S;
+                let above = (eye[1] - FLOOR - tall).max(0.0);
+                let d = across.hypot(above);
+                let reach = if mine.contains(id) { OPEN_MINE } else { OPEN_OTHERS };
+                (d < reach).then_some((d, id))
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(b.1)));
+        let want: HashSet<String> = near.iter().take(OPEN_MOST).map(|(_, id)| (*id).clone()).collect();
+        for id in &want {
+            self.open.entry(id.clone()).or_insert(0.0);
+        }
+        let step = dt / OPEN_SECS;
+        let mut moved = Vec::new();
+        for (id, p) in &mut self.open {
+            let target = if want.contains(id) { 1.0 } else { 0.0 };
+            let next = if target > *p {
+                (*p + step).min(1.0)
+            } else {
+                (*p - step).max(0.0)
+            };
+            if next != *p {
+                // In or out of its sector's mesh as it starts or ends.
+                moved.push((id.clone(), *p == 0.0 || next == 0.0));
+                *p = next;
+            }
+        }
+        for (id, leaves) in &moved {
+            if *leaves {
+                if let Some(up) = self.built.get(id) {
+                    self.dirty.insert(up.sector);
+                }
+            }
+        }
+        self.open.retain(|id, p| *p > 0.0 || want.contains(id));
+        self.facing.retain(|id, _| self.open.contains_key(id));
+        // The walls cut are the ones facing the camera.
+        for id in self.open.keys() {
+            let Some((fp, _)) = self.built.get(id).and_then(|up| up.building) else {
+                continue;
+            };
+            let c = fp.corners();
+            let mut sides = 0u8;
+            for i in 0..4 {
+                let mid = scale(add(c[i], c[(i + 1) % 4]), 0.5);
+                if dot(sub(at, mid), sub(mid, fp.c)) > 0.0 {
+                    sides |= 1 << i;
+                }
+            }
+            if self.facing.insert(id.clone(), sides) != Some(sides) {
+                self.open_dirty = true;
+            }
+        }
+        self.eye = at;
+        if !moved.is_empty() {
+            self.open_dirty = true;
+        }
+    }
+
+    /// How far open `id`'s building is, 0 shut.
+    #[cfg(test)]
+    pub fn openness(&self, id: &str) -> f32 {
+        self.open.get(id).copied().unwrap_or(0.0)
+    }
+
     /// Moves time on by `dt`: a house that has finished growing joins its
-    /// sector.
+    /// sector, and so does a storey that has finished rising.
     pub fn advance(&mut self, dt: f32, lots: &HashMap<String, Lot>) {
         self.time += dt;
         let time = self.time;
@@ -1280,12 +1846,22 @@ impl Houses {
             .collect();
         for id in done {
             self.growing.remove(&id);
-            let Some(lot) = lots.get(&id) else {
-                continue;
-            };
-            if let Some(h) = house(&id, lot, 1.0) {
-                self.dirty.insert(lot.sector);
-                self.built.insert(id, (lot.sector, h));
+            if let Some(lot) = lots.get(&id) {
+                self.put_up(&id, lot);
+            }
+        }
+        let risen: Vec<String> = self
+            .shown
+            .iter()
+            .filter(|(_, s)| s.rising_since.is_some_and(|t0| time - t0 >= GROW_SECS))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in risen {
+            if let Some(s) = self.shown.get_mut(&id) {
+                s.rising_since = None;
+            }
+            if let Some(lot) = lots.get(&id).filter(|_| self.built.contains_key(&id)) {
+                self.put_up(&id, lot);
             }
         }
     }
@@ -1295,27 +1871,71 @@ impl Houses {
         (self.built.len(), self.growing.len())
     }
 
+    /// The houses drawn in their sectors' meshes: not the open ones, nor
+    /// one whose new storey is rising.
+    fn settled(&self) -> impl Iterator<Item = &Up> {
+        self.built
+            .iter()
+            .filter(|(id, _)| !self.open.contains_key(*id) && !self.rising(id))
+            .map(|(_, up)| up)
+    }
+
     /// One sector's houses as one mesh.
     fn sector_mesh(&self, sector: Sector) -> MeshBuf {
         let mut m = MeshBuf::default();
-        for (s, h) in self.built.values() {
-            if *s == sector {
-                m.append(h.body.clone());
+        for up in self.settled() {
+            if up.sector == sector {
+                m.append(up.house.body.clone());
             }
         }
         m
     }
 
-    /// The houses going up, as they stand now, with their dark windows;
-    /// and their lit windows apart.
+    /// The houses going up, and the storeys rising, as they stand now,
+    /// with their dark windows; and their lit windows apart.
     fn growing_mesh(&self, lots: &HashMap<String, Lot>) -> (MeshBuf, MeshBuf) {
         let (mut m, mut lamps) = (MeshBuf::default(), MeshBuf::default());
-        for (id, &t0) in &self.growing {
+        let growing = self.growing.iter().map(|(id, &t0)| {
+            let p = ((self.time - t0) / GROW_SECS).clamp(0.0, 0.999);
+            (id, p, self.look(id))
+        });
+        let rising = self
+            .built
+            .keys()
+            .filter(|id| self.rising(id))
+            .map(|id| (id, 1.0, self.look(id)));
+        for (id, p, look) in growing.chain(rising) {
             let Some(lot) = lots.get(id) else {
                 continue;
             };
-            let p = ((self.time - t0) / GROW_SECS).clamp(0.0, 0.999);
-            if let Some(h) = house(id, lot, p) {
+            if let Some(h) = build(id, lot, p, &look) {
+                m.append(h.body);
+                panes(&mut m, &h.panes, false);
+                panes(&mut lamps, &h.panes, true);
+            }
+        }
+        (m, lamps)
+    }
+
+    /// The buildings standing open, as they stand now, with their dark
+    /// windows; and their lit windows apart.
+    fn open_mesh(&self, lots: &HashMap<String, Lot>) -> (MeshBuf, MeshBuf) {
+        let (mut m, mut lamps) = (MeshBuf::default(), MeshBuf::default());
+        for (id, &p) in &self.open {
+            let Some(lot) = lots.get(id) else {
+                continue;
+            };
+            let look = Look {
+                open: Some(Open {
+                    p,
+                    eye: self.eye,
+                    // Every station stands on the ground until stations
+                    // carry their storey (V3.3, #475).
+                    shown: 1,
+                }),
+                ..self.look(id)
+            };
+            if let Some(h) = build(id, lot, 1.0, &look) {
                 m.append(h.body);
                 panes(&mut m, &h.panes, false);
                 panes(&mut lamps, &h.panes, true);
@@ -1347,10 +1967,10 @@ impl Houses {
         let quarters: BTreeSet<(u8, u8)> = dirty.iter().copied().map(quarter).collect();
         for q in quarters {
             let (mut dark, mut lamps) = (MeshBuf::default(), MeshBuf::default());
-            for (s, h) in self.built.values() {
-                if quarter(*s) == q {
-                    panes(&mut dark, &h.panes, false);
-                    panes(&mut lamps, &h.panes, true);
+            for up in self.settled() {
+                if quarter(up.sector) == q {
+                    panes(&mut dark, &up.house.panes, false);
+                    panes(&mut lamps, &up.house.panes, true);
                 }
             }
             for (m, material) in [
@@ -1363,12 +1983,26 @@ impl Houses {
                 m.upload_material(gpu, material);
             }
         }
-        if !self.growing.is_empty() || self.growing_drawn {
+        let rising = self.shown.values().any(|s| s.rising_since.is_some());
+        if !self.growing.is_empty() || rising || self.growing_drawn {
             let (m, lamps) = self.growing_mesh(lots);
             self.growing_drawn = !m.indices.is_empty();
             for (m, material, options) in [
                 (m, material(GROWING_MESH, 0.85), RAY_TARGET),
                 (lamps, lamps_material(GROWING_LAMPS), Default::default()),
+            ] {
+                if !m.indices.is_empty() {
+                    uploaded.push(material.name.clone());
+                }
+                m.upload_material_with(gpu, material, options);
+            }
+        }
+        if std::mem::take(&mut self.open_dirty) && (!self.open.is_empty() || self.open_drawn) {
+            let (m, lamps) = self.open_mesh(lots);
+            self.open_drawn = !m.indices.is_empty();
+            for (m, material, options) in [
+                (m, material(OPEN_MESH, 0.85), RAY_TARGET),
+                (lamps, lamps_material(OPEN_LAMPS), Default::default()),
             ] {
                 if !m.indices.is_empty() {
                     uploaded.push(material.name.clone());
@@ -1492,6 +2126,10 @@ mod tests {
 
     #[test]
     fn nearly_every_lot_has_room_for_a_house() {
+        // On a home lot, the house is the rules' building, where there is one.
+        for (id, lot) in lots().iter().filter(|(_, l)| building::shape(l.zone).is_some()) {
+            assert_eq!(plan(id, lot).is_some(), footprint(lot).is_some(), "{id}");
+        }
         for zone in [
             Zone::Urban,
             Zone::Suburban,
@@ -1509,22 +2147,160 @@ mod tests {
         }
     }
 
+    /// Every vertex inside the lot as `edge` runs round it, `slack` server
+    /// units allowed.
+    fn on_lot(id: &str, h: &House, edge: &[P], slack: f64) {
+        let ring = plots::hull(edge);
+        let n = ring.len();
+        for p in vertices(h) {
+            let q = to_server(p[0], p[2]);
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                let inward = dot(unit(left(sub(b, a))), sub(q, a));
+                assert!(inward >= -slack, "{id}: {q:?} is {inward} outside");
+            }
+        }
+    }
+
     #[test]
     fn a_house_stays_on_its_lot() {
-        // Every vertex, eaves and all, inside the lot as drawn.
+        // Every vertex, eaves and all, inside the lot as drawn. A building
+        // on the rules' footprint stands on the lot itself: a city house
+        // fronts the pavement, its cornice a hand's width over it.
         for (id, lot) in lots() {
             let Some(h) = house(id, lot, 1.0) else {
                 continue;
             };
-            let n = lot.outline.len();
-            for p in vertices(&h) {
-                let q = to_server(p[0], p[2]);
-                for i in 0..n {
-                    let (a, b) = (lot.outline[i], lot.outline[(i + 1) % n]);
-                    let inward = dot(unit(left(sub(b, a))), sub(q, a));
-                    assert!(inward >= -0.05, "{id}: {q:?} is {inward} outside");
+            if footprint(lot).is_some() {
+                on_lot(id, &h, &lot.corners, metres(CORNICE) + 0.05);
+            } else {
+                on_lot(id, &h, &lot.outline, 0.05);
+            }
+        }
+    }
+
+    /// V3.4, #462: the blocks fill the rules' footprint exactly, so every
+    /// station indoors stands inside walls drawn round it, and every one
+    /// in the yard outside them.
+    #[test]
+    fn the_walls_stand_on_the_rules_footprint() {
+        let mut n = 0;
+        for (id, lot) in lots() {
+            let Some(fp) = footprint(lot) else {
+                continue;
+            };
+            let p = plan(id, lot).unwrap();
+            assert_eq!(p.building, Some(fp));
+            let area: f64 = p.blocks.iter().map(|b| 4.0 * b.rect.hx * b.rect.hy).sum();
+            assert!((area - 4.0 * fp.hx * fp.hy).abs() < 1e-6 * area, "{id}: the blocks leave a gap");
+            for b in &p.blocks {
+                for c in b.rect.corners() {
+                    assert!(fp.grown(1e-6).contains(c), "{id}: a block past the footprint");
                 }
             }
+            // And the server's test of indoors agrees, a station's width in.
+            let corners = lot.corners.map(|[x, y]| (x, y));
+            for (s, t) in [(0.0, 0.0), (0.8, 0.8), (-0.8, 0.8), (0.8, -0.8), (-0.8, -0.8)] {
+                let q = fp.at(fp.hx * s, fp.hy * t);
+                assert!(building::indoors(&corners, lot.zone, q[0], q[1]), "{id}: {q:?}");
+                assert!(p.blocks.iter().any(|b| b.rect.contains(q)), "{id}: {q:?} under no roof");
+            }
+            let out = fp.at(0.0, fp.hy + 5.0);
+            assert!(!p.blocks.iter().any(|b| b.rect.contains(out)), "{id}: the yard is roofed");
+            n += 1;
+        }
+        assert!(n > 100, "{n} buildings");
+    }
+
+    /// The highest any vertex of `h` stands, metres.
+    fn tallest(h: &House) -> f32 {
+        vertices(h).map(|p| p[1]).fold(FLOOR, f32::max)
+    }
+
+    #[test]
+    fn floors_raise_it_a_storey_each_and_scaffold_the_one_going_up() {
+        let (id, lot) = first(Zone::Urban);
+        let storey = plan(id, lot).unwrap().blocks[0].storey;
+        let at = |look: Look| build(id, lot, 1.0, &look).unwrap();
+        let none = at(Look::default());
+        let two = at(Look { floors: 2, ..Look::default() });
+        assert!((tallest(&two) - tallest(&none) - 2.0 * storey).abs() < 1e-3);
+        let has = |h: &House, colour: u32| h.body.vertices.iter().any(|v| v.color == hex(colour));
+        assert!(!has(&two, palette::SCAFFOLD));
+        // Under way: the storey stands in its frame, in scaffolding, with
+        // the roof on top; then it rises, and the scaffolding comes down.
+        let going = at(Look { floors: 2, raising: Some(0.0), ..Look::default() });
+        assert!(has(&going, palette::SCAFFOLD) && has(&going, palette::TIMBER));
+        assert!(tallest(&going) > tallest(&two) + storey - 1e-3);
+        let three = at(Look { floors: 3, ..Look::default() });
+        let risen = at(Look { floors: 2, raising: Some(1.0), ..Look::default() });
+        assert!((tallest(&risen) - tallest(&three)).abs() < 1e-3);
+        // More windows for more storeys.
+        assert!(three.panes.len() > none.panes.len());
+    }
+
+    #[test]
+    fn a_chimney_rises_through_the_roof_over_each_fire() {
+        for zone in [Zone::Urban, Zone::Suburban, Zone::Rural] {
+            let (id, lot) = first(zone);
+            let fp = footprint(lot).unwrap();
+            let fires = vec![fp.at(-fp.hx * 0.5, 0.0), fp.at(fp.hx * 0.5, fp.hy * 0.4)];
+            let shut = build(id, lot, 1.0, &Look::default()).unwrap();
+            assert!(shut.chimneys.is_empty(), "no fire, no chimney");
+            let h = build(id, lot, 1.0, &Look { fires: fires.clone(), ..Look::default() }).unwrap();
+            assert_eq!(h.chimneys.len(), 2, "{id}");
+            let p = plan(id, lot).unwrap();
+            for (fire, top) in &h.chimneys {
+                let b = p.blocks.iter().find(|b| b.rect.contains(*fire)).unwrap();
+                let walls = FLOOR + b.storeys as f32 * b.storey;
+                let at = to_server(top[0], top[2]);
+                assert!(dist(at, *fire) < 1.0 / S as f64, "{id}: over its fire");
+                assert!(top[1] > roof_height(b, walls, at) + 0.5, "{id}: clear of the roof");
+            }
+            // Open, it has none.
+            let open = Look {
+                fires,
+                open: Some(Open { p: 1.0, eye: fp.at(0.0, -fp.hy - 100.0), shown: 1 }),
+                ..Look::default()
+            };
+            assert!(build(id, lot, 1.0, &open).unwrap().chimneys.is_empty());
+        }
+    }
+
+    /// V3.4: opened, the roof is gone, the walls toward the camera are
+    /// down to the sill and the far ones stand a storey high.
+    #[test]
+    fn it_opens_cut_down_toward_the_camera() {
+        for zone in [Zone::Urban, Zone::Suburban, Zone::Rural] {
+            let (id, lot) = first(zone);
+            let fp = footprint(lot).unwrap();
+            let p = plan(id, lot).unwrap();
+            let storey = p.blocks.iter().map(|b| b.storey).fold(0.0, f32::max);
+            // From the street, a little to the left.
+            let eye = fp.at(-fp.hx * 0.3, -fp.hy - 120.0);
+            let open = |k: f32, floors: u8| {
+                let look = Look { floors, open: Some(Open { p: k, eye, shown: 1 }), ..Look::default() };
+                build(id, lot, 1.0, &look).unwrap()
+            };
+            let h = open(1.0, 2);
+            assert!(tallest(&h) <= FLOOR + storey + 1e-3, "{id}: {} over a storey", tallest(&h));
+            let w = metres(WALL);
+            for v in vertices(&h) {
+                // The front wall, not the ends of the side walls at its
+                // corners: the far one runs the whole depth.
+                let (s, t) = fp.local(to_server(v[0], v[2]));
+                if t < -fp.hy + w * 0.9 && s.abs() < fp.hx - w * 1.1 {
+                    assert!(v[1] <= FLOOR + SILL + 1e-3, "{id}: the front stands {}", v[1]);
+                }
+            }
+            assert!(
+                h.body.vertices.iter().any(|v| v.color == hex(palette::BOARDS)),
+                "{id}: no floor"
+            );
+            // Shut, it's the house; half open, between.
+            let shut = build(id, lot, 1.0, &Look { floors: 2, ..Look::default() }).unwrap();
+            assert!(tallest(&open(0.6, 2)) < tallest(&shut));
+            assert!(tallest(&open(0.6, 2)) > tallest(&h));
         }
     }
 
@@ -1546,7 +2322,9 @@ mod tests {
             }
             n += 1;
             barns += (plan.blocks.len() > 1) as usize;
-            back += ((t(door) - frame.depth().0) as f32 * S >= 5.0) as usize;
+            // The rules set it 4 m back from the lot's edge (V3.1), which is
+            // a little less from the hedge bank.
+            back += ((t(door) - frame.depth().0) as f32 * S >= 3.5) as usize;
         }
         let share = |k: usize| k as f64 / n as f64;
         println!("{n} farms: {barns} barns, {back} stand 5 m back or more");
@@ -1561,8 +2339,8 @@ mod tests {
 
     #[test]
     fn farmsteads_stand_back_from_the_lane_on_their_drives() {
-        // The barn's chance is 0.65.
-        farmsteads_stand_back_on_their_drives(&farm_lots(), 0.9, 0.5);
+        // Every farmhouse has its barn under the one range (V3.4).
+        farmsteads_stand_back_on_their_drives(&farm_lots(), 0.9, 0.99);
     }
 
     #[test]
@@ -1632,8 +2410,18 @@ mod tests {
             Zone::GuildDistrict,
         ] {
             for (id, lot) in lots().iter().filter(|(_, l)| l.zone == zone).take(40) {
-                for p in [0.2, 0.5, 0.8, 1.0] {
-                    let Some(h) = house(id, lot, p) else {
+                let fp = footprint(lot);
+                let looks = [
+                    Look::default(),
+                    Look { floors: 1, raising: Some(0.0), fires: fp.iter().map(|f| f.c).collect(), open: None },
+                    Look {
+                        floors: 2,
+                        open: fp.map(|f| Open { p: 0.8, eye: f.at(f.hx * 2.0, -f.hy * 3.0), shown: 2 }),
+                        ..Look::default()
+                    },
+                ];
+                for (p, look) in [0.2, 0.5, 0.8, 1.0].into_iter().map(|p| (p, &looks[0])).chain([(1.0, &looks[1]), (1.0, &looks[2])]) {
+                    let Some(h) = build(id, lot, p, look) else {
                         continue;
                     };
                     for t in h.body.indices.as_chunks::<3>().0 {
@@ -1820,19 +2608,111 @@ mod tests {
         );
     }
 
+    /// V3.4: a building opens as the camera comes close, yours from
+    /// further off, leaves its sector's mesh while it's open, and shuts and
+    /// goes back as the camera leaves.
+    #[test]
+    fn buildings_open_as_the_camera_comes_close() {
+        let lots = lots();
+        let (id, lot) = first(Zone::Suburban);
+        let fp = footprint(lot).unwrap();
+        let mut layer = Houses::default();
+        layer.sync(1, [id], |_| false, lots);
+        layer.dirty.clear();
+        let full = layer.sector_mesh(lot.sector).indices.len();
+        assert!(full > 0);
+        // World metres, `m` in front of its front wall, at eye height.
+        let eye = |m: f32| {
+            let p = fp.at(0.0, -fp.hy - metres(m));
+            let [x, z] = to_world(p[0], p[1]);
+            [x, 1.7, z]
+        };
+        let nobody = HashSet::new();
+        let me: HashSet<String> = [id.clone()].into();
+        // 15 m off: someone else's stays shut, yours opens.
+        layer.cutaway(0.1, eye(15.0), &nobody);
+        assert_eq!(layer.openness(id), 0.0);
+        layer.cutaway(0.1, eye(15.0), &me);
+        assert!(layer.openness(id) > 0.0);
+        assert!(layer.dirty.contains(&lot.sector), "it leaves its sector");
+        assert!(layer.sector_mesh(lot.sector).indices.is_empty());
+        assert!(!layer.open_mesh(lots).0.indices.is_empty());
+        for _ in 0..20 {
+            layer.cutaway(0.1, eye(15.0), &me);
+        }
+        assert_eq!(layer.openness(id), 1.0);
+        // 5 m off, anyone's opens.
+        let mut theirs = Houses::default();
+        theirs.sync(1, [id], |_| false, lots);
+        theirs.cutaway(0.1, eye(5.0), &nobody);
+        assert!(theirs.openness(id) > 0.0);
+        // Walk away: it shuts, and goes back into its sector.
+        layer.dirty.clear();
+        for _ in 0..20 {
+            layer.cutaway(0.1, eye(60.0), &me);
+        }
+        assert_eq!(layer.openness(id), 0.0);
+        assert!(layer.open.is_empty());
+        assert!(layer.dirty.contains(&lot.sector));
+        assert_eq!(layer.sector_mesh(lot.sector).indices.len(), full);
+        // From high over the city, nothing opens.
+        let mut high = eye(0.0);
+        high[1] = 200.0;
+        layer.cutaway(0.1, high, &me);
+        assert_eq!(layer.openness(id), 0.0);
+    }
+
+    /// A floor finished rises out of the sector's mesh, then goes back.
+    #[test]
+    fn a_finished_floor_rises_then_settles() {
+        let lots = lots();
+        let (id, lot) = first(Zone::Urban);
+        let mut layer = Houses::default();
+        layer.sync(1, [id], |_| false, lots);
+        layer.set_floors(id, 1, true, lots);
+        assert!(!layer.rising(id), "scaffolding stands in the sector");
+        assert!(!layer.sector_mesh(lot.sector).indices.is_empty());
+        layer.set_floors(id, 2, false, lots);
+        assert!(layer.rising(id));
+        assert!(layer.sector_mesh(lot.sector).indices.is_empty());
+        assert!(!layer.growing_mesh(lots).0.indices.is_empty());
+        layer.advance(GROW_SECS + 0.1, lots);
+        assert!(!layer.rising(id));
+        assert_eq!(layer.look(id).floors, 2);
+        assert!(!layer.sector_mesh(lot.sector).indices.is_empty());
+    }
+
+    /// The fires find their buildings, and a chimney stands over each.
+    #[test]
+    fn fires_indoors_get_chimneys() {
+        let lots = lots();
+        let (id, lot) = first(Zone::Rural);
+        let fp = footprint(lot).unwrap();
+        let mut layer = Houses::default();
+        layer.sync(1, [id], |_| false, lots);
+        let inside = fp.at(0.0, 0.0);
+        let outside = fp.at(0.0, fp.hy + 40.0);
+        layer.fires(&[inside, outside], lots);
+        let chimneys: Vec<_> = layer.chimneys().collect();
+        assert_eq!(chimneys.len(), 1);
+        assert_eq!(chimneys[0].0, inside);
+        layer.fires(&[], lots);
+        assert_eq!(layer.chimneys().count(), 0);
+    }
+
     #[test]
     fn a_dense_city_fits_the_budget_of_one_mesh_per_sector() {
         // Every lot claimed: the houses' triangles, and how many meshes.
         let mut layer = Houses::default();
         let lots = lots();
         layer.sync(1, lots.keys(), |_| false, lots);
-        let sectors: BTreeSet<Sector> = layer.built.values().map(|(s, _)| *s).collect();
+        let sectors: BTreeSet<Sector> = layer.built.values().map(|up| up.sector).collect();
         let tris: usize = layer
             .built
             .values()
-            .map(|(_, h)| h.body.indices.len() / 3)
+            .map(|up| up.house.body.indices.len() / 3)
             .sum();
-        let panes: usize = layer.built.values().map(|(_, h)| h.panes.len()).sum();
+        let panes: usize = layer.built.values().map(|up| up.house.panes.len()).sum();
         println!(
             "{} houses in {} sectors: {tris} triangles, {panes} windows",
             layer.built.len(),

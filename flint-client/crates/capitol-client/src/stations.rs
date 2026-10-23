@@ -39,6 +39,16 @@
 //! reads as yours in the crowd at the spawn. A waiting one's ember floats
 //! over the gold.
 //!
+//! **Indoors and out (V3.4).** A kiln or forge indoors smokes from the
+//! chimney over it, which `world::houses` raises through the roof: harder
+//! while it works, a thread while it's banked, and none while it waits.
+//! The kiln's own smoke goes up the chimney then, not through the roof.
+//! A station out in the weather wears it (V3.2): as its condition falls its
+//! colours fade toward a mossy grey (`palette::WEATHERED`, through the
+//! entity's `vertex_tint_*`) and it leans a little, and below
+//! `rules::weather::NEEDS_REPAIR` a mark over it says it needs repair
+//! (`draw_station_worn` in `input.rhai`).
+//!
 //! A station that was placed just now (`station_placed`) drops into place
 //! and settles. One seen for the first time, walking near it, rises out
 //! of the ground instead, quickly, so it doesn't pop. One the server stops
@@ -61,10 +71,10 @@
 use crate::coords::{to_server, to_world};
 use crate::script_api::{Shared, StationMark};
 use crate::world::mesh::{MeshBuf, UP};
-use crate::world::palette::{glow, hex, lit_glow, mix};
+use crate::world::palette::{glow, hex, lit_glow, mix, WEATHERED};
 use capitol_core::automation::{pause_words, Work};
 use capitol_core::protocol::rest::AutomationState;
-use capitol_core::protocol::rules::TICK_MS;
+use capitol_core::protocol::rules::{self, TICK_MS};
 use capitol_core::state::GameState;
 use capitol_core::station::in_reach;
 use flint_core::EntityId;
@@ -139,6 +149,14 @@ struct Station {
     puff: Option<EntityId>,
     blow: f32,
     blown: Option<f32>,
+    /// 0 new to 1 worn out: how far the weather has worn it, outdoors.
+    wear: f32,
+    /// The light and the wear last set on its material ([`Stations::fires`]).
+    tint: Option<(f32, f32)>,
+    /// The smoke from the chimney over it, indoors (V3.4): an entity of its
+    /// own at the chimney's top, and the `emission_scale` last set.
+    chimney: Option<EntityId>,
+    smoke: Option<f32>,
 }
 
 #[derive(Default)]
@@ -146,6 +164,9 @@ pub struct Stations {
     stations: HashMap<Uuid, Station>,
     meshes: bool,
     ghost: Option<Ghost>,
+    /// The chimneys over the fires indoors (V3.4): each station's, at its
+    /// top, world metres.
+    chimneys: HashMap<Uuid, [f32; 3]>,
 }
 
 /// What the ghost should show this frame.
@@ -240,10 +261,19 @@ impl Stations {
                         puff: None,
                         blow: 0.0,
                         blown: None,
+                        wear: 0.0,
+                        tint: None,
+                        chimney: None,
+                        smoke: None,
                     })
                 }
             };
             station.present = true;
+            station.wear = if info.indoors {
+                0.0
+            } else {
+                (1.0 - info.condition as f32 / rules::weather::FULL as f32).clamp(0.0, 1.0)
+            };
             let set = info.automation.as_ref();
             let work = Work::of(set);
             if work != station.work {
@@ -288,6 +318,7 @@ impl Stations {
                 top: height(station.kind) * smooth(station.shown),
                 paused,
                 mine,
+                worn: (!info.indoors && info.condition < rules::weather::NEEDS_REPAIR).then_some(info.condition),
             });
         }
 
@@ -298,8 +329,8 @@ impl Stations {
                 station.shown -= dt / SINK;
                 if station.shown <= 0.0 {
                     let _ = world.despawn(station.entity);
-                    if let Some(puff) = station.puff {
-                        let _ = world.despawn(puff);
+                    for e in [station.puff, station.chimney].into_iter().flatten() {
+                        let _ = world.despawn(e);
                     }
                     return false;
                 }
@@ -308,8 +339,10 @@ impl Stations {
             true
         });
         for (id, station) in &mut self.stations {
-            station.flames(ctx.world, *id);
+            let chimney = self.chimneys.get(id).copied();
+            station.flames(ctx.world, *id, chimney.is_some());
             station.puffs(ctx, *id);
+            station.smokes(ctx, *id, chimney);
         }
         if let Ok(mut shared) = shared.stations.lock() {
             *shared = marks;
@@ -372,17 +405,28 @@ impl Stations {
         self.ghost.as_ref().map(|g| g.at)
     }
 
+    /// The chimneys over the fires indoors, by station (V3.4), from
+    /// `world::houses`.
+    pub fn set_chimneys(&mut self, chimneys: HashMap<Uuid, [f32; 3]>) {
+        self.chimneys = chimneys;
+    }
+
     /// Set every station's light for the hour's `scale` ([`fire_light`])
     /// and its work: the forge's and kiln's fires, and the lanterns, through
-    /// their `material.emissive_scale`.
+    /// their `material.emissive_scale`. And its colours, faded by the
+    /// weather it has stood out in, through `vertex_tint_*` (V3.4).
     pub fn fires(&mut self, world: &mut flint_ecs::FlintWorld, scale: f32) {
         for station in self.stations.values_mut() {
-            if station.kind == "storage_chest" {
-                continue;
-            }
-            // Stepped, so the material is only written when it moves
-            let scale = (scale * station.light * 64.0).round() / 64.0;
-            if station.fire == Some(scale) {
+            // Stepped, so the material is only written when it moves. The
+            // chest has no light.
+            let chest = station.kind == "storage_chest";
+            let light = if chest {
+                0.0
+            } else {
+                (scale * station.light * 64.0).round() / 64.0
+            };
+            let wear = (station.wear * 32.0).round() / 32.0;
+            if station.tint == Some((light, wear)) {
                 continue;
             }
             let mut table = world
@@ -391,9 +435,18 @@ impl Stations {
                 .and_then(|m| m.as_table())
                 .cloned()
                 .unwrap_or_default();
-            table.insert("emissive_scale".into(), (scale as f64).into());
+            if !chest {
+                table.insert("emissive_scale".into(), (light as f64).into());
+            }
+            let tint = weathered(wear);
+            for (key, v) in ["vertex_tint_r", "vertex_tint_g", "vertex_tint_b"].into_iter().zip(tint) {
+                table.insert(key.into(), (v as f64).into());
+            }
             match world.set_component(station.entity, "material", table.into()) {
-                Ok(()) => station.fire = Some(scale),
+                Ok(()) => {
+                    station.fire = Some(light);
+                    station.tint = Some((light, wear));
+                }
                 Err(e) => tracing::warn!("stations: no glow scale: {e}"),
             }
         }
@@ -410,12 +463,17 @@ impl Station {
     }
 
     /// The forge's flames and the kiln's smoke, harder while it works and
-    /// low while it waits. Written only when the work changes.
-    fn flames(&mut self, world: &mut flint_ecs::FlintWorld, id: Uuid) {
+    /// low while it waits. Written only when the work changes. A kiln
+    /// under a `chimney` smokes from that instead.
+    fn flames(&mut self, world: &mut flint_ecs::FlintWorld, id: Uuid, chimney: bool) {
         let Some(effect) = fire_effect(self.kind) else {
             return;
         };
-        let rate = fire_rate(self.work);
+        let rate = if chimney && self.kind == "kiln" {
+            0.0
+        } else {
+            fire_rate(self.work)
+        };
         if self.flame == Some(rate) || (self.flame.is_none() && rate == 1.0) {
             return;
         }
@@ -466,6 +524,62 @@ impl Station {
             .set_component(entity, "particle_effect", toml::Value::Table(fx));
         self.blown = Some(blow);
     }
+}
+
+impl Station {
+    /// The smoke from the chimney over it (V3.4), at `top`, while there is
+    /// one: an entity of its own, made the first time and kept.
+    fn smokes(&mut self, ctx: &mut ExtensionCtx, id: Uuid, top: Option<[f32; 3]>) {
+        if self.chimney.is_none() && top.is_some() {
+            match ctx.world.spawn(format!("station_chimney_{}", id.simple()).as_str()) {
+                Ok(e) => self.chimney = Some(e),
+                Err(e) => tracing::warn!("stations: no chimney for {id}: {e}"),
+            }
+        }
+        let Some(entity) = self.chimney else {
+            return;
+        };
+        if let Some(p) = top {
+            let mut t = toml::Table::new();
+            t.insert("position".into(), vec3(p));
+            t.insert("rotation_quat".into(), vec4([0.0, 0.0, 0.0, 1.0]));
+            t.insert("scale".into(), vec3([1.0, 1.0, 1.0]));
+            let _ = ctx.world.set_component(entity, "transform", toml::Value::Table(t));
+        }
+        let rate = if top.is_some() { chimney_rate(self.work) } else { 0.0 };
+        if self.smoke == Some(rate) {
+            return;
+        }
+        let mut fx = toml::Table::new();
+        fx.insert("effect".into(), KILN_EFFECT.into());
+        fx.insert("seed".into(), seed(id).into());
+        fx.insert("emission_scale".into(), (rate as f64).into());
+        let _ = ctx.world.set_component(entity, "particle_effect", toml::Value::Table(fx));
+        self.smoke = Some(rate);
+    }
+}
+
+/// How hard a chimney smokes for its fire's `work`: hard while it works, a
+/// thread while it's banked, none while it waits.
+fn chimney_rate(work: Work) -> f32 {
+    match work {
+        Work::Idle => 0.35,
+        Work::Running => 1.6,
+        Work::Paused => 0.0,
+    }
+}
+
+/// The tint on a station worn `wear` (0 to 1) by the weather: from its own
+/// colours toward [`WEATHERED`], most of the way only near the end.
+fn weathered(wear: f32) -> [f32; 3] {
+    let k = wear.clamp(0.0, 1.0).powf(1.4);
+    WEATHERED.map(|w| 1.0 + (w - 1.0) * k)
+}
+
+/// How far a station worn `wear` leans, radians: none new, about 6 degrees
+/// worn out.
+fn lean(wear: f32) -> f32 {
+    wear.clamp(0.0, 1.0).powf(1.5) * 6f32.to_radians()
 }
 
 /// How strong a station's light is, over the hour's, for its `work` and how
@@ -867,8 +981,11 @@ fn place(world: &mut flint_ecs::FlintWorld, s: &Station) {
     let mut t = toml::Table::new();
     let ground = crate::world::land::ground_y([x, z]);
     t.insert("position".into(), vec3([x, ground + lift, z]));
-    let (sin, cos) = (s.yaw * 0.5).sin_cos();
-    t.insert("rotation_quat".into(), vec4([0.0, sin, 0.0, cos]));
+    // Its yaw, then its lean in the weather, forward or back by its yaw.
+    let (sy, cy) = (s.yaw * 0.5).sin_cos();
+    let side = if (s.yaw * 7.0).sin() < 0.0 { -1.0 } else { 1.0 };
+    let (sx, cx) = (lean(s.wear) * side * 0.5).sin_cos();
+    t.insert("rotation_quat".into(), vec4([cy * sx, sy * cx, -sy * sx, cy * cx]));
     // Never quite zero: a zero scale has no inverse for the normals.
     let (a, u) = (across.max(1e-3), up.max(1e-3));
     t.insert("scale".into(), vec3([a, u, a]));
@@ -2110,6 +2227,23 @@ mod tests {
         // Squashed just after it lands.
         let (_, [_, u]) = drop(0.46);
         assert!(u < 0.9, "{u}");
+    }
+
+    /// V3.4: the weather fades a station toward moss and leans it, a
+    /// little and then more, and a chimney smokes only while there's work.
+    #[test]
+    fn the_weather_fades_and_leans_a_station_left_out() {
+        assert_eq!(weathered(0.0), [1.0; 3]);
+        assert_eq!(weathered(1.0), WEATHERED);
+        let (half, most) = (weathered(0.5), weathered(0.9));
+        for i in 0..3 {
+            assert!(half[i] < 1.0 && most[i] < half[i] && most[i] > WEATHERED[i]);
+        }
+        assert_eq!(lean(0.0), 0.0);
+        assert!(lean(0.5) < lean(1.0) * 0.5, "it leans late");
+        assert!((lean(1.0).to_degrees() - 6.0).abs() < 1e-4);
+        assert!(chimney_rate(Work::Running) > chimney_rate(Work::Idle));
+        assert_eq!(chimney_rate(Work::Paused), 0.0);
     }
 
     #[test]

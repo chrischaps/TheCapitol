@@ -10,6 +10,7 @@
 //! window (game egui) stay until the living world (P4) replaces them.
 
 mod atmosphere;
+mod building_sample;
 mod camera_path;
 #[cfg(test)]
 mod camera_rig;
@@ -255,6 +256,12 @@ struct Args {
     /// anvil running, a kiln with its box full (E4.4). For captures
     #[arg(long, requires = "offline")]
     automation_sample: bool,
+    /// Offline, claim the home lots nearest where the camera first looks,
+    /// with floors, one going up in scaffolding, and stations indoors and
+    /// out in the weather, yours the nearest: to see the buildings open as
+    /// you come close (V3.4). For captures
+    #[arg(long, requires = "offline")]
+    building_sample: bool,
     /// Offline, scatter every kind of resource node round where the camera
     /// first looks, and take every other one through being worked, taken
     /// and growing back on a loop (E2.5). For captures
@@ -399,6 +406,7 @@ fn main() -> Result<()> {
         .with_claim_sample(args.claim_sample, args.grow_at)
         .with_station_sample(args.station_sample)
         .with_automation_sample(args.automation_sample)
+        .with_building_sample(args.building_sample)
         .with_node_sample(args.node_sample)
         .with_citizen_sample(args.citizen_sample.as_deref())
         .with_talk_sample(args.talk_sample)
