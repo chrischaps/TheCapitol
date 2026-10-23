@@ -250,10 +250,12 @@ pub enum UnitFlow {
     /// What a foreclosed station held that found no room anywhere, gone with
     /// the station
     Lost,
+    /// Goods a station's repair used up (V3.2)
+    Repaired,
 }
 
 impl UnitFlow {
-    pub const ALL: [UnitFlow; 10] = [
+    pub const ALL: [UnitFlow; 11] = [
         UnitFlow::Gathered,
         UnitFlow::Crafted,
         UnitFlow::Consumed,
@@ -264,6 +266,7 @@ impl UnitFlow {
         UnitFlow::KitReturned,
         UnitFlow::Granted,
         UnitFlow::Lost,
+        UnitFlow::Repaired,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -278,6 +281,7 @@ impl UnitFlow {
             UnitFlow::KitReturned => "kit_returned",
             UnitFlow::Granted => "granted",
             UnitFlow::Lost => "lost",
+            UnitFlow::Repaired => "repaired",
         }
     }
 

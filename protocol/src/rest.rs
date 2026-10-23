@@ -1451,6 +1451,29 @@ pub struct StationInfo {
     /// starts it again. Left out when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub production: Vec<Produced>,
+    /// Inside its lot's building (V3.1): out of the weather
+    #[serde(default)]
+    pub indoors: bool,
+    /// Its condition, 0 to 100 (V3.2): outdoors the weather wears it. Below
+    /// [`rules::weather::NEEDS_REPAIR`] it doesn't work on its own, and at 0
+    /// not at all until it's repaired.
+    #[serde(default = "full_condition")]
+    pub condition: i32,
+}
+
+fn full_condition() -> i32 {
+    rules::weather::FULL as i32
+}
+
+/// `POST /stations/{id}/repair`'s answer (V3.2): the station back to full,
+/// and the goods it took from your pack
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct RepairStationResponse {
+    pub station_id: Uuid,
+    pub condition: i32,
+    /// What the repair used up, by item type
+    pub used: Vec<crate::ws::ItemCount>,
 }
 
 /// How many crafts a station's production log keeps (E4.3).
@@ -1526,6 +1549,9 @@ pub enum PauseReason {
     /// Someone is working it for wages (Commons D7): it starts again when
     /// the shift ends
     Shift,
+    /// The weather has worn it below [`rules::weather::NEEDS_REPAIR`] (V3.2):
+    /// it starts again once it's repaired
+    NeedsRepair,
 }
 
 /// `PUT /stations/{id}/automation`. Setting it stops the station and starts

@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use capitol_protocol::rest::{
-    ConfigureAutomation, NearbyStationsResponse, StationAutomation, PlaceStationRequest, PlaceStationResponse, StationContainerResponse,
+    ConfigureAutomation, NearbyStationsResponse, RepairStationResponse, StationAutomation, PlaceStationRequest, PlaceStationResponse, StationContainerResponse,
     SuccessResponse,
 };
+
+use capitol_protocol::rules::weather;
 
 use crate::engine::automation::AutomationError;
 use crate::engine::container_access::{check_station_use, live_position, AccessError};
@@ -28,6 +30,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/{id}/automation", put(configure_automation))
         .route("/{id}/automation/start", post(start_automation))
         .route("/{id}/automation/stop", post(stop_automation))
+        .route("/{id}/repair", post(repair_station))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -118,6 +121,8 @@ pub async fn get_nearby_stations(
                 tool: tools.get(&station.id).cloned(),
                 automation: automation.get(&station.id).cloned(),
                 production: production.remove(&station.id).unwrap_or_default(),
+                indoors: station.indoors,
+                condition: weather::shown(station.condition),
             })
         })
         .collect();
@@ -345,6 +350,46 @@ pub async fn start_automation(
     let recipes = state.game.read().await.recipes.clone();
     let result = crate::engine::automation::start(&state.db, &recipes, player_id, station_id).await;
     announce_automation(&state, station_id, result).await
+}
+
+/// Repair a station the weather has worn (V3.2): yours, or one its plot lets
+/// you use, from within its range. It's restored to 100 for a share of what
+/// its kit took, more the further it has fallen, from your pack, lowest
+/// grade first.
+#[utoipa::path(
+    post,
+    path = "/stations/{id}/repair",
+    params(
+        ("id" = Uuid, Path, description = "Station ID")
+    ),
+    responses(
+        (status = 200, description = "Repaired", body = RepairStationResponse),
+        (status = 400, description = "It's in good repair, you're too far, or your pack is short of the goods"),
+        (status = 403, description = "Not a station you may use"),
+        (status = 404, description = "Station not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
+pub async fn repair_station(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(station_id): Path<Uuid>,
+) -> Result<Json<RepairStationResponse>, AppError> {
+    let player_id = player_of(&state, &auth_user).await?;
+    let at = live_position(&state.game, player_id).await;
+    crate::engine::container_access::check_station_access(&state.db, player_id, station_id, at).await?;
+    let recipes = state.game.read().await.recipes.clone();
+    let repaired = crate::engine::weather::repair(&state.db, &recipes, player_id, station_id, chrono::Utc::now()).await?;
+    let condition = weather::FULL as i32;
+    let game = state.game.read().await;
+    let _ = game.event_sender.send(GameEvent::StationCondition { station_id, condition });
+    let _ = game.event_sender.send(GameEvent::InventoryUpdated {
+        player_id,
+        container_id: repaired.inventory_id,
+        slots: vec![],
+    });
+    Ok(Json(RepairStationResponse { station_id, condition, used: repaired.used }))
 }
 
 /// Stop your station (E4.2). It keeps its setting and its count.

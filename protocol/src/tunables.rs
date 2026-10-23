@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::rules::bazaar::RENT_PER_DAY;
 use crate::rules::market::LISTING_FEE_PERCENT;
+use crate::rules::weather;
 use crate::rules::EXCHANGE_FEE_RATE;
 
 /// The weekly property tax by default, as a fraction of the deed (2%)
@@ -272,6 +273,39 @@ pub const KNOBS: &[Knob] = &[
         family: Some(Family::Resource),
     },
     Knob {
+        key: "weather_wear_claimed",
+        label: "Weather: wear a game day, outdoors on a plot",
+        unit: Unit::Ratio,
+        min: 0.0,
+        max: 100.0,
+        step: 0.01,
+        default: weather::WEAR_CLAIMED,
+        chart: "production",
+        family: None,
+    },
+    Knob {
+        key: "weather_wear_public",
+        label: "Weather: wear a game day, on public land",
+        unit: Unit::Ratio,
+        min: 0.0,
+        max: 100.0,
+        step: 0.01,
+        default: weather::WEAR_PUBLIC,
+        chart: "production",
+        family: None,
+    },
+    Knob {
+        key: "outdoor_tool_wear",
+        label: "Weather: a station's tool wear outdoors",
+        unit: Unit::Multiplier,
+        min: 1.0,
+        max: 10.0,
+        step: 0.01,
+        default: weather::OUTDOOR_TOOL_WEAR,
+        chart: "production",
+        family: None,
+    },
+    Knob {
         key: "watch_gini",
         label: "Watch: wealth's Gini over",
         unit: Unit::Ratio,
@@ -379,6 +413,12 @@ pub struct Tunables {
     pub yields: BTreeMap<String, f64>,
     /// When the watches warn (D2.5)
     pub watches: WatchThresholds,
+    /// Weather (V3.2): an outdoor station's wear a game day on a claimed plot
+    pub weather_wear_claimed: f64,
+    /// And on public land, where it falls down at 0
+    pub weather_wear_public: f64,
+    /// How much faster a station's installed tool wears outdoors
+    pub outdoor_tool_wear: f64,
 }
 
 impl Default for Tunables {
@@ -390,6 +430,9 @@ impl Default for Tunables {
             deed_price: BTreeMap::new(),
             yields: BTreeMap::new(),
             watches: WatchThresholds::default(),
+            weather_wear_claimed: weather::WEAR_CLAIMED,
+            weather_wear_public: weather::WEAR_PUBLIC,
+            outdoor_tool_wear: weather::OUTDOOR_TOOL_WEAR,
         }
     }
 }
@@ -462,6 +505,9 @@ impl Tunables {
             ("watch_off_target", None) => self.watches.off_target,
             ("watch_tax_per_hour", None) => self.watches.tax_per_hour,
             ("watch_tick_p95", None) => self.watches.tick_p95,
+            ("weather_wear_claimed", None) => self.weather_wear_claimed,
+            ("weather_wear_public", None) => self.weather_wear_public,
+            ("outdoor_tool_wear", None) => self.outdoor_tool_wear,
             ("deed_price", Some(zone)) => self.deed_multiplier(zone),
             ("yield", Some(resource)) => self.yield_multiplier(resource),
             _ => return None,
@@ -496,6 +542,9 @@ impl Tunables {
             ("watch_off_target", None) => self.watches.off_target = value,
             ("watch_tax_per_hour", None) => self.watches.tax_per_hour = value,
             ("watch_tick_p95", None) => self.watches.tick_p95 = value,
+            ("weather_wear_claimed", None) => self.weather_wear_claimed = value,
+            ("weather_wear_public", None) => self.weather_wear_public = value,
+            ("outdoor_tool_wear", None) => self.outdoor_tool_wear = value,
             ("deed_price", Some(zone)) => family_map(&mut self.deed_price, zone),
             ("yield", Some(resource)) => family_map(&mut self.yields, resource),
             _ => return Err(TunableError::UnknownKey),
@@ -741,7 +790,7 @@ mod tests {
         let zones = vec!["urban".to_string(), "rural".to_string()];
         let resources = vec!["clay".to_string(), "grass".to_string()];
         let list = TunablesResponse::list(&t, &zones, &resources);
-        assert_eq!(list.knobs.len(), 9 + 2 + 2);
+        assert_eq!(list.knobs.len(), 12 + 2 + 2);
         let clay = list.knobs.iter().find(|k| k.key == "yield.clay").unwrap();
         assert_eq!((clay.value, clay.default, clay.label.as_str()), (3.0, 1.0, "Gather yield: clay"));
         assert!(list.knobs.iter().all(|k| k.base_strands.is_none()));

@@ -90,6 +90,11 @@ pub enum GameEvent {
     StationRemoved {
         station_id: Uuid,
     },
+    /// A station's condition crossed 25 or 0, or it was repaired (V3.2)
+    StationCondition {
+        station_id: Uuid,
+        condition: i32,
+    },
     /// A station's tool slot changed: installed, removed, or worn by a craft (E1.6)
     StationToolChanged {
         station_id: Uuid,

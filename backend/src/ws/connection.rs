@@ -815,6 +815,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             continue;
                                         }
                                     };
+                                    // Worn out by the weather, it's out of use by hand too (V3.2)
+                                    if let Ok(Some(reason)) = crate::engine::weather::out_of_use(&state.db, station_uuid).await {
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerMessage::CraftingFailed { player_id, reason }).unwrap().into()
+                                        )).await;
+                                        continue;
+                                    }
                                     // On a wage shift, only the offer's recipe (Commons D7)
                                     if let Some(reason) = wage.as_ref().and_then(|w| crate::engine::wages::recipe_refusal(w, &recipe_id)) {
                                         let _ = sender.send(Message::Text(
@@ -1173,6 +1180,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // M4: Station events
                     Ok(GameEvent::StationRemoved { station_id }) => {
                         let msg = ServerMessage::StationRemoved { station_id };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    Ok(GameEvent::StationCondition { station_id, condition }) => {
+                        let msg = ServerMessage::StationCondition { station_id, condition };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     Ok(GameEvent::StationToolChanged { station_id, tool }) => {

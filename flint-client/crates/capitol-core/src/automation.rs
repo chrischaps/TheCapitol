@@ -106,6 +106,10 @@ pub fn pause_words(reason: &PauseReason, catalog: &Catalog, recipe: Option<&Reci
             "Someone is working it".to_owned(),
             "It goes on when their shift ends".to_owned(),
         ),
+        PauseReason::NeedsRepair => (
+            "It needs repair".to_owned(),
+            "The weather has worn it. It goes on once it's repaired".to_owned(),
+        ),
     };
     Words { what, fix }
 }
@@ -247,6 +251,7 @@ mod tests {
             PauseReason::ToolMissing,
             PauseReason::OwnerOffline,
             PauseReason::Shift,
+            PauseReason::NeedsRepair,
         ];
         for reason in &reasons {
             let w = pause_words(reason, &catalog, Some(&recipe));

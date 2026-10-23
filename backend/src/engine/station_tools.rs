@@ -265,22 +265,23 @@ pub async fn wear_installed(
     station_id: Uuid,
     item_id: Uuid,
 ) -> Result<Option<(Wear, Option<StationTool>)>, sqlx::Error> {
-    let found: Option<(Option<Uuid>, String, String, i32, Option<i32>)> = sqlx::query_as(
-        "SELECT s.tool_owner, i.item_type, it.name, i.quality, it.max_durability FROM stations s
+    let found: Option<(Option<Uuid>, String, String, i32, Option<i32>, f64)> = sqlx::query_as(&format!(
+        "SELECT s.tool_owner, i.item_type, it.name, i.quality, it.max_durability, {} FROM stations s
          JOIN items i ON i.id = s.installed_tool
          JOIN item_types it ON it.id = i.item_type
          WHERE s.id = $1 AND s.installed_tool = $2
          FOR UPDATE OF s",
-    )
+        super::weather::TOOL_WEAR_COLUMN.as_str(),
+    ))
     .bind(station_id)
     .bind(item_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((owner_id, item_type, item_name, quality, base_durability)) = found else {
+    let Some((owner_id, item_type, item_name, quality, base_durability, wear_factor)) = found else {
         return Ok(None);
     };
     let max_durability = tools::max_durability(base_durability.unwrap_or(0), quality);
-    let slot = SlotTool { item_id, item_type, item_name, quality, max_durability, owner_id };
+    let slot = SlotTool { item_id, item_type, item_name, quality, max_durability, owner_id, wear_factor };
     wear_slot(conn, station_id, slot).await
 }
 
@@ -294,6 +295,9 @@ pub struct SlotTool {
     pub max_durability: i32,
     /// Who put it there (`stations.tool_owner`)
     pub owner_id: Option<Uuid>,
+    /// How many uses' wear a craft takes: 1 indoors, `outdoor_tool_wear`
+    /// outdoors (V3.2, `weather::TOOL_WEAR_COLUMN`)
+    pub wear_factor: f64,
 }
 
 /// [`wear_installed`], for a caller that holds `station_id`'s lock and has
@@ -304,7 +308,8 @@ pub async fn wear_slot(
     station_id: Uuid,
     slot: SlotTool,
 ) -> Result<Option<(Wear, Option<StationTool>)>, sqlx::Error> {
-    let Some(wear) = super::tools::wear(conn, slot.item_id).await? else {
+    let amount = capitol_protocol::rules::weather::tool_wear(slot.wear_factor, rand::random::<f64>());
+    let Some(wear) = super::tools::wear_by(conn, slot.item_id, amount).await? else {
         return Ok(None);
     };
     match wear {

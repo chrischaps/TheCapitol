@@ -339,6 +339,12 @@ pub enum PlotNote {
     /// A new lot was laid where your `station_type` stood off a plot, so it
     /// was taken down and what it held came back (#188).
     Displaced { station_type: String },
+    /// Your `station_type` on public land wore out in the weather and fell
+    /// down; its tool and what it held went to your impound (V3.2).
+    Collapsed {
+        station_type: String,
+        impounded: Vec<ItemCount>,
+    },
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -2430,6 +2436,14 @@ impl Session {
                         .push(PlotNote::Displaced {
                             station_type: station_type.clone(),
                         }),
+                    StateEvent::StationCollapsed {
+                        station_type,
+                        impounded,
+                        ..
+                    } => self.plot_notes.push(PlotNote::Collapsed {
+                        station_type: station_type.clone(),
+                        impounded: impounded.clone(),
+                    }),
                     StateEvent::SubscriptionLapsed { until } => self
                         .plot_notes
                         .push(PlotNote::SubscriptionLapsed { until: *until }),

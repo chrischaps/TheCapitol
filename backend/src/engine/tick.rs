@@ -830,6 +830,9 @@ fn start_moving(
 /// Every player's position is saved each this many ticks: every 10 s at 1x
 const POSITION_SAVE_TICKS: u64 = 100;
 
+/// Ticks a game hour (V3.2): how often the weather's sweep runs
+const WEATHER_TICKS: u64 = (capitol_protocol::rules::DAY_LENGTH_SECS as u64 / 24) * 10;
+
 /// What one tick finished, for the writer to save (#304)
 struct Finished {
     gathers: Vec<PendingItem>,
@@ -962,6 +965,28 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                     super::property_tax::announce(report, &mut game.stations, &game.event_sender);
                 }
                 .instrument(tracing::info_span!("loop.tax")),
+            );
+        }
+
+        // V3.2: the weather, once a game hour (5 real minutes), half way
+        // between the tax's, in a task of its own: outdoor stations wear on
+        // to now, and those on public land at 0 fall down
+        if game_tick_count > 0 && game_tick_count % WEATHER_TICKS == WEATHER_TICKS / 2 {
+            let (game_state, db) = (game_state.clone(), app_state.db.clone());
+            let tunables = app_state.tunables.get();
+            let scale = app_state.config.sim_tick_scale;
+            tokio::spawn(
+                async move {
+                    match super::weather::sweep(&db, &tunables, scale, chrono::Utc::now()).await {
+                        Ok(report) => {
+                            let mut game = game_state.write().await;
+                            let game = &mut *game;
+                            super::weather::announce(report, &mut game.stations, &game.event_sender);
+                        }
+                        Err(e) => tracing::error!("The weather's sweep failed: {e}"),
+                    }
+                }
+                .instrument(tracing::info_span!("loop.weather")),
             );
         }
 

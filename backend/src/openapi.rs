@@ -171,6 +171,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::stations::configure_automation,
         crate::routes::stations::start_automation,
         crate::routes::stations::stop_automation,
+        crate::routes::stations::repair_station,
         // Exchange
         crate::routes::exchange::deposit_fiber,
         crate::routes::exchange::withdraw_fiber,
@@ -320,6 +321,8 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         StationTool,
         PlaceStationRequest,
         PlaceStationResponse,
+        capitol_protocol::rest::RepairStationResponse,
+        capitol_protocol::ws::ItemCount,
         StationContainerResponse,
         // Exchange
         DepositRequest,

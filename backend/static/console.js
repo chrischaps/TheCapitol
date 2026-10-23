@@ -1536,7 +1536,8 @@
     worn_out: { label: "Worn out", say: "tools worn out" },
     deposited: { label: "Deposited", say: "deposited at the Exchange" },
     kit_placed: { label: "Kits placed", say: (n) => `set up as ${n === 1 ? "a station" : "stations"}` },
-    lost: { label: "Lost", say: "lost with foreclosed stations" },
+    lost: { label: "Lost", say: "lost with foreclosed or fallen stations" },
+    repaired: { label: "Repairs", say: "used repairing stations" },
   };
   // The items the stock table names; the quieter ones are counted under it
   const STOCK_ROWS = 20;
@@ -2827,6 +2828,9 @@
     watch_gini: "--budget",
     watch_off_target: "--marker",
     watch_tick_p95: "--budget",
+    weather_wear_claimed: "--uf-repaired",
+    weather_wear_public: "--uf-repaired",
+    outdoor_tool_wear: "--uf-worn_out",
   };
   // The knobs as the server last said, and each one's row by key
   let knobs = null;

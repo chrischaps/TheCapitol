@@ -366,6 +366,29 @@ pub async fn return_stations(
     tx: &mut PgConnection,
     station_ids: &[Uuid],
 ) -> Result<ReturnedStations, sqlx::Error> {
+    empty_stations(tx, station_ids, &[Kind::Inventory, Kind::Impound], true).await
+}
+
+/// Empty `station_ids`, which the weather has brought down on public land
+/// (V3.2), into their owners' impounds: their tools, and what was in their
+/// boxes, as [`return_stations`] would but never into an inventory. Their
+/// kits are lost, so none is made. The stations are left for the caller to
+/// delete.
+pub async fn collapse_stations(
+    tx: &mut PgConnection,
+    station_ids: &[Uuid],
+) -> Result<ReturnedStations, sqlx::Error> {
+    empty_stations(tx, station_ids, &[Kind::Impound], false).await
+}
+
+/// Empty `station_ids` into the first of `kinds` with room for each thing,
+/// and give back their kits when `kits`
+async fn empty_stations(
+    tx: &mut PgConnection,
+    station_ids: &[Uuid],
+    kinds: &[Kind],
+    kits: bool,
+) -> Result<ReturnedStations, sqlx::Error> {
     let stations: Vec<(Uuid, String, Uuid, i32, Option<Uuid>, Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
         "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, s.kit_maker_id, st.kit_item, s.installed_tool, s.tool_owner
          FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
@@ -396,12 +419,12 @@ pub async fn return_stations(
     let mut returned = ReturnedStations::default();
     let mut stores = Stores::new();
 
-    for (station_id, station_type, owner_id, kit_quality, kit_maker, kit, _, _) in &stations {
+    for (station_id, station_type, owner_id, kit_quality, kit_maker, kit, _, _) in stations.iter().filter(|_| kits) {
         let Some(kit) = kit else {
             tracing::error!("Station {} has type {} with no kit", station_id, station_type);
             continue;
         };
-        let Some((container, kind, slot)) = free_slot(tx, &mut stores, *owner_id).await? else {
+        let Some((container, kind, slot)) = free_slot(tx, &mut stores, *owner_id, kinds).await? else {
             returned.lost.push((*owner_id, kit.to_string(), 1));
             continue;
         };
@@ -429,7 +452,7 @@ pub async fn return_stations(
             .bind(tool)
             .fetch_one(&mut *tx)
             .await?;
-        let Some((container, kind, slot)) = free_slot(tx, &mut stores, player).await? else {
+        let Some((container, kind, slot)) = free_slot(tx, &mut stores, player, kinds).await? else {
             returned.lost.push((player, item_type, 1));
             continue;
         };
@@ -440,7 +463,7 @@ pub async fn return_stations(
     for (item_id, item_type, quantity, item_owner, station_id, stackable) in contents {
         let player = item_owner.unwrap_or(station_owner[&station_id]);
         let mut found = None;
-        for kind in [Kind::Inventory, Kind::Impound] {
+        for &kind in kinds {
             if let Some(store) = store(tx, &mut stores, player, kind).await? {
                 if let Some(room) = store.room(item_id, &item_type, quantity, stackable) {
                     found = Some((store.id, kind, room));
@@ -483,13 +506,15 @@ fn took(returned: &mut ReturnedStations, player: Uuid, container: Uuid, kind: Ki
     }
 }
 
-/// A free slot of `player`'s inventory, or else of their impound
+/// A free slot in the first of `kinds` of `player`'s stores that has one:
+/// their inventory, or else their impound
 async fn free_slot(
     tx: &mut PgConnection,
     stores: &mut Stores,
     player: Uuid,
+    kinds: &[Kind],
 ) -> Result<Option<(Uuid, Kind, i32)>, sqlx::Error> {
-    for kind in [Kind::Inventory, Kind::Impound] {
+    for &kind in kinds {
         if let Some(store) = store(tx, stores, player, kind).await? {
             if let Some(slot) = store.slot() {
                 return Ok(Some((store.id, kind, slot)));

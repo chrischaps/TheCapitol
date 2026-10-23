@@ -201,6 +201,9 @@ pub mod wages;
 /// The building that comes with a deed: its footprint, indoors and out (V3.1).
 pub mod building;
 
+/// Weather: a station's condition, its wear outdoors, and its repair (V3.2).
+pub mod weather;
+
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
 pub fn quality_grade(quality: i32) -> &'static str {

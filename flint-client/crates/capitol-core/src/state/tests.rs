@@ -78,6 +78,8 @@ fn station(id: Uuid, owner: Uuid) -> StationInfo {
         tool: None,
         automation: None,
         production: Vec::new(),
+        indoors: false,
+        condition: 100,
     }
 }
 
@@ -226,6 +228,8 @@ fn test_for(message: &M) -> fn() {
         M::TaxDelinquent { .. } => tax_messages_are_reported,
         M::PlotForeclosed { .. } => tax_messages_are_reported,
         M::StationDisplaced { .. } => station_displaced_is_reported,
+        M::StationCondition { .. } => station_condition_updates_the_station,
+        M::StationCollapsed { .. } => station_collapsed_is_reported,
         M::SubscriptionLapsed { .. } => subscription_follows_auth_ok_me_and_the_lapse,
         M::OrderPlaced { .. } => market_messages_reach_the_market_store,
         M::OrderFilled { .. } => market_messages_reach_the_market_store,
@@ -272,7 +276,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 78, "one fixture per ServerMessage variant");
+    assert_eq!(count, 80, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1729,6 +1733,38 @@ fn station_displaced_is_reported() {
             station_id: bench,
             station_type: "workbench".into(),
             terrain_id: "sub_2_0_3_L_4".into(),
+        }]
+    );
+}
+
+#[test]
+fn station_condition_updates_the_station() {
+    let mut state = connected();
+    state.apply_rest(&R::NearbyStations(NearbyStationsResponse {
+        stations: vec![station(STATION, ME)],
+    }));
+    assert_eq!(state.station(STATION).map(|s| s.condition), Some(100));
+    state.apply_ws(&M::StationCondition { station_id: STATION, condition: 24 });
+    assert_eq!(state.station(STATION).map(|s| s.condition), Some(24));
+    // A station we don't know of is ignored
+    state.apply_ws(&M::StationCondition { station_id: CHEST, condition: 0 });
+}
+
+#[test]
+fn station_collapsed_is_reported() {
+    let mut state = connected();
+    let bench = Uuid::from_u128(42);
+    let impounded = vec![capitol_protocol::ws::ItemCount { item_type: "plank".into(), quantity: 12 }];
+    assert_eq!(
+        state.apply_ws(&M::StationCollapsed {
+            station_id: bench,
+            station_type: "workbench".into(),
+            impounded: impounded.clone(),
+        }),
+        vec![StateEvent::StationCollapsed {
+            station_id: bench,
+            station_type: "workbench".into(),
+            impounded,
         }]
     );
 }

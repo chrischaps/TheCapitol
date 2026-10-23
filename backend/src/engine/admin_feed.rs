@@ -107,6 +107,7 @@ pub fn tap(event: &GameEvent) -> Option<Feed> {
                 PauseReason::ToolMissing => "it has no tool".to_string(),
                 PauseReason::OwnerOffline => "its owner left".to_string(),
                 PauseReason::Shift => "someone is working it".to_string(),
+                PauseReason::NeedsRepair => "it needs repair".to_string(),
             };
             warning(*owner_id, WarningKind::AutomationPaused, format!("A {station_type} paused: {why}"))
         }

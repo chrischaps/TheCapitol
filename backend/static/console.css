@@ -68,6 +68,7 @@
   --uf-deposited: var(--fl-rent);
   --uf-kit_placed: var(--fl-fees);
   --uf-lost: var(--fl-other);
+  --uf-repaired: var(--marker);
   /* the wire's kinds */
   --k-annotation: #7a6214;
   --k-fill: #2b4c7e;

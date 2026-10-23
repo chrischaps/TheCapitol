@@ -39,12 +39,16 @@ pub struct Station {
     /// The quality of the kit that placed it (`stations.kit_quality`, #88):
     /// the station term of the cascade for crafts made here (E1.3)
     pub quality: i32,
+    /// Inside its lot's building (V3.1)
+    pub indoors: bool,
+    /// Its condition as the weather last left it (V3.2), 0 to 100
+    pub condition: f64,
 }
 
 /// The columns of [`Station`], for `SELECT {STATION_COLUMNS} FROM stations`.
 /// The table keeps the name `kit_quality`; code calls it `quality`.
 pub const STATION_COLUMNS: &str =
-    "id, station_type, owner_id, position_x, position_y, plot_id, placed_at, kit_quality AS quality";
+    "id, station_type, owner_id, position_x, position_y, plot_id, placed_at, kit_quality AS quality, indoors, condition";
 
 /// Station runtime state for game engine
 #[derive(Debug, Clone, Serialize, Deserialize)]

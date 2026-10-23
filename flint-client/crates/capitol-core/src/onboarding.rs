@@ -659,6 +659,8 @@ mod tests {
             tool: None,
             automation: None,
             production: Vec::new(),
+            indoors: false,
+            condition: 100,
         }
     }
 

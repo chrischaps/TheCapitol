@@ -3175,6 +3175,19 @@ fn plots(
                     "A new lot was laid where it stood. Its kit and what it held are back in your pack, or your impound if it was full".into(),
                 )
             }
+            PlotNote::Collapsed { station_type, impounded } => {
+                let name = session
+                    .state()
+                    .catalog()
+                    .station_type(&station_type)
+                    .map_or_else(|| station_type.replace('_', " "), |t| t.name.to_lowercase());
+                let body = if impounded.is_empty() {
+                    "It stood out on public land until the weather wore it out. Its kit is lost".to_string()
+                } else {
+                    "It stood out on public land until the weather wore it out. Its kit is lost, and what it held is in your impound".to_string()
+                };
+                (format!("Your {name} fell down"), body)
+            }
             PlotNote::NoneThere => ("No plot here".into(), "Alt-click a lot to see its deed".into()),
             PlotNote::Unanswered => ("Couldn't look".into(), "The server didn't say what's here".into()),
             PlotNote::TaxOwed {

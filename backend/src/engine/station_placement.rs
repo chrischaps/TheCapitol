@@ -348,6 +348,8 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
             tool: None,
             automation: None,
             production: Vec::new(),
+            indoors,
+            condition: capitol_protocol::rules::weather::FULL as i32,
         },
         plot_id,
     })

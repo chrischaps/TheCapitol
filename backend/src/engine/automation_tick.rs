@@ -14,8 +14,9 @@
 //! - and the setting's `done` goes up, or the run stops once a count is made.
 //!
 //! A craft that can't complete changes nothing, and the station pauses with
-//! the reason: `missing_input`, `output_full`, `tool_missing`, or `tool_broken`
-//! when the craft just done used the tool up. A paused station tries again
+//! the reason: `missing_input`, `output_full`, `tool_missing`, `tool_broken`
+//! when the craft just done used the tool up, or `needs_repair` when the
+//! weather has worn it below 25 (V3.2, `engine::weather`). A paused station tries again
 //! every cycle, so it resumes on its own once the box is loaded or emptied or
 //! a tool goes in. A free player's stations pause `owner_offline` while
 //! they're away and resume when they're back; a subscriber's keep working
@@ -54,7 +55,7 @@ use capitol_protocol::rest::{
     PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::stacking::{Pick, Units};
-use capitol_protocol::rules::{quality, tools as tool_rules};
+use capitol_protocol::rules::{quality, tools as tool_rules, weather};
 use capitol_protocol::ws::ServerMessage;
 use chrono::{DateTime, Utc};
 use sqlx::types::Json;
@@ -762,6 +763,10 @@ struct BoxAndSlot {
     base_power: Option<f64>,
     base_durability: Option<i32>,
     tier: Option<String>,
+    /// Its tool's wear a craft, by the weather (V3.2)
+    wear_factor: f64,
+    /// Its condition as the weather last left it (V3.2)
+    condition: f64,
 }
 
 impl BoxAndSlot {
@@ -786,7 +791,15 @@ impl BoxAndSlot {
             tier: self.tier.as_deref().and_then(tool_rules::Tier::from_str),
             station_id: Some(station_id),
         };
-        let slot = SlotTool { item_id, item_type, item_name, quality, max_durability, owner_id: self.tool_owner };
+        let slot = SlotTool {
+            item_id,
+            item_type,
+            item_name,
+            quality,
+            max_durability,
+            owner_id: self.tool_owner,
+            wear_factor: self.wear_factor,
+        };
         Some((held, slot))
     }
 }
@@ -795,10 +808,10 @@ impl BoxAndSlot {
 /// locking the station, in a statement of its own, so it sees any change to
 /// the slot that the lock waited for.
 async fn box_and_slot(conn: &mut PgConnection, station_id: Uuid) -> Result<Option<BoxAndSlot>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         "SELECT c.id AS container_id, ct.slot_count, s.tool_owner, i.id AS item_id, i.item_type,
                 it.name AS item_name, i.quality, i.durability, it.tool_type, it.base_power,
-                it.max_durability AS base_durability, it.tier
+                it.max_durability AS base_durability, it.tier, {} AS wear_factor, s.condition
          FROM stations s
          JOIN containers c ON c.station_id = s.id
          JOIN container_types ct ON ct.id = c.container_type
@@ -806,7 +819,8 @@ async fn box_and_slot(conn: &mut PgConnection, station_id: Uuid) -> Result<Optio
          LEFT JOIN item_types it ON it.id = i.item_type
          WHERE s.id = $1
          LIMIT 1",
-    )
+        super::weather::TOOL_WEAR_COLUMN.as_str(),
+    ))
     .bind(station_id)
     .fetch_optional(&mut *conn)
     .await
@@ -835,6 +849,10 @@ pub async fn craft_once(
         return Ok(Attempt::Changed(None));
     };
     let container_id = found.container_id;
+    // The weather has worn it too far to work on its own (V3.2)
+    if weather::needs_repair(found.condition) {
+        return Ok(Attempt::Blocked(PauseReason::NeedsRepair));
+    }
 
     let tool = match recipe.tool_type {
         Some(tool_type) => match found.tool(station_id, tool_type) {
@@ -1382,6 +1400,32 @@ mod tests {
                 assert_eq!(world.cycle().await, Cycle::default(), "a stopped station rests");
             }
             assert!(pause_notices(&db, ada).await.is_empty(), "finishing isn't a pause");
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn below_25_it_pauses_for_repair_and_goes_on_once_repaired(db: PgPool) {
+            let world = World::new(db.clone()).await;
+            let (ada, _) = player(&db, "ada", true).await;
+            let (bench, inbox) = station(&db, ada, "workbench").await;
+            stack_of(&db, ada, inbox, 0, "sticks", &Units::uniform(9, 70)).await;
+            stack_of(&db, ada, inbox, 1, "rope", &Units::uniform(3, 50)).await;
+            world.start(ada, bench, "tool_handle", AutomationMode::Forever).await;
+            let wear_to = |c: f64| {
+                sqlx::query("UPDATE stations SET condition = $2 WHERE id = $1").bind(bench).bind(c).execute(&db)
+            };
+
+            wear_to(24.5).await.unwrap();
+            assert_eq!(world.finish_craft(bench).await.crafts, 1, "it shows 25: still working");
+            wear_to(24.0).await.unwrap();
+            assert_eq!(world.finish_craft(bench).await.paused, 1);
+            assert_eq!(stored(&db, bench).await.state, paused(PauseReason::NeedsRepair));
+            assert_eq!(pause_notices(&db, ada).await, vec![PauseReason::NeedsRepair]);
+            assert_eq!(world.cycle().await, Cycle::default(), "the same reason isn't said twice");
+
+            wear_to(100.0).await.unwrap();
+            let resumed = world.cycle().await;
+            assert_eq!((resumed.crafts, resumed.resumed), (1, 1), "repaired, it crafts at once");
         }
 
         #[sqlx::test(migrations = "./migrations")]

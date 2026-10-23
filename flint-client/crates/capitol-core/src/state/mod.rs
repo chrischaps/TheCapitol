@@ -376,6 +376,14 @@ pub enum StateEvent {
         station_type: String,
         terrain_id: String,
     },
+    /// Your station on public land wore out in the weather and fell down
+    /// (`station_collapsed`, V3.2): its kit is lost, and its tool and box
+    /// went to your impound. `StationRemoved` comes alongside.
+    StationCollapsed {
+        station_id: Uuid,
+        station_type: String,
+        impounded: Vec<ItemCount>,
+    },
     /// Your subscription ran out at `until` (`subscription_lapsed`, E4.1).
     SubscriptionLapsed {
         until: DateTime<Utc>,
@@ -818,6 +826,9 @@ impl GameState {
                     tool: None,
                     automation: None,
                     production: Vec::new(),
+                    // `station_placed` doesn't say; the next look round does (#495)
+                    indoors: false,
+                    condition: capitol_protocol::rules::weather::FULL as i32,
                 };
                 self.upsert_station(station, &mut out);
                 out.push(StateEvent::StationPlaced {
@@ -858,6 +869,12 @@ impl GameState {
             M::StationToolChanged { station_id, tool } => {
                 if let Some(station) = self.stations.get_mut(station_id) {
                     station.tool = tool.clone();
+                }
+            }
+            // V3.2: the weather wore it past 25 or 0, or it was repaired
+            M::StationCondition { station_id, condition } => {
+                if let Some(station) = self.stations.get_mut(station_id) {
+                    station.condition = *condition;
                 }
             }
             // Kept on the station for E4.4's automation panel
@@ -1063,6 +1080,15 @@ impl GameState {
                 station_id: *station_id,
                 station_type: station_type.clone(),
                 terrain_id: terrain_id.clone(),
+            }),
+            M::StationCollapsed {
+                station_id,
+                station_type,
+                impounded,
+            } => out.push(StateEvent::StationCollapsed {
+                station_id: *station_id,
+                station_type: station_type.clone(),
+                impounded: impounded.clone(),
             }),
             M::Resync { .. } => out.extend(self.apply_resync()),
             M::Presence { yours, held_by } => {

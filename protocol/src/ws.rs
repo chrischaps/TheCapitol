@@ -529,6 +529,20 @@ pub enum ServerMessage {
         station_type: String,
         terrain_id: String,
     },
+    /// A station's condition crossed 25 or 0 as the weather wore it, or it
+    /// was repaired (V3.2). Broadcast, like `station_tool_changed`.
+    #[serde(rename = "station_condition")]
+    StationCondition { station_id: Uuid, condition: i32 },
+    /// Your station on public land wore out and fell down (V3.2). Its kit is
+    /// lost; its tool and what was in its box went to your impound (#141),
+    /// and `impounded` counts them. `station_removed` goes to everyone. One
+    /// that fell while you were away is sent as you come back.
+    #[serde(rename = "station_collapsed")]
+    StationCollapsed {
+        station_id: Uuid,
+        station_type: String,
+        impounded: Vec<ItemCount>,
+    },
     /// Your subscription ran out at `until` (E4.1). What it kept running
     /// stops. One that ran out while you were away is sent as you come back.
     #[serde(rename = "subscription_lapsed")]
@@ -877,6 +891,8 @@ impl ServerMessage {
             ServerMessage::TaxDelinquent { .. } => "tax_delinquent",
             ServerMessage::PlotForeclosed { .. } => "plot_foreclosed",
             ServerMessage::StationDisplaced { .. } => "station_displaced",
+            ServerMessage::StationCondition { .. } => "station_condition",
+            ServerMessage::StationCollapsed { .. } => "station_collapsed",
             ServerMessage::SubscriptionLapsed { .. } => "subscription_lapsed",
             ServerMessage::OrderPlaced { .. } => "order_placed",
             ServerMessage::OrderFilled { .. } => "order_filled",
@@ -926,6 +942,7 @@ pub struct ToolUse {
 /// So many of an item type, as `plot_foreclosed` counts what went to the
 /// impound (#141).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct ItemCount {
     pub item_type: String,
     pub quantity: i32,

@@ -98,6 +98,12 @@ pub async fn best_tool(db: &PgPool, player_id: Uuid, tool_type: ToolType) -> Res
 /// once that commits, it passes a [`Wear::Broke`] to [`announce_broken`]. `None` if
 /// the item is gone or isn't a tool.
 pub async fn wear(conn: &mut PgConnection, item_id: Uuid) -> Result<Option<Wear>, sqlx::Error> {
+    wear_by(conn, item_id, tools::WEAR_PER_USE).await
+}
+
+/// [`wear`], taking `amount` durability: an installed tool outdoors wears
+/// more than one use's (V3.2, `rules::weather::tool_wear`)
+pub async fn wear_by(conn: &mut PgConnection, item_id: Uuid, amount: i32) -> Result<Option<Wear>, sqlx::Error> {
     let worn: Option<(i32, Option<Uuid>, Option<Uuid>, String, String)> = sqlx::query_as(
         "UPDATE items i SET durability = GREATEST(i.durability - $2, 0)
          FROM item_types it
@@ -105,7 +111,7 @@ pub async fn wear(conn: &mut PgConnection, item_id: Uuid) -> Result<Option<Wear>
          RETURNING i.durability, i.owner_id, i.container_id, i.item_type, it.name",
     )
     .bind(item_id)
-    .bind(tools::WEAR_PER_USE)
+    .bind(amount)
     .fetch_optional(&mut *conn)
     .await?;
 
