@@ -510,6 +510,7 @@ mod tests {
                 durability: None,
             }],
             tool: Some(tool),
+            station_id: None,
             wage: None,
         }
     }

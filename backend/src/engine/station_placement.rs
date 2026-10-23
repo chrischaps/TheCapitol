@@ -528,7 +528,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn a_kit_keeps_its_makers_mark_through_its_station(db: PgPool) {
-        use crate::engine::units::test_units::{marked, marked_stack_of};
+        use crate::engine::units::test_units::{all_marked, marked_stack_of};
         use crate::engine::units::Marked;
         use capitol_protocol::rules::stacking::Units;
         let (ada, _) = builder(&db, "ada", 50).await;
@@ -548,9 +548,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, Some(ada));
-        let removed = crate::engine::station_removal::remove_station(&db, bo, placed.info.id).await.unwrap();
+        crate::engine::station_removal::remove_station(&db, bo, placed.info.id).await.unwrap();
 
-        assert_eq!(marked(&db, removed.kit_item_id).await, made);
+        let kit_back = all_marked(&db, bo, "workbench_kit").await;
+        // Beside the plain kit it already held
+        assert_eq!(kit_back, Marked::from_rows([(50, None, 1), (71, Some(ada), 1)]));
     }
 
     /// Places `first` and holds its transaction open while `second` is

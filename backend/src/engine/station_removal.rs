@@ -1,11 +1,16 @@
 //! Taking a station down (#88).
 //!
 //! REST `DELETE /stations/{id}` and WS `remove_station` both come here. In one
-//! transaction the station's box must be empty, the kit that placed it goes back
-//! into the owner's inventory at the quality it was placed with, with the tool
-//! in its tool slot if it holds one (E1.6), and the station,
-//! its container and its place on the plot's station count all go. Nothing is
-//! destroyed: a station can be moved by taking it down and placing it again.
+//! transaction the kit that placed it goes back into the owner's inventory at
+//! the quality it was placed with, with the tool in its tool slot if it holds
+//! one (E1.6), and then what's in its box (#489): each thing to whoever owns
+//! it, so the owner's own things and anything with no owner to the owner's
+//! inventory, and a guest's deposit (#80) to the guest's, or to the guest's
+//! impound when that's full (#141). If the owner's inventory can't hold all of
+//! theirs, or a guest's things would have nowhere at all to go, nothing moves
+//! and the station stays up. Then the station, its container and its place on
+//! the plot's station count all go. Nothing is destroyed: a station can be
+//! moved by taking it down and placing it again.
 //!
 //! A foreclosed plot's stations come down here too ([`return_plot_stations`],
 //! #137), boxes and tools and all: what's in them goes back to the inventories
@@ -25,13 +30,9 @@ use super::units::{Marked, NewStack};
 /// What a removal changed, so the caller can update the game state and tell clients.
 #[derive(Debug, Clone)]
 pub struct RemovedStation {
-    /// The owner's inventory container, which now holds the kit.
-    pub inventory_id: Uuid,
-#[cfg_attr(not(test), allow(dead_code))] // the tests read it; callers only need the inventory
-    pub kit_item_id: Uuid,
-    /// The tool that was in its tool slot, now beside the kit (E1.6)
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub tool_item_id: Option<Uuid>,
+    /// `(player, container)` for each inventory or impound that took
+    /// something: the owner's inventory, which holds the kit, first
+    pub returned_to: Vec<(Uuid, Uuid)>,
 }
 
 /// Why a station can't be taken down.
@@ -39,11 +40,12 @@ pub struct RemovedStation {
 pub enum RemoveError {
     NotFound,
     NotYours,
-    /// Its box still holds items. They may not all be the owner's (#80), so
-    /// they aren't moved for them.
-    BoxNotEmpty,
-    /// No free inventory slot for the kit, or for the kit and its tool.
-    NoRoomForKit,
+    /// No room in the owner's inventory for the kit, its tool and their
+    /// things in the box.
+    NoRoom,
+    /// A guest's things in the box (#80) have no room in their inventory or
+    /// their impound.
+    NoRoomForGuests,
     Database(sqlx::Error),
 }
 
@@ -52,8 +54,12 @@ impl RemoveError {
         match self {
             RemoveError::NotFound => "Station not found".into(),
             RemoveError::NotYours => "Not your station".into(),
-            RemoveError::BoxNotEmpty => "Empty the station's box before taking it down".into(),
-            RemoveError::NoRoomForKit => "No room in your inventory for the kit and its tool".into(),
+            RemoveError::NoRoom => {
+                "No room in your inventory for the kit, its tool and what's in its box".into()
+            }
+            RemoveError::NoRoomForGuests => {
+                "Someone else's things in its box have nowhere to go. Ask them to take them out".into()
+            }
             RemoveError::Database(e) => format!("Database error: {}", e),
         }
     }
@@ -71,7 +77,7 @@ impl From<RemoveError> for crate::error::AppError {
         match e {
             RemoveError::NotFound => AppError::NotFound(e.message()),
             RemoveError::NotYours => AppError::Forbidden(e.message()),
-            RemoveError::BoxNotEmpty | RemoveError::NoRoomForKit => {
+            RemoveError::NoRoom | RemoveError::NoRoomForGuests => {
                 AppError::BadRequest(e.message())
             }
             RemoveError::Database(db) => AppError::Database(db),
@@ -86,82 +92,56 @@ pub async fn remove_station(
     station_id: Uuid,
 ) -> Result<RemovedStation, RemoveError> {
     let mut tx = db.begin().await?;
-    let (removed, kit) = remove_in(&mut tx, player_id, station_id).await?;
+    let returned = remove_in(&mut tx, player_id, station_id).await?;
     // The kit comes back into the world (C1.7)
     let mut flows = super::ledger::Flows::new();
-    flows.add(&kit, UnitFlow::KitReturned, 1);
+    returned.count_into(&mut flows);
     super::ledger::commit(tx, flows).await?;
-    Ok(removed)
+    Ok(RemovedStation { returned_to: returned.containers })
 }
 
 async fn remove_in(
     tx: &mut Transaction<'_, Postgres>,
     player_id: Uuid,
     station_id: Uuid,
-) -> Result<(RemovedStation, String), RemoveError> {
-    let (station_type, owner_id, plot_id, kit_quality, kit_maker, kit, tool): (String, Uuid, Option<Uuid>, i32, Option<Uuid>, Option<String>, Option<Uuid>) =
-        sqlx::query_as(
-            "SELECT s.station_type, s.owner_id, s.plot_id, s.kit_quality, s.kit_maker_id, st.kit_item, s.installed_tool
-             FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
-             WHERE s.id = $1 FOR UPDATE OF s",
-        )
-        .bind(station_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or(RemoveError::NotFound)?;
+) -> Result<ReturnedStations, RemoveError> {
+    let (station_type, owner_id, plot_id, kit): (String, Uuid, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT s.station_type, s.owner_id, s.plot_id, st.kit_item
+         FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
+         WHERE s.id = $1 FOR UPDATE OF s",
+    )
+    .bind(station_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(RemoveError::NotFound)?;
     if owner_id != player_id {
         return Err(RemoveError::NotYours);
     }
-    let kit = kit.ok_or_else(|| {
-        tracing::error!(
-            "Station {} has type {} with no kit",
-            station_id,
-            station_type
-        );
-        RemoveError::NotFound
-    })?;
+    if kit.is_none() {
+        tracing::error!("Station {} has type {} with no kit", station_id, station_type);
+        return Err(RemoveError::NotFound);
+    }
 
-    // Lock the box before looking in it. A deposit's foreign-key check needs a
-    // share lock on this row, so one that started first is counted below, and
+    // Lock the box before emptying it. A deposit's foreign-key check needs a
+    // share lock on this row, so one that started first is emptied below, and
     // one that starts now waits and then fails against the deleted container.
-    let boxes: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM containers WHERE station_id = $1 FOR UPDATE")
-            .bind(station_id)
-            .fetch_all(&mut **tx)
-            .await?;
-    let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE container_id = ANY($1)")
-        .bind(boxes.iter().map(|(id,)| *id).collect::<Vec<_>>())
-        .fetch_one(&mut **tx)
+    sqlx::query("SELECT id FROM containers WHERE station_id = $1 FOR UPDATE")
+        .bind(station_id)
+        .execute(&mut **tx)
         .await?;
-    if held > 0 {
-        return Err(RemoveError::BoxNotEmpty);
-    }
 
-    // Kits and tools don't stack, so each takes the first free inventory slot.
-    // The tool comes out to the station's owner, who may take any tool from
-    // their own station (`station_tools::remove_tool`).
-    let wanted = 1 + tool.is_some() as usize;
-    let (inventory_id, slots) = free_slots(tx, player_id, wanted)
-        .await?
-        .ok_or(RemoveError::NoRoomForKit)?;
-    let slot = slots[0];
-    if let Some(tool) = tool {
-        super::station_tools::give_back(tx, station_id, tool, player_id, inventory_id, slots[1]).await?;
+    // The kit first, then the tool, then the box, so the owner's own things
+    // take their inventory's room before a guest's deposit is reckoned. Kits
+    // and tools don't stack, so each takes the first free slot.
+    let returned = empty_stations(tx, &[station_id], TAKE_DOWN).await?;
+    // What the owner can't carry stays put, and so does the station: a
+    // take-down never sends their own things to the impound.
+    if !returned.impounded_for(player_id).is_empty() || returned.lost.iter().any(|(p, ..)| *p == player_id) {
+        return Err(RemoveError::NoRoom);
     }
-
-    // The kit comes back as it went in: its quality and its maker's mark (#241)
-    let kit_item_id = super::units::insert_stack(
-        tx,
-        NewStack {
-            item_type: &kit,
-            owner_id: Some(player_id),
-            container_id: Some(inventory_id),
-            slot_index: Some(slot),
-            durability: None,
-        },
-        &kit_units(kit_quality, kit_maker),
-    )
-    .await?;
+    if !returned.lost.is_empty() {
+        return Err(RemoveError::NoRoomForGuests);
+    }
 
     // The container goes with the station (ON DELETE CASCADE), and it's empty.
     sqlx::query("DELETE FROM stations WHERE id = $1")
@@ -177,15 +157,7 @@ async fn remove_in(
         .execute(&mut **tx)
         .await?;
     }
-
-    Ok((
-        RemovedStation {
-            inventory_id,
-            kit_item_id,
-            tool_item_id: tool,
-        },
-        kit,
-    ))
+    Ok(returned)
 }
 
 /// The one unit of a kit a station gives back: the quality it was placed at,
@@ -366,7 +338,7 @@ pub async fn return_stations(
     tx: &mut PgConnection,
     station_ids: &[Uuid],
 ) -> Result<ReturnedStations, sqlx::Error> {
-    empty_stations(tx, station_ids, &[Kind::Inventory, Kind::Impound], true).await
+    empty_stations(tx, station_ids, RETURN).await
 }
 
 /// Empty `station_ids`, which the weather has brought down on public land
@@ -378,17 +350,37 @@ pub async fn collapse_stations(
     tx: &mut PgConnection,
     station_ids: &[Uuid],
 ) -> Result<ReturnedStations, sqlx::Error> {
-    empty_stations(tx, station_ids, &[Kind::Impound], false).await
+    empty_stations(tx, station_ids, COLLAPSE).await
 }
 
-/// Empty `station_ids` into the first of `kinds` with room for each thing,
-/// and give back their kits when `kits`
+/// How [`empty_stations`] empties
+#[derive(Clone, Copy)]
+struct Emptying {
+    /// Where each thing may go, the first with room taking it
+    kinds: &'static [Kind],
+    /// The kits are given back
+    kits: bool,
+    /// A tool goes to the station's owner, not whoever put it in: its owner
+    /// may take any tool from their own station (`station_tools::remove_tool`)
+    tools_to_owner: bool,
+}
+
+/// A foreclosure, or a lot laid under a workbench
+const RETURN: Emptying = Emptying { kinds: &[Kind::Inventory, Kind::Impound], kits: true, tools_to_owner: false };
+/// A station fallen in the weather (V3.2)
+const COLLAPSE: Emptying = Emptying { kinds: &[Kind::Impound], kits: false, tools_to_owner: false };
+/// A take-down by its owner, which [`remove_in`] refuses if any of the
+/// owner's things went to the impound or nowhere
+const TAKE_DOWN: Emptying = Emptying { kinds: &[Kind::Inventory, Kind::Impound], kits: true, tools_to_owner: true };
+
+/// Empty `station_ids` into the first of `how.kinds` with room for each thing,
+/// and give back their kits when `how.kits`
 async fn empty_stations(
     tx: &mut PgConnection,
     station_ids: &[Uuid],
-    kinds: &[Kind],
-    kits: bool,
+    how: Emptying,
 ) -> Result<ReturnedStations, sqlx::Error> {
+    let Emptying { kinds, kits, tools_to_owner } = how;
     let stations: Vec<(Uuid, String, Uuid, i32, Option<Uuid>, Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
         "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, s.kit_maker_id, st.kit_item, s.installed_tool, s.tool_owner
          FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
@@ -447,7 +439,7 @@ async fn empty_stations(
 
     for (station_id, _, owner_id, _, _, _, tool, tool_owner) in &stations {
         let Some(tool) = tool else { continue };
-        let player = tool_owner.unwrap_or(*owner_id);
+        let player = tool_owner.filter(|_| !tools_to_owner).unwrap_or(*owner_id);
         let item_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1")
             .bind(tool)
             .fetch_one(&mut *tx)
@@ -681,11 +673,11 @@ mod tests {
 
         let removed = remove_station(&db, me.id, station).await.unwrap();
 
-        assert_eq!(removed.inventory_id, me.inventory);
+        assert_eq!(removed.returned_to, vec![(me.id, me.inventory)]);
         let (kind, quality, slot): (String, i32, i32) = sqlx::query_as(
-            "SELECT item_type, quality, slot_index FROM items WHERE id = $1 AND owner_id = $2 AND container_id = $3",
+            "SELECT item_type, quality, slot_index FROM items
+             WHERE item_type = 'chest_kit' AND owner_id = $1 AND container_id = $2",
         )
-        .bind(removed.kit_item_id)
         .bind(me.id)
         .bind(me.inventory)
         .fetch_one(&db)
@@ -701,24 +693,100 @@ mod tests {
         assert_eq!(boxes, 0);
     }
 
+    /// Where the item `id` is now: its owner and its container
+    async fn whereabouts(db: &PgPool, id: Uuid) -> (Option<Uuid>, Uuid) {
+        sqlx::query_as("SELECT owner_id, container_id FROM items WHERE id = $1")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    /// What's in the box comes down with the station (#489): the owner's own
+    /// things, and anything with no owner, to the owner's inventory, joining
+    /// a stack of their type, and a guest's deposit back to the guest (#80)
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn a_station_with_things_in_its_box_stays_up(db: PgPool) {
+    async fn a_station_comes_down_with_its_box_emptied(db: PgPool) {
+        use crate::engine::units::test_units::{all_held, stack_of, units};
         let me = player(&db, "builder").await;
         let guest = player(&db, "guest").await;
+        let held = stack_of(&db, me.id, me.inventory, 0, "fiber", &Units::uniform(2, 50)).await;
         let (station, container) = chest(&db, me.id, 50).await;
-        put(&db, guest.id, container, 4).await;
+        stack_of(&db, me.id, container, 3, "fiber", &Units::uniform(3, 80)).await;
+        let rope = stack_of(&db, me.id, container, 5, "rope", &Units::uniform(1, 70)).await;
+        sqlx::query("UPDATE items SET owner_id = NULL WHERE id = $1").bind(rope).execute(&db).await.unwrap();
+        let deposit = stack_of(&db, guest.id, container, 7, "fiber", &Units::uniform(4, 60)).await;
 
-        let err = remove_station(&db, me.id, station).await.unwrap_err();
+        let removed = remove_station(&db, me.id, station).await.unwrap();
 
-        assert!(matches!(err, RemoveError::BoxNotEmpty), "{err:?}");
-        assert!(station_exists(&db, station).await);
-        let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE container_id = $1")
-            .bind(container)
+        assert_eq!(removed.returned_to, vec![(me.id, me.inventory), (guest.id, guest.inventory)]);
+        assert!(!station_exists(&db, station).await);
+        let mine = Units::from_pairs([(50, 2), (80, 3)]);
+        assert_eq!(units(&db, held).await, mine, "the box's fiber joined the pack's");
+        assert_eq!(all_held(&db, me.id, "fiber").await, mine);
+        assert_eq!(whereabouts(&db, rope).await, (Some(me.id), me.inventory), "no owner: the station owner's");
+        assert_eq!(whereabouts(&db, deposit).await, (Some(guest.id), guest.inventory), "back to the guest");
+    }
+
+    /// With no room in the owner's inventory for their things in the box, it
+    /// stays up and nothing moves: a take-down never fills their impound
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn no_room_for_the_box_keeps_the_station_up(db: PgPool) {
+        let me = player(&db, "builder").await;
+        let slots: i32 = sqlx::query_scalar("SELECT slot_count FROM container_types WHERE id = 'player_inventory'")
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(held, 1);
+        // One free slot: room for the kit, none for the rope
+        for slot in 1..slots {
+            put(&db, me.id, me.inventory, slot).await;
+        }
+        let (station, container) = chest(&db, me.id, 50).await;
+        let rope =
+            crate::engine::units::test_units::stack_of(&db, me.id, container, 0, "rope", &Units::uniform(1, 70)).await;
+
+        let err = remove_station(&db, me.id, station).await.unwrap_err();
+
+        assert!(matches!(err, RemoveError::NoRoom), "{err:?}");
+        assert!(station_exists(&db, station).await);
+        assert_eq!(whereabouts(&db, rope).await, (Some(me.id), container), "the rope stays in the box");
+        let kits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE item_type = 'chest_kit'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(kits, 0, "no kit made");
+    }
+
+    /// A guest whose inventory is full gets their deposit in their impound
+    /// (#141), and the station still comes down
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_full_guest_gets_their_deposit_in_the_impound(db: PgPool) {
+        let me = player(&db, "builder").await;
+        let guest = player(&db, "guest").await;
+        let slots: i32 = sqlx::query_scalar("SELECT slot_count FROM container_types WHERE id = 'player_inventory'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        for slot in 0..slots {
+            put(&db, guest.id, guest.inventory, slot).await;
+        }
+        let (station, container) = chest(&db, me.id, 50).await;
+        let deposit =
+            crate::engine::units::test_units::stack_of(&db, guest.id, container, 0, "rope", &Units::uniform(2, 70)).await;
+
+        let removed = remove_station(&db, me.id, station).await.unwrap();
+
+        let pound: Uuid = sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound'")
+            .bind(guest.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(removed.returned_to, vec![(me.id, me.inventory), (guest.id, pound)]);
+        assert_eq!(whereabouts(&db, deposit).await, (Some(guest.id), pound));
+        assert!(!station_exists(&db, station).await);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -738,7 +806,7 @@ mod tests {
 
         let err = remove_station(&db, me.id, station).await.unwrap_err();
 
-        assert!(matches!(err, RemoveError::NoRoomForKit), "{err:?}");
+        assert!(matches!(err, RemoveError::NoRoom), "{err:?}");
         assert!(station_exists(&db, station).await);
     }
 
@@ -780,11 +848,10 @@ mod tests {
     async fn a_station_comes_down_with_its_tool(db: PgPool) {
         let me = player(&db, "builder").await;
         let guest = player(&db, "guest").await;
-        let (station, sickle) = bench_with_tool(&db, me.id, guest.id).await;
+        let (station, _) = bench_with_tool(&db, me.id, guest.id).await;
 
-        let removed = remove_station(&db, me.id, station).await.unwrap();
+        remove_station(&db, me.id, station).await.unwrap();
 
-        assert_eq!(removed.tool_item_id, Some(sickle));
         let held: Vec<(Uuid, String, i32, Option<i32>)> = sqlx::query_as(
             "SELECT owner_id, item_type, slot_index, durability FROM items
              WHERE container_id = $1 ORDER BY slot_index",
@@ -818,7 +885,7 @@ mod tests {
 
         let err = remove_station(&db, me.id, station).await.unwrap_err();
 
-        assert!(matches!(err, RemoveError::NoRoomForKit), "{err:?}");
+        assert!(matches!(err, RemoveError::NoRoom), "{err:?}");
         assert!(station_exists(&db, station).await);
         let installed: Option<Uuid> = sqlx::query_scalar("SELECT installed_tool FROM stations WHERE id = $1")
             .bind(station)

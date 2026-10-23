@@ -261,7 +261,7 @@ impl CraftingPanel {
         if let Some(check) = &check {
             if let Some(blocked) = &check.blocked {
                 ui.add_space(6.0);
-                if let Some(shifts) = blocked_box(ui, state, check, blocked) {
+                if let Some(shifts) = blocked_box(ui, state, check, blocked, false) {
                     action = Some(Action::Moves(shifts));
                 }
             } else if let Some(range) = check.range {
@@ -613,26 +613,27 @@ fn breakdown(ui: &mut egui::Ui, check: &Check) {
         });
 }
 
-/// The output slot is taken by something else: say so, and offer to move
-/// it to the inventory. Returns that move when it's asked for.
+/// The output slot is taken by something else, or `at_station` the
+/// station's box is full (#489): say so, and offer to move it to the
+/// inventory. Returns that move when it's asked for.
 pub(super) fn blocked_box(
     ui: &mut egui::Ui,
     state: &GameState,
     check: &Check,
     blocked: &craft::Blocked,
+    at_station: bool,
 ) -> Option<Vec<craft::Shift>> {
     let output = check
         .recipe
         .outputs
         .first()
         .map_or("the output", |o| o.item_name.as_str());
-    theme::error_box(
-        ui,
-        &format!(
-            "{} fills the output, so the {output} would be destroyed.",
-            blocked.item_name
-        ),
-    );
+    let why = if at_station {
+        format!("The station's box is full, so the {output} would have nowhere to go.")
+    } else {
+        format!("{} fills the output, so the {output} would be destroyed.", blocked.item_name)
+    };
+    theme::error_box(ui, &why);
     let inventory = state.inventory()?;
     let slot = inventory.first_empty()?;
     ui.add_space(2.0);

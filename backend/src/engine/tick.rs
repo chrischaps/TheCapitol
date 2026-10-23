@@ -549,8 +549,10 @@ impl GameState {
                                 &self.event_sender,
                             ) {
                                 Ok(operation_id) => {
-                                    // On a wage shift, it's paid for when it's written
+                                    // Its output goes into the station's box (#489), and on
+                                    // a wage shift it's paid for when it's written
                                     if let Some(op) = self.crafting_operations.get_mut(&operation_id) {
+                                        op.station_id = Some(station_id);
                                         op.wage = wage;
                                     }
                                 }

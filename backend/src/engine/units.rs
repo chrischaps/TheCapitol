@@ -387,6 +387,41 @@ pub async fn join_first_stack(
     let Some(id) = first_stack(conn, container_id, item_type).await? else {
         return Ok(false);
     };
+    join_stack(conn, id, units).await
+}
+
+/// [`join_first_stack`] in a box several players keep things in, a
+/// station's (#80): onto the first stack of `item_type` that `owner` owns, so
+/// a craft's output never joins someone else's stack and becomes theirs
+/// (#489).
+pub async fn join_own_stack(
+    conn: &mut PgConnection,
+    container_id: Uuid,
+    item_type: &str,
+    owner: Uuid,
+    units: &Marked,
+) -> Result<bool, sqlx::Error> {
+    let id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM items
+         WHERE container_id = $1 AND item_type = $2 AND owner_id = $3
+         ORDER BY slot_index NULLS LAST, id
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(container_id)
+    .bind(item_type)
+    .bind(owner)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(id) = id else {
+        return Ok(false);
+    };
+    join_stack(conn, id, units).await
+}
+
+/// Join `units` onto the stack `id`, locked. `false`, and nothing changed, if
+/// it can't hold that many more.
+async fn join_stack(conn: &mut PgConnection, id: Uuid, units: &Marked) -> Result<bool, sqlx::Error> {
     let mut held = units_of(conn, id).await?;
     if !held.merge(&units.units()) {
         return Ok(false);

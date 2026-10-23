@@ -9,6 +9,12 @@
 //! A craft takes the very units its quality was worked out from (E1.8): the start names them
 //! (the best of each stack first), and completion takes exactly those, or fails.
 //!
+//! A craft by hand puts its output in the crafter's own crafting output. A craft at a station
+//! puts it in the station's box, as the crafter's (#489): it stays at the bench, where it was
+//! made, and the crafter takes it from there as from any slot. It joins only a stack of its type
+//! the crafter owns, since a box holds other people's things too (#80). If the box has no room,
+//! or the station came down while it ran, the craft fails and nothing changes.
+//!
 //! A craft on a wage shift (Commons D7) takes its inputs from the station's box rather than the
 //! crafter's own, puts its output back in that box as the employer's, marked as the worker's
 //! make, and pays for it out of the offer's escrow (`wages::pay`), all in the same transaction.
@@ -40,6 +46,9 @@ pub struct FinishedCraft {
     pub outputs: Vec<CraftOutput>,
     /// The tool the recipe needs, as it was at the start (E1.5). It wears once.
     pub tool: Option<HeldTool>,
+    /// The station it was made at: its output goes into that station's box
+    /// (#489). `None` by hand.
+    pub station_id: Option<Uuid>,
     /// The wage shift it was made on (Commons D7): its inputs are from the
     /// station's box, its output goes back there as the employer's, and it's
     /// paid for in the same transaction
@@ -82,6 +91,10 @@ pub const TOOL_MOVED: &str = "The craft's tool left your inventory before it fin
 pub const STATION_TOOL_MOVED: &str = "The station's tool was taken out before the craft finished";
 /// The reason shown when the output slot holds something else
 pub const OUTPUT_FULL: &str = "Your crafting output is full. Empty it and craft again";
+/// The reason shown when a station's box has no room for what it made (#489)
+pub const BOX_FULL: &str = "The station's box is full. Make room in it and craft again";
+/// The reason shown when the station came down while the craft ran
+pub const STATION_GONE: &str = "The station was taken down before the craft finished";
 
 /// Consume the inputs, wear the tool and write the outputs, together or not at all. The
 /// `Err` is the reason for `crafting_failed`.
@@ -94,6 +107,12 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
     let station_box = match &craft.wage {
         Some(work) => Some(station_box(&mut tx, work).await?),
         None => None,
+    };
+    // At a station, its box is where the output goes, the crafter's (#489)
+    let output_box = match (station_box, craft.station_id) {
+        (Some(b), _) => Some(b),
+        (None, Some(station_id)) => Some(box_of(&mut tx, station_id).await?.ok_or_else(|| STATION_GONE.to_string())?),
+        (None, None) => None,
     };
 
     consume_inputs(&mut tx, craft, station_box.map(|(id, _)| id), &mut changed, &mut flows).await?;
@@ -127,12 +146,13 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
         }
     }
     for output in &craft.outputs {
-        let container = match (&craft.wage, station_box) {
-            (Some(work), Some((box_id, slot_count))) => {
-                place_made(&mut tx, box_id, slot_count, work.employer_id, craft.player_id, output).await?;
+        let container = match output_box {
+            Some((box_id, slot_count)) => {
+                let owner = craft.wage.as_ref().map_or(craft.player_id, |work| work.employer_id);
+                place_made(&mut tx, box_id, slot_count, owner, craft.player_id, output, BOX_FULL).await?;
                 box_id
             }
-            _ => place_output(&mut tx, craft.player_id, output).await?,
+            None => place_output(&mut tx, craft.player_id, output).await?,
         };
         if !changed.contains(&container) {
             changed.push(container);
@@ -170,6 +190,11 @@ async fn station_box(tx: &mut Transaction<'_, Postgres>, work: &ShiftWork) -> Re
     let capitol_protocol::rules::wages::Work::Craft { station_id, .. } = &work.work else {
         return Err(wages::SHIFT_OVER.to_string());
     };
+    box_of(tx, *station_id).await?.ok_or_else(|| wages::SHIFT_OVER.to_string())
+}
+
+/// The box of `station_id` and its slot count, or `None` once it's gone.
+async fn box_of(tx: &mut Transaction<'_, Postgres>, station_id: Uuid) -> Result<Option<(Uuid, i32)>, String> {
     sqlx::query_as(
         "SELECT c.id, ct.slot_count FROM containers c JOIN container_types ct ON ct.id = c.container_type
          WHERE c.station_id = $1",
@@ -177,8 +202,7 @@ async fn station_box(tx: &mut Transaction<'_, Postgres>, work: &ShiftWork) -> Re
     .bind(station_id)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(db_error)?
-    .ok_or_else(|| wages::SHIFT_OVER.to_string())
+    .map_err(db_error)
 }
 
 /// Check every input again and use it up. Rows are locked as they're read, so a move or trade
@@ -262,10 +286,10 @@ async fn place_output(
 }
 
 /// Put `output`, owned by `owner_id`, in `container_id` of `slot_count` slots:
-/// onto the first stack of its type if it stacks (`units::join_first_stack`:
-/// every unit keeps its quality, so any grade may join), or into the first free
-/// slot. [`OUTPUT_FULL`] when there's neither. Its units carry `owner_id`'s
-/// mark: they made it (#231).
+/// onto the first stack of its type `owner_id` owns if it stacks
+/// (`units::join_own_stack`: every unit keeps its quality, so any grade may
+/// join), or into the first free slot. [`OUTPUT_FULL`] when there's neither.
+/// Its units carry `owner_id`'s mark: they made it (#231).
 pub async fn place_in(
     tx: &mut Transaction<'_, Postgres>,
     container_id: Uuid,
@@ -273,11 +297,13 @@ pub async fn place_in(
     owner_id: Uuid,
     output: &CraftOutput,
 ) -> Result<(), String> {
-    place_made(tx, container_id, slot_count, owner_id, owner_id, output).await
+    place_made(tx, container_id, slot_count, owner_id, owner_id, output, OUTPUT_FULL).await
 }
 
-/// [`place_in`], made by `maker`: on a wage shift the output is the
-/// employer's, and its units carry the worker's mark (Commons D7).
+/// [`place_in`], made by `maker`, and `full` when there's no room: on a wage
+/// shift the output is the employer's, and its units carry the worker's mark
+/// (Commons D7). Only a stack `owner_id` owns takes it, as a station's box
+/// holds other people's too (#80, #489).
 async fn place_made(
     tx: &mut Transaction<'_, Postgres>,
     container_id: Uuid,
@@ -285,9 +311,12 @@ async fn place_made(
     owner_id: Uuid,
     maker: Uuid,
     output: &CraftOutput,
+    full: &str,
 ) -> Result<(), String> {
     let made = Marked::by(Some(maker), &Units::uniform(output.quantity, output.quality));
-    if output.stackable && units::join_first_stack(tx, container_id, &output.item_type, &made).await.map_err(db_error)? {
+    if output.stackable
+        && units::join_own_stack(tx, container_id, &output.item_type, owner_id, &made).await.map_err(db_error)?
+    {
         return Ok(());
     }
 
@@ -300,7 +329,7 @@ async fn place_made(
     .map_err(db_error)?;
     let slot = (0..slot_count)
         .find(|s| !used.iter().any(|(u,)| u == s))
-        .ok_or_else(|| OUTPUT_FULL.to_string())?;
+        .ok_or_else(|| full.to_string())?;
 
     let stack = NewStack {
         item_type: &output.item_type,
@@ -398,6 +427,7 @@ pub(crate) mod tests {
                 durability: None,
             }],
             tool: None,
+            station_id: None,
             wage: None,
         }
     }
@@ -446,6 +476,113 @@ pub(crate) mod tests {
 
         assert_eq!(item(&db, fiber).await, None);
         assert_eq!(rope_made(&db, &ada).await, 1);
+    }
+
+    /// A chest owned by `owner`, standing in for any station: finishing a
+    /// craft doesn't look at its type. Returns the station and its box.
+    async fn station(db: &PgPool, owner: Uuid) -> (Uuid, Uuid) {
+        let station = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, kit_quality)
+             VALUES ($1, 'storage_chest', $2, 0, 0, 50)",
+        )
+        .bind(station)
+        .bind(owner)
+        .execute(db)
+        .await
+        .unwrap();
+        let the_box = Uuid::new_v4();
+        sqlx::query("INSERT INTO containers (id, container_type, station_id) VALUES ($1, 'station_inventory', $2)")
+            .bind(the_box)
+            .bind(station)
+            .execute(db)
+            .await
+            .unwrap();
+        (station, the_box)
+    }
+
+    /// The rope stacks in `container`, as (owner, quantity), in slot order
+    async fn ropes_in(db: &PgPool, container: Uuid) -> Vec<(Uuid, i32)> {
+        sqlx::query_as("SELECT owner_id, quantity FROM items WHERE container_id = $1 AND item_type = 'rope' ORDER BY slot_index")
+            .bind(container)
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    /// Made at a station, it stays there: in the station's box, the
+    /// crafter's, from inputs in that same box (#489)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_station_craft_lands_in_the_stations_box(db: PgPool) {
+        let ada = crafter(&db, "ada").await;
+        let (bench, the_box) = station(&db, ada.id).await;
+        let fiber = stack(&db, ada.id, the_box, 0, "fiber", 2).await;
+        let mut craft = rope(&ada, fiber);
+        craft.station_id = Some(bench);
+
+        let changed = finish_craft(&db, &craft).await.unwrap().changed;
+
+        assert_eq!(item(&db, fiber).await, None, "the fiber used up");
+        assert_eq!(ropes_in(&db, the_box).await, vec![(ada.id, 1)]);
+        assert_eq!(rope_made(&db, &ada).await, 0, "nothing in the crafting output");
+        assert_eq!(changed, vec![the_box]);
+    }
+
+    /// A guest's craft at someone else's station never joins the owner's
+    /// stack, which would make it the owner's: it takes a slot of its own,
+    /// and a second one joins it
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_guests_station_craft_keeps_to_their_own_stack(db: PgPool) {
+        let ada = crafter(&db, "ada").await;
+        let bram = crafter(&db, "bram").await;
+        let (bench, the_box) = station(&db, ada.id).await;
+        stack(&db, ada.id, the_box, 0, "rope", 3).await;
+        let fiber = stack(&db, bram.id, bram.inventory, 0, "fiber", 4).await;
+        let mut craft = rope(&bram, fiber);
+        craft.station_id = Some(bench);
+
+        finish_craft(&db, &craft).await.unwrap();
+        assert_eq!(ropes_in(&db, the_box).await, vec![(ada.id, 3), (bram.id, 1)]);
+        finish_craft(&db, &craft).await.unwrap();
+        assert_eq!(ropes_in(&db, the_box).await, vec![(ada.id, 3), (bram.id, 2)]);
+    }
+
+    /// A full box fails the craft and keeps its inputs, as a full output does
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_full_station_box_fails_the_craft(db: PgPool) {
+        let ada = crafter(&db, "ada").await;
+        let (bench, the_box) = station(&db, ada.id).await;
+        let slots: i32 = sqlx::query_scalar("SELECT slot_count FROM container_types WHERE id = 'station_inventory'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        for slot in 0..slots {
+            stack(&db, ada.id, the_box, slot, "fiber", 1).await;
+        }
+        let fiber = stack(&db, ada.id, ada.inventory, 0, "fiber", 2).await;
+        let mut craft = rope(&ada, fiber);
+        craft.station_id = Some(bench);
+
+        assert_eq!(finish_craft(&db, &craft).await, Err(BOX_FULL.to_string()));
+        assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(2), "inputs rolled back");
+    }
+
+    /// Taken down mid-craft: the craft fails and nothing is used up
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_station_taken_down_mid_craft_fails_it(db: PgPool) {
+        let ada = crafter(&db, "ada").await;
+        let (bench, _) = station(&db, ada.id).await;
+        let fiber = stack(&db, ada.id, ada.inventory, 0, "fiber", 2).await;
+        sqlx::query("DELETE FROM stations WHERE id = $1").bind(bench).execute(&db).await.unwrap();
+        let mut craft = rope(&ada, fiber);
+        craft.station_id = Some(bench);
+
+        assert_eq!(finish_craft(&db, &craft).await, Err(STATION_GONE.to_string()));
+        assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(2));
     }
 
     /// A trade of the whole stack keeps its id and changes its owner

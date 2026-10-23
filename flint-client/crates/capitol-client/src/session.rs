@@ -1000,7 +1000,8 @@ impl Session {
         };
         let station_id = open.id;
         let tool = craft::tool_in(&self.state, recipe, true);
-        let check = craft::check_at(recipe, bench, self.state.crafting_output(), open.quality, tool);
+        // The output stays in the station's box (#489)
+        let check = craft::check_at(recipe, bench, Some(bench), open.quality, tool);
         if let Some(message) = self.crafting.start_at(&check, station_id, &self.state, now) {
             tracing::info!(
                 "craft: {} at {station_id} from {} stacks",
@@ -3970,8 +3971,10 @@ mod tests {
 
     /// Against the local stack, the station panel's rules end to end (P6.3):
     /// walk to a workbench and open it, Fill its box, craft a tool handle
-    /// there, put the box back, open a chest and move the handle into it and
-    /// out, walk out of reach and see it close, and take the chest down.
+    /// there and find it in the box (#489), put the box back, open a chest
+    /// and move the handle into it and out, walk out of reach and see it
+    /// close, and take the chest down with the handle in it, which comes
+    /// back to the inventory.
     ///
     /// Needs a workbench and a storage chest owned by `Station1`, each with
     /// its `station_inventory` container, inserted before the server started
@@ -3984,9 +3987,7 @@ mod tests {
     #[ignore = "needs the local stack, a workbench and chest for Station1; takes a minute or two"]
     fn a_station_opens_crafts_stores_closes_and_comes_down() {
         use capitol_core::bot::{Account, Bot};
-        use capitol_core::catalog::container_type::CRAFTING_OUTPUT;
         use capitol_core::craft::{self, Phase};
-        use capitol_core::state::Container;
 
         let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
         let account = Account::numbered("station", 1);
@@ -4037,14 +4038,6 @@ mod tests {
                 .unwrap_or_else(|| panic!("no {kind} of Station1 nearby: see the doc comment"))
         };
         let (bench, chest) = (mine(&session, "workbench"), mine(&session, "storage_chest"));
-        let output = |s: &Session| -> Container {
-            s.state()
-                .containers()
-                .values()
-                .find(|c| c.container_type == CRAFTING_OUTPUT)
-                .unwrap()
-                .clone()
-        };
         let station_box = |s: &Session| s.state().station_container().cloned();
         let open = |s: &Session| s.state().open_station().map(|o| o.station_id);
         let emptied = |session: &mut Session| {
@@ -4054,13 +4047,6 @@ mod tests {
             );
             session.move_items(&shifts);
         };
-
-        // A clear output, so the handle has somewhere to go.
-        let shifts = craft::empty_into(&output(&session), session.state().inventory().unwrap());
-        session.move_items(&shifts);
-        wait(&mut session, "a clear output", &|s| {
-            output(s).used_slots() == 0
-        });
 
         // The workbench, out of reach: walk, then it opens.
         session.open_station(Instant::now(), bench);
@@ -4086,7 +4072,7 @@ mod tests {
         let ready = |s: &Session| {
             let st = s.state();
             let r = st.recipe("tool_handle").unwrap();
-            station_box(s).is_some_and(|b| craft::check(r, &b, st.crafting_output(), None).ready())
+            station_box(s).is_some_and(|b| craft::check(r, &b, Some(&b), None).ready())
         };
         wait(&mut session, "sticks and rope on the workbench", &ready);
 
@@ -4097,9 +4083,12 @@ mod tests {
         wait(&mut session, "the handle", &|s| {
             *s.crafting().phase() == Phase::Idle && !s.state().is_crafting()
         });
-        assert_eq!(craft::count(&output(&session), "tool_handle"), 1);
         assert_eq!(session.take_crafted().len(), 1);
         let left = |s: &Session, t: &str| station_box(s).map_or(0, |b| craft::count(&b, t));
+        // Made at the bench, it waits in the bench's box (#489)
+        wait(&mut session, "the handle in the workbench's box", &|s| {
+            left(s, "tool_handle") >= 1
+        });
         eprintln!(
             "after the craft the workbench holds {} rope, {} sticks",
             left(&session, "rope"),
@@ -4117,7 +4106,14 @@ mod tests {
         wait(&mut session, "the chest to open", &|s| {
             open(s) == Some(chest) && station_box(s).is_some()
         });
-        let kit = output(&session).items().next().unwrap().clone();
+        let kit = session
+            .state()
+            .inventory()
+            .unwrap()
+            .items()
+            .find(|i| i.item_type == "tool_handle")
+            .expect("the handle, back from the workbench")
+            .clone();
         let chest_box = station_box(&session).unwrap();
         // Into an empty slot, so nothing comes back out in a swap.
         session.move_item(Move {
@@ -4147,18 +4143,28 @@ mod tests {
         session.move_to(Instant::now(), me.x + 120.0, me.y);
         wait(&mut session, "the chest to close", &|s| open(s).is_none());
 
-        // Back, empty it as the panel asks, and take the chest down.
+        // Back, the handle into it again, and the chest down with it inside:
+        // the handle comes back with the kit (#489).
         session.open_station(Instant::now(), chest);
         wait(&mut session, "the chest to open again", &|s| {
             open(s) == Some(chest) && station_box(s).is_some()
         });
-        emptied(&mut session);
-        wait(&mut session, "the chest emptied", &|s| {
-            station_box(s).is_some_and(|b| b.used_slots() == 0)
+        let chest_box = station_box(&session).unwrap();
+        session.move_item(Move {
+            item_id: kit.item_id,
+            target_container_id: chest_box.id,
+            target_slot: chest_box.first_empty().expect("room in the chest") as i32,
+            split: None,
+            qualities: None,
+        });
+        wait(&mut session, "the kit in the chest again", &|s| {
+            station_box(s).is_some_and(|b| b.find(kit.item_id).is_some())
         });
         session.remove_station(chest);
-        wait(&mut session, "the chest to come down", &|s| {
-            s.state().station(chest).is_none() && open(s).is_none()
+        wait(&mut session, "the chest to come down, the handle back", &|s| {
+            s.state().station(chest).is_none()
+                && open(s).is_none()
+                && s.state().inventory().unwrap().find(kit.item_id).is_some()
         });
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);

@@ -166,7 +166,8 @@ pub async fn place_station(
     Ok(Json(PlaceStationResponse { station: placed.info }))
 }
 
-/// Take down a station you own. Its box must be empty, and its kit goes back into your inventory.
+/// Take down a station you own. Its kit, its tool and your things in its box go back into your
+/// inventory, and a guest's deposit to the guest (#489).
 #[utoipa::path(
     delete,
     path = "/stations/{id}",
@@ -174,8 +175,8 @@ pub async fn place_station(
         ("id" = Uuid, Path, description = "Station ID")
     ),
     responses(
-        (status = 200, description = "Station removed, kit returned"),
-        (status = 400, description = "Its box isn't empty, or your inventory has no room for the kit"),
+        (status = 200, description = "Station removed, kit and box returned"),
+        (status = 400, description = "Your inventory has no room for the kit, its tool and what's in the box"),
         (status = 403, description = "Not your station"),
         (status = 404, description = "Station not found")
     ),
@@ -200,11 +201,10 @@ pub async fn remove_station(
     let mut game = state.game.write().await;
     game.stations.remove(&station_id);
     let _ = game.event_sender.send(GameEvent::StationRemoved { station_id });
-    let _ = game.event_sender.send(GameEvent::InventoryUpdated {
-        player_id,
-        container_id: removed.inventory_id,
-        slots: vec![],
-    });
+    // The kit and the box's contents, to whoever they went to (#489)
+    for (player_id, container_id) in removed.returned_to {
+        let _ = game.event_sender.send(GameEvent::InventoryUpdated { player_id, container_id, slots: vec![] });
+    }
     drop(game);
 
     Ok(Json(SuccessResponse::ok()))

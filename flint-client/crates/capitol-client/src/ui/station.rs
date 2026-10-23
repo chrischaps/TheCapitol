@@ -11,10 +11,10 @@
 //!   the crafting panel, the quality range, and Craft, which sends
 //!   `craft_at_station`. While it runs: the bar, the time left and Cancel.
 //!   The rules are `capitol_core::craft`, as for crafting by hand.
-//! - **Where the output goes.** The server puts a station's output in your
-//!   own crafting output, not the station's box. React doesn't say so; this
-//!   shows that slot under the box, so you can see it arrive and drag it
-//!   out.
+//! - **Where the output goes.** It stays at the station, in its box, as
+//!   yours (#489), and you drag it out to your inventory as from any slot.
+//!   It once landed in your own crafting output, which surprised people who
+//!   had made it at the bench. A line under Fill and Clear says so.
 //! - **The tool slot (E1.6, E1.7)**, under a crafting station's box: drag a
 //!   tool in to install it (`install_tool`), drag it out to any slot of the
 //!   inventory, or press Take out (`remove_tool`; the server puts it in your
@@ -25,11 +25,12 @@
 //!   tab beside Craft (`ui::automation`), set to make one recipe from the
 //!   box, a count of times or forever. The header says when it's running
 //!   or paused, for anyone who opens it.
-//! - **Return to inventory**, for the owner, once the box is empty: a
-//!   recycling bin in gold (`theme::recycle_bin`, #488). The server refuses
-//!   while the box holds anything and puts the whole kit back in your
-//!   inventory (#88), so it's how you move a station, and it doesn't ask
-//!   twice. It was a dim Remove link, and nobody saw it gives everything back.
+//! - **Return to inventory**, for the owner: a recycling bin in gold
+//!   (`theme::recycle_bin`, #488). The server puts the whole kit back in
+//!   your inventory (#88), and what's in the box with it (#489): your things
+//!   to you, a guest's back to the guest. It refuses if your inventory can't
+//!   hold it all. So it's how you move a station, and it doesn't ask twice.
+//!   It was a dim Remove link, and nobody saw it gives everything back.
 //!
 //! **On a small screen (#235)** the panel goes where there's room (`place`):
 //! two columns left of the inventory if they fit there, else one column,
@@ -161,14 +162,15 @@ impl StationPanel {
         }
     }
 
-    /// The recipe weighed against the station's box and your output slot,
-    /// at the station's quality.
+    /// The recipe weighed against the station's box, which takes its inputs
+    /// and its output (#489), at the station's quality.
     pub fn check<'a>(&self, state: &'a GameState) -> Option<Check<'a>> {
         let recipe = self.recipe(state)?;
+        let bench = state.station_container()?;
         Some(craft::check_at(
             recipe,
-            state.station_container()?,
-            state.crafting_output(),
+            bench,
+            Some(bench),
             state.open_station_info()?.quality,
             craft::tool_in(state, recipe, true),
         ))
@@ -377,7 +379,7 @@ impl StationPanel {
         tab: Tab,
     ) -> Option<Action> {
         match tab {
-            Tab::Craft => self.crafting(ui, icons, view, crafting),
+            Tab::Craft => self.crafting(ui, view, crafting),
             Tab::Automation => self.automation(ui, icons, view),
         }
     }
@@ -387,7 +389,6 @@ impl StationPanel {
     fn crafting(
         &mut self,
         ui: &mut egui::Ui,
-        icons: &mut ItemIcons,
         view: &View,
         crafting: Option<&Activity>,
     ) -> Option<Action> {
@@ -466,28 +467,16 @@ impl StationPanel {
             });
         });
 
-        // Where the output lands: your own output slot.
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(theme::label("Output"));
-                ui.label(
-                    theme::dim("Made here, it lands in your crafting output").size(size::LABEL),
-                );
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(out) = state.crafting_output() {
-                    if let Some(m) = SlotGrid::new(out).enabled(idle).show(ui, icons) {
-                        action = Some(Action::Move(m));
-                    }
-                }
-            });
+        // Where the output lands: here, in the box (#489)
+        ui.add_space(4.0);
+        ui.vertical_centered(|ui| {
+            ui.label(theme::dim("What's made here waits in the station's box").size(size::LABEL));
         });
 
         if let Some(check) = &check {
             if let Some(blocked) = &check.blocked {
                 ui.add_space(6.0);
-                if let Some(shifts) = blocked_box(ui, state, check, blocked) {
+                if let Some(shifts) = blocked_box(ui, state, check, blocked, true) {
                     action = Some(Action::Moves(shifts));
                 }
             } else if let Some(range) = check.range {
@@ -545,10 +534,10 @@ impl StationPanel {
         }
     }
 
-    /// Return to inventory (the owner's, once the box is empty) and Close.
-    /// It's a recycling bin in the gold of "yours", which says what it does
-    /// on hover: a dim Remove link read as losing the bench, so benches were
-    /// left standing by the road rather than taken home (#488).
+    /// Return to inventory (the owner's) and Close. It's a recycling bin in
+    /// the gold of "yours", which says what it does on hover: a dim Remove
+    /// link read as losing the bench, so benches were left standing by the
+    /// road rather than taken home (#488). It packs up the box too (#489).
     fn footer(&mut self, ui: &mut egui::Ui, view: &View) -> Option<Action> {
         let state = view.state;
         let open = state.open_station()?;
@@ -557,16 +546,16 @@ impl StationPanel {
             .is_some_and(|s| Some(s.owner_id) == state.me());
         let empty = state
             .station_container()
-            .is_some_and(|c| c.used_slots() == 0);
+            .is_none_or(|c| c.used_slots() == 0);
         let busy = state.local_activity().is_some();
         let mut action = None;
         ui.horizontal(|ui| {
             if mine {
-                let enabled = empty && !busy;
+                let enabled = !busy;
                 let button = ui
                     .add_enabled(enabled, egui::Button::new("").min_size(RECYCLE_BUTTON))
-                    .on_hover_text(RETURN)
-                    .on_disabled_hover_text(return_refused(empty));
+                    .on_hover_text(return_hover(empty))
+                    .on_disabled_hover_text(RETURN_BUSY);
                 let ink = if enabled { theme::GOLD } else { theme::GOLD.gamma_multiply(0.4) };
                 let bin = egui::Rect::from_center_size(button.rect.center(), RECYCLE_ICON);
                 theme::recycle_bin(ui.painter(), bin, ink);
@@ -584,17 +573,18 @@ impl StationPanel {
     }
 }
 
-/// The recycling bin's hover (#488).
-const RETURN: &str = "Return to inventory";
-
-/// Its hover while it can't be pressed: why not yet.
-fn return_refused(empty: bool) -> &'static str {
+/// The recycling bin's hover (#488), and with things in the box, where they
+/// go (#489): yours with you, a guest's back to them
+fn return_hover(empty: bool) -> &'static str {
     if empty {
-        "Return to inventory, once the craft is done"
+        "Return to inventory"
     } else {
-        "Return to inventory, once its box is empty"
+        "Return to inventory, with what's in its box"
     }
 }
+
+/// Its hover while a craft is under way.
+const RETURN_BUSY: &str = "Return to inventory, once the craft is done";
 
 /// The panel's width inside its frame: one column for a chest or when
 /// stacked, else the box and the recipe's column with the gap between them

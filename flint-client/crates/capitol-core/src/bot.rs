@@ -41,7 +41,7 @@ use capitol_protocol::rest::{
     CollectResponse, ConfigureAutomation, DepositRequest, DepositResponse, GrantRequest, GrantResponse,
     HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder, MarketSummaryResponse, MoveItemRequest,
     MyOrdersQuery, MyStallResponse, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest, RentStall,
-    ResourceNodeInfo, SplitStackRequest, SplitStackResponse, StationAutomation, StationInfo, StationTool,
+    ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse, StationAutomation, StationInfo, StationTool,
     StockListing, SubscribeRequest, Subscription, WithdrawRequest, WithdrawResponse,
 };
 use capitol_protocol::rules::{self, steer, Zone};
@@ -1148,7 +1148,9 @@ impl Bot {
     }
 
     /// Crafts `recipe_id` from the inventory, at `station` if one is given
-    /// (stand within its reach first) or by hand. Otherwise as [`craft`](Self::craft).
+    /// (stand within its reach first) or by hand. Otherwise as [`craft`](Self::craft),
+    /// but what a station makes waits in its box (#489), so it's brought
+    /// from there to the inventory ([`collect_from_station`](Self::collect_from_station)).
     pub fn craft_at(&mut self, recipe_id: &str, station: Option<Uuid>) -> Result<Yield, BotError> {
         let recipe = self
             .state
@@ -1220,7 +1222,11 @@ impl Bot {
                 _ => None,
             })
             .expect("until stopped on one of these")?;
-        self.wait_for_items(container_type::CRAFTING_OUTPUT, &item)?;
+        match station {
+            // Made at a station, it waits in the station's box (#489)
+            Some(station_id) => self.collect_from_station(station_id, &item.item_type)?,
+            None => self.wait_for_items(container_type::CRAFTING_OUTPUT, &item)?,
+        }
         // Output and inputs are written together (B10), but the refetch that
         // shows the output may not be the one that shows the inputs gone.
         self.wait_until("the inputs to be used up", |bot| {
@@ -1241,7 +1247,49 @@ impl Bot {
             return Ok(());
         };
         let made: Vec<_> = output.items().cloned().collect();
-        for item in made {
+        self.move_to_inventory(&made, "collecting the crafting output")?;
+        self.wait_until("the crafting output to empty", |bot| {
+            bot.state.crafting_output().is_none_or(|c| c.used_slots() == 0)
+        })?;
+        self.settle()
+    }
+
+    /// Takes the `item_type` a craft at `station_id` made out of the
+    /// station's box, where it waits (#489), into the inventory. Stand within
+    /// the station's reach. Every stack of that type comes out, so it's for a
+    /// station of our own, whose box holds only ours.
+    pub fn collect_from_station(&mut self, station_id: Uuid, item_type: &str) -> Result<(), BotError> {
+        let what = "looking in the station's box";
+        let RestResponse::StationContainer(the_box) =
+            self.call(what, RestRequest::StationContainer { station_id })?
+        else {
+            return Err(BotError::Failed(format!("{what}: an answer that isn't a box")));
+        };
+        let made: Vec<SlotItem> = the_box.slots.into_iter().filter(|i| i.item_type == item_type).collect();
+        let want = self.count(container_type::PLAYER_INVENTORY, item_type) + made.iter().map(|i| i.quantity).sum::<i32>();
+        self.move_to_inventory(&made, "collecting from the station's box")?;
+        self.wait_until(&format!("{want} {item_type} in the inventory"), |bot| {
+            bot.count(container_type::PLAYER_INVENTORY, item_type) >= want
+        })
+    }
+
+    /// Moves the stack `item_id` into `slot` of the container `to`, a
+    /// station's box among them, and waits for the inventory to show it.
+    pub fn move_item(&mut self, item_id: Uuid, to: Uuid, slot: i32) -> Result<(), BotError> {
+        let request = RestRequest::MoveItem(MoveItemRequest {
+            item_id,
+            target_container_id: to,
+            target_slot: slot,
+        });
+        self.call("moving a stack", request)?;
+        self.settle()
+    }
+
+    /// Moves `items` into the inventory: each onto a stack of its type, or
+    /// into an empty slot no other of them took.
+    fn move_to_inventory(&mut self, items: &[SlotItem], what: &'static str) -> Result<(), BotError> {
+        let mut filled = Vec::new();
+        for item in items {
             let inventory = self
                 .state
                 .inventory()
@@ -1255,19 +1303,20 @@ impl Bot {
                 .items()
                 .find(|i| stackable && i.item_type == item.item_type)
                 .map(|i| i.slot_index as usize)
-                .or_else(|| inventory.first_empty())
+                .or_else(|| {
+                    let slot = (0..inventory.slot_count()).find(|s| inventory.slot(*s).is_none() && !filled.contains(s))?;
+                    filled.push(slot);
+                    Some(slot)
+                })
                 .ok_or_else(|| BotError::Failed("the inventory is full".into()))?;
             let request = RestRequest::MoveItem(MoveItemRequest {
                 item_id: item.item_id,
                 target_container_id: inventory.id,
                 target_slot: onto as i32,
             });
-            self.call("collecting the crafting output", request)?;
+            self.call(what, request)?;
         }
-        self.wait_until("the crafting output to empty", |bot| {
-            bot.state.crafting_output().is_none_or(|c| c.used_slots() == 0)
-        })?;
-        self.settle()
+        Ok(())
     }
 
     /// Puts a station down at `(x, y)` from the kit `kit_item_id`, over REST.

@@ -7,9 +7,12 @@
 //! **At a station (P6.3)** the same rules hold, with the station's box as
 //! the input box and the station's recipes ([`crate::station::recipes_at`])
 //! in place of the hand ones. [`Crafting::start_at`] sends
-//! `craft_at_station`. The output still lands in the player's own crafting
-//! output box (`crafting.rs` on the server sets `crafting_output` whatever
-//! the bench), so that's the box [`check`] weighs it against.
+//! `craft_at_station`. The output stays at the station, in its box, as
+//! yours (#489), so the box is the output box too, and [`check_at`] counts
+//! the slots the craft's own inputs would empty as room for it. It joins
+//! only a stack of its type you own there, and the box can't say whose a
+//! stack is, so a guest whose box is full but for the owner's rope sees
+//! it pass here and the server refuse it.
 //!
 //! - **The recipe.** A recipe picked by hand wins. Otherwise [`detect`]
 //!   finds one the inputs satisfy: an exact match first, then the one that
@@ -446,6 +449,9 @@ pub fn check_at<'a>(
     let mut needs = Vec::with_capacity(recipe.inputs.len());
     let mut inputs = Vec::new();
     let mut taken = quality::Inputs::default();
+    // The stacks the craft uses up whole: at a station they leave room in
+    // the box for the output
+    let mut emptied = Vec::new();
     for need in &recipe.inputs {
         let mut left = need.quantity;
         for item in input.items().filter(|i| i.item_type == need.item_type) {
@@ -458,6 +464,9 @@ pub fn check_at<'a>(
             left -= used.count() as i32;
             taken.add_units(&item.item_type, &used);
             inputs.push(item.item_id);
+            if used.count() as i32 >= item.quantity {
+                emptied.push(item.item_id);
+            }
         }
         needs.push(Need {
             item_type: need.item_type.clone(),
@@ -477,7 +486,8 @@ pub fn check_at<'a>(
         inputs,
         taken,
         range,
-        blocked: output.and_then(|o| blocked(recipe, o)),
+        // At a station the box is both, and what the craft empties is room
+        blocked: output.and_then(|o| blocked(recipe, o, if o.id == input.id { &emptied } else { &[] })),
         station,
         tool,
     }
@@ -485,15 +495,17 @@ pub fn check_at<'a>(
 
 /// What in `output` would leave one of the recipe's outputs nowhere to go:
 /// a stack of its type takes it, whatever the grade (E1.8); anything else
-/// needs a free slot.
-fn blocked(recipe: &RecipeInfo, output: &Container) -> Option<Blocked> {
-    let mut free = output.slot_count() - output.used_slots();
+/// needs a free slot. The stacks in `emptied` are gone by then (the server
+/// takes the inputs first), so their slots are free.
+fn blocked(recipe: &RecipeInfo, output: &Container, emptied: &[Uuid]) -> Option<Blocked> {
+    let mut free = output.slot_count() - output.used_slots() + emptied.len();
+    let staying: Vec<&SlotItem> = output.items().filter(|i| !emptied.contains(&i.item_id)).collect();
     for out in &recipe.outputs {
-        if output.items().any(|i: &SlotItem| i.item_type == out.item_type) {
+        if staying.iter().any(|i| i.item_type == out.item_type) {
             continue;
         }
         if free == 0 {
-            let first = output.items().next()?;
+            let first = staying.first()?;
             return Some(Blocked {
                 item_id: first.item_id,
                 item_name: first.item_name.clone(),
@@ -961,6 +973,25 @@ mod tests {
         assert_eq!(check(&r[0], &inp, None, None).blocked, None);
     }
 
+    /// At a station the box is the input and the output (#489): a full box
+    /// still takes the rope where the craft uses up a stack of its own
+    #[test]
+    fn a_full_station_box_has_room_where_the_craft_empties_a_stack() {
+        let r = recipes();
+        let bench = |fiber: i32| {
+            let mut items = vec![item(1, 0, "fiber", 50, fiber)];
+            items.extend((1..4).map(|s| item(10 + s as u128, s, "chest_kit", 70, 1)));
+            boxed(Uuid::from_u128(40), "station_inventory", 4, &items)
+        };
+        // Two fiber, both used: their slot takes the rope
+        let used_up = bench(2);
+        assert!(check_at(&r[0], &used_up, Some(&used_up), 50, None).ready());
+        // Three: one stays, and there's no room
+        let left = bench(3);
+        let c = check_at(&r[0], &left, Some(&left), 50, None);
+        assert_eq!(c.blocked.map(|b| b.item_id), Some(Uuid::from_u128(1)));
+    }
+
     /// Rope that wants a sickle: fiber 70% and the tool 30%, give or take 3.
     fn sickle_rope() -> RecipeInfo {
         let mut r = recipe("rope_cut", &[("fiber", 2)], "rope");
@@ -1237,12 +1268,8 @@ mod tests {
         };
         fill(&mut state, 5);
         let mut crafting = Crafting::default();
-        let c = check_at(
-            &forge,
-            state.station_container().unwrap(),
-            state.crafting_output(),
-            90, None
-        );
+        let bench = state.station_container().unwrap();
+        let c = check_at(&forge, bench, Some(bench), 90, None);
         assert!(c.ready());
         // 0.56 × 70 + 0.24 × 50 + 0.2 × 90 (an A-grade bench) = 69.2.
         assert_eq!(c.range, Some((66, 72)));

@@ -26,6 +26,9 @@ pub struct CraftingOperation {
     pub station_quality: i32,
     /// The tool the recipe needs, as it was at the start (E1.5)
     pub tool: Option<HeldTool>,
+    /// The station it's made at, whose box takes the output (#489), set by
+    /// the tick once it starts. `None` by hand.
+    pub station_id: Option<Uuid>,
     /// The wage shift it's made on (Commons D7), set by the tick once it starts
     pub wage: Option<ShiftWork>,
 }
@@ -88,6 +91,7 @@ pub fn process_crafting(
                     inputs: operation.input_items_to_consume.clone(),
                     outputs,
                     tool: operation.tool.clone(),
+                    station_id: operation.station_id,
                     wage: operation.wage.clone(),
                 });
             }
@@ -207,6 +211,7 @@ pub fn start_crafting(
         inputs,
         station_quality,
         tool,
+        station_id: None,
         wage: None,
     });
 

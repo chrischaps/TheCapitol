@@ -1102,6 +1102,7 @@ mod tests {
                 durability: None,
             }],
             tool: None,
+            station_id: None,
             wage,
         }
     }

@@ -552,8 +552,9 @@ fn bots_keep_a_shop_and_buy_from_one() {
 
 /// C1.4, a station through `Bot`: split a stack, put down a workbench, have a
 /// stack that isn't a tool refused its slot, put a sickle in it, set it to
-/// make knapped stone, start and stop it, take the sickle out, and take the
-/// bench down again.
+/// make knapped stone, start and stop it, take the sickle out, knap a stone
+/// by hand and find it in the box (#489), and take the bench down again with
+/// stone in its box, which comes home with the kit.
 #[test]
 #[ignore = "needs a local stack with DEV_GRANTS=on: docker-compose up -d, then cargo run in backend/"]
 fn bots_split_stacks_and_set_tools_and_automation() {
@@ -632,7 +633,21 @@ fn bots_split_stacks_and_set_tools_and_automation() {
     assert_eq!(bot.count(container_type::PLAYER_INVENTORY, "stone_sickle"), 1);
     assert!(bot.state().station(bench).is_some_and(|s| s.tool.is_none()));
 
-    bot.remove_station(bench).expect("took the bench down");
+    // Knapped by hand at the bench, the stone waits in the bench's box, not
+    // the crafting output, and comes to the pack from there (#489)
+    let made = bot.craft_at("knapped_stone", Some(bench)).expect("knapped a stone");
+    assert_eq!(made.item_type, "knapped_stone");
+    assert_eq!(bot.count(container_type::PLAYER_INVENTORY, "knapped_stone"), 1);
+    assert_eq!(bot.count(container_type::CRAFTING_OUTPUT, "knapped_stone"), 0);
+
+    // Taken down with stone left in its box, the stone comes home with the kit
+    let stone_held = bot.count(container_type::PLAYER_INVENTORY, "stone");
+    let the_box = bot.state().station(bench).and_then(|s| s.container_id).expect("the bench's box");
+    bot.move_item(stack_of(&bot, "stone"), the_box, 0).expect("stone into the box");
+    assert!(bot.count(container_type::PLAYER_INVENTORY, "stone") < stone_held);
+    bot.remove_station(bench).expect("took the bench down, box and all");
+    assert_eq!(bot.count(container_type::PLAYER_INVENTORY, "stone"), stone_held);
+    assert_eq!(bot.count(container_type::PLAYER_INVENTORY, "workbench_kit"), 1);
 }
 
 /// C0.6: a bot on a key outlives the server going away. The proxy turns

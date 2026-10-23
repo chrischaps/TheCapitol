@@ -485,6 +485,7 @@ mod tests {
                 durability: None,
             }],
             tool: None,
+            station_id: None,
             wage: None,
         };
         super::super::craft_completion::finish_craft(&db, &craft).await.unwrap();

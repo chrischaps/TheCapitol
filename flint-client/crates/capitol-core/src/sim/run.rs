@@ -1344,8 +1344,8 @@ impl SimBot {
     /// Takes down its own stations near it that stand off its lot (#488).
     /// The whole kit comes back, so a bench it's done with goes in its pack
     /// rather than standing by the road for good; the spawn filled up with
-    /// Arrival's benches. One set to work, or whose box holds something,
-    /// stays. How many came down.
+    /// Arrival's benches. One set to work stays. What's in a box comes home
+    /// with the kit (#489). How many came down.
     pub(super) fn pack_up(&mut self) -> Result<usize, BotError> {
         let state = self.bot.state();
         let plots = state.plots();
@@ -1364,7 +1364,7 @@ impl SimBot {
                     self.stations.remove(&kind);
                     down += 1;
                 }
-                // Its box isn't empty, or the pack has no room for the kit:
+                // The pack has no room for the kit and what's in its box:
                 // left standing, for another day
                 Err(BotError::Rest { .. }) => {}
                 Err(e) => return Err(e),

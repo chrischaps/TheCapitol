@@ -668,15 +668,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                                     match crate::engine::station_removal::remove_station(&state.db, player_id, station_uuid).await {
                                         Ok(removed) => {
-                                            // Everyone sees it go, and the owner's inventory now holds the kit.
+                                            // Everyone sees it go. The owner's inventory now holds the
+                                            // kit and their things from the box, and a guest's deposit
+                                            // went back to the guest (#489).
                                             let mut game = state.game.write().await;
                                             game.stations.remove(&station_uuid);
                                             let _ = game.event_sender.send(GameEvent::StationRemoved { station_id: station_uuid });
-                                            let _ = game.event_sender.send(GameEvent::InventoryUpdated {
-                                                player_id,
-                                                container_id: removed.inventory_id,
-                                                slots: vec![],
-                                            });
+                                            for (player_id, container_id) in removed.returned_to {
+                                                let _ = game.event_sender.send(GameEvent::InventoryUpdated {
+                                                    player_id,
+                                                    container_id,
+                                                    slots: vec![],
+                                                });
+                                            }
                                         }
                                         Err(e) => {
                                             let _ = sender.send(Message::Text(
