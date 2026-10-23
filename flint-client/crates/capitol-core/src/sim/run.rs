@@ -13,11 +13,15 @@
 //! turns to whoever it trades with, and stops a moment beside a person it
 //! passes. Lingering among other citizens, it may ask one for a trade
 //! (#295). A town's merchants (C1.6, [`merchant`]) earn a float and make a
-//! market.
+//! market. And every citizen walks the road in, the tutorial, and claims
+//! its deed at the end of it (#450, [`road_in`]).
 
 mod idle;
 mod merchant;
 mod people;
+pub mod road_in;
+
+pub use road_in::walk_the_road;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::land;
+use capitol_protocol::metrics::RoadInReport;
 use capitol_protocol::rest::{PlaceOrder, ResourceNodeInfo, StationInfo};
 use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
@@ -232,6 +237,8 @@ pub(crate) fn live(
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
     citizen.people = true;
     citizen.persona = Some(persona.clone());
+    // Every citizen walks the road in, and earns its deed (#450)
+    citizen.road = Some(road_in::Road::default());
     if role == Role::Merchant {
         citizen.merchant = Some(merchant::Merchant::new(seed));
     }
@@ -307,6 +314,7 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::Bid { .. }, Some(Action::Trade(Trade::Bid { .. })))
         | (Choice::Stock { .. }, Some(Action::Trade(Trade::Stock { .. })))
         | (Choice::MakeMarket { .. }, Some(Action::Trade(Trade::MakeMarket)))
+        | (Choice::Road { .. }, Some(Action::Road(_)))
         | (Choice::Rest | Choice::Hall, None) => true,
         (Choice::Keep | Choice::Gather { .. }, _) => return Fate::Passed,
         _ => false,
@@ -366,6 +374,11 @@ struct SimBot {
     noon_day: Option<i64>,
     /// The citizens it has asked to trade lately, and when (#295).
     asked: HashMap<Uuid, Instant>,
+    /// A citizen walks the road in (#450): the steps it's waiting on. A
+    /// swarm bot doesn't, so the E2.7 sim's numbers stay comparable.
+    road: Option<road_in::Road>,
+    /// Its last round was a step on the road: what carrying on means there.
+    on_road: bool,
 }
 
 /// What a bot does next.
@@ -375,6 +388,8 @@ enum Action {
     /// A citizen's market hours with no trade to make: to its market, and
     /// a game minute there.
     Market,
+    /// A bit of the road in's next step (#450).
+    Road(capitol_protocol::tutorial::Step),
 }
 
 impl SimBot {
@@ -410,6 +425,8 @@ impl SimBot {
             spot: None,
             noon_day: None,
             asked: HashMap::new(),
+            road: None,
+            on_road: false,
         }
     }
 
@@ -496,7 +513,15 @@ impl SimBot {
                 Ok(errands) => Ok(Some(self.choose_errand(&catalog, &holdings, errands))),
                 Err(stuck) => Err(stuck),
             };
+            // The road in first, while a step on it is open (#450): by day and
+            // at market hours, and in the night's work what needs no walk
+            let road = match &errand {
+                _ if self.road.is_none() => None,
+                Ok(errand) => self.choose_road(&holdings, errand.as_ref()),
+                Err(_) => self.choose_road(&holdings, None),
+            };
             let trade = match &errand {
+                _ if road.is_some() => None,
                 // No market in the night's work (#276)
                 Ok(Some(errand)) if self.trading && !self.night_shift => self.choose_trade(&holdings, errand),
                 _ => None,
@@ -506,10 +531,11 @@ impl SimBot {
             // it carries on with after.
             let step = errand.map(|e| e.map(|e| e.step));
             let errand_label = step.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.label(&catalog));
-            let action = match (step, trade) {
-                (_, Some(trade)) => Ok(Some(Action::Trade(trade))),
+            let action = match (road, step, trade) {
+                (Some(lesson), _, _) => Ok(Some(Action::Road(lesson))),
+                (None, _, Some(trade)) => Ok(Some(Action::Trade(trade))),
                 _ if phase == Some(Phase::Market) => Ok(Some(Action::Market)),
-                (step, None) => step.map(|s| s.map(Action::Step)),
+                (None, step, None) => step.map(|s| s.map(Action::Step)),
             };
             match action {
                 Ok(Some(action)) => {
@@ -523,6 +549,7 @@ impl SimBot {
                         Action::Trade(trade) => self.trade(trade),
                         Action::Step(step) => self.take(step),
                         Action::Market => self.keep_market(town),
+                        Action::Road(lesson) => self.walk_road(*lesson),
                     };
                     if errand_label.is_some() {
                         self.doing = errand_label;
@@ -595,7 +622,11 @@ impl SimBot {
                 self.journal();
                 town.record(std::mem::take(&mut self.entries), self.mind.take_rulings());
                 let strands = self.bot.state().strands();
-                town.health(|h| h.strands = strands);
+                let road = self.road_progress().map(|p| RoadInReport::of(&p));
+                town.health(|h| {
+                    h.strands = strands;
+                    h.road_in = road.or(h.road_in.take());
+                });
             }
         }
         Ok(town.map_or(Ended::Stopped, Tether::ended))
@@ -618,6 +649,7 @@ impl SimBot {
                 let at = if self.at_market { "at" } else { "to" };
                 format!("{at} the {place}")
             }
+            Action::Road(step) => format!("the road in: {}", road_in::does(*step)),
         }
     }
 
@@ -653,7 +685,9 @@ impl SimBot {
         self.at_market = false;
         self.spot = None;
         self.night_shift = true;
-        if self.bot.state().plots().is_empty() {
+        // A citizen on the road in doesn't save for a home: the road's deed
+        // is its first (#450)
+        if self.bot.state().plots().is_empty() && !self.awaits_road_deed() {
             match self.buy_home() {
                 Ok(()) => {}
                 Err(e) if e.is_final() => return Err(e),
@@ -705,7 +739,7 @@ impl SimBot {
         if strands < fund(self.deed_cost) {
             return Ok(());
         }
-        self.claim_near(&[persona.home.zone.as_str()], persona.home.spot(), 1, false, |cost| fund(cost) <= strands)
+        self.claim_near(&[persona.home.zone.as_str()], persona.home.spot(), 1, false, |cost| fund(cost) <= strands, false)
     }
 
     /// Waits for the server after a drop: until `deadline`, or for a citizen
@@ -929,6 +963,7 @@ impl SimBot {
             strands: state.strands().unwrap_or(0),
             deed_cost: self.deed_cost,
             fees: state.fees(),
+            road_deed: self.road_deed(),
             ..Holdings::default()
         };
         for container in [state.inventory(), state.crafting_output()].into_iter().flatten() {
@@ -1301,18 +1336,24 @@ impl SimBot {
     /// A citizen whose home zone has such a lot it can't afford yet saves for
     /// it rather than buying elsewhere; only a home zone with no lot that
     /// takes its stations sends it to the others.
+    ///
+    /// A citizen on the road in whose deed is open claims with it instead
+    /// ([`road_in`]), as its first plot (#450).
     fn claim(&mut self) -> Result<(), BotError> {
+        if self.road_deed() == Some(capitol_protocol::tutorial::Grant::Open) {
+            return self.claim_deed();
+        }
         let strands = self.bot.state().strands().unwrap_or(0) - FLOAT;
         let wanted = self.role.room_wanted();
         match self.persona.as_ref().map(|p| p.home) {
             Some(home) => {
                 let mut zones = vec![home.zone.as_str()];
                 zones.extend(PLOT_ZONES.iter().filter(|z| **z != home.zone.as_str()));
-                self.claim_near(&zones, home.spot(), wanted, true, |cost| cost <= strands)
+                self.claim_near(&zones, home.spot(), wanted, true, |cost| cost <= strands, false)
             }
             None => {
                 let here = self.bot.position();
-                self.claim_near(&PLOT_ZONES, here, wanted, false, |cost| cost <= strands)
+                self.claim_near(&PLOT_ZONES, here, wanted, false, |cost| cost <= strands, false)
             }
         }
     }
@@ -1322,7 +1363,8 @@ impl SimBot {
     /// stations, or failing that the first with any (#305). The deed it
     /// saves for is the first zone's (#419). With `wait_for_first`, a first
     /// zone that has a lot with the room, but none it can afford, is waited
-    /// for: it buys nothing.
+    /// for: it buys nothing. With `granted`, it claims with the road in's
+    /// deed (#450) and pays nothing.
     fn claim_near(
         &mut self,
         zones: &[&str],
@@ -1330,6 +1372,7 @@ impl SimBot {
         wanted: i32,
         wait_for_first: bool,
         afford: impl Fn(i64) -> bool,
+        granted: bool,
     ) -> Result<(), BotError> {
         let strands = self.bot.state().strands().unwrap_or(0);
         let mut listed: Vec<Vec<capitol_protocol::rest::PlotInfo>> = Vec::new();
@@ -1361,14 +1404,22 @@ impl SimBot {
                         .total_cmp(&(b.world_x - x).hypot(b.world_y - y))
                 });
                 for plot in plots.iter().take(5) {
-                    match self.bot.claim_plot(plot.id) {
+                    let claimed = if granted { self.bot.claim_with_grant(plot.id) } else { self.bot.claim_plot(plot.id) };
+                    match claimed {
                         Ok(_) => {
-                            let cost = plot.deed_cost.unwrap_or(0) as i64;
-                            self.deed_cost = cost;
+                            let cost = if granted { 0 } else { plot.deed_cost.unwrap_or(0) as i64 };
+                            if !granted {
+                                self.deed_cost = cost;
+                            }
                             self.entries.push(Entry::Claimed { cost });
                             self.bot.refetch(Fetch::Plots);
                             self.bot.settle()?;
                             return Ok(());
+                        }
+                        // The deed refused: not earned, or spent (#440). It
+                        // would be refused on every lot, so say why
+                        Err(e @ BotError::Rest { .. }) if granted && !e.to_string().contains("already claimed") => {
+                            return Err(e)
                         }
                         // Someone else got it first.
                         Err(BotError::Rest { .. }) => continue,
@@ -1376,6 +1427,9 @@ impl SimBot {
                     }
                 }
             }
+        }
+        if granted {
+            return Err(BotError::Failed(format!("no free lot in {} for the road in's deed", zones.join(", "))));
         }
         Err(BotError::Failed(format!(
             "no plot for sale at {strands} Strands or less"

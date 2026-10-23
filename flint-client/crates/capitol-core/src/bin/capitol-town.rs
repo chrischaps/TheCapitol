@@ -6,6 +6,7 @@
 //! capitol-town mint --count 2 --role merchant   # and two merchants (C1.6)
 //! capitol-town mint --online 20     # enough citizens that 20 are on, on average (#276)
 //! capitol-town habits               # who's on when, over the coming weeks (#276)
+//! capitol-town road-in              # where each citizen is on the road in (#450)
 //! capitol-town                      # live until Ctrl-C
 //! capitol-town --always-on          # every citizen on, day and night (#276)
 //! capitol-town --report             # and write what the town did when it stops (C1.7)
@@ -92,7 +93,13 @@ USAGE:
                                  next four weeks: its habits, the average
                                  online, the fewest and most, and the
                                  average by hour of the day (UTC)
-    capitol-town status          Print the running town's last health
+    capitol-town road-in         Where each citizen on the roster is on the
+                                 road in, the tutorial every citizen walks
+                                 (#450): steps done, its chapter, its next
+                                 step and its deed, asked of the server
+                                 with its own key, so a running town plays
+                                 on. Exits 1 if one couldn't be asked
+    capitol-town status         Print the running town's last health
                                  (also --status)
     capitol-town replay [<log>...] --layers <a,b>
                                  Run a stack of decision layers over the
@@ -211,6 +218,7 @@ enum Action {
     Compare { a: PathBuf, b: PathBuf, out: Option<PathBuf> },
     Mint { size: Size },
     Habits,
+    RoadIn,
     Status,
     Replay {
         logs: Vec<PathBuf>,
@@ -297,7 +305,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         let reading_books = matches!(&action, Some(Action::Books { file }) if file.as_os_str().is_empty());
         let comparing = matches!(action, Some(Action::Compare { .. }));
         let mut set = |a: Action| match action.replace(a) {
-            Some(_) => Err("run, soak, books, compare, mint, habits, status, replay, corpus and voice go one at a time".to_string()),
+            Some(_) => Err(
+                "run, soak, books, compare, mint, habits, road-in, status, replay, corpus and voice go one at a time".to_string(),
+            ),
             None => Ok(()),
         };
         match arg.as_str() {
@@ -313,6 +323,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             "--out" => out = Some(PathBuf::from(value()?)),
             "mint" => set(Action::Mint { size: Size::Count(0) })?,
             "habits" => set(Action::Habits)?,
+            "road-in" => set(Action::RoadIn)?,
             "--always-on" => options.always_on = true,
             "--online" => {
                 let n: f64 = number(&arg, &value()?)?;
@@ -619,6 +630,52 @@ fn habits(options: &Options) -> Result<(), String> {
         let avg = *sum as f64 / days;
         let bar = "█".repeat((avg / peak * 40.0).round() as usize);
         println!("  {hour:02}:00  {avg:>6.1}  {bar}");
+    }
+    Ok(())
+}
+
+/// Where each citizen on the roster is on the road in (#450), as the server
+/// keeps it: asked with each one's key, by REST alone, so a running town's
+/// citizens are left playing.
+fn road_in(options: &Options) -> Result<(), String> {
+    let roster = living_roster(options)?;
+    let config = NetConfig::with_base_url(server(options, &roster));
+    println!("{}: the road in, citizen by citizen", roster.path.display());
+    println!("{:<20} {:<17} {:<9} {:>7}  {:<13} {:<8} next", "citizen", "trade", "home", "steps", "chapter", "deed");
+    let (mut walked, mut claimed, mut unread) = (0, 0, 0);
+    for citizen in &roster.citizens {
+        let progress = citizen.key().and_then(|key| {
+            match net::call_once(&config, Some(&key), &RestRequest::Tutorial).map_err(|e| e.to_string())? {
+                RestResponse::Tutorial(progress) => Ok(metrics::RoadInReport::of(&progress)),
+                other => Err(format!("the server answered {other:?}")),
+            }
+        });
+        let home = citizen.persona.home.zone.as_str();
+        match progress {
+            Ok(road) => {
+                walked += usize::from(road.finished());
+                claimed += usize::from(road.grant == capitol_core::protocol::tutorial::Grant::Spent);
+                println!(
+                    "{:<20} {:<17} {:<9} {:>7}  {:<13} {:<8} {}",
+                    citizen.name,
+                    citizen.role.to_string(),
+                    home,
+                    format!("{}/{}", road.done, road.of),
+                    road.chapter.as_deref().unwrap_or("walked"),
+                    format!("{:?}", road.grant).to_lowercase(),
+                    road.next.as_deref().unwrap_or("–"),
+                );
+            }
+            Err(e) => {
+                unread += 1;
+                println!("{:<20} {:<17} {:<9} couldn't ask: {e}", citizen.name, citizen.role.to_string(), home);
+            }
+        }
+    }
+    let n = roster.citizens.len();
+    println!("{walked} of {n} have walked the whole road; {claimed} have claimed their deed");
+    if unread > 0 {
+        return Err(format!("{unread} of {n} couldn't be asked"));
     }
     Ok(())
 }
@@ -1256,6 +1313,7 @@ fn main() -> ExitCode {
         },
         Action::Mint { size } => mint(&options, size),
         Action::Habits => habits(&options),
+        Action::RoadIn => road_in(&options),
         Action::Status => status(&options),
         Action::Replay {
             ref logs,
@@ -1301,6 +1359,7 @@ mod tests {
         let o = parse(args("mint --online 18")).unwrap().unwrap();
         assert_eq!(o.action, Action::Mint { size: Size::Online(18.0) });
         assert_eq!(parse(args("habits")).unwrap().unwrap().action, Action::Habits);
+        assert_eq!(parse(args("road-in --roster t/x.toml")).unwrap().unwrap().action, Action::RoadIn);
         assert!(!parse(args("run")).unwrap().unwrap().always_on);
         assert!(parse(args("run --always-on")).unwrap().unwrap().always_on);
         assert!(parse(args("soak --hours 2 --always-on")).unwrap().unwrap().always_on);

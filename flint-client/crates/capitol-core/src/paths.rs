@@ -51,8 +51,9 @@ use std::sync::{Arc, Mutex};
 
 use capitol_protocol::land;
 use capitol_protocol::rules::ground::{Footing, Ground, CLIFF_SLOPE};
-use capitol_protocol::rules::{self, PLAYER_SPEED};
-use capitol_protocol::terrain::{Landmark, LandmarkKind, TerrainResponse, WaterRing};
+use capitol_protocol::rules::{self, Frame, Zone, PLAYER_SPEED};
+use capitol_protocol::terrain::{Landmark, LandmarkKind, TerrainPlot, TerrainResponse, WaterRing};
+use capitol_protocol::tutorial::stops;
 
 use crate::citizen::idle::Places;
 
@@ -137,6 +138,9 @@ pub struct WalkGraph {
     bazaar_streets: Vec<Vec<Point>>,
     /// The places worth being, for a citizen's free time (C2.1).
     places: Places,
+    /// The lots near the road in's stops (#445), for a citizen walking it
+    /// (#450): those within [`STOP_LOTS_WITHIN`] of each stop's point.
+    stop_lots: Vec<TerrainPlot>,
     nodes: Vec<Point>,
     /// Each node's neighbours, and the cost of the way there.
     edges: Vec<Vec<(u32, f64)>>,
@@ -173,6 +177,38 @@ impl Way {
     }
 }
 
+/// How far from a stop's point on the road a lot may be and still be kept
+/// for [`WalkGraph::road_stop`]: well past any stop's lot, so the rule sees
+/// every lot it could choose.
+pub const STOP_LOTS_WITHIN: f64 = 1000.0;
+
+/// A stop on the road in (#445), as a walker finds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoadStop {
+    /// The lot's id on `/terrain`
+    pub lot: String,
+    /// The lot's middle
+    pub middle: Point,
+    /// The point on the south arterial it was chosen from
+    pub road: Point,
+    /// Someone owns it
+    pub taken: bool,
+}
+
+/// The lots within [`STOP_LOTS_WITHIN`] of a stop on the road in.
+fn stop_lots(terrain: &TerrainResponse) -> Vec<TerrainPlot> {
+    let points: Vec<Point> = stops::STOP_ZONES
+        .iter()
+        .filter_map(|&z| stops::stop_point(&Frame::TABLE, z))
+        .collect();
+    terrain
+        .terrain_plots
+        .iter()
+        .filter(|l| points.iter().any(|&p| stops::distance_to_lot(p, &l.corners) <= STOP_LOTS_WITHIN))
+        .cloned()
+        .collect()
+}
+
 /// A way between a point and a node of the graph.
 #[derive(Debug, Clone)]
 struct Access {
@@ -193,6 +229,7 @@ impl WalkGraph {
             landmarks: terrain.landmarks.clone(),
             bazaar_streets: crate::bazaar::streets(&terrain.roads),
             places: Places::new(terrain),
+            stop_lots: stop_lots(terrain),
             nodes: Vec::new(),
             edges: Vec::new(),
             buckets: HashMap::new(),
@@ -319,6 +356,23 @@ impl WalkGraph {
     /// The places worth being (C2.1), from the same `/terrain`.
     pub fn places(&self) -> &Places {
         &self.places
+    }
+
+    /// The road in's stop in `zone` (#445), by the rule the client marks it
+    /// by (`protocol::tutorial::stops`), so a citizen walking the road
+    /// (#450) looks at the same lot a player's ring is round. `taken` says
+    /// whether a lot, by its id, is owned.
+    pub fn road_stop(&self, zone: Zone, taken: impl Fn(&str) -> bool) -> Option<RoadStop> {
+        let road = stops::stop_point(&Frame::TABLE, zone)?;
+        let stop = stops::stop(&self.stop_lots, &Frame::TABLE, zone, taken)?;
+        let c = &stop.lot.corners;
+        let middle = (c.iter().map(|p| p.0).sum::<f64>() / 4.0, c.iter().map(|p| p.1).sum::<f64>() / 4.0);
+        Some(RoadStop {
+            lot: stop.lot.id.clone(),
+            middle,
+            road,
+            taken: stop.taken,
+        })
     }
 
     /// How many nodes the graph has.

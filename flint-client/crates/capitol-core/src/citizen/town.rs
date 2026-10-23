@@ -43,7 +43,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::ledger::Ledger;
-use capitol_protocol::metrics::{CitizenReport, TownFailure, TownReport, TOWN_FAILURES};
+use capitol_protocol::metrics::{CitizenReport, RoadInReport, TownFailure, TownReport, TOWN_FAILURES};
 use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
@@ -639,6 +639,8 @@ pub struct Health {
     pub failures: u64,
     /// Lives started after the first.
     pub restarts: u32,
+    /// Where it is on the road in (#450), as it last heard
+    pub road_in: Option<RoadInReport>,
 }
 
 impl Health {
@@ -653,6 +655,7 @@ impl Health {
             failure: None,
             failures: 0,
             restarts: 0,
+            road_in: None,
         }
     }
 
@@ -680,6 +683,9 @@ impl Health {
             strands,
             self.activity
         );
+        if let Some(road) = self.road_in.as_ref().filter(|r| !r.finished()) {
+            line.push_str(&format!(" · road in {}/{}", road.done, road.of));
+        }
         if self.restarts > 0 {
             line.push_str(&format!(" · {} restart{}", self.restarts, if self.restarts == 1 { "" } else { "s" }));
         }
@@ -1191,6 +1197,7 @@ impl Reporter {
                 restarts: h.restarts,
                 failure,
                 decisions: beat.decisions,
+                road_in: h.road_in.clone(),
             });
         }
         // A layer's cost so far is every citizen's together

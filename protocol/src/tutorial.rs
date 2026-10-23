@@ -51,6 +51,18 @@ impl Chapter {
     pub fn steps(self) -> impl Iterator<Item = Step> {
         Step::ALL.into_iter().filter(move |s| s.chapter() == self)
     }
+
+    /// The chapter's name on the wire, as serde writes it
+    pub fn name(self) -> &'static str {
+        match self {
+            Chapter::Arrival => "arrival",
+            Chapter::RoadIn => "road_in",
+            Chapter::Hall => "hall",
+            Chapter::People => "people",
+            Chapter::DeedsOffice => "deeds_office",
+            Chapter::SettleIn => "settle_in",
+        }
+    }
 }
 
 /// Who says a step is done (plan D7).
@@ -429,6 +441,32 @@ mod tests {
             // The name is serde's, so a step alone and in a list agree
             assert_eq!(serde_json::to_string(&step).unwrap(), format!("\"{}\"", step.name()));
         }
+    }
+
+    #[test]
+    fn a_chapters_name_is_serdes() {
+        for chapter in Chapter::ALL {
+            assert_eq!(serde_json::to_string(&chapter).unwrap(), format!("\"{}\"", chapter.name()));
+        }
+    }
+
+    #[test]
+    fn a_citizens_road_in_reads_briefly() {
+        use crate::metrics::RoadInReport;
+        let fresh = RoadInReport::of(&TutorialProgress::default());
+        assert_eq!((fresh.done, fresh.of), (0, Step::ALL.len() as u32));
+        assert_eq!((fresh.next.as_deref(), fresh.chapter.as_deref()), (Some("walk"), Some("arrival")));
+        let arrival: Steps = Chapter::Arrival.steps().collect();
+        let walked = RoadInReport::of(&TutorialProgress { done: arrival, ..Default::default() });
+        assert_eq!(walked.next.as_deref(), Some("see_rural_lot"));
+        assert_eq!(walked.chapter.as_deref(), Some("road_in"));
+        let done = RoadInReport::of(&TutorialProgress { done: Steps::every(), grant: Grant::Spent, ..Default::default() });
+        assert!(done.finished() && done.next.is_none() && done.grant == Grant::Spent);
+        // Brief on the wire: no step left, no names
+        assert_eq!(
+            serde_json::to_string(&done).unwrap(),
+            format!(r#"{{"done":{n},"of":{n},"grant":"spent"}}"#, n = Step::ALL.len())
+        );
     }
 
     #[test]

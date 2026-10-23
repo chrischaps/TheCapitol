@@ -11,16 +11,20 @@
 //!   else the first in the catalog. Before crafting, the bot needs the
 //!   recipe's station and tool, then each input in turn
 //! - a station is placed from its kit. A workbench can stand anywhere
-//!   (D10); every other station needs a plot of the bot's own with room,
-//!   and a plot needs Strands, which come from depositing fiber. A bot
-//!   buys the deed once it holds [`FLOAT`] over its price, so it can still
-//!   buy and sell after (#294)
+//!   (D10); every other station needs a plot of the bot's own with room.
+//!   A citizen's first plot is the deed the road in earns (#450,
+//!   [`Holdings::road_deed`]), so it never saves for one: it claims once
+//!   the deed is open, and until then the station waits for the road. A
+//!   bot not on the road (the sim's swarm) buys its plot with Strands,
+//!   which come from depositing fiber, once it holds [`FLOAT`] over the
+//!   deed's price, so it can still buy and sell after (#294)
 //!
 //! Since a step is taken before the next is planned, the inputs a craft uses
 //! up (the rope a handle takes, say) are simply missing next time, and made
 //! again.
 
 use capitol_protocol::tunables::Fees;
+use capitol_protocol::tutorial::Grant;
 use std::collections::{HashMap, HashSet};
 
 use capitol_protocol::rest::RecipeInfo;
@@ -58,6 +62,11 @@ pub struct Holdings {
     /// The fees the server charges now (D6.1), for what a sale, a rent or
     /// the exchange costs.
     pub fees: Fees,
+    /// The deed the road in earns, for a bot that walks it (#450): its
+    /// first plot comes from it, not from saving. `None` for a bot that
+    /// doesn't walk the road, which buys its plot as before, and a spent
+    /// deed means the next plot is bought too.
+    pub road_deed: Option<Grant>,
 }
 
 impl Holdings {
@@ -295,6 +304,11 @@ impl<'a> Planner<'a> {
                 on_plot: true,
             })),
             Some(_) => Err(Stuck(format!("the plot has no room for a {station}"))),
+            // The road in's deed is its first plot (#450): nothing saved for it
+            None if self.holdings.road_deed == Some(Grant::Open) => Ok(Some(Step::Claim)),
+            None if self.holdings.road_deed == Some(Grant::Unearned) => Err(Stuck(format!(
+                "the {station} waits for a plot, and the plot for the road in's deed"
+            ))),
             None if self.holdings.strands >= self.holdings.deed_cost + FLOAT => Ok(Some(Step::Claim)),
             None => self.strands(self.holdings.deed_cost + FLOAT - self.holdings.strands).map(Some),
         }
@@ -445,6 +459,24 @@ mod tests {
         assert!(next(&Catalog::fallback(), &owner, &Goal::Station("kiln".into())).is_err());
         owner.stations.insert("kiln".into());
         assert_eq!(plan(&owner, Goal::Station("kiln".into())), None);
+    }
+
+    #[test]
+    fn a_bot_on_the_road_in_waits_for_its_deed_rather_than_save_for_one() {
+        let goal = || Goal::Station("kiln".into());
+        let mut h = holding(&[("kiln_kit", 1)]);
+        h.road_deed = Some(Grant::Unearned);
+        // Rich or poor, it doesn't save: the road in earns its deed (#450)
+        assert!(next(&Catalog::fallback(), &h, &goal()).is_err());
+        h.strands = 250 + FLOAT;
+        assert!(next(&Catalog::fallback(), &h, &goal()).is_err());
+        // Once the road has earned it, it claims, with nothing saved
+        h.strands = 0;
+        h.road_deed = Some(Grant::Open);
+        assert_eq!(plan(&h, goal()), Some(Step::Claim));
+        // The deed spent and the plot gone, the next is bought as before
+        h.road_deed = Some(Grant::Spent);
+        assert_eq!(plan(&h, goal()), gather("fiber"));
     }
 
     #[test]

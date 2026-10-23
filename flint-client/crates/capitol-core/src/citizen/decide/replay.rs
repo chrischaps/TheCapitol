@@ -479,6 +479,7 @@ fn kind(q: &Question) -> &'static str {
         Question::FreeTime => "free time",
         Question::Market => "market",
         Question::Ask => "ask",
+        Question::Road { .. } => "road",
     }
 }
 

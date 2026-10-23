@@ -10,6 +10,7 @@
 //! capitol-bot --wander --listen --hail          # among citizens, printing what they say (S1.6)
 //! capitol-bot --sim 20 --hours 2               # the economy sim (E2.7), with a report
 //! capitol-bot --prefix maker --market fiber,plank,iron_ingot --fund   # a market maker (E3.8)
+//! capitol-bot --prefix newcomer --tutorial      # walk the road in and claim its deed (#450)
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -21,7 +22,9 @@ use std::time::{Duration, Instant};
 use capitol_core::bot::{Account, Bot, BotError, TradeOffer};
 use capitol_core::market_maker::{self, Maker, MakerConfig};
 use capitol_core::net::NetConfig;
+use capitol_core::protocol::tutorial;
 use capitol_core::sim::run::{self as sim, SimConfig};
+use capitol_core::sim::{Gather, Role};
 
 const USAGE: &str = "\
 capitol-bot: headless players for The Capitol
@@ -73,6 +76,14 @@ FLAGS:
     --fund              With --market, top up to 20000 Strands and --target
                         units of each item first, as a grant. Only a server
                         with DEV_GRANTS=on gives one: never a shared server.
+    --tutorial          Walk the road in, the tutorial, on the account as a
+                        citizen does (#450): every step the server judges,
+                        the few only a screen shows reported, each said as
+                        it's done, to the claim with the deed it earns at
+                        the Deeds Office and the steps of settling in. Stops
+                        once it's walked, or after --seconds, and fails if
+                        the deed wasn't claimed. Its card step wants someone
+                        else about: run it in a town
     --sim <bots>        Run the economy sim: this many bots, each with a role
                         (gatherer, crafter or builder), gather, craft and build
                         for --hours game hours, then write a report to --out.
@@ -119,6 +130,7 @@ struct Options {
     makers: usize,
     market: Option<MakerConfig>,
     fund: bool,
+    tutorial: bool,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -148,6 +160,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         makers: 2,
         market: None,
         fund: false,
+        tutorial: false,
     };
     let mut maker = MakerConfig::default();
     let mut maker_tuned = false;
@@ -254,6 +267,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 options.fund = true;
                 maker_tuned = true;
             }
+            "--tutorial" => options.tutorial = true,
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
         }
@@ -267,6 +281,15 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         && (options.sim.is_some() || options.wander || options.gather.is_some() || options.trade.is_some())
     {
         return Err("--market is a bot of its own: not with --sim, --wander, --gather or --trade".into());
+    }
+    if options.tutorial
+        && (options.sim.is_some()
+            || options.market.is_some()
+            || options.wander
+            || options.gather.is_some()
+            || options.trade.is_some())
+    {
+        return Err("--tutorial walks the road on its own: not with --sim, --market, --wander, --gather or --trade".into());
     }
     if options.sim.is_some() {
         if options.api_key.is_some()
@@ -327,6 +350,9 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     if let Some(config) = &options.market {
         return make_market(&mut bot, config, options.fund, deadline);
     }
+    if options.tutorial {
+        return walk_the_road(bot, n, deadline);
+    }
     // These loops can start over, so they carry on through a dropped
     // connection or a server restart (C0.6).
     if let Some(name) = &options.trade {
@@ -341,6 +367,29 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
         println!("{}", bot.run_script()?);
         println!("{}: {}", bot.name(), bot.net_stats());
         Ok(())
+    }
+}
+
+/// The road in, walked as a fiber gatherer would, living where its seed
+/// says (#450): the steps it did, and whether it claimed its deed.
+fn walk_the_road(bot: Bot, n: usize, deadline: Option<Instant>) -> Result<(), BotError> {
+    let name = bot.name().to_string();
+    let seed = name.bytes().fold(n as u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64));
+    let progress = sim::walk_the_road(bot, Role::Gatherer(Gather::Fiber), seed, deadline)?;
+    let done = progress.done.iter().count();
+    let of = tutorial::Step::ALL.len();
+    let claimed = progress.done.has(tutorial::Step::ClaimHome) && progress.grant == tutorial::Grant::Spent;
+    println!(
+        "{name}: {done} of {of} steps of the road in; {}",
+        if claimed { "its deed is claimed" } else { "its deed isn't claimed" }
+    );
+    if let Some(step) = progress.done.current() {
+        println!("{name}: still to do: {}", sim::road_in::does(step));
+    }
+    if claimed {
+        Ok(())
+    } else {
+        Err(BotError::Failed("the road in ended without a claim".into()))
     }
 }
 

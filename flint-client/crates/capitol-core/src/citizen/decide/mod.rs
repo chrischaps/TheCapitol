@@ -216,6 +216,10 @@ pub enum Question {
     /// Whether to ask a citizen nearby to trade, and what for, while it
     /// lingers among others (#295, [`meet::ask`](crate::citizen::meet::ask)).
     Ask,
+    /// Whether to take the road in's next step now, `step` by its name on
+    /// the wire, or go on with its errand (#450): the tutorial, walked by
+    /// the rules, whose end earns a deed (road-in plan D3).
+    Road { step: String },
 }
 
 impl Question {
@@ -230,6 +234,7 @@ impl Question {
             Question::FreeTime => "free time".into(),
             Question::Market => "market".into(),
             Question::Ask => "ask".into(),
+            Question::Road { .. } => "road".into(),
         }
     }
 }
@@ -350,6 +355,10 @@ pub enum Choice {
         item: String,
         quantity: Span<i32>,
     },
+    /// Take the road in's next step (#450): `step` by its name on the wire,
+    /// in `chapter`, by its name too, and what taking it is, in a few
+    /// words (`twist a rope`).
+    Road { step: String, chapter: String, does: String },
 }
 
 impl Choice {

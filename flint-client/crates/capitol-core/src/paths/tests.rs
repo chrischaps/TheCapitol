@@ -397,3 +397,23 @@ fn walks_go_round_the_ponds_of_the_rural_ring() {
 }
 
 
+
+/// A citizen walking the road in (#450) finds the stops the client rings
+/// (#445): the same rule over the same `/terrain`, with only the lots near
+/// the road kept, and a stop on the road it can walk to from the spawn.
+#[test]
+fn the_road_ins_stops_are_the_clients() {
+    let (terrain, graph) = world();
+    for zone in stops::STOP_ZONES {
+        let whole = stops::stop(&terrain.terrain_plots, &Frame::TABLE, zone, |_| false);
+        let found = graph.road_stop(zone, |_| false);
+        assert_eq!(found.as_ref().map(|s| s.lot.as_str()), whole.map(|s| s.lot.id.as_str()), "{zone}");
+        let stop = found.unwrap_or_else(|| panic!("the fixture world has no {zone} stop"));
+        assert!(!stop.taken);
+        // Taken, the stop moves to the next lot as the client's does
+        let taken = graph.road_stop(zone, |id| id == stop.lot);
+        let whole = stops::stop(&terrain.terrain_plots, &Frame::TABLE, zone, |id| id == stop.lot);
+        assert_eq!(taken.map(|s| s.lot), whole.map(|s| s.lot.id.clone()), "{zone}, taken");
+        assert!(graph.route((SPAWN_X, SPAWN_Y), stop.road).is_some(), "no way to the {zone} stop");
+    }
+}

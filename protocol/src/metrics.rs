@@ -617,6 +617,46 @@ pub struct CitizenReport {
     /// keeps the last it was sent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<DecisionBrief>,
+    /// Where it is on the road in (#450), once it has signed in and heard
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub road_in: Option<RoadInReport>,
+}
+
+/// Where a citizen is on the road in (#450), briefly: the console's
+/// roster shows it, and `capitol-town road-in` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct RoadInReport {
+    /// Steps done
+    pub done: u32,
+    /// Steps on the road, all told (`tutorial::Step::ALL`)
+    pub of: u32,
+    /// The first step not done, by its name on the wire, and its chapter's;
+    /// none once the road is walked to its end
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter: Option<String>,
+    /// Its deed: `unearned`, `open` or `spent`
+    pub grant: crate::tutorial::Grant,
+}
+
+impl RoadInReport {
+    /// From a player's progress on the road in.
+    pub fn of(progress: &crate::tutorial::TutorialProgress) -> RoadInReport {
+        let next = progress.done.current();
+        RoadInReport {
+            done: progress.done.iter().count() as u32,
+            of: crate::tutorial::Step::ALL.len() as u32,
+            next: next.map(|s| s.name().to_string()),
+            chapter: next.map(|s| s.chapter().name().to_string()),
+            grant: progress.grant,
+        }
+    }
+
+    pub fn finished(&self) -> bool {
+        self.done >= self.of
+    }
 }
 
 /// One decision, as the console's drill-down shows it: the question, the

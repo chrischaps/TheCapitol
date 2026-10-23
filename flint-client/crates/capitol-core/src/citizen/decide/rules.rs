@@ -39,6 +39,11 @@
 //! to buy, the more readily the more sociable (a thrifty buyer a little
 //! less), against resting where it is. It asks for what it would bid for at
 //! the books, and offers all it holds.
+//!
+//! The road in (#450): its next step is worth more than anything a citizen
+//! was doing ([`ROAD`]), since at its end is a deed, its home if it has
+//! none. On the road's question everything else is putting it off, and
+//! worth [`PUT_OFF`] of what it would be, so the rules settle it clearly.
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Verdict};
 use crate::sim::{BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
@@ -54,6 +59,10 @@ const CLEAR: f64 = 0.2;
 const FAIRNESS: (f64, f64) = (0.0, 1.2);
 /// How far a whim moves a place's appeal (C2.1).
 const WHIM: f64 = 0.12;
+/// What the road in's next step is worth (#450).
+const ROAD: f64 = 1.0;
+/// What anything else on the road's menu is worth, of what it would be.
+const PUT_OFF: f64 = 0.6;
 
 /// The rules layer. It keeps no state: the same situation gets the same
 /// answer, which is what lets C3.1 replay a log exactly.
@@ -173,7 +182,11 @@ impl Decider for RulesDecider {
                     };
                     (0.65 + 0.25 * t.sociability as f64, d)
                 }
+                Choice::Road { .. } => (ROAD, Decision::plain(i)),
             };
+            // On the road's question, anything else puts the road off (#450)
+            let road = matches!(s.question, Question::Road { .. }) && !matches!(choice, Choice::Road { .. });
+            let u = if road { u * PUT_OFF } else { u };
             scored.push((i, u, d));
         }
         pick(scored)
@@ -371,6 +384,27 @@ mod tests {
         let mut t = Temperament::default();
         f(&mut t);
         t
+    }
+
+    #[test]
+    fn the_road_ins_next_step_is_taken_clearly_over_the_errand() {
+        let road = Choice::Road {
+            step: "twist_rope".into(),
+            chapter: "arrival".into(),
+            does: "twist a rope".into(),
+        };
+        let question = Question::Road { step: "twist_rope".into() };
+        for t in [Temperament::default(), with(|t| t.patience = 1.0), with(|t| t.sociability = 1.0)] {
+            for other in [work(1).remove(0), Choice::Rest, Choice::Bank] {
+                let (d, confidence) = decide(&situation(question.clone(), vec![other.clone(), road.clone()], t));
+                assert_eq!(d, Decision::plain(1), "{other:?}");
+                // Sure enough that the rules settle it, under Jev's 0.9
+                assert!(confidence >= 0.9, "{other:?}: {confidence}");
+            }
+        }
+        // On any other question the road's entries change nothing else
+        let (d, _) = decide(&situation(Question::FreeTime, vec![Choice::Rest, Choice::Hall], Temperament::default()));
+        assert_eq!(d, Decision::plain(0));
     }
 
     #[test]

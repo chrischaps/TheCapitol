@@ -2124,9 +2124,29 @@
     phase: (c) => c.phase ?? "~",
     strands: (c) => c.strands ?? -Infinity,
     activity: (c) => c.activity.toLowerCase(),
+    // Furthest along the road in last, a claimed deed counting past the steps
+    road: (c) => (c.road_in ? c.road_in.done + (c.road_in.grant === "spent" ? 0.5 : 0) : -1),
     // Sorted up, the newest failure comes first
     failure: (c) => -(c.failure?.at_ms ?? -Infinity),
   };
+
+  const ROAD_CHAPTERS = {
+    arrival: "Arrival",
+    road_in: "The road in",
+    hall: "The hall",
+    people: "People",
+    deeds_office: "The Deeds Office",
+    settle_in: "Settle in",
+  };
+
+  /** Where a citizen is on the road in (#450), in a few words */
+  function roadIn(r) {
+    if (!r) return "–";
+    const deed = r.grant === "spent" ? "deed claimed" : r.grant === "open" ? "deed earned" : null;
+    if (r.done >= r.of) return deed ? `walked, ${deed}` : "walked";
+    const at = `${ROAD_CHAPTERS[r.chapter] ?? r.chapter ?? "on the road"}, ${r.done} of ${r.of}`;
+    return deed ? `${at}, ${deed}` : at;
+  }
   const ROSTER_SHOW = {
     all: () => true,
     on: (c) => ON.has(c.standing),
@@ -2151,7 +2171,7 @@
         ? `This server has made ${plural(made.length, "citizen", "citizens")}, but no town has reported in, so there's no more to say of them yet.`
         : "This server has made no citizens.";
       $("roster-dek").textContent = "Every citizen this server has made, oldest first. Their trades and days come with the town's first report.";
-      return void body.replaceChildren(...(made.length ? made.map(madeRow) : [emptyRow(7, "No citizens yet. scripts/town.sh up makes a town of them.")]));
+      return void body.replaceChildren(...(made.length ? made.map(madeRow) : [emptyRow(8, "No citizens yet. scripts/town.sh up makes a town of them.")]));
     }
     $("roster-dek").textContent = `Every citizen on the town's roster, as its report of ${clockSecs(t.report.at_ms)} has them. Click a heading to sort, or a name for that citizen's page.`;
     const find = townView.find.trim().toLowerCase();
@@ -2165,7 +2185,7 @@
         return (townView.desc ? -by : by) || a.name.localeCompare(b.name);
       });
     const shown = townView.every ? rows : rows.slice(0, ROSTER_ROWS);
-    body.replaceChildren(...(rows.length ? shown.map(rosterRow) : [emptyRow(7, "No citizen on the roster matches.")]));
+    body.replaceChildren(...(rows.length ? shown.map(rosterRow) : [emptyRow(8, "No citizen on the roster matches.")]));
     if (shown.length < rows.length) body.append(moreRow(rows.length));
     const n = t.report.citizens.length;
     let line = rows.length === n
@@ -2175,6 +2195,12 @@
     if (failed) line += ` For ${plural(failed, "of them", "of them")}, something went wrong in ${window_()}.`;
     const richest = t.report.citizens.filter((c) => c.strands != null).sort((a, b) => b.strands - a.strands)[0];
     if (richest) line += ` The richest is ${richest.name}, ${one(richest.role)}, with ${plural(richest.strands, "Strand", "Strands")}.`;
+    const roads = t.report.citizens.filter((c) => c.road_in);
+    if (roads.length) {
+      const deeds = roads.filter((c) => c.road_in.grant === "spent").length;
+      const walking = roads.filter((c) => c.road_in.grant !== "spent").length;
+      line += ` ${plural(deeds, "citizen has", "citizens have")} walked the road in to the deed it earns, and ${nf.format(walking)} ${walking === 1 ? "walks" : "walk"} it still.`;
+    }
     h.textContent = line;
   }
 
@@ -2192,6 +2218,7 @@
       cell(c.phase ?? "–", "dim"),
       cell(c.strands == null ? "–" : nf.format(c.strands), "num"),
       cell(c.activity),
+      cell(roadIn(c.road_in), c.road_in ? "" : "dim"),
       cell(failure, c.failure ? "failure" : "dim"),
     );
     return tr;
@@ -2206,7 +2233,7 @@
     b.className = "quiet";
     b.addEventListener("click", () => { townView.every = true; rosterTable(); });
     const td = cell([`The first ${nf.format(ROSTER_ROWS)} of ${nf.format(n)}. `, b]);
-    td.colSpan = 7;
+    td.colSpan = 8;
     tr.append(td);
     return tr;
   }
@@ -2221,6 +2248,7 @@
       cell("–", "dim"),
       cell("–", "num dim"),
       cell(c.key?.last_used_at ? `signed in ${ago(Date.parse(c.key.last_used_at))}` : "–", "dim"),
+      cell("–", "dim"),
       cell("–", "dim"),
     );
     return tr;

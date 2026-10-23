@@ -343,6 +343,10 @@ pub fn question(q: &Question) -> String {
         Question::FreeTime => "What should you do with your free time?".into(),
         Question::Market => "Should you make a market at the hall with your float now, or go on earning it?".into(),
         Question::Ask => "Should you ask one of the citizens near you to trade, or leave them be?".into(),
+        Question::Road { .. } => "You're walking the road in, the city's welcome to a newcomer, and at its end the \
+                                  Deeds Office gives you a deed to a lot of your choosing. Should you take its next \
+                                  step now, or go on with what you were doing?"
+            .into(),
     }
 }
 
@@ -372,6 +376,7 @@ pub fn label(c: &Choice) -> String {
         Choice::MakeMarket { .. } => "make a market".into(),
         Choice::BuyFrom { partner, item, .. } => format!("buy {item} from {partner}"),
         Choice::SellTo { partner, item, .. } => format!("sell {item} to {partner}"),
+        Choice::Road { .. } => "the road in".into(),
     }
 }
 
@@ -461,6 +466,7 @@ pub fn entry(c: &Choice) -> String {
             "Ask {partner}, whose trade needs {item}, to buy some of yours: lay out {} of them and see what they pay",
             count(quantity)
         ),
+        Choice::Road { does, .. } => format!("Take the road in's next step: {does}"),
     }
 }
 
