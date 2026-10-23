@@ -177,7 +177,22 @@ fn a_gazette_round_trips_with_every_section() {
     assert_eq!(edition.number, capitol_protocol::rules::gazette_number(edition.day));
     assert!(!edition.movers.is_empty() && !edition.prices.is_empty() && !edition.deeds.is_empty());
     assert!(edition.best_sale.is_some() && !edition.producers.is_empty());
+    // The hall's board (S2.4)
+    let wanted = edition.wanted.as_ref().unwrap();
+    assert!(!wanted.story.is_empty() && !wanted.wanted.is_empty() && wanted.came_through.is_some());
     assert_eq!(serde_json::to_string(&response).unwrap(), json);
+}
+
+/// An edition kept from before commissions has no `wanted`, and still reads
+/// as it was printed (S2.4)
+#[test]
+fn a_gazette_from_before_the_board_still_reads() {
+    let mut old: serde_json::Value = serde_json::from_str(&fixture("gazette.json")).unwrap();
+    old["edition"].as_object_mut().unwrap().remove("wanted");
+    let json = old.to_string();
+    let response: GazetteResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(response.edition.as_ref().unwrap().wanted, None);
+    assert_eq!(serde_json::to_value(&response).unwrap(), old);
 }
 
 #[test]

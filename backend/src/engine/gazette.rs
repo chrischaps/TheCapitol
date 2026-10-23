@@ -18,6 +18,10 @@
 //!   `bazaar::buy`, #240): counts and the busiest shops, never a price,
 //!   since the bazaar keeps its prices between buyer and seller (D6). Its
 //!   Strands count in the day's selling (`GazetteShares::sold`).
+//! - the hall's board (commons S2.4): what was still wanted at the day's
+//!   end, what was posted, filled and expired, each delivery
+//!   (`commission_deliveries`, written by `commissions::deliver`), and the
+//!   claims kept and lapsed. A lapse is only ever counted, never named.
 //!
 //! [`compose`] turns them into the edition. It's pure: the headlines come from
 //! templates picked by a hash of the day, never an LLM, so a day always reads
@@ -38,8 +42,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use capitol_protocol::rest::{
-    Gazette, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteSale, GazetteShares,
-    GazetteShop, GazetteStalls,
+    Gazette, GazetteDeeds, GazetteDelivery, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteSale,
+    GazetteShares, GazetteShop, GazetteStalls, GazetteWant, GazetteWanted,
 };
 use capitol_protocol::annotation::AnnotationKind;
 use capitol_protocol::rules::{self, Zone};
@@ -57,12 +61,19 @@ const PRODUCERS: usize = 5;
 const MADE: usize = 6;
 /// How many of the bazaar's busiest shops an edition lists
 const SHOPS: usize = 3;
+/// How many of the board's wants, and of what went begging, an edition lists
+const WANTS: usize = 5;
+const BEGGING: usize = 3;
 /// A change in price this big (in percent, either way) makes the front page
 const FRONT_PAGE_MOVE: i64 = 15;
 
 /// How the Gazette refers to someone who keeps their name out of it
 const UNNAMED: &str = "a trader who keeps out of the papers";
 const UNNAMED_CITIZEN: &str = "a citizen who keeps out of the papers";
+/// How the Wanted column refers to a poster or deliverer who keeps their
+/// name out of it (S2.4)
+const RESIDENT: &str = "a resident";
+const RESIDENT_CITIZEN: &str = "a citizen";
 
 /// How the Gazette names someone in its prose: "Ada", "Citizen Cy", or one of
 /// the unnamed, a citizen still marked as one
@@ -72,6 +83,16 @@ fn name_of(name: Option<&str>, citizen: bool) -> String {
         (Some(name), true) => format!("Citizen {name}"),
         (None, false) => UNNAMED.to_string(),
         (None, true) => UNNAMED_CITIZEN.to_string(),
+    }
+}
+
+/// How the Wanted column names a poster or deliverer: by name with their
+/// leave, otherwise "a resident" (or "a citizen", still marked as one)
+fn resident_of(name: Option<&str>, citizen: bool) -> String {
+    match (name, citizen) {
+        (Some(_), _) => name_of(name, citizen),
+        (None, false) => RESIDENT.to_string(),
+        (None, true) => RESIDENT_CITIZEN.to_string(),
     }
 }
 
@@ -236,6 +257,40 @@ pub struct DayRecords {
     pub stalls: Vec<StallTrade>,
     /// Who settled with the road in's deed (#448), in the order they did
     pub settlers: Vec<Settler>,
+    /// The day on the hall's board (S2.4)
+    pub board: Board,
+}
+
+/// The day on the hall's board (commons S2.4), before it's ranked
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Board {
+    /// Each commission still open at the day's end, with what it still wanted
+    pub open: Vec<Asked>,
+    /// Each commission that expired today, with what it never got
+    pub expired: Vec<Asked>,
+    /// The day's deliveries, in the order they were made
+    pub deliveries: Vec<GazetteDelivery>,
+    /// Commissions posted and filled today
+    pub posted: i64,
+    pub filled: i64,
+    /// Claims that ended today kept, and lapsed
+    pub kept: i64,
+    pub lapsed: i64,
+}
+
+impl Board {
+    fn is_empty(&self) -> bool {
+        *self == Board::default()
+    }
+}
+
+/// One commission's ask: `units` of an item at `price` each
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Asked {
+    pub item_type: String,
+    pub item_name: String,
+    pub units: i64,
+    pub price: i64,
 }
 
 /// Someone who claimed a home with the deed the road in earned (#448)
@@ -412,8 +467,11 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     .fetch_all(db)
     .await?;
 
+    let board = gather_board(db, (start, end)).await?;
+
     Ok(DayRecords {
         day,
+        board,
         prices,
         trades,
         strands,
@@ -457,6 +515,152 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
             })
             .collect(),
     })
+}
+
+/// Read the hall's board for the day `start..end` (S2.4).
+async fn gather_board(db: &PgPool, (start, end): (DateTime<Utc>, DateTime<Utc>)) -> Result<Board, sqlx::Error> {
+    let asked = |(item_type, item_name, units, price): (String, Option<String>, i64, i64)| Asked {
+        item_name: item_name.unwrap_or_else(|| item_type.clone()),
+        item_type,
+        units,
+        price,
+    };
+    // Open at the day's end: posted before it and not closed by it. What it
+    // still wanted then is what it wants now and what was delivered since.
+    let open: Vec<(String, Option<String>, i64, i64)> = sqlx::query_as(
+        "SELECT c.item_type, it.name,
+                (c.quantity - c.delivered + COALESCE((SELECT SUM(d.quantity) FROM commission_deliveries d
+                                                      WHERE d.commission_id = c.id AND d.at >= $1), 0))::BIGINT,
+                c.price_per_unit
+         FROM commissions c LEFT JOIN item_types it ON it.id = c.item_type
+         WHERE c.posted_at < $1 AND (c.closed_at IS NULL OR c.closed_at >= $1) AND NOT c.withdrawn
+         ORDER BY c.posted_at, c.id",
+    )
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+    let expired: Vec<(String, Option<String>, i64, i64)> = sqlx::query_as(
+        "SELECT c.item_type, it.name, (c.quantity - c.delivered)::BIGINT, c.price_per_unit
+         FROM commissions c LEFT JOIN item_types it ON it.id = c.item_type
+         WHERE c.status = 'expired' AND c.closed_at >= $1 AND c.closed_at < $2
+         ORDER BY c.closed_at, c.id",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+    let (posted, filled): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE posted_at >= $1 AND posted_at < $2),
+                COUNT(*) FILTER (WHERE status = 'filled' AND closed_at >= $1 AND closed_at < $2)
+         FROM commissions",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await?;
+    let (kept, lapsed): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE status = 'kept'), COUNT(*) FILTER (WHERE status = 'lapsed')
+         FROM commission_claims WHERE ended_at >= $1 AND ended_at < $2",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await?;
+    type DeliveryRow = (String, bool, bool, String, bool, bool, String, Option<String>, i32, i64);
+    let deliveries: Vec<DeliveryRow> = sqlx::query_as(
+        "SELECT dp.name, dp.gazette_named, COALESCE(da.kind = 'citizen', FALSE),
+                pp.name, pp.gazette_named, COALESCE(pa.kind = 'citizen', FALSE),
+                c.item_type, it.name, d.quantity, d.paid
+         FROM commission_deliveries d
+         JOIN commissions c ON c.id = d.commission_id
+         JOIN players dp ON dp.id = d.deliverer_id
+         LEFT JOIN accounts da ON da.id = dp.account_id
+         JOIN players pp ON pp.id = c.poster_id
+         LEFT JOIN accounts pa ON pa.id = pp.account_id
+         LEFT JOIN item_types it ON it.id = c.item_type
+         WHERE d.at >= $1 AND d.at < $2
+         ORDER BY d.at, d.id",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+    Ok(Board {
+        open: open.into_iter().map(asked).filter(|a| a.units > 0).collect(),
+        expired: expired.into_iter().map(asked).filter(|a| a.units > 0).collect(),
+        deliveries: deliveries
+            .into_iter()
+            .map(|(deliverer, d_named, d_citizen, poster, p_named, p_citizen, item_type, item_name, units, paid)| {
+                GazetteDelivery {
+                    deliverer: d_named.then_some(deliverer),
+                    deliverer_citizen: d_citizen,
+                    poster: p_named.then_some(poster),
+                    poster_citizen: p_citizen,
+                    item_name: item_name.unwrap_or_else(|| item_type.clone()),
+                    item_type,
+                    units: units as i64,
+                    paid,
+                }
+            })
+            .collect(),
+        posted,
+        filled,
+        kept,
+        lapsed,
+    })
+}
+
+/// Asks by item: the most Strands down first, then by name
+fn wants(asked: &[Asked]) -> Vec<GazetteWant> {
+    let mut by_item: BTreeMap<&str, GazetteWant> = BTreeMap::new();
+    for a in asked.iter().filter(|a| a.units > 0) {
+        let w = by_item.entry(&a.item_type).or_insert_with(|| GazetteWant {
+            item_type: a.item_type.clone(),
+            item_name: a.item_name.clone(),
+            ..Default::default()
+        });
+        w.commissions += 1;
+        w.units += a.units;
+        w.value += a.units * a.price;
+        w.best_price = w.best_price.max(a.price);
+    }
+    let mut wants: Vec<GazetteWant> = by_item.into_values().collect();
+    wants.sort_by(|a, b| b.value.cmp(&a.value).then_with(|| a.item_name.cmp(&b.item_name)));
+    wants
+}
+
+/// The Wanted column, or `None` on a day with nothing on the board or done
+/// with there
+pub fn wanted(board: &Board, day: i64) -> Option<GazetteWanted> {
+    if board.is_empty() {
+        return None;
+    }
+    let mut wanted = wants(&board.open);
+    wanted.truncate(WANTS);
+    let mut gone_begging = wants(&board.expired);
+    gone_begging.truncate(BEGGING);
+    // The most paid, then the most units, and of equals the first made
+    let came_through = board
+        .deliveries
+        .iter()
+        .enumerate()
+        .max_by(|(i, a), (j, b)| a.paid.cmp(&b.paid).then_with(|| a.units.cmp(&b.units)).then_with(|| j.cmp(i)))
+        .map(|(_, d)| d.clone());
+    let mut column = GazetteWanted {
+        story: String::new(),
+        wanted,
+        came_through,
+        gone_begging,
+        posted: board.posted,
+        filled: board.filled,
+        expired: board.expired.len() as i64,
+        deliveries: board.deliveries.len() as i64,
+        paid: board.deliveries.iter().map(|d| d.paid).sum(),
+        kept: board.kept,
+        lapsed: board.lapsed,
+    };
+    column.story = Pen { day }.wanted(&column);
+    Some(column)
 }
 
 /// The day's movers: items that traded both days, by the size of their
@@ -607,6 +811,7 @@ pub fn compose(records: &DayRecords) -> Gazette {
     let made = made(&records.work);
     let shares = shares(records);
     let stalls = stalls(&records.stalls);
+    let wanted = wanted(&records.board, day);
     let deeds: Vec<GazetteDeeds> = deeds_by_zone(&records.deeds);
     let claimed: i64 = deeds.iter().map(|d| d.claimed).sum();
     let foreclosed: i64 = deeds.iter().map(|d| d.foreclosed).sum();
@@ -668,6 +873,7 @@ pub fn compose(records: &DayRecords) -> Gazette {
         shares,
         stalls,
         stalls_story,
+        wanted,
     }
 }
 
@@ -981,6 +1187,91 @@ impl Pen {
         if producers.len() > 1 {
             let rest: i64 = producers[1..].iter().map(|p| p.units).sum();
             text.push_str(&format!(" The next {} made {} between them.", count_word(producers.len() as i64 - 1, false), thousands(rest)));
+        }
+        text
+    }
+
+    /// The Wanted column's prose (S2.4): what the board still wants, who
+    /// came through, the claims kept, and what went begging. Lapses are
+    /// counted, never named.
+    fn wanted(&self, w: &GazetteWanted) -> String {
+        let mut text = match w.wanted.first() {
+            Some(top) => {
+                let mut text = self
+                    .pick(26, &[
+                        "The board in the hall still wants {units} {item}, at up to {price} Strands a unit, with {value} Strands down for it.",
+                        "Most wanted on the hall's board tonight: {units} {item}, {value} Strands put down for it, up to {price} a unit.",
+                    ])
+                    .replace("{units}", &thousands(top.units))
+                    .replace("{item}", &top.item_name)
+                    .replace("{price}", &thousands(top.best_price))
+                    .replace("{value}", &thousands(top.value));
+                let also: Vec<String> =
+                    w.wanted[1..].iter().take(2).map(|a| format!("{} {}", thousands(a.units), a.item_name)).collect();
+                if !also.is_empty() {
+                    text.push_str(&format!(" Also wanted: {}.", also.join(" and ")));
+                }
+                text
+            }
+            None => self
+                .pick(26, &[
+                    "Nothing stands wanted on the hall's board tonight.",
+                    "The hall's board is bare tonight: whatever was asked for has been brought or taken down.",
+                ])
+                .to_string(),
+        };
+        match (w.posted, w.filled) {
+            (0, 0) => {}
+            (p, 0) => text.push_str(&format!(" {} went up today.", capitalise(&plural(p, "commission", "commissions")))),
+            (0, f) => text.push_str(&format!(" {} filled today.", capitalise(&plural(f, "commission was", "commissions were")))),
+            (p, f) => text.push_str(&format!(
+                " {} went up today, and {} filled.",
+                capitalise(&plural(p, "commission", "commissions")),
+                count_word(f, false)
+            )),
+        }
+        if let Some(d) = &w.came_through {
+            let who = resident_of(d.deliverer.as_deref(), d.deliverer_citizen);
+            let line = self
+                .pick(27, &[
+                    " {Who} came through for {whom} with {units} {item}, and was paid {paid} Strands from the court's escrow.",
+                    " The day's biggest delivery: {units} {item}, brought by {who} for {whom}, {paid} Strands paid on the spot.",
+                ])
+                .replace("{Who}", &capitalise(&who))
+                .replace("{who}", &who)
+                .replace("{whom}", &resident_of(d.poster.as_deref(), d.poster_citizen))
+                .replace("{units}", &thousands(d.units))
+                .replace("{item}", &d.item_name)
+                .replace("{paid}", &thousands(d.paid));
+            text.push_str(&line);
+            if w.deliveries > 1 {
+                text.push_str(&format!(
+                    " In all, {} paid {} Strands.",
+                    plural(w.deliveries, "delivery", "deliveries"),
+                    thousands(w.paid)
+                ));
+            }
+        }
+        match (w.kept, w.lapsed) {
+            (0, 0) => {}
+            (k, 0) => text.push_str(&format!(" {} kept, every one delivered in time.", capitalise(&plural(k, "claim was", "claims were")))),
+            (0, l) => text.push_str(&format!(" {} ran out undelivered.", capitalise(&plural(l, "claim", "claims")))),
+            (k, l) => text.push_str(&format!(
+                " {} kept, and {} ran out.",
+                capitalise(&plural(k, "claim was", "claims were")),
+                count_word(l, false)
+            )),
+        }
+        if let Some(begging) = w.gone_begging.first() {
+            let line = self
+                .pick(28, &[
+                    " Gone begging: {units} {item} at {price} a unit, unfilled when its time ran out. Whoever makes it may find buyers waiting.",
+                    " Nobody brought {units} {item}, though {price} Strands a unit was on offer, and the commission ran out. There's a want there for whoever can fill it.",
+                ])
+                .replace("{units}", &thousands(begging.units))
+                .replace("{item}", &begging.item_name)
+                .replace("{price}", &thousands(begging.best_price));
+            text.push_str(&line);
         }
         text
     }
@@ -1309,6 +1600,42 @@ mod tests {
             ],
             // The fixture's day predates the road in's deed (#448)
             settlers: Vec::new(),
+            board: busy_board(),
+        }
+    }
+
+    fn asked(item: &str, units: i64, price: i64) -> Asked {
+        Asked { item_type: item.to_lowercase(), item_name: item.into(), units, price }
+    }
+
+    /// `deliverer` brought `units` of `item` for `poster`, paid `paid`
+    fn delivery(deliverer: Option<&str>, poster: Option<&str>, item: &str, units: i64, paid: i64) -> GazetteDelivery {
+        GazetteDelivery {
+            deliverer: deliverer.map(Into::into),
+            poster: poster.map(Into::into),
+            item_type: item.to_lowercase(),
+            item_name: item.into(),
+            units,
+            paid,
+            ..Default::default()
+        }
+    }
+
+    /// A day on the board: planks and rope wanted, Ada's delivery for a poster
+    /// who keeps out of the papers the biggest, Citizen Cy's for Ada, iron
+    /// ingots gone begging, and claims kept and lapsed
+    fn busy_board() -> Board {
+        Board {
+            open: vec![asked("Rope", 12, 6), asked("Plank", 10, 15), asked("Plank", 5, 20)],
+            expired: vec![asked("Iron Ingot", 4, 60)],
+            deliveries: vec![
+                delivery(Some("Ada"), None, "Rope", 8, 48),
+                GazetteDelivery { deliverer_citizen: true, ..delivery(Some("Cy"), Some("Ada"), "Plank", 3, 45) },
+            ],
+            posted: 3,
+            filled: 1,
+            kept: 2,
+            lapsed: 1,
         }
     }
 
@@ -1407,6 +1734,74 @@ mod tests {
         let crowd = DayRecords { settlers: vec![records.settlers[0].clone(); 6], ..records.clone() };
         assert!(compose(&crowd).deeds_story.ends_with("; and two more."), "{}", compose(&crowd).deeds_story);
         assert!(!compose(&DayRecords { day: DAY, ..Default::default() }).deeds_story.contains("Settled"));
+    }
+
+    /// The hall's board makes a column (S2.4): what's wanted by the Strands
+    /// down for it, the biggest delivery, what went begging and the claims
+    /// kept, with every template's holes filled
+    #[test]
+    fn the_board_makes_the_wanted_column() {
+        let w = compose(&busy_day()).wanted.expect("a day with commissions");
+        let wanted: Vec<(&str, i64, i64, i64, i64)> =
+            w.wanted.iter().map(|a| (a.item_name.as_str(), a.commissions, a.units, a.value, a.best_price)).collect();
+        assert_eq!(wanted, [("Plank", 2, 15, 250, 20), ("Rope", 1, 12, 72, 6)]);
+        assert_eq!(w.came_through, Some(delivery(Some("Ada"), None, "Rope", 8, 48)));
+        assert_eq!(w.gone_begging.iter().map(|a| (a.item_name.as_str(), a.units)).collect::<Vec<_>>(), [("Iron Ingot", 4)]);
+        assert_eq!((w.posted, w.filled, w.expired, w.deliveries, w.paid, w.kept, w.lapsed), (3, 1, 1, 2, 93, 2, 1));
+        for day in DAY..DAY + 8 {
+            let w = compose(&DayRecords { day, ..busy_day() }).wanted.unwrap();
+            assert!(!w.story.contains('{'), "{}", w.story);
+            for told in ["15 Plank", "250 Strands", "Also wanted: 12 Rope.", "Three commissions went up today, and one filled."] {
+                assert!(w.story.contains(told), "{told}: {}", w.story);
+            }
+            assert!(w.story.contains("Ada came through for a resident") || w.story.contains("brought by Ada for a resident"), "{}", w.story);
+            assert!(w.story.contains(" In all, two deliveries paid 93 Strands."), "{}", w.story);
+            assert!(w.story.contains(" Two claims were kept, and one ran out."), "{}", w.story);
+            assert!(w.story.contains("4 Iron Ingot") && w.story.contains("60"), "{}", w.story);
+        }
+    }
+
+    /// A day nothing stood on the board or was done there has no column, as
+    /// editions from before commissions had none
+    #[test]
+    fn a_day_without_commissions_has_no_wanted_column() {
+        assert_eq!(compose(&DayRecords { day: DAY, ..Default::default() }).wanted, None);
+        assert_eq!(compose(&DayRecords { board: Board::default(), ..busy_day() }).wanted, None);
+        // A board that only emptied today still gets its column
+        let emptied = Board { deliveries: vec![delivery(Some("Ada"), Some("Bo"), "Rope", 4, 40)], filled: 1, ..Default::default() };
+        let w = compose(&DayRecords { day: DAY, board: emptied, ..Default::default() }).wanted.unwrap();
+        assert!(w.wanted.is_empty());
+        assert!(w.story.contains("board") && w.story.contains("One commission was filled today."), "{}", w.story);
+    }
+
+    /// A poster or deliverer who keeps out of the papers is "a resident", a
+    /// citizen still "a citizen"; their names are nowhere in the edition
+    #[test]
+    fn the_wanted_column_names_only_with_leave() {
+        let unnamed = |deliverer_citizen, poster_citizen| Board {
+            deliveries: vec![GazetteDelivery { deliverer_citizen, poster_citizen, ..delivery(None, None, "Rope", 4, 40) }],
+            ..Default::default()
+        };
+        for day in DAY..DAY + 8 {
+            let story = |board| compose(&DayRecords { day, board, ..Default::default() }).wanted.unwrap().story;
+            let s = story(unnamed(false, false));
+            assert!(s.contains("A resident came through for a resident") || s.contains("brought by a resident for a resident"), "{s}");
+            let s = story(unnamed(true, false));
+            assert!(s.contains("A citizen came through for a resident") || s.contains("brought by a citizen for a resident"), "{s}");
+            let s = story(Board { deliveries: vec![GazetteDelivery { deliverer_citizen: true, ..delivery(Some("Cy"), Some("Ada"), "Rope", 4, 40) }], ..Default::default() });
+            assert!(s.contains("Citizen Cy came through for Ada") || s.contains("brought by Citizen Cy for Ada"), "{s}");
+        }
+    }
+
+    /// A lapsed claim is counted, never named: the board's records carry no
+    /// claimant at all
+    #[test]
+    fn lapses_are_counted_never_named() {
+        let board = Board { open: vec![asked("Rope", 4, 10)], lapsed: 2, ..Default::default() };
+        let w = compose(&DayRecords { day: DAY, board, ..Default::default() }).wanted.unwrap();
+        assert_eq!((w.kept, w.lapsed), (0, 2));
+        assert!(w.story.ends_with(" Two claims ran out undelivered."), "{}", w.story);
+        assert_eq!(w.came_through, None);
     }
 
     #[test]
@@ -1828,6 +2223,70 @@ mod tests {
             assert!(!serde_json::to_string(&g).unwrap().contains("Bo's Bits"));
             // The bazaar was the day's only story
             assert!(g.lead.contains("bazaar"), "{}", g.lead);
+            assert_eq!(edition(&db, Some(day)).await.unwrap(), Some(g));
+        }
+
+        /// A day on the hall's board through the court itself (S2.4): a
+        /// commission filled with its claim kept, one half delivered by
+        /// someone who keeps out of the papers, a claim released too late,
+        /// and one expired. The edition counts each, names only with leave,
+        /// and never names the claimant who lapsed.
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn the_boards_day_makes_the_wanted_column(db: PgPool) {
+            use crate::engine::commissions;
+            use crate::engine::units::test_units::stack_of;
+            use capitol_protocol::rest::{ClaimCommission, DeliverCommission, PostCommission};
+            use capitol_protocol::rules::stacking::Units;
+            use chrono::Duration;
+
+            let ada = player(&db, "Ada", 10_000).await;
+            let bo = player(&db, "Bo", 0).await;
+            let cy = player(&db, "Cy", 0).await;
+            let zed = player(&db, "Zed", 0).await;
+            sqlx::query("UPDATE players SET gazette_named = FALSE WHERE id = $1").bind(cy.id).execute(&db).await.unwrap();
+            let day = rules::day_number(Utc::now().timestamp_millis()) - 1;
+            let at = |hour: i64| DateTime::<Utc>::from_timestamp_millis(rules::day_start_ms(day) + hour * 300_000).unwrap();
+            let ask = |item: &str, quantity, price, due_days| PostCommission {
+                item_type: item.into(),
+                min_quality: 0,
+                quantity,
+                price,
+                due_days,
+            };
+            let hand = |item_id, quantity| DeliverCommission { item_id, qualities: None, quantity: Some(quantity) };
+            let bo_rope = stack_of(&db, bo.id, bo.inventory, 0, "rope", &Units::uniform(10, 70)).await;
+            let cy_rope = stack_of(&db, cy.id, cy.inventory, 0, "rope", &Units::uniform(10, 70)).await;
+
+            // Filled, its claim kept
+            let filled = commissions::post(&db, ada.id, &ask("rope", 4, 10, 2), at(1)).await.unwrap();
+            commissions::claim(&db, bo.id, filled.id, &ClaimCommission { quantity: 4 }, at(1)).await.unwrap();
+            commissions::deliver(&db, bo.id, filled.id, &hand(bo_rope, 4), at(2)).await.unwrap();
+            // Half delivered by Cy, and one more the next day: 4 wanted at the end
+            let half = commissions::post(&db, ada.id, &ask("rope", 6, 20, 3), at(3)).await.unwrap();
+            commissions::deliver(&db, cy.id, half.id, &hand(cy_rope, 2), at(4)).await.unwrap();
+            commissions::deliver(&db, cy.id, half.id, &hand(cy_rope, 1), at(30)).await.unwrap();
+            // Zed's claim released in its last hour: a lapse
+            let early = at(10) - Duration::minutes(23 * 60 + 30);
+            let lapsing = commissions::post(&db, ada.id, &ask("fiber", 5, 3, 3), early).await.unwrap();
+            commissions::claim(&db, zed.id, lapsing.id, &ClaimCommission { quantity: 5 }, early).await.unwrap();
+            commissions::release(&db, zed.id, lapsing.id, at(10)).await.unwrap();
+            // Posted the day before, expired today with nothing brought
+            let begging = commissions::post(&db, ada.id, &ask("rope", 7, 9, 1), at(12) - Duration::days(1)).await.unwrap();
+            assert_eq!(commissions::expire_due(&db, begging.due_at).await.unwrap().len(), 1);
+
+            let g = publish(&db, day).await.unwrap().expect("a new edition");
+            let w = g.wanted.as_ref().expect("the board had a day");
+            assert_eq!((w.posted, w.filled, w.expired, w.deliveries, w.paid, w.kept, w.lapsed), (2, 1, 1, 2, 80, 1, 1));
+            let wanted: Vec<(&str, i64, i64)> = w.wanted.iter().map(|a| (a.item_type.as_str(), a.units, a.value)).collect();
+            assert_eq!(wanted, [("rope", 4, 80), ("fiber", 5, 15)]);
+            assert_eq!(w.gone_begging.iter().map(|a| (a.item_type.as_str(), a.units)).collect::<Vec<_>>(), [("rope", 7)]);
+            let came = w.came_through.as_ref().unwrap();
+            assert_eq!((came.deliverer.as_deref(), came.poster.as_deref(), came.units, came.paid), (Some("Bo"), Some("Ada"), 4, 40));
+            assert!(!w.story.contains('{'), "{}", w.story);
+            // Cy keeps out of the papers, and Zed's lapse is only counted
+            let json = serde_json::to_string(&g).unwrap();
+            assert!(!json.contains("Cy") && !json.contains("Zed"), "{json}");
             assert_eq!(edition(&db, Some(day)).await.unwrap(), Some(g));
         }
 

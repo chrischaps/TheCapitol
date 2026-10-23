@@ -391,15 +391,28 @@ pub async fn deliver(
     .map_err(CourtError::Funds)?;
     let filled = head.delivered + n == head.quantity;
     sqlx::query(
-        "UPDATE commissions SET delivered = delivered + $2, escrow_strands = escrow_strands - $3, status = $4
+        "UPDATE commissions SET delivered = delivered + $2, escrow_strands = escrow_strands - $3, status = $4,
+             closed_at = CASE WHEN $5 THEN $6 END
          WHERE id = $1",
     )
     .bind(commission_id)
     .bind(n)
     .bind(paid)
     .bind(if filled { CommissionStatus::Filled } else { CommissionStatus::Open }.as_str())
+    .bind(filled)
+    .bind(now)
     .execute(&mut *tx)
     .await?;
+    // The board's record, for the Gazette's Wanted column (S2.4)
+    sqlx::query("INSERT INTO commission_deliveries (id, commission_id, deliverer_id, quantity, paid, at) VALUES ($1, $2, $3, $4, $5, $6)")
+        .bind(Uuid::new_v4())
+        .bind(commission_id)
+        .bind(deliverer_id)
+        .bind(n)
+        .bind(paid)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
 
     // Against their own claim first: delivered in full, it's kept
     if let Some(own) = own {
@@ -530,9 +543,10 @@ async fn close(
         .await
         .map_err(CourtError::Funds)?;
     }
-    sqlx::query("UPDATE commissions SET status = $2, escrow_strands = 0 WHERE id = $1")
+    sqlx::query("UPDATE commissions SET status = $2, escrow_strands = 0, closed_at = $3 WHERE id = $1")
         .bind(commission_id)
         .bind(status.as_str())
+        .bind(now)
         .execute(&mut *conn)
         .await?;
     let commission = load(conn, commission_id).await?.ok_or(CourtError::NotFound)?;

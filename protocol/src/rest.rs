@@ -2328,6 +2328,76 @@ pub struct Gazette {
     /// Empty only in editions from before the Gazette counted the stalls
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stalls_story: String,
+    /// The hall's board (commons S2.4): what's wanted, who came through and
+    /// what went begging. `None` on a day with nothing on the board or done
+    /// with there, and in editions from before commissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wanted: Option<GazetteWanted>,
+}
+
+/// The Wanted column (commons S2.4): the day on the hall's board. Names are
+/// printed only with their holder's leave (`players.gazette_named`); a lapsed
+/// claim is never named, only counted.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteWanted {
+    /// The column's prose
+    pub story: String,
+    /// What the board still wanted at the day's end, by the Strands down for
+    /// it, the most first
+    pub wanted: Vec<GazetteWant>,
+    /// The day's largest delivery, by what it paid
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub came_through: Option<GazetteDelivery>,
+    /// What expired unfilled today, by the Strands it left on the table
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gone_begging: Vec<GazetteWant>,
+    /// Commissions posted, filled and expired today
+    pub posted: i64,
+    pub filled: i64,
+    pub expired: i64,
+    /// Deliveries made today, and the Strands they paid
+    pub deliveries: i64,
+    pub paid: i64,
+    /// Claims that ended today kept, and lapsed
+    pub kept: i64,
+    pub lapsed: i64,
+}
+
+/// One item on the board: the units asked for across its commissions, and
+/// what they pay
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteWant {
+    pub item_type: String,
+    pub item_name: String,
+    /// How many commissions ask for it
+    pub commissions: i64,
+    pub units: i64,
+    /// What those units would pay, in Strands
+    pub value: i64,
+    /// The best price a unit among them
+    pub best_price: i64,
+}
+
+/// A delivery to a commission, as the Gazette prints it
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteDelivery {
+    /// Who delivered, and for whom, each only with their leave
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverer: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deliverer_citizen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub poster_citizen: bool,
+    pub item_type: String,
+    pub item_name: String,
+    pub units: i64,
+    /// Strands paid for them out of the escrow
+    pub paid: i64,
 }
 
 /// A day's selling at the bazaar's stalls (#240). It has counts, not

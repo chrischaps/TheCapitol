@@ -5,7 +5,9 @@
 //! warm paper and dark ink (`theme::PAPER`, `theme::INK`), the masthead and
 //! headline in the inscriptional capitals, then three columns: the Exchange
 //! with its small price table, the finest sale and the land office, and the
-//! day's busiest hands. Narrower than a broadsheet, the columns stack.
+//! day's busiest hands. Under them, on a day the hall's board had any, runs
+//! Wanted at the Hall (S2.4): what's wanted pinned up as slips, who came
+//! through, and the claims kept. Narrower than a broadsheet, the columns stack.
 //!
 //! Its numbers are the edition's own, as the server composed it
 //! (`engine::gazette`). This only lays them out. A citizen's name in the
@@ -17,7 +19,7 @@
 use std::path::PathBuf;
 
 use capitol_core::gazette::Reader;
-use capitol_core::protocol::rest::{Gazette, GazettePrice};
+use capitol_core::protocol::rest::{Gazette, GazettePrice, GazetteWant, GazetteWanted};
 use capitol_core::protocol::rules;
 use egui::{Align, Align2, Color32, Id, Layout, Margin, RichText, Sense, Stroke};
 use flint_runtime::PersistentStore;
@@ -200,6 +202,14 @@ fn page(ui: &mut egui::Ui, view: &View, open: &mut bool, height: f32) -> Option<
                 sale_and_land(ui, g);
                 ui.add_space(10.0);
                 hands(ui, g, &mut action);
+            }
+            // An edition from before commissions, or a day the board was
+            // idle, has no column
+            if let Some(w) = &g.wanted {
+                ui.add_space(10.0);
+                rule(ui, 1.0);
+                ui.add_space(6.0);
+                board(ui, w, &mut action);
             }
             ui.add_space(10.0);
             rule(ui, 1.0);
@@ -454,6 +464,114 @@ fn hands(ui: &mut egui::Ui, g: &Gazette, action: &mut Option<Action>) {
     }
 }
 
+/// Wanted at the Hall (commons S2.4): a band across the foot of the page, the
+/// day's story beside the wants pinned up as slips, as on the board itself,
+/// then who came through and the claims kept. Narrow, they stack.
+fn board(ui: &mut egui::Ui, w: &GazetteWanted, action: &mut Option<Action>) {
+    section(ui, "Wanted at the Hall");
+    if ui.available_width() >= THREE_COLUMNS {
+        ui.columns(2, |c| {
+            c[0].vertical(|ui| ui.label(ink(&w.story, size::BODY)));
+            c[1].vertical(|ui| board_notes(ui, w, action));
+        });
+    } else {
+        ui.label(ink(&w.story, size::BODY));
+        ui.add_space(6.0);
+        board_notes(ui, w, action);
+    }
+}
+
+/// The slips, the day's biggest delivery and the tallies.
+fn board_notes(ui: &mut egui::Ui, w: &GazetteWanted, action: &mut Option<Action>) {
+    if !w.wanted.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            for want in &w.wanted {
+                slip(ui, want);
+            }
+        });
+        ui.add_space(6.0);
+    }
+    if let Some(d) = &w.came_through {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(dim("Came through:", size::SMALL).italics());
+            resident(ui, d.deliverer.as_deref(), d.deliverer_citizen, action);
+            ui.label(dim("for", size::SMALL));
+            resident(ui, d.poster.as_deref(), d.poster_citizen, action);
+            ui.label(dim(&format!("· {} {}, {} Strands", d.units, d.item_name, d.paid), size::SMALL));
+        });
+    }
+    if let Some(begging) = w.gone_begging.first() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(dim("Gone begging:", size::SMALL).italics());
+            ui.label(ink(&format!("{} {}", begging.units, begging.item_name), size::SMALL));
+            ui.label(dim(&format!("at {} a unit", begging.best_price), size::SMALL));
+        });
+    }
+    if w.kept > 0 || w.lapsed > 0 {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(dim("Kept their word:", size::SMALL).italics());
+            ui.label(ink(&w.kept.to_string(), size::SMALL).strong());
+            if w.lapsed > 0 {
+                // Counted, never named
+                ui.label(dim("· ran out:", size::SMALL));
+                ui.label(RichText::new(w.lapsed.to_string()).font(theme::body(size::SMALL)).color(theme::INK_DOWN));
+            }
+        });
+    }
+    if w.came_through.as_ref().is_some_and(|d| d.deliverer_citizen || d.poster_citizen) {
+        ui.horizontal(|ui| {
+            citizen_mark(ui, size::LABEL);
+            ui.label(dim("marks a citizen", size::LABEL).italics());
+        });
+    }
+}
+
+/// One want, as a slip pinned to the board: WANTED, the units and the item,
+/// and the best price on offer.
+fn slip(ui: &mut egui::Ui, want: &GazetteWant) {
+    egui::Frame::none()
+        .stroke(Stroke::new(1.0_f32, theme::INK_RULE))
+        .rounding(1.0)
+        .inner_margin(Margin::symmetric(7.0, 4.0))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(
+                    RichText::new("WANTED")
+                        .font(theme::display(size::LABEL - 1.0))
+                        .color(theme::INK_DIM)
+                        .extra_letter_spacing(1.5),
+                );
+                ui.label(ink(&format!("{} {}", want.units, want.item_name), size::SMALL).strong());
+                ui.label(dim(&format!("up to {} a unit", want.best_price), size::LABEL));
+            });
+        })
+        .response
+        .on_hover_text(match want.commissions {
+            1 => format!("{} Strands down for it on one commission", want.value),
+            n => format!("{} Strands down for it on {n} commissions", want.value),
+        });
+}
+
+/// A poster or deliverer on the board: their name, a click for their card,
+/// or "a resident" for someone who keeps out of the papers.
+fn resident(ui: &mut egui::Ui, name: Option<&str>, citizen: bool, action: &mut Option<Action>) {
+    if citizen {
+        citizen_mark(ui, size::SMALL);
+    }
+    match name {
+        Some(name) => {
+            if person(ui, ink(name, size::SMALL).strong()) {
+                *action = Some(Action::Card(name.to_owned()));
+            }
+        }
+        None => {
+            ui.label(ink("a resident", size::SMALL).italics());
+        }
+    }
+}
+
 /// The goods made most, with people's part of each on a day citizens worked
 /// too. On a day they didn't, people made it all, so the column is left off.
 fn made_table(ui: &mut egui::Ui, g: &Gazette) {
@@ -619,8 +737,9 @@ mod tests {
     fn the_sample_has_an_edition() {
         let reader = sample();
         let edition = reader.showing().expect("an edition");
-        // With the stalls in it, so the page draws them (#240)
+        // With the stalls in it, so the page draws them (#240), and the board (S2.4)
         assert!(edition.stalls.is_some() && !edition.stalls_story.is_empty());
+        assert!(edition.wanted.as_ref().is_some_and(|w| !w.wanted.is_empty() && w.came_through.is_some()));
         assert!(reader.unread());
     }
 

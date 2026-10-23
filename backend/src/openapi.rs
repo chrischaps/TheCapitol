@@ -26,7 +26,7 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rest::{
     Gazette, GazetteByline, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse,
-    GazetteSale, GazetteShares, GazetteShop, GazetteStalls,
+    GazetteDelivery, GazetteSale, GazetteShares, GazetteShop, GazetteStalls, GazetteWant, GazetteWanted,
 };
 use capitol_protocol::rest::{
     ClaimCommission, ClaimResponse, ClaimsResponse, Commission, CommissionClaim, CommissionDelivery, CommissionsResponse,
@@ -382,6 +382,9 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         GazetteShares,
         GazetteStalls,
         GazetteShop,
+        GazetteWanted,
+        GazetteWant,
+        GazetteDelivery,
         GazetteResponse,
         GazetteByline,
         // Plots
