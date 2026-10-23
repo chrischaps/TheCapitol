@@ -84,6 +84,10 @@ const MAKER_STRANDS: i64 = 50_000;
 const MAKER_QUALITY: i32 = 50;
 /// How long a citizen waits, at most, before it notices its town saying stop.
 const STOP_CHECK: Duration = Duration::from_secs(1);
+/// How far a citizen goes back for a station of its own that it's leaving
+/// off its lot, to take it down (#488). Further off, it's left for a day
+/// that ends nearer.
+const PACK_UP_REACH: f64 = 200.0;
 
 /// How a sim is run.
 #[derive(Debug, Clone)]
@@ -676,7 +680,8 @@ impl SimBot {
         self.market_spot(town, bazaar)
     }
 
-    /// Dusk: buys a home if the citizen has saved enough and has none, and
+    /// Dusk: buys a home if the citizen has saved enough and has none, takes
+    /// down its benches near it off its lot ([`Self::pack_up`], #488), and
     /// walks home along the avenues, for the night's work (#276). Something
     /// going wrong on the way doesn't keep it from that: it works the night
     /// from where it stands.
@@ -693,6 +698,12 @@ impl SimBot {
                 Err(e) if e.is_final() => return Err(e),
                 Err(e) => town.health(|h| h.failed(format!("buying a home: {e}"))),
             }
+        }
+        // Its benches off its lot come home in its pack (#488)
+        match self.pack_up() {
+            Ok(_) => {}
+            Err(e) if e.is_final() => return Err(e),
+            Err(e) => town.health(|h| h.failed(format!("packing up: {e}"))),
         }
         let (x, y) = self.home();
         // A while on a bridge first, if one's near the way (C2.1)
@@ -1330,6 +1341,38 @@ impl SimBot {
             .collect()
     }
 
+    /// Takes down its own stations near it that stand off its lot (#488).
+    /// The whole kit comes back, so a bench it's done with goes in its pack
+    /// rather than standing by the road for good; the spawn filled up with
+    /// Arrival's benches. One set to work, or whose box holds something,
+    /// stays. How many came down.
+    pub(super) fn pack_up(&mut self) -> Result<usize, BotError> {
+        let state = self.bot.state();
+        let plots = state.plots();
+        // What the store last heard of each, for a job set since it was placed
+        let known: Vec<(String, StationInfo)> = self
+            .stations
+            .iter()
+            .map(|(kind, s)| (kind.clone(), state.station(s.id).cloned().unwrap_or_else(|| s.clone())))
+            .collect();
+        let leaving = leaving(known, self.bot.position(), |x, y| plots.iter().any(|p| p.contains(x, y)));
+        let mut down = 0;
+        for (kind, s) in leaving {
+            self.bot.walk_to(s.x, s.y + 10.0)?;
+            match self.bot.remove_station(s.id) {
+                Ok(()) => {
+                    self.stations.remove(&kind);
+                    down += 1;
+                }
+                // Its box isn't empty, or the pack has no room for the kit:
+                // left standing, for another day
+                Err(BotError::Rest { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(down)
+    }
+
     /// Buys the nearest unclaimed plot it can afford with its [`FLOAT`] left
     /// over (#294) and room for its role's stations (#419): for a citizen,
     /// near its home (C1.2), so the lot it builds on is the one it lives on.
@@ -1445,6 +1488,23 @@ impl SimBot {
     }
 }
 
+/// Which of `stations` (each by type) a citizen at `at` takes down as it
+/// packs up (#488): those not on a lot of its own (`own_lot`) and within
+/// [`PACK_UP_REACH`], nearest first. One set to work stays where its job is.
+fn leaving(
+    stations: Vec<(String, StationInfo)>,
+    (x, y): (f64, f64),
+    own_lot: impl Fn(f64, f64) -> bool,
+) -> Vec<(String, StationInfo)> {
+    let away = |s: &StationInfo| (s.x - x).hypot(s.y - y);
+    let mut leaving: Vec<_> = stations
+        .into_iter()
+        .filter(|(_, s)| s.automation.is_none() && !own_lot(s.x, s.y) && away(s) <= PACK_UP_REACH)
+        .collect();
+    leaving.sort_by(|a, b| away(&a.1).total_cmp(&away(&b.1)));
+    leaving
+}
+
 /// How far `r` lies outside the band `(inner, outer)`.
 fn band_gap((inner, outer): (f64, f64), r: f64) -> f64 {
     (inner - r).max(r - outer).max(0.0)
@@ -1504,6 +1564,53 @@ fn ring(x: f64, y: f64, r: f64) -> Vec<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn station(kind: &str, x: f64, y: f64) -> (String, StationInfo) {
+        let info = StationInfo {
+            id: Uuid::from_u128((x as u128) << 16 | y as u128),
+            station_type: kind.into(),
+            name: kind.into(),
+            category: "crafting".into(),
+            icon: None,
+            x,
+            y,
+            owner_id: Uuid::nil(),
+            container_id: None,
+            interaction_range: 75.0,
+            quality: 50,
+            tool: None,
+            automation: None,
+            production: Vec::new(),
+            indoors: false,
+            condition: 100,
+        };
+        (kind.into(), info)
+    }
+
+    /// Packing up (#488) takes down what stands off its own lot and near,
+    /// nearest first, and leaves its lot's, the far and one at work.
+    #[test]
+    fn packing_up_takes_down_the_near_benches_off_its_lot() {
+        use capitol_protocol::rest::{AutomationMode, AutomationState, StationAutomation};
+        let mut working = station("anvil", 30.0, 0.0);
+        working.1.automation = Some(StationAutomation {
+            recipe_id: "nails".into(),
+            mode: AutomationMode::Forever,
+            state: AutomationState::Stopped,
+            done: 0,
+        });
+        let stations = vec![
+            station("workbench", 120.0, 0.0),
+            station("kiln", 40.0, 0.0),
+            station("loom", 500.0, 0.0),
+            station("forge", 0.0, 60.0),
+            working,
+        ];
+        // Its lot is everything north of y = 50
+        let leaving = leaving(stations, (0.0, 0.0), |_, y| y > 50.0);
+        let kinds: Vec<&str> = leaving.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kinds, ["kiln", "workbench"]);
+    }
 
     #[test]
     fn a_band_gap_is_zero_inside_and_the_distance_outside() {

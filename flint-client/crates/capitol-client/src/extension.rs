@@ -626,11 +626,19 @@ impl CapitolExtension {
     }
 
     /// Offline, open the station panel on a sample workbench, on `tab`
-    /// (`craft` or `automation`), with the inventory and crafting panels
-    /// open beside it (`--station-panel-sample`, #235).
+    /// (`craft` or `automation`; `empty`, craft with the box empty, or
+    /// `chest`, an empty chest of yours, for the recycling bin, #488),
+    /// with the inventory and crafting panels open beside it
+    /// (`--station-panel-sample`, #235).
     pub fn with_station_panel_sample(mut self, tab: Option<&str>) -> Self {
         if let (Some(tab), None) = (tab, &self.session) {
-            self.station_panel_sample = Some(ui::station::sample());
+            let mut state = ui::station::sample();
+            match tab {
+                "empty" => ui::station::empty_the_box(&mut state),
+                "chest" => ui::station::chest_of_yours(&mut state),
+                _ => {}
+            }
+            self.station_panel_sample = Some(state);
             self.station_panel_tab = Some(match tab {
                 "automation" => ui::station::Tab::Automation,
                 _ => ui::station::Tab::Craft,

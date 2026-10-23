@@ -25,9 +25,11 @@
 //!   tab beside Craft (`ui::automation`), set to make one recipe from the
 //!   box, a count of times or forever. The header says when it's running
 //!   or paused, for anyone who opens it.
-//! - **Remove**, for the owner, once the box is empty. The server refuses
-//!   while it holds anything and puts the kit back in your inventory (#88),
-//!   so taking a station down is how you move it, and it doesn't ask twice.
+//! - **Return to inventory**, for the owner, once the box is empty: a
+//!   recycling bin in gold (`theme::recycle_bin`, #488). The server refuses
+//!   while the box holds anything and puts the whole kit back in your
+//!   inventory (#88), so it's how you move a station, and it doesn't ask
+//!   twice. It was a dim Remove link, and nobody saw it gives everything back.
 //!
 //! **On a small screen (#235)** the panel goes where there's room (`place`):
 //! two columns left of the inventory if they fit there, else one column,
@@ -39,14 +41,14 @@ use super::automation::{self, Ask};
 use super::crafting::{blocked_box, craft_label, needs, preview, under_way, Fill};
 use super::icons::ItemIcons;
 use super::slots::{Move, Slot, SlotGrid};
-use super::theme::{self, size, DIM, EMBER, STATION};
+use super::theme::{self, size, EMBER, STATION};
 use capitol_core::automation::{Draft, Status};
 use capitol_core::craft::{self, Check, Phase};
 use capitol_core::protocol::rules::quality;
 use capitol_core::protocol::rest::{RecipeInfo, SlotItem};
 use capitol_core::state::{Activity, GameState};
 use capitol_core::station;
-use egui::{Align2, Id, RichText};
+use egui::{Align2, Id};
 use uuid::Uuid;
 
 /// The recipe column's width: the crafting panel's.
@@ -71,6 +73,9 @@ const LEAST_ROOM: f32 = 120.0;
 const FOOTER: f32 = 40.0;
 /// How long the panel takes to open or close, in seconds.
 const FADE: f32 = 0.18;
+/// The recycling bin's button, and the bin on it (#488).
+const RECYCLE_BUTTON: egui::Vec2 = egui::vec2(36.0, 32.0);
+const RECYCLE_ICON: egui::Vec2 = egui::vec2(19.0, 22.0);
 
 /// How a crafting station's panel lays out its box and its work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,7 +566,10 @@ impl StationPanel {
         });
     }
 
-    /// Remove (the owner's, once the box is empty) and Close.
+    /// Return to inventory (the owner's, once the box is empty) and Close.
+    /// It's a recycling bin in the gold of "yours", which says what it does
+    /// on hover: a dim Remove link read as losing the bench, so benches were
+    /// left standing by the road rather than taken home (#488).
     fn footer(&mut self, ui: &mut egui::Ui, view: &View) -> Option<Action> {
         let state = view.state;
         let open = state.open_station()?;
@@ -571,23 +579,19 @@ impl StationPanel {
         let empty = state
             .station_container()
             .is_some_and(|c| c.used_slots() == 0);
+        let busy = state.local_activity().is_some();
         let mut action = None;
         ui.horizontal(|ui| {
             if mine {
-                let tip = if empty {
-                    "Take the station down. Its kit goes back in your inventory"
-                } else {
-                    "Empty its box first"
-                };
-                let link = ui
-                    .add_enabled(
-                        empty && view.state.local_activity().is_none(),
-                        egui::Label::new(RichText::new("Remove").color(DIM).size(size::SMALL))
-                            .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text(tip)
-                    .on_disabled_hover_text(tip);
-                if link.clicked() {
+                let enabled = empty && !busy;
+                let button = ui
+                    .add_enabled(enabled, egui::Button::new("").min_size(RECYCLE_BUTTON))
+                    .on_hover_text(RETURN)
+                    .on_disabled_hover_text(return_refused(empty));
+                let ink = if enabled { theme::GOLD } else { theme::GOLD.gamma_multiply(0.4) };
+                let bin = egui::Rect::from_center_size(button.rect.center(), RECYCLE_ICON);
+                theme::recycle_bin(ui.painter(), bin, ink);
+                if button.clicked() {
                     action = Some(Action::Remove(open.station_id));
                 }
             }
@@ -598,6 +602,18 @@ impl StationPanel {
             });
         });
         action
+    }
+}
+
+/// The recycling bin's hover (#488).
+const RETURN: &str = "Return to inventory";
+
+/// Its hover while it can't be pressed: why not yet.
+fn return_refused(empty: bool) -> &'static str {
+    if empty {
+        "Return to inventory, once the craft is done"
+    } else {
+        "Return to inventory, once its box is empty"
     }
 }
 
@@ -837,6 +853,48 @@ pub fn sample() -> GameState {
         slots,
     }));
     state
+}
+
+/// Empties [`sample`]'s station box, so its owner may return it to their
+/// inventory (#488).
+pub fn empty_the_box(state: &mut GameState) {
+    use capitol_core::net::RestResponse;
+    use capitol_core::protocol::rest::StationContainerResponse;
+    state.apply_rest(&RestResponse::StationContainer(StationContainerResponse {
+        id: Uuid::from_u128(0x2350),
+        container_type: "station_inventory".into(),
+        slot_count: 16,
+        layout_columns: 4,
+        slots: Vec::new(),
+    }));
+}
+
+/// [`sample`] at an empty storage chest of yours instead, whose panel is
+/// one box wide, for its footer's recycling bin (#488).
+pub fn chest_of_yours(state: &mut GameState) {
+    use capitol_core::protocol::ws::ServerMessage;
+    const ME: Uuid = Uuid::from_u128(0xca9);
+    const CHEST: Uuid = Uuid::from_u128(0xc4e5);
+    const BOX: Uuid = Uuid::from_u128(0x2350);
+    state.apply_ws(&ServerMessage::StationPlaced {
+        station_id: CHEST,
+        station_type: "storage_chest".into(),
+        name: "Storage Chest".into(),
+        owner_id: ME,
+        x: 20.0,
+        y: 0.0,
+        container_id: BOX,
+        quality: 50,
+    });
+    state.apply_ws(&ServerMessage::StationOpened {
+        player_id: ME,
+        station_id: CHEST,
+        station_type: "storage_chest".into(),
+        name: "Storage Chest".into(),
+        container_id: BOX,
+    });
+    // Opening it asks for its box afresh
+    empty_the_box(state);
 }
 
 #[cfg(test)]

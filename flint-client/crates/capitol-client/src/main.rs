@@ -193,7 +193,8 @@ struct Args {
     impound_sample: bool,
     /// Offline, open the station panel (#235) on a sample workbench of
     /// yours, beside the inventory and crafting panels, on its `craft` or
-    /// `automation` tab. Check it at --width 1280 --height 720 at 150%
+    /// `automation` tab, or `empty` (the craft tab, its box empty) or `chest`
+    /// (an empty chest of yours), so its recycling bin may be pressed (#488). Check it at --width 1280 --height 720 at 150%
     #[arg(long, value_name = "TAB", requires = "offline")]
     station_panel_sample: Option<String>,
     /// No sound. Captures (--exit-after) are silent anyway

@@ -812,6 +812,42 @@ pub fn envelope(painter: &egui::Painter, rect: egui::Rect, sealed: bool, ink: Co
     }
 }
 
+/// A recycling bin filling `rect`, in `ink` (#488): a lid with its handle,
+/// a tapering body, and on it the three chasing arrows. The station panel's
+/// button that returns a station to your inventory wears it.
+pub fn recycle_bin(painter: &egui::Painter, rect: egui::Rect, ink: Color32) {
+    let (w, h) = (rect.width(), rect.height());
+    let line = Stroke::new((w * 0.07).max(1.0), ink);
+    let p = |x: f32, y: f32| egui::pos2(rect.left() + x * w, rect.top() + y * h);
+    // The handle, then the lid
+    painter.add(egui::Shape::line(vec![p(0.36, 0.12), p(0.38, 0.02), p(0.62, 0.02), p(0.64, 0.12)], line));
+    painter.line_segment([p(0.02, 0.14), p(0.98, 0.14)], line);
+    // The body, narrower at its foot
+    painter.add(egui::Shape::closed_line(
+        vec![p(0.1, 0.22), p(0.9, 0.22), p(0.8, 1.0), p(0.2, 1.0)],
+        line,
+    ));
+    // The arrows: one along each side of a triangle, each with its head at
+    // the corner it runs to, the next starting a little past it
+    let c = p(0.5, 0.64);
+    let r = w * 0.29;
+    let corner = |i: usize| {
+        let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::TAU / 3.0;
+        c + egui::vec2(a.cos(), a.sin()) * r
+    };
+    let arrow = Stroke::new((w * 0.05).max(0.9), ink);
+    for i in 0..3 {
+        let (from, to) = (corner(i), corner(i + 1));
+        let along = to - from;
+        let start = from + along * 0.24;
+        let tip = from + along * 0.88;
+        let back = tip - along.normalized() * (w * 0.15);
+        painter.line_segment([start, back], arrow);
+        let side = egui::vec2(-along.y, along.x).normalized() * (w * 0.1);
+        painter.add(egui::Shape::convex_polygon(vec![tip, back + side, back - side], ink, Stroke::NONE));
+    }
+}
+
 /// Underlined words that act, in dim gold.
 pub fn link(ui: &mut Ui, text: &str, size: f32) -> Response {
     ui.add(

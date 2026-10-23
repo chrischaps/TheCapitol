@@ -264,7 +264,14 @@ impl SimBot {
             // A bench of its own, off any lot (D10), whatever it has at home
             PlaceWorkbench => self.set_up_workbench(false),
             PlaceAtHome => self.set_up_workbench(true),
-            SeeRuralLot => self.see_stop(Zone::Rural),
+            // Arrival's bench comes down before the road, as the card asks
+            // a player (#488): the kit comes back whole, for its lot
+            SeeRuralLot => {
+                if self.pack_up()? > 0 {
+                    return Ok(false);
+                }
+                self.see_stop(Zone::Rural)
+            }
             SeeSuburbanLot => self.see_stop(Zone::Suburban),
             SeeUrbanLot => self.see_stop(Zone::Urban),
             ReadZoneCard => {
@@ -374,10 +381,15 @@ impl SimBot {
     }
 
     /// A workbench kit, then the bench set up off any lot, by the spawn
-    /// where the road begins, or on its own lot.
+    /// where the road begins, or on its own lot. At home the kit is the one
+    /// it took down by the road, if it did ([`SimBot::pack_up`], #488), or
+    /// a bench of its own near it off its lot comes down for it.
     fn set_up_workbench(&mut self, at_home: bool) -> Result<bool, BotError> {
         const KIT: &str = "workbench_kit";
         if self.holdings().count(KIT) == 0 {
+            if at_home && self.pack_up()? > 0 {
+                return Ok(false);
+            }
             self.make("craft_workbench")?;
             return Ok(false);
         }

@@ -74,7 +74,8 @@ pub fn chapter_name(chapter: Chapter) -> &'static str {
 fn chapter_close(chapter: Chapter) -> &'static str {
     match chapter {
         Chapter::Arrival => {
-            "You can gather by hand, make things at a bench of your own, and work with a tool what hands can't. The road runs north into the city."
+            "You can gather by hand, make things at a bench of your own, and work with a tool what hands can't. \
+             Your bench returns to your inventory whole, to take home. The road runs north into the city."
         }
         Chapter::RoadIn => {
             "You've read the deeds of a farm, a house and a yard, and what each zone is like. The hall is ahead, under the tower."
@@ -161,8 +162,10 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
         ),
         Step::FellTree => (
             "Fell a tree",
-            "Your hands couldn't take a tree; an axe can. With it in your pack, fell one in the copse for its logs.",
-            "[Click] a tree",
+            "Your hands couldn't take a tree; an axe can. With it in your pack, fell one in the copse for its logs. \
+             The bench's work here is done: open it and press its recycling bin, and it returns to your inventory \
+             as a kit, whole, to set up on your own land.",
+            "[Click] a tree  ·  [O] the bench  ·  the recycling bin",
         ),
         // The road in (#445): a stop in each zone up the south road, its
         // lot `protocol::tutorial::stops` picks
@@ -258,8 +261,8 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
         // home the client hasn't listed yet.
         Step::PlaceAtHome => (
             "A station at home",
-            "The room on your own lot is yours to fill. Make a kit by hand (a storage chest takes 8 fiber, \
-             a workbench 10) and set it down there. A workbench at home can be set to work, next.",
+            "The room on your own lot is yours to fill. Set down the bench you brought from the road, or make \
+             a kit by hand (a storage chest takes 8 fiber, a workbench 10). A workbench at home can be set to work, next.",
             "[C] crafting  ·  Right-click the kit",
         ),
         Step::SetAutomation => (
@@ -295,8 +298,8 @@ fn home_words(step: Step, home: Option<&Home>) -> Option<String> {
             };
             let stations = if home.fits == 1 { "station" } else { "stations" };
             Some(format!(
-                "Your {noun} fits {} {stations}{allows}: the room is yours to fill. Make a kit by hand \
-                 (a storage chest takes 8 fiber, a workbench 10) and set it down on your own land. \
+                "Your {noun} fits {} {stations}{allows}: the room is yours to fill. Set down the bench you \
+                 brought from the road, or make a kit by hand (a storage chest takes 8 fiber, a workbench 10). \
                  A workbench at home can be set to work, next.",
                 home.fits
             ))
