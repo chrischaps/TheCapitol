@@ -671,6 +671,8 @@ pub struct BoxStack {
     pub id: Uuid,
     pub item_type: String,
     pub slot: Option<i32>,
+    /// Whose it is: a guest's deposit keeps its depositor (#80)
+    pub owner: Option<Uuid>,
     pub units: Units,
 }
 
@@ -678,6 +680,7 @@ pub struct BoxStack {
 /// the inputs its quality is worked out from: for each input in recipe order,
 /// stacks in slot order until it's met, the best units of each first. That's
 /// what a craft by hand takes from the same stacks (`crafting::start_crafting`).
+/// It takes a guest's stacks too, whose they are (#502 asks whether it should).
 /// `Err` names an input the box lacks.
 pub fn pick_inputs(recipe: &Recipe, stacks: &[BoxStack]) -> Result<(Vec<(Uuid, Units)>, quality::Inputs), String> {
     let mut taken = Vec::new();
@@ -710,15 +713,18 @@ enum Place {
     Slot(i32),
 }
 
-/// Where `output` goes among `stacks`, a box of `slot_count` slots, as
-/// `craft_completion::place_in` puts a craft's output: onto the first stack of
-/// its type in slot order if it stacks and that stack can hold it, or else
-/// the first free slot. `None`: the box is full.
-fn place(stacks: &[BoxStack], slot_count: i32, output: &CraftOutput) -> Option<Place> {
+/// Where `output`, made for `owner`, goes among `stacks`, a box of
+/// `slot_count` slots, as `craft_completion::place_in` puts a craft's output:
+/// onto `owner`'s first stack of its type in slot order if it stacks and that
+/// stack can hold it, or else the first free slot. A guest's stack is never
+/// joined, so the owner's output never becomes theirs (#497), as a craft by
+/// hand joins only the crafter's own (`units::join_own_stack`, #489). `None`:
+/// the box is full.
+fn place(stacks: &[BoxStack], slot_count: i32, owner: Uuid, output: &CraftOutput) -> Option<Place> {
     if output.stackable {
         let first = stacks
             .iter()
-            .filter(|s| s.item_type == output.item_type)
+            .filter(|s| s.item_type == output.item_type && s.owner == Some(owner))
             .min_by_key(|s| (s.slot.is_none(), s.slot, s.id));
         if let Some(first) = first {
             if first.units.clone().merge(&Units::uniform(output.quantity, output.quality)) {
@@ -732,8 +738,8 @@ fn place(stacks: &[BoxStack], slot_count: i32, output: &CraftOutput) -> Option<P
 /// The stacks in `container_id`, in slot order, locked: the stacks in one
 /// statement and their units in the next ([`units::units_of_many`]).
 async fn box_stacks(conn: &mut PgConnection, container_id: Uuid) -> Result<Vec<BoxStack>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, Option<i32>)> = sqlx::query_as(
-        "SELECT id, item_type, slot_index FROM items WHERE container_id = $1
+    let rows: Vec<(Uuid, String, Option<i32>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, item_type, slot_index, owner_id FROM items WHERE container_id = $1
          ORDER BY slot_index NULLS LAST, id FOR UPDATE",
     )
     .bind(container_id)
@@ -743,7 +749,7 @@ async fn box_stacks(conn: &mut PgConnection, container_id: Uuid) -> Result<Vec<B
     let mut units = units::units_of_many(conn, &ids).await?;
     Ok(rows
         .into_iter()
-        .map(|(id, item_type, slot)| BoxStack { id, item_type, slot, units: units.remove(&id).unwrap_or_default() })
+        .map(|(id, item_type, slot, owner)| BoxStack { id, item_type, slot, owner, units: units.remove(&id).unwrap_or_default() })
         .collect())
 }
 
@@ -918,7 +924,7 @@ pub async fn craft_once(
         // The station's owner made it (#231), as a craft by hand marks it
         // with the crafter
         let marked = Marked::by(Some(station.owner_id), &made);
-        match place(&stacks, found.slot_count, output) {
+        match place(&stacks, found.slot_count, station.owner_id, output) {
             None => return Ok(Attempt::Blocked(PauseReason::OutputFull)),
             Some(Place::Onto(id)) => {
                 units::add(&mut tx, id, &marked).await?;
@@ -935,7 +941,13 @@ pub async fn craft_once(
                     durability: output.durability,
                 };
                 let id = units::insert_stack(&mut tx, stack, &marked).await?;
-                stacks.push(BoxStack { id, item_type: output.item_type.clone(), slot: Some(slot), units: made });
+                stacks.push(BoxStack {
+                    id,
+                    item_type: output.item_type.clone(),
+                    slot: Some(slot),
+                    owner: Some(station.owner_id),
+                    units: made,
+                });
             }
         }
     }
@@ -1065,7 +1077,7 @@ mod tests {
                         let units = Units::from_pairs(
                             (0..rng.gen_range(1..=3)).map(|_| (rng.gen_range(0..=100), rng.gen_range(1..=need.quantity))),
                         );
-                        stacks.push(BoxStack { id: Uuid::new_v4(), item_type: need.item_type.clone(), slot: None, units });
+                        stacks.push(BoxStack { id: Uuid::new_v4(), item_type: need.item_type.clone(), slot: None, owner: None, units });
                     }
                 }
                 for i in (1..stacks.len()).rev() {
@@ -1121,7 +1133,7 @@ mod tests {
         }
         // Short of an input names it
         let recipe = &recipes["tool_handle"];
-        let sticks = BoxStack { id: Uuid::new_v4(), item_type: "sticks".into(), slot: None, units: Units::uniform(5, 50) };
+        let sticks = BoxStack { id: Uuid::new_v4(), item_type: "sticks".into(), slot: None, owner: None, units: Units::uniform(5, 50) };
         assert_eq!(pick_inputs(recipe, &[sticks]).unwrap_err(), "rope");
     }
 
@@ -1136,8 +1148,11 @@ mod tests {
         }
     }
 
+    /// The station owner's in these tests
+    const OWNER: Uuid = Uuid::from_u128(1);
+
     fn stack_at(slot: Option<i32>, item_type: &str, units: Units) -> BoxStack {
-        BoxStack { id: Uuid::new_v4(), item_type: item_type.into(), slot, units }
+        BoxStack { id: Uuid::new_v4(), item_type: item_type.into(), slot, owner: Some(OWNER), units }
     }
 
     /// An output goes where `craft_completion::place_in` would put it
@@ -1146,12 +1161,24 @@ mod tests {
         let later = stack_at(Some(3), "tool_handle", Units::uniform(1, 40));
         let first = stack_at(Some(1), "tool_handle", Units::uniform(1, 90));
         let stacks = vec![stack_at(Some(0), "sticks", Units::uniform(4, 70)), later.clone(), first.clone()];
+        let place = |stacks: &[BoxStack], slots, output: &CraftOutput| place(stacks, slots, OWNER, output);
         assert_eq!(place(&stacks, 4, &output("tool_handle", 1, true)), Some(Place::Onto(first.id)), "in slot order");
         assert_eq!(place(&stacks, 4, &output("iron_axe", 1, false)), Some(Place::Slot(2)), "a tool takes a slot");
         assert_eq!(place(&stacks, 4, &output("rope", 1, true)), Some(Place::Slot(2)));
         let full = vec![stack_at(Some(0), "tool_handle", Units::uniform(i32::MAX, 50))];
         assert_eq!(place(&full, 2, &output("tool_handle", 1, true)), Some(Place::Slot(1)), "a stack that can't hold it");
         assert_eq!(place(&full, 1, &output("rope", 1, true)), None, "no room");
+    }
+
+    /// The owner's output never joins a guest's stack, or one nobody owns (#497)
+    #[test]
+    fn an_output_joins_only_the_owners_own_stack() {
+        let guests = BoxStack { owner: Some(Uuid::from_u128(2)), ..stack_at(Some(0), "rope", Units::uniform(3, 40)) };
+        let nobodys = BoxStack { owner: None, ..stack_at(Some(1), "rope", Units::uniform(3, 40)) };
+        let owners = stack_at(Some(3), "rope", Units::uniform(3, 40));
+        let rope = output("rope", 1, true);
+        assert_eq!(place(&[guests.clone(), nobodys.clone()], 4, OWNER, &rope), Some(Place::Slot(2)), "a slot of its own");
+        assert_eq!(place(&[guests, nobodys, owners.clone()], 4, OWNER, &rope), Some(Place::Onto(owners.id)), "past theirs");
     }
 
     /// Stations a restart resumes start part way into their crafts, so they
@@ -1330,6 +1357,36 @@ mod tests {
         async fn load_handles(db: &PgPool, owner: Uuid, inbox: Uuid) {
             stack_of(db, owner, inbox, 0, "sticks", &Units::uniform(20, 70)).await;
             stack_of(db, owner, inbox, 1, "rope", &Units::uniform(10, 50)).await;
+        }
+
+        /// A guest's handles left in the bench stay theirs, and the owner's
+        /// go on a stack of the owner's own (#497)
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn the_output_never_joins_a_guests_stack(db: PgPool) {
+            let world = World::new(db.clone()).await;
+            let (ada, _) = player(&db, "ada", true).await;
+            let (bo, _) = player(&db, "bo", true).await;
+            let (bench, inbox) = station(&db, ada, "workbench").await;
+            let bos = stack_of(&db, bo, inbox, 0, "tool_handle", &Units::uniform(3, 40)).await;
+            stack_of(&db, ada, inbox, 1, "sticks", &Units::uniform(4, 70)).await;
+            stack_of(&db, ada, inbox, 2, "rope", &Units::uniform(2, 50)).await;
+            world.start(ada, bench, "tool_handle", AutomationMode::Count(2)).await;
+            for _ in 0..12 {
+                world.cycle().await;
+            }
+            assert_eq!(stored(&db, bench).await.done, 2);
+            let mut conn = db.acquire().await.unwrap();
+            assert_eq!(units::units_of(&mut conn, bos).await.unwrap(), Units::uniform(3, 40), "Bo's are as they were");
+            let owners: Vec<(Uuid, i32)> = sqlx::query_as(
+                "SELECT owner_id, quantity FROM items WHERE container_id = $1 AND item_type = 'tool_handle' AND id <> $2",
+            )
+            .bind(inbox)
+            .bind(bos)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+            assert_eq!(owners, vec![(ada, 2)], "Ada's two, on one stack of hers");
         }
 
         #[sqlx::test(migrations = "./migrations")]
