@@ -15,6 +15,10 @@
 //!   finds one the inputs satisfy: an exact match first, then the one that
 //!   uses the most. Only hand recipes ([`hand_recipes`]); the server
 //!   refuses a station recipe here.
+//! - **The list (#490).** The inputs narrow it: [`shortlist`] puts the
+//!   recipes they satisfy first, marked ready, then those that take
+//!   something in them, then the rest. [`auto_label`] says in words what
+//!   the automatic choice is ("Auto: rope, from what's in").
 //! - **What's sent.** [`Check::inputs`] holds the input stacks a craft
 //!   needs, in slot order, and no more. The server takes what it needs from
 //!   them and leaves the rest. React sends every stack in the inputs.
@@ -112,6 +116,73 @@ pub fn detect<'a>(
         }
     }
     best.map(|(recipe, ..)| recipe)
+}
+
+/// How a recipe stands against what's in the inputs, for the picker (#490).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Fit {
+    /// The inputs hold all it needs.
+    Ready,
+    /// It takes something that's in the inputs, but they're short of it.
+    Uses,
+    /// It takes nothing that's in the inputs, or the inputs are empty.
+    Other,
+}
+
+/// One line of the picker: a recipe and how it fits the inputs.
+#[derive(Debug, Clone, Copy)]
+pub struct Listed<'a> {
+    pub recipe: &'a RecipeInfo,
+    pub fit: Fit,
+}
+
+/// The recipes as the picker lists them (#490): the inputs narrow the list
+/// to what you could make from them. The ready ones first, then those that
+/// take something in the inputs (the most kinds of it first), then the
+/// rest. The catalog's order holds within each.
+pub fn shortlist<'a>(
+    recipes: impl IntoIterator<Item = &'a RecipeInfo>,
+    input: &Container,
+) -> Vec<Listed<'a>> {
+    let mut listed: Vec<(Listed, usize)> = recipes
+        .into_iter()
+        .map(|recipe| {
+            let shared = recipe
+                .inputs
+                .iter()
+                .filter(|need| count(input, &need.item_type) > 0)
+                .count();
+            let ready = !recipe.inputs.is_empty()
+                && recipe
+                    .inputs
+                    .iter()
+                    .all(|need| count(input, &need.item_type) >= need.quantity);
+            let fit = match (ready, shared) {
+                (true, _) => Fit::Ready,
+                (false, 0) => Fit::Other,
+                (false, _) => Fit::Uses,
+            };
+            (Listed { recipe, fit }, shared)
+        })
+        .collect();
+    listed.sort_by_key(|(l, shared)| (l.fit, std::cmp::Reverse(*shared)));
+    listed.into_iter().map(|(l, _)| l).collect()
+}
+
+/// What the picker's automatic choice says, in words rather than
+/// "auto-detect" (#490): what the inputs make, or why they make nothing.
+pub fn auto_label(input: &Container, list: &[Listed]) -> String {
+    if input.used_slots() == 0 {
+        return "Pick one, or put items in to choose".to_owned();
+    }
+    if let Some(r) = detect(list.iter().map(|l| l.recipe), input) {
+        return format!("Auto: {}, from what's in", r.name);
+    }
+    match list.iter().filter(|l| l.fit == Fit::Uses).count() {
+        0 => "Auto: nothing takes what's in".to_owned(),
+        1 => "Auto: not enough yet for the 1 that takes it".to_owned(),
+        n => format!("Auto: not enough yet for the {n} that take it"),
+    }
 }
 
 /// One of a recipe's inputs, against what the slots hold.
@@ -742,6 +813,61 @@ mod tests {
         assert_eq!(name(&[item(1, 0, "fiber", 50, 8)]), Some("craft_chest"));
         // Rope in the inputs makes nothing.
         assert_eq!(name(&[item(1, 0, "rope", 50, 3)]), None);
+    }
+
+    #[test]
+    fn the_inputs_narrow_the_list() {
+        let mut r = recipes();
+        r.push(recipe("bundle", &[("fiber", 1), ("stick", 2)], "bundle"));
+        r.push(recipe("stew", &[("water", 1)], "stew"));
+        let list = |items: &[SlotItem]| {
+            shortlist(&r, &input(items))
+                .into_iter()
+                .map(|l| (l.recipe.id.as_str(), l.fit))
+                .collect::<Vec<_>>()
+        };
+        // Empty: everything, in the catalog's order.
+        let empty = list(&[]);
+        assert!(empty.iter().all(|(_, f)| *f == Fit::Other));
+        assert_eq!(empty[0].0, "rope_basic");
+        // Three fiber: rope is ready; then what takes fiber, the bundle
+        // first for taking it too; stew last.
+        assert_eq!(
+            list(&[item(1, 0, "fiber", 50, 3)]),
+            [
+                ("rope_basic", Fit::Ready),
+                ("craft_workbench", Fit::Uses),
+                ("craft_chest", Fit::Uses),
+                ("bundle", Fit::Uses),
+                ("stew", Fit::Other),
+            ]
+        );
+        // A stick and a fiber: the bundle takes both kinds, so it leads.
+        let mixed = list(&[item(1, 0, "fiber", 50, 1), item(2, 1, "stick", 50, 1)]);
+        assert_eq!(mixed[0], ("bundle", Fit::Uses));
+        assert_eq!(mixed.last(), Some(&("stew", Fit::Other)));
+    }
+
+    #[test]
+    fn the_automatic_choice_says_what_it_is() {
+        let r = recipes();
+        let label = |items: &[SlotItem]| {
+            let inp = input(items);
+            auto_label(&inp, &shortlist(&r, &inp))
+        };
+        assert_eq!(label(&[]), "Pick one, or put items in to choose");
+        assert_eq!(
+            label(&[item(1, 0, "fiber", 50, 2)]),
+            "Auto: rope_basic, from what's in"
+        );
+        assert_eq!(
+            label(&[item(1, 0, "fiber", 50, 1)]),
+            "Auto: not enough yet for the 3 that take it"
+        );
+        assert_eq!(
+            label(&[item(1, 0, "rope", 50, 1)]),
+            "Auto: nothing takes what's in"
+        );
     }
 
     #[test]

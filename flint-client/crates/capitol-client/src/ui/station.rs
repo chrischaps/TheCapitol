@@ -38,7 +38,7 @@
 //! columns scroll. 1280×720 at 150% (853×480 points) is the case to check.
 
 use super::automation::{self, Ask};
-use super::crafting::{blocked_box, craft_label, needs, preview, under_way, Fill};
+use super::crafting::{blocked_box, craft_label, needs, picker, preview, under_way, Fill};
 use super::icons::ItemIcons;
 use super::slots::{Move, Slot, SlotGrid};
 use super::theme::{self, size, EMBER, STATION};
@@ -537,33 +537,12 @@ impl StationPanel {
         }
     }
 
-    /// The recipe list: "Auto: …" first, then the station's recipes.
+    /// The station's recipes, narrowed by what's in its box (#490).
     fn picker(&mut self, ui: &mut egui::Ui, state: &GameState, station_type: &str) {
-        let detected = state
-            .station_container()
-            .and_then(|c| craft::detect(station::recipes_at(state.recipes(), station_type), c));
-        let auto = match detected {
-            Some(r) => format!("Auto: {}", r.name),
-            None => "Select or auto-detect".to_owned(),
-        };
-        let shown = match &self.picked {
-            Some(id) => state
-                .recipe(id)
-                .map_or_else(|| auto.clone(), |r| r.name.clone()),
-            None => auto.clone(),
-        };
-        ui.horizontal(|ui| {
-            ui.label(theme::dim("Recipe:"));
-            egui::ComboBox::from_id_salt("capitol_station_recipe")
-                .width(ui.available_width())
-                .selected_text(theme::text(shown))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.picked, None, auto);
-                    for r in station::recipes_at(state.recipes(), station_type) {
-                        ui.selectable_value(&mut self.picked, Some(r.id.clone()), &r.name);
-                    }
-                });
-        });
+        if let Some(input) = state.station_container() {
+            let recipes = station::recipes_at(state.recipes(), station_type);
+            picker(ui, "capitol_station_recipe", &mut self.picked, recipes, input);
+        }
     }
 
     /// Return to inventory (the owner's, once the box is empty) and Close.

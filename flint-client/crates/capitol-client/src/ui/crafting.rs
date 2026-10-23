@@ -3,7 +3,9 @@
 //! Enter (`craft`) crafts while it's open. The rules are
 //! `capitol_core::craft`; this draws them.
 //!
-//! - **A recipe** picked from the list, or the one the inputs make.
+//! - **A recipe** picked from the list, or the one the inputs make. The
+//!   inputs narrow the list: what they make first, marked ✓, then what
+//!   takes something in them, then the rest (#490).
 //! - **What it needs**, against what the input slots hold, with **Fill**
 //!   to bring it from the inventory (best stacks first) and **Clear** to
 //!   put the inputs back. React has neither; with them you can craft
@@ -26,10 +28,10 @@
 use super::icons::ItemIcons;
 use super::slots::{Move, SlotGrid};
 use super::theme::{self, size, CRAFT, DIM, ENOUGH, SHORT, SLOT_GAP, TEXT};
-use capitol_core::craft::{self, Check, Phase};
+use capitol_core::craft::{self, Check, Fit, Phase};
 use capitol_core::protocol::rest::RecipeInfo;
 use capitol_core::protocol::rules::{quality, TICK_MS};
-use capitol_core::state::{Activity, GameState};
+use capitol_core::state::{Activity, Container, GameState};
 use egui::RichText;
 
 /// The panel's width inside its frame: React's 300 less the padding.
@@ -285,34 +287,61 @@ impl CraftingPanel {
         action
     }
 
-    /// The recipe list: "Auto: …" first, then every hand recipe.
+    /// The recipe list, narrowed by the inputs.
     fn picker(&mut self, ui: &mut egui::Ui, state: &GameState) {
-        let detected = state
-            .crafting_input()
-            .and_then(|c| craft::detect(craft::hand_recipes(state.recipes()), c));
-        let auto = match detected {
-            Some(r) => format!("Auto: {}", r.name),
-            None => "Select or auto-detect".to_owned(),
-        };
-        let shown = match &self.picked {
-            Some(id) => state
-                .recipe(id)
-                .map_or_else(|| auto.clone(), |r| r.name.clone()),
-            None => auto.clone(),
-        };
-        ui.horizontal(|ui| {
-            ui.label(theme::dim("Recipe:"));
-            egui::ComboBox::from_id_salt("capitol_recipe")
-                .width(ui.available_width())
-                .selected_text(theme::text(shown))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.picked, None, auto);
-                    for r in craft::hand_recipes(state.recipes()) {
-                        ui.selectable_value(&mut self.picked, Some(r.id.clone()), &r.name);
-                    }
-                });
-        });
+        if let Some(input) = state.crafting_input() {
+            let recipes = craft::hand_recipes(state.recipes());
+            picker(ui, "capitol_recipe", &mut self.picked, recipes, input);
+        }
     }
+}
+
+/// The recipe picker, here and at a station (#490). The automatic choice
+/// first, in words, then the recipes as [`craft::shortlist`] orders them:
+/// those the inputs make marked ✓, those that take something in them, and
+/// under a rule the rest, dimmed.
+pub(super) fn picker<'a>(
+    ui: &mut egui::Ui,
+    salt: &str,
+    picked: &mut Option<String>,
+    recipes: impl IntoIterator<Item = &'a RecipeInfo>,
+    input: &Container,
+) {
+    let list = craft::shortlist(recipes, input);
+    let auto = craft::auto_label(input, &list);
+    let shown = picked
+        .as_ref()
+        .and_then(|id| list.iter().find(|l| &l.recipe.id == id))
+        .map_or_else(|| auto.clone(), |l| l.recipe.name.clone());
+    ui.horizontal(|ui| {
+        ui.label(theme::dim("Recipe:"));
+        egui::ComboBox::from_id_salt(salt)
+            .width(ui.available_width())
+            .selected_text(theme::text(shown))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(picked, None, theme::text(auto)).on_hover_text(
+                    "With nothing picked, what's in the inputs chooses: the recipe they \
+                     make exactly, else the one that uses the most of them",
+                );
+                let narrowed = list.iter().any(|l| l.fit != Fit::Other);
+                let mut ruled = false;
+                for l in &list {
+                    let name = match l.fit {
+                        Fit::Ready => RichText::new(format!("✓ {}", l.recipe.name)).color(ENOUGH),
+                        Fit::Uses => theme::text(&l.recipe.name),
+                        Fit::Other if narrowed => {
+                            if !ruled {
+                                ruled = true;
+                                ui.separator();
+                            }
+                            theme::dim(&l.recipe.name)
+                        }
+                        Fit::Other => theme::text(&l.recipe.name),
+                    };
+                    ui.selectable_value(picked, Some(l.recipe.id.clone()), name);
+                }
+            });
+    });
 }
 
 /// A craft under way: what, the bar (`f`, 0 to 1) in `accent`, how long,
