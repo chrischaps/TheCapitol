@@ -192,9 +192,9 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
         // The hall (#446): no step costs more than an order's escrow, which comes back, and a fee
         Step::Deposit => (
             "The Exchange",
-            "The hall under the tower takes fiber in and pays out Strands, the city's coin, less a small fee. \
-             The panel sets all three in a line. Deposit a little.",
-            "[X] the exchange",
+            "The Exchange takes fiber in and pays out Strands, the city's coin, less a small fee. \
+             It's a window, not a place: open it wherever you stand. It sets all three in a line. Deposit a little.",
+            "[X] the Exchange  ·  Deposit",
         ),
         Step::SellOrder => (
             "Offer something",

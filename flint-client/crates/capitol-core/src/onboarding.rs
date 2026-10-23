@@ -162,7 +162,10 @@ pub fn target(step: Step) -> Option<Target> {
         Step::SeeUrbanLot => Target::Lot(Zone::Urban),
         // Left till after the three lots, you're at the last stop
         Step::ReadZoneCard => Target::Lot(Zone::Urban),
-        Step::Deposit | Step::SellOrder | Step::BuyOrder | Step::CollectBox => Target::Hall,
+        // The Exchange is a panel (X) that opens anywhere, and the server
+        // asks no range of a deposit, so it leads nowhere (#491). The
+        // market's three are at the hall, whose door opens the market.
+        Step::SellOrder | Step::BuyOrder | Step::CollectBox => Target::Hall,
         Step::VisitStall => Target::Stall,
         Step::ReadGazette => Target::Board,
         Step::OpenCard => Target::Person,
@@ -580,8 +583,10 @@ mod tests {
         assert_eq!(target(Step::FellTree), Some(Target::Node(&["tree"])));
         assert_eq!(target(Step::SeeSuburbanLot), Some(Target::Lot(Zone::Suburban)));
         assert_eq!(target(Step::VisitStall), Some(Target::Stall));
-        // Everything at the Exchange leads to the hall; the Gazette reads anywhere
-        for step in Chapter::Hall.steps().filter(|s| !matches!(s, Step::VisitStall | Step::ReadGazette)) {
+        // The Exchange is a panel that opens anywhere (#491); the market's
+        // three lead to the hall, whose door opens the market
+        assert_eq!(target(Step::Deposit), None);
+        for step in [Step::SellOrder, Step::BuyOrder, Step::CollectBox] {
             assert_eq!(target(step), Some(Target::Hall), "{step:?}");
         }
         assert_eq!(target(Step::ReadGazette), Some(Target::Board));
