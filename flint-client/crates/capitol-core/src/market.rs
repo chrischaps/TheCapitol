@@ -539,11 +539,15 @@ pub struct Draft {
     pub min_grade: String,
     /// Buy: how `min_grade` reads the units sold
     pub grade_rule: GradeRule,
+    /// Sell: which units of the stack, adding up to `quantity` ("my six
+    /// 92s", #492). `None` takes the lowest.
+    pub qualities: Option<Units>,
 }
 
 impl Draft {
     /// What to send for it. A sell names `stack`, the stack its units come
-    /// from; the server takes the lowest of them, as [`quote`] does.
+    /// from; the server takes its `qualities`, or else the lowest, as
+    /// [`quote`] does.
     pub fn to_place(&self, stack: Option<Uuid>) -> PlaceOrder {
         let buy = self.side == OrderSide::Buy;
         PlaceOrder {
@@ -552,7 +556,7 @@ impl Draft {
             price: self.price,
             quantity: self.quantity,
             item_id: if buy { None } else { stack },
-            qualities: None,
+            qualities: if buy { None } else { self.qualities.clone() },
             min_grade: buy.then(|| self.min_grade.clone()),
             grade_rule: buy.then_some(self.grade_rule),
         }
@@ -657,9 +661,12 @@ pub fn quote(
         }
         OrderSide::Sell => {
             let held = stack.ok_or(FormRefusal::NoStack)?;
-            let units = held
-                .pick(draft.quantity, Pick::Lowest)
-                .ok_or(FormRefusal::NotHeld { held: held.count() })?;
+            let units = match &draft.qualities {
+                Some(wanted) => (wanted.count() == draft.quantity as i64 && held.contains(wanted))
+                    .then(|| wanted.clone()),
+                None => held.pick(draft.quantity, Pick::Lowest),
+            }
+            .ok_or(FormRefusal::NotHeld { held: held.count() })?;
             short_of(fee, strands)?;
             let fills = sell_fills(draft, &units, &others);
             Ok(OrderQuote {
@@ -845,6 +852,7 @@ mod tests {
             quantity,
             min_grade: min_grade.into(),
             grade_rule: rule,
+            qualities: None,
         }
     }
 
@@ -956,6 +964,31 @@ mod tests {
         assert_eq!((buy.item_id, buy.min_grade.as_deref(), buy.grade_rule), (None, Some("B"), Some(GradeRule::EveryUnit)));
         let sell = draft(OrderSide::Sell, 44, 3, "B", GradeRule::EveryUnit).to_place(Some(Uuid::nil()));
         assert_eq!((sell.item_id, sell.min_grade, sell.grade_rule), (Some(Uuid::nil()), None, None));
+    }
+
+    #[test]
+    fn a_sell_can_name_its_units() {
+        let bids = book(vec![
+            DepthLevel { grade_rule: Some(GradeRule::EveryUnit), ..level(OrderSide::Buy, 50, "A", 2) },
+            level(OrderSide::Buy, 44, "F", 10),
+        ]);
+        let stack = Units::from_pairs([(40, 3), (70, 3), (92, 2)]);
+        // The two 92s, not the lowest: they meet the A at every unit
+        let best = Units::uniform(2, 92);
+        let sell = Draft { qualities: Some(best.clone()), ..draft(OrderSide::Sell, 44, 2, "F", GradeRule::Average) };
+        let q = quote(&sell, Some(&stack), Some(&bids), &[], None, &Fees::default()).unwrap();
+        assert_eq!(q.units, Some(best.clone()));
+        assert_eq!(q.fills.value, 2 * 50);
+        assert_eq!(sell.to_place(Some(Uuid::nil())).qualities, Some(best));
+        // More than the stack holds at that quality, or a count that
+        // doesn't add up, isn't held
+        let three = Draft { qualities: Some(Units::uniform(3, 92)), ..draft(OrderSide::Sell, 44, 3, "F", GradeRule::Average) };
+        assert_eq!(quote(&three, Some(&stack), None, &[], None, &Fees::default()), Err(FormRefusal::NotHeld { held: 8 }));
+        let off = Draft { quantity: 3, ..sell.clone() };
+        assert_eq!(quote(&off, Some(&stack), None, &[], None, &Fees::default()), Err(FormRefusal::NotHeld { held: 8 }));
+        // A buy never names units
+        let buy = Draft { side: OrderSide::Buy, ..sell };
+        assert_eq!(buy.to_place(None).qualities, None);
     }
 
     fn trade(id: u128, secs: i64, price: i64, quantity: i32, grade: &str) -> MarketTrade {

@@ -3463,6 +3463,7 @@ mod tests {
             quantity: 3,
             min_grade: "F".into(),
             grade_rule: GradeRule::Average,
+            qualities: None,
         };
         let st = session.state();
         let mine = st.market().open_orders();

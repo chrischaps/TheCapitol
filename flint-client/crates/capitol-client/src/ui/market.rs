@@ -18,6 +18,9 @@
 //!   how it reads. The preview is `capitol_core::market::quote`: the fee is
 //!   `rules::market::listing_fee`, the one the server charges, and "fills
 //!   now" walks the visible book less your own orders, as the matcher would.
+//!   A stack dragged onto the panel from your inventory starts a sell of it
+//!   ([`MarketPanel::offer`], #492), and a stack of several qualities gets
+//!   a row per quality to name the units that go.
 //! - **Your orders**, with a cancel on each, and the market box: what you
 //!   bought waits there, and Collect brings it to your inventory.
 //! - **Book or Chart** (E3.6), beside the item's name: the chart takes the
@@ -50,6 +53,7 @@ use uuid::Uuid;
 use super::hud::grouped;
 use super::icons::ItemIcons;
 use super::market_chart::{self as chart, ChartState};
+use super::slots;
 use super::theme::{self, size, DIM, ENOUGH, GOLD, GOLD_DIM, GOLD_WASH, SHORT, TEXT};
 
 /// The columns' widths inside the frame.
@@ -126,6 +130,11 @@ pub struct Form {
     pub grade_rule: GradeRule,
     /// A sell's stack; the first of the item's without one
     pub stack: Option<Uuid>,
+    /// A sell's stack of more than one quality: a row per quality, high
+    /// first, and how many to sell of it (#492, as the trade window's #205)
+    pub picks: Vec<(i32, i32)>,
+    /// The stack `picks` are for
+    picks_of: Option<Uuid>,
 }
 
 impl Default for Form {
@@ -137,6 +146,8 @@ impl Default for Form {
             min_grade: "F",
             grade_rule: GradeRule::Average,
             stack: None,
+            picks: Vec::new(),
+            picks_of: None,
         }
     }
 }
@@ -216,6 +227,26 @@ impl MarketPanel {
         }
     }
 
+    /// Starts a sell of `item`, a stack dragged onto the panel (#492): its
+    /// book, the Sell form with the whole stack, and a row per quality when
+    /// the stack holds more than one. The price is left to you, but one
+    /// typed for another item goes.
+    pub fn offer(&mut self, item: &SlotItem) {
+        if self.selected.as_deref() != Some(item.item_type.as_str()) {
+            self.form.price.clear();
+        }
+        self.select(&item.item_type);
+        if self.tab == Tab::Bazaar {
+            self.tab = Tab::Items;
+        }
+        self.pane = Pane::Book;
+        self.form.side = OrderSide::Sell;
+        self.form.stack = Some(item.item_id);
+        self.form.quantity = item.quantity.to_string();
+        self.form.picks = slots::pick_rows(&item.units, None);
+        self.form.picks_of = Some(item.item_id);
+    }
+
     /// Opens the panel on `item_type` with the form filled in, for captures
     /// (`--market-sample`, `--market`): "plank" opens its book, and
     /// "plank:buy:10@41:B" fills a buy of 10 at 41, B or better. Anywhere
@@ -291,9 +322,11 @@ impl MarketPanel {
             .interactable(self.open)
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
-                theme::panel_edged(GOLD)
-                    .show(ui, |ui| self.body(ui, icons, view))
-                    .inner
+                let shown = theme::panel_edged(GOLD).show(ui, |ui| self.body(ui, icons, view));
+                if let Some(item) = drop_zone(ui, shown.response.rect).filter(|_| self.open) {
+                    self.offer(&item);
+                }
+                shown.inner
             });
         self.rect = self.open.then_some(area.response.rect);
         area.inner
@@ -1040,6 +1073,7 @@ impl MarketPanel {
                         .clicked()
                     {
                         *quantity = s.quantity.to_string();
+                        self.form.picks.iter_mut().for_each(|(_, take)| *take = 0);
                     }
                 }
             }
@@ -1118,7 +1152,29 @@ impl MarketPanel {
                         }
                     }
                 });
+                if let Some(s) = stack {
+                    if self.form.picks_of != Some(s.item_id) {
+                        self.form.picks = slots::pick_rows(&s.units, None);
+                        self.form.picks_of = Some(s.item_id);
+                    }
+                }
+                if let Some(s) = stack.filter(|_| !self.form.picks.is_empty()) {
+                    ui.add_space(2.0);
+                    let by_quality = slots::picked(&self.form.picks).is_some();
+                    ui.label(
+                        theme::dim(if by_quality { "Selling these" } else { "The lowest go, or pick" })
+                            .size(size::SMALL),
+                    );
+                    slots::quality_rows(ui, &mut self.form.picks, &s.units);
+                }
             }
+        }
+        // Picked by quality, the count is the rows' to add up
+        let qualities = (self.form.side == OrderSide::Sell)
+            .then(|| slots::picked(&self.form.picks))
+            .flatten();
+        if let Some(units) = &qualities {
+            self.form.quantity = units.count().to_string();
         }
         let draft = Draft {
             side: self.form.side,
@@ -1127,6 +1183,7 @@ impl MarketPanel {
             quantity: amount(&self.form.quantity).min(i32::MAX as i64) as i32,
             min_grade: self.form.min_grade.to_owned(),
             grade_rule: self.form.grade_rule,
+            qualities,
         };
         let quote = market::quote(
             &draft,
@@ -1337,6 +1394,31 @@ impl MarketPanel {
 
 /// The market box, along the foot of the panel: what waits there, and
 /// Collect. Returns `Collect` if it was clicked.
+/// The whole panel takes a stack dragged from your inventory (#492): edged
+/// in gold while one is held anywhere, washed and named while it's over the
+/// panel. Returns the stack let go of over it.
+fn drop_zone(ui: &mut egui::Ui, panel: egui::Rect) -> Option<SlotItem> {
+    let drop = ui.interact(panel, Id::new("capitol_market_drop"), Sense::hover());
+    if slots::dragging_item(ui.ctx()) {
+        let over = slots::item_over(&drop);
+        let painter = ui.painter();
+        let edge = if over { GOLD } else { GOLD.gamma_multiply(0.4) };
+        painter.rect_stroke(panel, 12.0, Stroke::new(if over { 2.0 } else { 1.0_f32 }, edge));
+        if over {
+            painter.rect_filled(panel, 12.0, GOLD.gamma_multiply(0.06));
+            // A tag astride the top edge, clear of the heading
+            let galley = painter.layout_no_wrap("Let go to sell it".into(), theme::strong(size::SMALL), GOLD);
+            let tag = egui::Rect::from_center_size(
+                egui::pos2(panel.center().x, panel.top()),
+                galley.size() + egui::vec2(20.0, 8.0),
+            );
+            painter.rect(tag, 9.0, theme::PANEL, Stroke::new(1.0_f32, GOLD));
+            painter.galley(tag.center() - galley.size() / 2.0, galley, GOLD);
+        }
+    }
+    slots::dropped_item(&drop)
+}
+
 fn market_box(ui: &mut egui::Ui, view: &View) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
@@ -1980,6 +2062,7 @@ impl Default for Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capitol_core::protocol::rules::stacking::Units;
 
     /// Runs a few frames of the panel, clicking `click_at` on frame 5, and
     /// returns the action it asked for.
@@ -2109,6 +2192,106 @@ mod tests {
             run(&mut panel, &sample.view(Some("plank")), Some(place)),
             None
         );
+    }
+
+    /// The sample with its planks blended: three 40s, three 70s and two 92s.
+    fn blended(sample: &mut Sample) -> SlotItem {
+        let mut planks = SlotItem::new(Uuid::from_u128(101), "plank".into(), "Plank".into(), 64, 8, 0);
+        planks.units = Units::from_pairs([(40, 3), (70, 3), (92, 2)]);
+        let rope = sample.inventory.slot(1).cloned().unwrap();
+        sample.inventory = Container::new(sample.inventory.id, "player_inventory", 24, 6, &[planks.clone(), rope]);
+        planks
+    }
+
+    #[test]
+    fn an_offered_stack_fills_the_sell_form_and_its_picks_name_the_units() {
+        let mut sample = Sample::new();
+        let planks = blended(&mut sample);
+        let mut panel = open();
+        panel.tab = Tab::Bazaar;
+        panel.preset("rope:buy:3@12");
+        panel.offer(&planks);
+        assert_eq!(panel.selected.as_deref(), Some("plank"));
+        assert_eq!((panel.tab, panel.pane, panel.form.side), (Tab::Items, Pane::Book, OrderSide::Sell));
+        assert_eq!(panel.form.stack, Some(planks.item_id));
+        assert_eq!(panel.form.quantity, "8");
+        // The price was rope's: it goes, and the new one is yours to set
+        assert_eq!(panel.form.price, "");
+        assert_eq!(panel.form.picks, [(92, 0), (70, 0), (40, 0)]);
+
+        // Pick the two 92s and price them: the order names those units
+        panel.form.picks[0].1 = 2;
+        panel.form.price = "50".into();
+        run(&mut panel, &sample.view(Some("plank")), None);
+        assert_eq!(panel.form.quantity, "2", "the rows set the count");
+        let place = panel.place.unwrap().center();
+        let Some(Action::Place(order)) = run(&mut panel, &sample.view(Some("plank")), Some(place)) else {
+            panic!("no sell");
+        };
+        assert_eq!(
+            (order.side, order.item_id, order.quantity, order.qualities),
+            (OrderSide::Sell, Some(planks.item_id), 2, Some(Units::uniform(2, 92)))
+        );
+
+        // Offering it again starts over with the whole stack, the price kept
+        panel.offer(&planks);
+        assert_eq!((panel.form.quantity.as_str(), panel.form.price.as_str()), ("8", "50"));
+        assert!(panel.form.picks.iter().all(|(_, take)| *take == 0));
+    }
+
+    #[test]
+    fn a_stack_dragged_from_a_slot_onto_the_panel_is_offered() {
+        let mut sample = Sample::new();
+        let planks = blended(&mut sample);
+        let mut panel = open();
+        panel.select("rope");
+        let ctx = theme::test_context();
+        let mut icons = ItemIcons::load(std::path::Path::new("no/icons/needed"));
+        let slot_at = egui::pos2(40.0, 660.0);
+        let mut frame = |panel: &mut MarketPanel, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                theme::install(ctx);
+                // A lone inventory slot in the corner, clear of the panel
+                egui::Area::new(Id::new("test_slot"))
+                    .fixed_pos(slot_at - egui::vec2(24.0, 24.0))
+                    .show(ctx, |ui| {
+                        let slot = slots::Slot {
+                            container_id: sample.inventory.id,
+                            index: 0,
+                            item: Some(&planks),
+                            enabled: true,
+                        };
+                        assert_eq!(slot.show(ui, &mut icons), None, "no slot takes it");
+                    });
+                panel.show(ctx, &mut icons, &sample.view(panel.selected.as_deref()));
+            });
+        };
+        for _ in 0..8 {
+            frame(&mut panel, vec![]);
+        }
+        let to = panel.rect.unwrap().center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: if pressed { slot_at } else { to },
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut panel, vec![egui::Event::PointerMoved(slot_at)]);
+        frame(&mut panel, vec![press(true)]);
+        for i in 1..=6 {
+            frame(&mut panel, vec![egui::Event::PointerMoved(slot_at + (to - slot_at) * (i as f32 / 6.0))]);
+        }
+        assert_eq!(panel.selected.as_deref(), Some("rope"), "nothing until it's let go");
+        frame(&mut panel, vec![press(false)]);
+        frame(&mut panel, vec![]);
+        assert_eq!(panel.selected.as_deref(), Some("plank"));
+        assert_eq!((panel.form.side, panel.form.stack), (OrderSide::Sell, Some(planks.item_id)));
+        assert_eq!(panel.form.quantity, "8");
     }
 
     #[test]
