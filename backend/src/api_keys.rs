@@ -176,7 +176,9 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("POST", "stations", ["place"])
         | ("DELETE", "stations", [_])
         | ("PUT", "stations", [_, "automation"])
-        | ("POST", "stations", [_, "automation", "start" | "stop"]) => Some(ApiKeyScope::Play),
+        | ("POST", "stations", [_, "automation", "start" | "stop"])
+        // Reading a letter of your own: a citizen does it on the road in (#450)
+        | ("POST", "letters", [_, "read"]) => Some(ApiKeyScope::Play),
         ("POST", "exchange", ["deposit" | "withdraw"])
         | ("POST", "market", ["orders"] | ["box", "collect"])
         | ("DELETE", "market", ["orders", _])
@@ -390,6 +392,11 @@ mod tests {
         assert_eq!(rest(Method::POST, "/bazaar/mine/listings"), Some(Trade));
         assert_eq!(rest(Method::POST, "/bazaar/listings/abc/buy"), Some(Trade));
         assert_eq!(rest(Method::DELETE, "/bazaar/listings/abc"), Some(Trade));
+        // A citizen reads its letters on the road in (#450), but sends none
+        // and drops none on a key
+        assert_eq!(rest(Method::POST, "/letters/abc/read"), Some(Play));
+        assert_eq!(rest(Method::POST, "/letters"), None);
+        assert_eq!(rest(Method::DELETE, "/letters/abc"), None);
     }
 
     #[test]
