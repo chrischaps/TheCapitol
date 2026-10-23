@@ -33,6 +33,12 @@
 //! follows `station_automation_changed` and `automation_produced`, through
 //! the same `material.emissive_scale` as the hour.
 //!
+//! **Yours (#487).** A small gold lozenge hangs over each station of yours
+//! (`draw_station_mine` in `input.rhai`, from [`StationMark::mine`]), in
+//! the gold the plot panel and your card use for "yours", so your bench
+//! reads as yours in the crowd at the spawn. A waiting one's ember floats
+//! over the gold.
+//!
 //! A station that was placed just now (`station_placed`) drops into place
 //! and settles. One seen for the first time, walking near it, rises out
 //! of the ground instead, quickly, so it doesn't pop. One the server stops
@@ -255,11 +261,10 @@ impl Stations {
             station.blow = (station.blow - dt / PUFF).max(0.0);
             let want = work_light(station.kind, station.work, station.progress());
             station.light += (want - station.light) * (1.0 - (-LIGHT_RATE * dt).exp());
+            let mine = state.me().is_some() && state.me() == Some(info.owner_id);
             // An ember over your own while it waits, with why on hover
             let paused = match set.map(|a| &a.state) {
-                Some(AutomationState::Paused { reason })
-                    if state.me().is_some() && state.me() == Some(info.owner_id) =>
-                {
+                Some(AutomationState::Paused { reason }) if mine => {
                     let recipe = set.and_then(|a| state.recipe(&a.recipe_id));
                     Some(pause_words(reason, state.catalog(), recipe).what)
                 }
@@ -282,6 +287,7 @@ impl Stations {
                 reach: station.reach * smooth(station.shown),
                 top: height(station.kind) * smooth(station.shown),
                 paused,
+                mine,
             });
         }
 
@@ -534,10 +540,16 @@ fn height(kind: &str) -> f32 {
 
 /// `--station-sample`: a store holding one of every station type the
 /// catalog knows, and a `loom` it doesn't, in a row across the view from
-/// `camera` to `target` (world metres, X and Z), [`SAMPLE_SPACING`] apart.
+/// `camera` to `target` (world metres, X and Z), [`SAMPLE_SPACING`] apart,
+/// every other one yours. Behind them stands a crowd of workbenches, as at
+/// the spawn after Arrival's bench step (#487), with two of them yours.
 pub fn sample(target: [f32; 2], camera: [f32; 2]) -> GameState {
+    use capitol_core::net::ConnectionState;
     use capitol_core::protocol::ws::ServerMessage;
+    let me = Uuid::from_u128(0xca9);
+    let someone = Uuid::from_u128(0xbee);
     let mut state = GameState::new();
+    state.apply_connection(&ConnectionState::Connected { player_id: me });
     let mut types: Vec<String> = state
         .catalog()
         .station_types()
@@ -547,27 +559,47 @@ pub fn sample(target: [f32; 2], camera: [f32; 2]) -> GameState {
     types.push("loom".into());
     let (dx, dz) = (target[0] - camera[0], target[1] - camera[1]);
     let len = dx.hypot(dz).max(1e-3);
+    let ahead = [dx / len, dz / len];
     let across = [dz / len, -dx / len];
-    let mid = (types.len() as f32 - 1.0) / 2.0;
-    for (i, t) in types.iter().enumerate() {
-        let k = (i as f32 - mid) * SAMPLE_SPACING;
-        let [x, y] = to_server(target[0] + across[0] * k, target[1] + across[1] * k);
+    let mut place = |n: u128, kind: &str, k: f32, back: f32, owner: Uuid| {
+        let [x, y] = to_server(
+            target[0] + across[0] * k + ahead[0] * back,
+            target[1] + across[1] * k + ahead[1] * back,
+        );
         state.apply_ws(&ServerMessage::StationPlaced {
-            station_id: Uuid::from_u128(i as u128 + 1),
-            station_type: t.clone(),
-            name: t.clone(),
-            owner_id: Uuid::nil(),
+            station_id: Uuid::from_u128(n),
+            station_type: kind.into(),
+            name: kind.into(),
+            owner_id: owner,
             x,
             y,
             container_id: Uuid::nil(),
             quality: 60,
         });
+    };
+    let mid = (types.len() as f32 - 1.0) / 2.0;
+    for (i, t) in types.iter().enumerate() {
+        let owner = if i % 2 == 0 { me } else { someone };
+        place(i as u128 + 1, t, (i as f32 - mid) * SAMPLE_SPACING, 0.0, owner);
+    }
+    // The crowd: two rows of benches, a little ragged, as people put them.
+    for i in 0..14u32 {
+        let (row, col) = (i / 7, i % 7);
+        let jitter = (i.wrapping_mul(2_654_435_761) % 100) as f32 / 100.0 - 0.5;
+        let k = (col as f32 - 3.0 + row as f32 * 0.5) * CROWD_SPACING + jitter * 0.4;
+        let back = CROWD_BACK + row as f32 * CROWD_SPACING + jitter * 0.4;
+        let owner = if i == 4 || i == 9 { me } else { someone };
+        place(100 + i as u128, "workbench", k, back, owner);
     }
     state
 }
 
 /// How far apart `--station-sample` stands them, metres.
 const SAMPLE_SPACING: f32 = 3.6;
+/// How far behind the row the crowd of benches starts, and how far apart
+/// they stand, metres: a little over the server's 5 (`STATION_MIN_SPACING`).
+const CROWD_BACK: f32 = 7.0;
+const CROWD_SPACING: f32 = 5.5;
 
 /// `--automation-sample` (E4.4): stations at work and waiting, in a row
 /// across the view as `--station-sample` stands them, all yours: a forge

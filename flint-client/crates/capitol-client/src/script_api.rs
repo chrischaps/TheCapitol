@@ -380,6 +380,9 @@ pub struct StationMark {
     pub top: f32,
     /// Yours, and waiting (E4.4): why, in a few words ("Out of iron ore").
     pub paused: Option<String>,
+    /// Yours (#487): a gold mark floats over it, so yours stands out in a
+    /// crowd of the same.
+    pub mine: bool,
 }
 
 /// How near a stall you stand to be in the bazaar, in metres: its streets'
@@ -877,9 +880,10 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             .map(|n| node_map(n).into())
             .collect()
     });
-    // `cap_stations() -> [#{ id, kind, x, z, radius, in_reach, reach }]`:
-    // the stations shown, in world metres. `in_reach` is whether you're
-    // within its interaction range; `reach` eases from 0 to 1 with it.
+    // `cap_stations() -> [#{ id, kind, x, z, radius, in_reach, reach, top,
+    // mine, paused }]`: the stations shown, in world metres. `in_reach` is
+    // whether you're within its interaction range; `reach` eases from 0 to
+    // 1 with it. `mine` is whether it's yours (#487).
     let stations = shared.stations.clone();
     engine.register_fn("cap_stations", move || -> rhai::Array {
         let Ok(stations) = stations.lock() else {
@@ -1292,6 +1296,7 @@ fn station_map(s: &StationMark) -> rhai::Map {
     m.insert("in_reach".into(), s.in_reach.into());
     m.insert("reach".into(), (s.reach as f64).into());
     m.insert("top".into(), (s.top as f64).into());
+    m.insert("mine".into(), s.mine.into());
     match &s.paused {
         Some(why) => m.insert("paused".into(), why.clone().into()),
         None => m.insert("paused".into(), rhai::Dynamic::UNIT),
@@ -1563,7 +1568,7 @@ mod tests {
     #[test]
     fn a_click_inside_a_ring_picks_the_station_and_asks_to_open_it() {
         let shared = Shared::default();
-        let mark = |id: &str, x: f32| StationMark {
+        let mark = |id: &str, x: f32, mine: bool| StationMark {
             id: id.into(),
             kind: "workbench",
             at: [x, 0.0],
@@ -1572,8 +1577,9 @@ mod tests {
             reach: 0.0,
             top: 1.0,
             paused: None,
+            mine,
         };
-        *shared.stations.lock().unwrap() = vec![mark("bench", 0.0), mark("chest", 2.5)];
+        *shared.stations.lock().unwrap() = vec![mark("bench", 0.0, false), mark("chest", 2.5, true)];
         let mut engine = rhai::Engine::new();
         register(&mut engine, &shared);
         let picked: String = engine
@@ -1585,6 +1591,10 @@ mod tests {
             Some("chest")
         );
         assert!(engine.eval::<()>("cap_station_at(0.0, 1.6)").is_ok());
+        let mine: String = engine
+            .eval(r#"let s = cap_stations(); `${s[0].mine} ${s[1].mine}`"#)
+            .unwrap();
+        assert_eq!(mine, "false true", "the chest is yours, the bench isn't");
     }
 
     #[test]

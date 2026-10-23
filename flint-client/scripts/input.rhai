@@ -480,7 +480,9 @@ fn on_draw_ui() {
         // One under the cursor shows its ring, faintly if it's out of reach.
         if over != () && over.id == s.id && s.reach < hover_reach() { s.reach = hover_reach(); }
         if s.reach > 0.01 { draw_station_ring(s, now); }
-        if s.paused != () { draw_station_ember(s, over != () && over.id == s.id, now); }
+        let hovered = over != () && over.id == s.id;
+        if s.mine { draw_station_mine(s, hovered, now); }
+        if s.paused != () { draw_station_ember(s, hovered, now); }
     }
     // The tuft you're going to gather, if any. While you walk to it, the
     // sight round it stands in for the ring at your destination.
@@ -693,6 +695,8 @@ fn draw_station_ember(s, over, now) {
     let bob = 0.08 * (now * 1.3 + seed).sin();
     let p = world_to_screen(s.x, cap_ground_at(s.x, s.z) + s.top + 0.55 + bob, s.z);
     if !p.visible { return; }
+    // Over your gold mark, which it always has: only yours have embers.
+    if s.mine { p.y -= mine_mark_height() + 12.0; }
     let flicker = 0.8 + 0.2 * (now * 7.3 + seed).sin() * (now * 3.1).cos();
     let r = 4.2 * flicker;
     let hot = station_orange();
@@ -712,6 +716,50 @@ fn draw_station_ember(s, over, now) {
     draw_text_opts(p.x - m.width / 2.0, y, line, size, #{
         font: "strong", color: [1.0, 0.77, 0.42, 0.95],
     });
+}
+
+// The gold over a station of yours (#487), so yours reads as yours in a
+// crowd of the same, as at the spawn after Arrival's bench step: a small
+// lozenge in the Capitol's gold, the plot panel's and your card's "yours",
+// its point down at the station, hanging still but for a slow breath. It
+// keeps a few points' size however far you stand, and fades out past a
+// street or two, so a yard full of your own doesn't wear a field of them.
+fn mine_mark_height() { 13.0 }
+fn mine_mark_near() { 70.0 }
+fn mine_mark_far() { 160.0 }
+
+fn draw_station_mine(s, over, now) {
+    let cam = get_camera_position();
+    let d = dist(s.x, s.z, cam.x, cam.z);
+    let fade = ((mine_mark_far() - d) / (mine_mark_far() - mine_mark_near())).max(0.0).min(1.0);
+    // It comes in with the station as it rises or drops into place.
+    fade *= (s.top * 2.0).min(1.0);
+    if fade <= 0.01 { return; }
+    let ground = cap_ground_at(s.x, s.z);
+    let p = world_to_screen(s.x, ground + s.top + 0.5, s.z);
+    if !p.visible { return; }
+    // A fine stem down to the station's top, like a surveyor's pin, so up
+    // close the mark can't be read as the one behind's.
+    let foot = world_to_screen(s.x, ground + s.top + 0.05, s.z);
+    let seed = s.x * 1.3 + s.z * 0.7;
+    let breath = 0.5 + 0.5 * (now * 1.1 + seed).sin();
+    let g = gold();
+    let h = if over { mine_mark_height() * 1.15 } else { mine_mark_height() };
+    let w = h * 0.42;
+    let tip = p.y - 2.0;
+    let mid = tip - h * 0.62;
+    let top = tip - h;
+    let a = if over { fade } else { fade * 0.9 };
+    // A soft halo, breathing, then the lozenge with a dark rim so it holds
+    // against a bright sky or a sunlit street, and a pale facet up its left.
+    if foot.visible && foot.y - tip > 3.0 {
+        draw_line(p.x, tip, foot.x, foot.y, g[0], g[1], g[2], a * 0.55, 1.2);
+    }
+    draw_circle(p.x, mid, h * (0.62 + 0.08 * breath), g[0], g[1], g[2], a * (0.05 + 0.05 * breath));
+    let shape = [[p.x, top], [p.x + w, mid], [p.x, tip], [p.x - w, mid]];
+    draw_polygon(shape, g[0], g[1], g[2], a, 2);
+    draw_polygon([[p.x, top], [p.x, tip], [p.x - w, mid]], 1.0, 0.9, 0.55, a * 0.45, 2);
+    draw_polygon_outline(shape, 0.24, 0.17, 0.03, a * 0.75, 1.2, true, 2);
 }
 
 // A ring of radius r (m) on the ground at (cx, cz), in `steps` segments.
