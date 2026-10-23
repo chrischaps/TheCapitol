@@ -437,12 +437,14 @@ mod tests {
         Player { id, inventory: containers[0], input: containers[1] }
     }
 
-    /// A station of `kind` owned by `owner`, off any plot, at the origin
+    /// A station of `kind` owned by `owner`, off any plot, at the origin.
+    /// It stands indoors, so a craft wears its tool one use: outdoors the
+    /// wear is dithered (V3.2), and a test of it is [`outdoors_a_craft_wears_the_tool_more`]
     async fn station(db: &PgPool, owner: Uuid, kind: &str) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, kit_quality)
-             VALUES ($1, $2, $3, 0, 0, 50)",
+            "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, kit_quality, indoors)
+             VALUES ($1, $2, $3, 0, 0, 50, TRUE)",
         )
         .bind(id)
         .bind(kind)
@@ -551,6 +553,24 @@ mod tests {
         assert_eq!(where_is(&db, sickle).await, Some((Some(ada.id), Some(ada.inventory), Some(0), Some(2))));
         assert_eq!(slot_of(&db, bench).await, (None, None));
         assert!(matches!(remove_tool(&db, ada.id, bench, HERE).await, Err(ToolSlotError::NoTool)));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn outdoors_a_craft_wears_the_tool_more(db: PgPool) {
+        let (ada, bench) = setup(&db).await;
+        sqlx::query("UPDATE stations SET indoors = FALSE WHERE id = $1").bind(bench).execute(&db).await.unwrap();
+        // A whole factor, so the dither has nothing to round
+        sqlx::query("INSERT INTO tunables (key, value) VALUES ('outdoor_tool_wear', 2)").execute(&db).await.unwrap();
+        let sickle = item(&db, ada.id, ada.inventory, 0, "stone_sickle", 1, Some(9)).await;
+        let fiber = item(&db, ada.id, ada.input, 0, "fiber", 4, None).await;
+        install_tool(&db, ada.id, bench, sickle, HERE).await.unwrap();
+        let installed = installed_tool(&db, bench, ToolType::Sickle).await.unwrap().unwrap();
+
+        let done = finish_craft(&db, &rope(&ada, fiber, installed)).await.unwrap();
+
+        assert_eq!(done.tool.map(|t| t.durability), Some(7), "two uses' wear in the weather");
+        assert_eq!(done.station_tool.and_then(|(_, t)| t).map(|t| t.durability), Some(7));
     }
 
     #[sqlx::test(migrations = "./migrations")]
