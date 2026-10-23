@@ -2552,7 +2552,8 @@ pub struct PlotInfo {
     pub deed_cost: Option<i32>,
     /// Current number of stations placed
     pub station_count: i32,
-    /// Maximum stations allowed
+    /// Maximum stations allowed: on a home lot, its building's room
+    /// indoors plus its yard's (Plots v2 §5.6, V3.1)
     pub station_capacity: i32,
     /// The `/terrain` lot this plot is (`TerrainPlot::id`). Clients join the two
     /// on it. `None` only for a plot claimed before B7 that no lot replaced.
@@ -2563,6 +2564,14 @@ pub struct PlotInfo {
     /// `None` only for a pre-B7 plot, whose shape is `bounds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corners: Option<[(f64, f64); 4]>,
+    /// The stations its building holds on each storey, inside
+    /// `rules::building::footprint` (V3.1, #473). `None` for a lot with no
+    /// building, a guild hall's, or one whose room isn't worked out yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indoor_room: Option<i32>,
+    /// The stations its yard holds, round the building
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yard_room: Option<i32>,
 }
 
 impl PlotInfo {

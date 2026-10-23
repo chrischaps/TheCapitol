@@ -43,8 +43,12 @@ const STYLE: f32 = 34.0;
 /// The length of the plan's scale bar, in world units (metres).
 const SCALE_BAR: f64 = 50.0;
 
-/// A typical lot's corners, and where its stations stand on it.
-type Dots = ([(f64, f64); 4], Vec<(f64, f64)>);
+/// A typical lot's corners, its building's footprint, and where its
+/// stations stand on it: indoors first, then in the yard (V3.1, #473).
+type Dots = (Quad, Option<Quad>, Vec<(f64, f64)>);
+
+/// A lot or a footprint: four corners in server units.
+type Quad = [(f64, f64); 4];
 
 /// What the card shows: one zone, or all three side by side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,26 +101,31 @@ impl Plans {
                 for f in columns {
                     ui.vertical(|ui| {
                         ui.set_width(COLUMN);
-                        let dots = self.dots_for(f);
-                        column(ui, f, dots, scale);
+                        let (building, dots) = self.dots_for(f);
+                        column(ui, f, building, dots, scale);
                     });
                 }
             });
         });
     }
 
-    /// The stations on `f`'s typical lot, as `sim::lot` places them.
-    fn dots_for(&mut self, f: &ZoneFacts) -> &[(f64, f64)] {
+    /// The building on `f`'s typical lot, and its stations, as `sim::lot`
+    /// places them: inside first, then in the yard.
+    fn dots_for(&mut self, f: &ZoneFacts) -> (Option<Quad>, &[(f64, f64)]) {
         let want = f.stations_median.max(0) as usize;
         let stale = self
             .dots
             .get(&f.zone_id)
-            .is_none_or(|(corners, dots)| *corners != f.typical_lot || dots.len() > want);
+            .is_none_or(|(corners, _, dots)| *corners != f.typical_lot || dots.len() > want);
         if stale {
-            let dots = lot::layout(f.typical_lot, want);
-            self.dots.insert(f.zone_id.clone(), (f.typical_lot, dots));
+            let (building, dots) = match Zone::from_str(&f.zone_id) {
+                Some(zone) => lot::layout_in(f.typical_lot, zone, want),
+                None => (None, lot::layout(f.typical_lot, want)),
+            };
+            self.dots.insert(f.zone_id.clone(), (f.typical_lot, building, dots));
         }
-        &self.dots[&f.zone_id].1
+        let (_, building, dots) = &self.dots[&f.zone_id];
+        (*building, dots)
     }
 }
 
@@ -272,7 +281,7 @@ fn extent(points: &[(f64, f64)]) -> (f64, f64) {
 }
 
 /// One zone's column: the band, the plan, the facts and what it owns up to.
-fn column(ui: &mut egui::Ui, f: &ZoneFacts, dots: &[(f64, f64)], scale: f32) {
+fn column(ui: &mut egui::Ui, f: &ZoneFacts, building: Option<[(f64, f64); 4]>, dots: &[(f64, f64)], scale: f32) {
     let ink = Zone::from_str(&f.zone_id).map_or(TEXT, theme::zone);
     let (band, _) = ui.allocate_exact_size(egui::vec2(COLUMN, 3.0), Sense::hover());
     ui.painter().rect_filled(band, 1.5, ink);
@@ -280,7 +289,7 @@ fn column(ui: &mut egui::Ui, f: &ZoneFacts, dots: &[(f64, f64)], scale: f32) {
     ui.label(RichText::new(&f.zone_name).font(theme::strong(size::LARGE)).color(ink));
     let style = ui.add(egui::Label::new(RichText::new(&f.style).italics().color(DIM).size(size::SMALL)).wrap());
     ui.add_space((STYLE - style.rect.height()).max(0.0) + 6.0);
-    plan(ui, f, dots, scale, ink);
+    plan(ui, f, building, dots, scale, ink);
     ui.add_space(6.0);
     theme::list_spacing(ui);
     row(ui, "Deed", RichText::new(format!("{} Strands", f.deed_cost)).color(GOLD));
@@ -299,9 +308,9 @@ fn column(ui: &mut egui::Ui, f: &ZoneFacts, dots: &[(f64, f64)], scale: f32) {
     }
 }
 
-/// The typical lot, long side across, its stations as gold dots, and a
-/// scale bar, at the card's one scale.
-fn plan(ui: &mut egui::Ui, f: &ZoneFacts, dots: &[(f64, f64)], scale: f32, ink: Color32) {
+/// The typical lot, long side across, the building that comes with its
+/// deed, its stations as gold dots, and a scale bar, at the card's one scale.
+fn plan(ui: &mut egui::Ui, f: &ZoneFacts, building: Option<[(f64, f64); 4]>, dots: &[(f64, f64)], scale: f32, ink: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(COLUMN, PLAN), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 6.0, theme::WELL);
@@ -316,6 +325,12 @@ fn plan(ui: &mut egui::Ui, f: &ZoneFacts, dots: &[(f64, f64)], scale: f32, ink: 
     let outline: Vec<Pos2> = lot.iter().map(|&p| to_screen(p)).collect();
     painter.add(egui::Shape::convex_polygon(outline.clone(), ink.gamma_multiply(0.14), Stroke::NONE));
     painter.add(egui::Shape::closed_line(outline, Stroke::new(1.25_f32, ink.gamma_multiply(0.8))));
+    // The building, a shade darker than its lot, with its walls drawn in
+    if let Some(footprint) = building {
+        let walls: Vec<Pos2> = laid(&f.typical_lot, &footprint).into_iter().map(to_screen).collect();
+        painter.add(egui::Shape::convex_polygon(walls.clone(), ink.gamma_multiply(0.30), Stroke::NONE));
+        painter.add(egui::Shape::closed_line(walls, Stroke::new(1.0_f32, ink.gamma_multiply(0.55))));
+    }
     // A station's reach, faint, then the station
     let reach = (lot::SPOT_SPACING as f32 / 2.0 * scale).max(2.0);
     for &p in &stations {
@@ -378,7 +393,7 @@ pub fn sample() -> Vec<ZoneFacts> {
             tax_per_week: 20,
             stations_median: 4,
             stations_least: 4,
-            station_capacity: 16,
+            station_capacity: 4,
             lots_free: 1015,
             lots_total: 1016,
             walk_nearest_secs: 17.0,
@@ -395,7 +410,7 @@ pub fn sample() -> Vec<ZoneFacts> {
             tax_per_week: 10,
             stations_median: 8,
             stations_least: 3,
-            station_capacity: 25,
+            station_capacity: 8,
             lots_free: 977,
             lots_total: 977,
             walk_nearest_secs: 39.0,
@@ -412,7 +427,7 @@ pub fn sample() -> Vec<ZoneFacts> {
             tax_per_week: 5,
             stations_median: 15,
             stations_least: 12,
-            station_capacity: 25,
+            station_capacity: 15,
             lots_free: 901,
             lots_total: 901,
             walk_nearest_secs: 68.0,
@@ -498,7 +513,7 @@ mod tests {
     fn the_dots_are_the_stations_a_typical_lot_fits() {
         let mut card = ZoneCard::default();
         for f in sample() {
-            let dots = card.plans.dots_for(&f).len();
+            let dots = card.plans.dots_for(&f).1.len();
             assert_eq!(dots as i32, f.stations_median, "{}", f.zone_id);
         }
     }

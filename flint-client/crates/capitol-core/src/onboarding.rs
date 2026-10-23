@@ -215,9 +215,10 @@ pub fn nearest_person<'a>(
 pub struct Home {
     pub plot_id: Uuid,
     pub zone: Zone,
-    /// The stations it fits on its own, empty, at the packing #444's zone
-    /// card counts by (`sim::lot::layout`, which the server's
-    /// `station_room` copies), capped by its capacity
+    /// The stations it fits on its own, empty: its building's room indoors
+    /// and in the yard, as the server sends it (V3.1, #473), or else the
+    /// packing #444's zone card counts by (`sim::lot::layout`, which the
+    /// server's `station_room` copies), capped by its capacity
     pub fits: usize,
     /// What its deed allows (`station_capacity`)
     pub capacity: i32,
@@ -239,8 +240,9 @@ impl Home {
     /// lot outside the home zones.
     pub fn of(plot: &PlotInfo, before: Option<&Home>) -> Option<Home> {
         let zone = Zone::from_str(&plot.zone_id).filter(|z| crate::deeds::HOME_ZONES.contains(z))?;
-        let fits = match before {
-            Some(b) if b.plot_id == plot.id && b.capacity == plot.station_capacity => b.fits,
+        let fits = match (before, plot.indoor_room, plot.yard_room) {
+            (_, Some(indoor), Some(yard)) => (indoor + yard).min(plot.station_capacity).max(0) as usize,
+            (Some(b), ..) if b.plot_id == plot.id && b.capacity == plot.station_capacity => b.fits,
             _ => crate::sim::lot::layout(crate::sim::lot::corners(plot), plot.station_capacity.max(0) as usize).len(),
         };
         Some(Home {
@@ -807,6 +809,8 @@ mod tests {
             station_capacity: 25,
             terrain_id: None,
             corners: Some([(0.0, 0.0), (120.0, 0.0), (120.0, 300.0), (0.0, 300.0)]),
+            indoor_room: None,
+            yard_room: None,
         }
     }
 

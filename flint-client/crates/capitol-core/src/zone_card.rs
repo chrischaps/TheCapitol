@@ -35,22 +35,27 @@ pub fn walk_range(f: &ZoneFacts) -> String {
     }
 }
 
-/// The stations a typical lot fits: "4", or "3 to 8" where some fit fewer.
+/// The stations a typical lot fits, and more with floors, which any home
+/// lot may build (Plots v2 §5.3): "4, more with floors", or "3 to 8, more
+/// with floors" where some fit fewer.
 pub fn stations(f: &ZoneFacts) -> String {
-    if f.stations_least < f.stations_median {
+    let fits = if f.stations_least < f.stations_median {
         format!("{} to {}", f.stations_least, f.stations_median)
     } else {
         f.stations_median.to_string()
-    }
+    };
+    format!("{fits}, more with floors")
 }
 
 /// What the card owns up to about the room, if anything: fewer than a whole
-/// workshop, or fewer than the deed's capacity reads.
+/// workshop, or fewer than the deed's capacity reads. Since the building
+/// came with the deed (V3.1, #473) the capacity is what a lot fits, so the
+/// second is only for a server from before it.
 pub fn room_notes(f: &ZoneFacts) -> Vec<String> {
     let mut notes = Vec::new();
     if f.stations_median < WORKSHOP {
         notes.push(format!(
-            "Room for {} stations, not a whole workshop.",
+            "Room for {} stations, not a whole workshop, until you build a floor.",
             f.stations_median
         ));
     }
@@ -116,7 +121,7 @@ pub(crate) mod tests {
             tax_per_week: 20,
             stations_median: 4,
             stations_least: 4,
-            station_capacity: 16,
+            station_capacity: 4,
             lots_free: 1015,
             lots_total: 1016,
             walk_nearest_secs: 17.2,
@@ -141,16 +146,13 @@ pub(crate) mod tests {
     #[test]
     fn the_card_owns_up_to_a_lot_short_of_a_workshop_and_of_its_capacity() {
         let u = urban();
-        assert_eq!(stations(&u), "4");
-        assert_eq!(
-            room_notes(&u),
-            [
-                "Room for 4 stations, not a whole workshop.",
-                "The deed allows 16; a typical lot fits 4."
-            ]
-        );
-        let farm = ZoneFacts { stations_median: 25, stations_least: 12, station_capacity: 25, ..u };
-        assert_eq!(stations(&farm), "12 to 25");
+        assert_eq!(stations(&u), "4, more with floors");
+        assert_eq!(room_notes(&u), ["Room for 4 stations, not a whole workshop, until you build a floor."]);
+        // A server from before the building, whose capacity said more
+        let old = ZoneFacts { station_capacity: 16, ..urban() };
+        assert_eq!(room_notes(&old)[1], "The deed allows 16; a typical lot fits 4.");
+        let farm = ZoneFacts { stations_median: 14, stations_least: 12, station_capacity: 14, ..u };
+        assert_eq!(stations(&farm), "12 to 14, more with floors");
         assert!(room_notes(&farm).is_empty(), "nothing to own up to");
     }
 

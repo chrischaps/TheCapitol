@@ -2,15 +2,16 @@
 //! plan D9): `GET /bureaucracy/zone-facts`.
 //!
 //! The card tells the truth. Its stations are what a lot **fits** at
-//! `STATION_MIN_SPACING` (`station_room::most`, the client's packing rule),
-//! capped by the lot's capacity, never the capacity alone. Its walk is the
-//! straight line from a lot to the Exchange hall at `PLAYER_SPEED`.
+//! `STATION_MIN_SPACING`: since the building came with the deed (Plots v2
+//! §5.6, V3.1, #473), its room indoors and in the yard, packed by
+//! `station_room::room` as the sync packs it into `plots.indoor_room` and
+//! `yard_room`. That's the lot's capacity too, before floors. Its walk is
+//! the straight line from a lot to the Exchange hall at `PLAYER_SPEED`.
 //!
-//! Packing every lot takes a while (the default world's 2900, about 1.3 s
-//! in release and 6 s in debug), so the room and the walk are worked out
-//! once for each world ([`rooms`]), on a blocking thread: warmed at startup,
-//! and again on the first ask after a terrain commit, keyed by the terrain's
-//! version.
+//! Packing every lot takes a while (the default world's 3000, a few seconds
+//! in debug), so the room and the walk are worked out once for each world
+//! ([`rooms`]), on a blocking thread: warmed at startup, and again on the
+//! first ask after a terrain commit, keyed by the terrain's version.
 //! The price, the tax and the free lots are read live on every ask.
 
 use std::collections::HashMap;
@@ -23,7 +24,6 @@ use capitol_protocol::terrain::{LandmarkKind, TerrainPlot};
 use capitol_protocol::tunables::Tunables;
 use sqlx::PgPool;
 
-use crate::engine::plot_sync::size_category;
 use crate::models::station_room;
 use crate::models::ResourceType;
 use crate::state::AppState;
@@ -49,8 +49,9 @@ struct Lot {
     zone: Zone,
     corners: [(f64, f64); 4],
     area: f64,
-    /// The stations it fits, capped by its capacity
+    /// The stations it fits: its room indoors and in the yard
     fits: i32,
+    /// Its capacity, the same before floors
     capacity: i32,
     /// Its middle's straight walk to the hall, in seconds
     walk: f64,
@@ -89,29 +90,20 @@ pub async fn rooms(state: &AppState) -> Result<Arc<Rooms>, sqlx::Error> {
             .map_or((terrain.center_x, terrain.center_y), |l| l.door);
         (version, plots, hall)
     };
-    let capacities = capacities(&state.db).await?;
-    let rooms = tokio::task::spawn_blocking(move || Arc::new(pack(version, &plots, hall, &capacities)))
+    let rooms = tokio::task::spawn_blocking(move || Arc::new(pack(version, &plots, hall)))
         .await
         .expect("packing the lots panicked");
     *ROOMS.lock().unwrap() = Some(rooms.clone());
     Ok(rooms)
 }
 
-/// Each plot size category's station capacity.
-async fn capacities(db: &PgPool) -> Result<HashMap<String, i32>, sqlx::Error> {
-    let rows: Vec<(String, i32)> = sqlx::query_as("SELECT id, station_capacity FROM plot_size_categories")
-        .fetch_all(db)
-        .await?;
-    Ok(rows.into_iter().collect())
-}
-
-fn pack(version: String, plots: &[TerrainPlot], hall: (f64, f64), capacities: &HashMap<String, i32>) -> Rooms {
+fn pack(version: String, plots: &[TerrainPlot], hall: (f64, f64)) -> Rooms {
     let lots = plots
         .iter()
         .filter_map(|p| {
             let zone = Zone::from_str(&p.zone)?;
-            let capacity = capacities.get(size_category(&p.zone, p.area)).copied().unwrap_or(0);
-            let fits = station_room::most(&p.corners, capacity.max(0) as usize) as i32;
+            let fits = station_room::room(&p.corners, zone)?.capacity(0) as i32;
+            let capacity = fits;
             let (mx, my) = middle(&p.corners);
             let walk = (mx - hall.0).stable_hypot(my - hall.1) / PLAYER_SPEED;
             Some(Lot { id: p.id.clone(), zone, corners: p.corners, area: p.area, fits, capacity, walk })
@@ -309,8 +301,8 @@ mod tests {
     }
 
     /// The facts match the default world (Plots v2, #459): an urban lot fits
-    /// 4, a suburban one 6 or more, a farm 12 or more, none of them the
-    /// capacity alone; the walk to the hall grows outward; a claim takes a
+    /// 4, a suburban one 6 or more, a farm 12 or more, each its building's
+    /// room and its capacity (#473); the walk to the hall grows outward; a claim takes a
     /// lot off the free count.
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
@@ -346,7 +338,7 @@ mod tests {
             assert!((f.typical_area - TerrainPlot::calculate_area(&f.typical_lot)).abs() < 1.0);
         }
         assert_eq!(urban.stations_median, 4, "an urban lot fits 4");
-        assert!(urban.station_capacity > 4, "and its capacity says more");
+        assert_eq!(urban.station_capacity, 4, "and its capacity, its building's room, says so too (#473)");
         assert!(suburban.stations_median >= 6, "a suburban lot fits a workshop: {}", suburban.stations_median);
         assert!(rural.stations_median >= 12, "a farm fits 12: {}", rural.stations_median);
         assert!(urban.walk_nearest_secs < suburban.walk_nearest_secs && suburban.walk_nearest_secs < rural.walk_nearest_secs);

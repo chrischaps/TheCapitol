@@ -198,6 +198,9 @@ pub mod guild;
 /// Piece-rate wages: an offer's bounds, its pay and why a shift ends (D7, S2.6).
 pub mod wages;
 
+/// The building that comes with a deed: its footprint, indoors and out (V3.1).
+pub mod building;
+
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
 pub fn quality_grade(quality: i32) -> &'static str {

@@ -416,6 +416,8 @@ mod tests {
             station_capacity: 9,
             terrain_id: None,
             corners: None,
+            indoor_room: None,
+            yard_room: None,
             owner_citizen: false,
         }
     }

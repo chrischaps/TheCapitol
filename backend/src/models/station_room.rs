@@ -9,6 +9,8 @@
 //! targets mean what a citizen finds when it builds.
 
 use capitol_protocol::fmath::StableMath;
+use capitol_protocol::rules::building::{self, footprint};
+use capitol_protocol::rules::Zone;
 use capitol_protocol::terrain::quad_contains;
 
 type P = (f64, f64);
@@ -131,24 +133,65 @@ pub fn takes(c: &[P; 4], wanted: usize) -> bool {
 /// `takes`'s rule: `takes(c, n)` holds for every n up to it and none past
 /// it, as each order packs greedily. One packing, not a scan of n (#468).
 pub fn most(c: &[P; 4], cap: usize) -> usize {
-    // No order packs past the bound, so it caps the packing too.
-    let cap = match most_that_fit(c, edge_of(c)) {
+    packed(c, None, bounded(c, cap))
+}
+
+/// `cap`, or less where the packing bound says no order packs that many: it
+/// caps the packing too.
+fn bounded(c: &[P; 4], cap: usize) -> usize {
+    match most_that_fit(c, edge_of(c)) {
         Some(bound) => cap.min(bound.max(0.0).floor() as usize),
         None => cap,
+    }
+}
+
+/// More than any lot the world lays holds, so a room is never cut short.
+const ROOM_CAP: usize = 64;
+
+/// A lot's room for stations with its building on it (Plots v2 §5.6, V3.1,
+/// #473): how many stand indoors on each storey, and how many in the yard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Room {
+    pub indoor: usize,
+    pub yard: usize,
+}
+
+impl Room {
+    /// What the lot holds with `floors` bought: indoors on every storey,
+    /// and the yard.
+    pub fn capacity(&self, floors: usize) -> usize {
+        self.indoor * (1 + floors) + self.yard
+    }
+}
+
+/// The room on a lot of `zone` with these corners: inside its building's
+/// footprint (`rules::building::footprint`), packed as a lot is, and in the
+/// yard round it, with the footprint and [`EDGE`] round it taken out. A wall
+/// stands between the two, so the spacing holds within each, not across.
+/// `None` for a zone whose lots have no building.
+pub fn room(c: &[P; 4], zone: Zone) -> Option<Room> {
+    let Some(f) = footprint(c, zone) else {
+        // A home lot too small for a building is all yard
+        return building::shape(zone).map(|_| Room { indoor: 0, yard: most(c, ROOM_CAP) });
     };
-    packed(c, cap)
+    Some(Room { indoor: most(&f, ROOM_CAP), yard: packed(c, Some(&f), bounded(c, ROOM_CAP)) })
 }
 
 /// [`most`] without the bound: the best of the client's orders, each packed
 /// greedily up to `cap`. Each order is built only when the ones before it
 /// fall short of `cap`, and the first starts with the coarse lattice, so a
 /// lot that lattice fills needs no fine grid at all.
-fn packed(c: &[P; 4], cap: usize) -> usize {
+fn packed(c: &[P; 4], without: Option<&[P; 4]>, cap: usize) -> usize {
     let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
     let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
     let edge = edge_of(c);
     let middle = at(c, 0.5, 0.5);
     let fits = |p: P| quad_contains(c, p.0, p.1) && (0..4).all(|i| to_segment(p, c[i], c[(i + 1) % 4]) >= edge);
+    // Out in the yard: not in the building, nor against its walls
+    let fits = |p: P| {
+        fits(p)
+            && without.is_none_or(|f| !quad_contains(f, p.0, p.1) && (0..4).all(|i| to_segment(p, f[i], f[(i + 1) % 4]) >= edge))
+    };
     let grid = |step: f64| -> Vec<P> {
         let vs = lattice(len_v, step, edge);
         lattice(len_u, step, edge)
@@ -241,7 +284,7 @@ mod tests {
             let (w, h) = (rng.range(60.0, 200.0), rng.range(60.0, 320.0));
             let (skew, lean) = (rng.range(-30.0, 30.0), rng.range(-25.0, 25.0));
             let c = [(0.0, 0.0), (w, lean), (w + skew, h + lean), (skew, h)];
-            let unbounded = packed(&c, 40);
+            let unbounded = packed(&c, None, 40);
             if let Some(bound) = most_that_fit(&c, edge_of(&c)) {
                 assert!((unbounded as f64) <= bound, "{c:?} packs {unbounded}, past the bound {bound:.2}");
                 ruled_out += [4, 8, 12, 15].iter().filter(|&&n| bound < n as f64).count();
@@ -255,5 +298,41 @@ mod tests {
         // A farm a hair short of 12, and one that takes them.
         assert!(most_that_fit(&boxed(140.0, 150.0), EDGE).unwrap() < 12.0);
         assert!(takes(&boxed(132.0, 190.0), 12));
+    }
+}
+
+#[cfg(test)]
+mod world_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Every home lot of the default world (Plots v2's, the grown one since
+    /// the flip, #459) has its building and its room (V3.1, #473): every
+    /// urban lot 4 indoors and none in the yard, the suburb about 4 and 4 with
+    /// nine in ten taking a whole workshop, as the lots alone did, and every
+    /// farm the 12 it was laid for (V1.3, #457).
+    #[test]
+    fn every_home_lot_has_its_room() {
+        let world = crate::models::TerrainConfig::default_world();
+        let mut by: BTreeMap<&str, Vec<Room>> = BTreeMap::new();
+        for lot in &world.terrain_plots {
+            let Some(zone) = Zone::from_str(&lot.zone) else { continue };
+            let Some(room) = room(&lot.corners, zone) else { continue };
+            by.entry(lot.zone.as_str()).or_default().push(room);
+        }
+        let median = |mut xs: Vec<usize>| {
+            xs.sort_unstable();
+            xs[xs.len() / 2]
+        };
+        let urban = &by["urban"];
+        assert!(urban.len() > 1000 && urban.iter().all(|r| *r == Room { indoor: 4, yard: 0 }));
+        let suburb = &by["suburban"];
+        assert_eq!(median(suburb.iter().map(|r| r.indoor).collect()), 4);
+        assert_eq!(median(suburb.iter().map(|r| r.capacity(0)).collect()), 8);
+        let workshops = suburb.iter().filter(|r| r.capacity(0) >= 6).count();
+        assert!(workshops * 100 >= suburb.len() * 90, "{workshops} of {} take a workshop", suburb.len());
+        let farms = &by["rural"];
+        assert_eq!(median(farms.iter().map(|r| r.indoor).collect()), 4);
+        assert!(farms.iter().all(|r| r.capacity(0) >= 12), "every farm takes 12");
     }
 }

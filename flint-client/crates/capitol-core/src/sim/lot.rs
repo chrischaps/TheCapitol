@@ -9,9 +9,21 @@
 //! [`SPOT_SPACING`] apart in its own frame, and a finer grid, in whichever
 //! order packs the most stations round those already down ([`spots`]). Every
 //! spot keeps [`EDGE`] in from the sides, or less on a lot too narrow for it.
+//!
+//! A home lot has its building (Plots v2 §5.6, V3.1, #473), on
+//! `rules::building::footprint`. Its room indoors and in the yard are
+//! separate places: the server counts each against its own room
+//! (`PlotInfo::indoor_room` and `yard_room`), and keeps the spacing within
+//! each, not through the wall. So the spots go indoors first, packed in the
+//! footprint round the stations inside, then in the yard, packed round the
+//! footprint and the stations outside ([`Building`]).
 
 use capitol_protocol::rest::PlotInfo;
+use capitol_protocol::rules::{building, Zone};
 use capitol_protocol::terrain::quad_contains;
+
+/// A point in server units.
+type P = (f64, f64);
 
 /// How far apart stations go on a plot: just over `STATION_MIN_SPACING`.
 pub const SPOT_SPACING: f64 = 55.0;
@@ -80,8 +92,24 @@ fn lattice(len: f64, step: f64, edge: f64) -> Vec<f64> {
 /// end of the lot's longer axis, or out from one of its corners, which suit a
 /// pie, a trapezoid or a suburban lot that's nearly a triangle, where the
 /// lattice bunches up at the narrow end.
+///
+/// On a lot with a building, the spots indoors come first while there's
+/// room inside, then the yard's.
 pub fn spots(plot: &PlotInfo, taken: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    ordered(corners(plot), taken, left(plot))
+    match Building::of(plot) {
+        None => ordered(corners(plot), taken, left(plot), None),
+        Some(b) => {
+            let split = b.split(plot, taken);
+            let mut spots = Vec::new();
+            if split.indoor_left > 0 {
+                spots = ordered(b.footprint, &split.inside, split.indoor_left, None);
+            }
+            if split.yard_left > 0 {
+                spots.extend(ordered(corners(plot), &split.outside, split.yard_left, Some(&b.footprint)));
+            }
+            spots
+        }
+    }
 }
 
 /// What the lot's capacity has left.
@@ -89,9 +117,66 @@ fn left(plot: &PlotInfo) -> usize {
     (plot.station_capacity - plot.station_count).max(0) as usize
 }
 
+/// A home lot's building, and its room indoors and in the yard, as the
+/// server worked them out (V3.1, #473).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Building {
+    pub footprint: [(f64, f64); 4],
+    pub indoor_room: usize,
+    pub yard_room: usize,
+}
+
+/// The stations round a lot with a building, by place, and the room each
+/// place has left.
+struct Split {
+    inside: Vec<(f64, f64)>,
+    outside: Vec<(f64, f64)>,
+    indoor_left: usize,
+    yard_left: usize,
+}
+
+impl Building {
+    /// `plot`'s building, or `None` for a lot with none (a guild hall's), or
+    /// whose room the server hasn't sent.
+    pub fn of(plot: &PlotInfo) -> Option<Building> {
+        let zone = Zone::from_str(&plot.zone_id)?;
+        Some(Building {
+            footprint: building::footprint(&corners(plot), zone)?,
+            indoor_room: plot.indoor_room?.max(0) as usize,
+            yard_room: plot.yard_room?.max(0) as usize,
+        })
+    }
+
+    /// Whether `p` is inside it.
+    pub fn contains(&self, p: (f64, f64)) -> bool {
+        quad_contains(&self.footprint, p.0, p.1)
+    }
+
+    /// `taken` indoors and out, and what's left of each place's room: the
+    /// stations inside the footprint are this lot's indoors, and the ones
+    /// on the lot outside it its yard's.
+    fn split(&self, plot: &PlotInfo, taken: &[(f64, f64)]) -> Split {
+        let (inside, outside): (Vec<P>, Vec<P>) = taken.iter().copied().partition(|&p| self.contains(p));
+        let in_yard = outside.iter().filter(|p| plot.contains(p.0, p.1)).count();
+        let left = left(plot);
+        Split {
+            indoor_left: self.indoor_room.saturating_sub(inside.len()).min(left),
+            yard_left: self.yard_room.saturating_sub(in_yard).min(left),
+            inside,
+            outside,
+        }
+    }
+}
+
 /// [`spots`], in the first order that packs `enough`, or else the one that
-/// packs the most.
-fn ordered(c: [(f64, f64); 4], taken: &[(f64, f64)], enough: usize) -> Vec<(f64, f64)> {
+/// packs the most. A spot inside `without`, or within the edge of it, is
+/// left out: that's the yard round a building.
+fn ordered(
+    c: [(f64, f64); 4],
+    taken: &[(f64, f64)],
+    enough: usize,
+    without: Option<&[(f64, f64); 4]>,
+) -> Vec<(f64, f64)> {
     let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
     let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
     let edge = EDGE.min(0.4 * len_u.min(len_v));
@@ -99,6 +184,9 @@ fn ordered(c: [(f64, f64); 4], taken: &[(f64, f64)], enough: usize) -> Vec<(f64,
     let fits = |p: (f64, f64)| {
         quad_contains(&c, p.0, p.1)
             && (0..4).all(|i| to_segment(p, c[i], c[(i + 1) % 4]) >= edge)
+            && without.is_none_or(|f| {
+                !quad_contains(f, p.0, p.1) && (0..4).all(|i| to_segment(p, f[i], f[(i + 1) % 4]) >= edge)
+            })
             && taken.iter().all(|s| clear(*s, p))
     };
     let grid = |step: f64| -> Vec<(f64, f64)> {
@@ -160,20 +248,42 @@ fn pack(order: &[(f64, f64)], taken: &[(f64, f64)], most: usize) -> Vec<(f64, f6
 /// How many more stations `plot` takes: what its capacity has left, and what
 /// fits round the stations at `taken`, placed best spot first.
 pub fn room(plot: &PlotInfo, taken: &[(f64, f64)]) -> i32 {
-    pack(&spots(plot, taken), taken, left(plot)).len() as i32
+    let Some(b) = Building::of(plot) else {
+        return pack(&spots(plot, taken), taken, left(plot)).len() as i32;
+    };
+    let s = b.split(plot, taken);
+    let indoors = pack(&ordered(b.footprint, &s.inside, s.indoor_left, None), &s.inside, s.indoor_left).len();
+    let yard = pack(&ordered(corners(plot), &s.outside, s.yard_left, Some(&b.footprint)), &s.outside, s.yard_left).len();
+    (indoors + yard).min(left(plot)) as i32
 }
 
 /// Whether an empty `plot` takes `wanted` stations.
 pub fn takes(plot: &PlotInfo, wanted: i32) -> bool {
     let wanted = (wanted.max(0) as usize).min(left(plot));
-    pack(&ordered(corners(plot), &[], wanted), &[], wanted).len() >= wanted
+    match Building::of(plot) {
+        None => pack(&ordered(corners(plot), &[], wanted, None), &[], wanted).len() >= wanted,
+        Some(_) => room(plot, &[]) as usize >= wanted,
+    }
 }
 
 /// Where `most` stations would stand on an empty lot with these corners, as
 /// [`room`] places them: for drawing a lot's room, as the zone card does
-/// (#444).
+/// (#444). On a lot of a zone with buildings, indoors first, then the yard
+/// round the building ([`layout_in`]).
 pub fn layout(corners: [(f64, f64); 4], most: usize) -> Vec<(f64, f64)> {
-    pack(&ordered(corners, &[], most), &[], most)
+    pack(&ordered(corners, &[], most, None), &[], most)
+}
+
+/// [`layout`] on a lot of `zone`: its building's footprint, if it has one,
+/// and `most` stations packed inside it first, then in the yard round it.
+pub fn layout_in(corners: [P; 4], zone: Zone, most: usize) -> (Option<[P; 4]>, Vec<P>) {
+    let Some(f) = building::footprint(&corners, zone) else {
+        return (None, layout(corners, most));
+    };
+    let mut dots = pack(&ordered(f, &[], most, None), &[], most);
+    let rest = most - dots.len();
+    dots.extend(pack(&ordered(corners, &[], rest, Some(&f)), &[], rest));
+    (Some(f), dots)
 }
 
 #[cfg(test)]
@@ -207,7 +317,75 @@ mod tests {
             station_capacity: 9,
             terrain_id: None,
             corners: Some(corners),
+            indoor_room: None,
+            yard_room: None,
         }
+    }
+
+    /// A `zone` lot `w` wide along its street (y = 1000) and `h` deep, with
+    /// its building's room as the server would send it
+    fn home(zone: &str, w: f64, h: f64, indoor: i32, yard: i32) -> PlotInfo {
+        let corners = [(1000.0, 1000.0), (1000.0 + w, 1000.0), (1000.0 + w, 1000.0 + h), (1000.0, 1000.0 + h)];
+        PlotInfo {
+            zone_id: zone.into(),
+            station_capacity: indoor + yard,
+            indoor_room: Some(indoor),
+            yard_room: Some(yard),
+            ..lot(corners, 0)
+        }
+    }
+
+    /// An urban lot: 4 indoors and no yard, so every spot is inside, and a
+    /// full building leaves none (V3.1, #473)
+    #[test]
+    fn an_urban_lots_spots_are_indoors() {
+        let mut plot = home("urban", 90.0, 93.0, 4, 0);
+        let b = Building::of(&plot).unwrap();
+        let all = spots(&plot, &[]);
+        assert!(!all.is_empty() && all.iter().all(|p| b.contains(*p)));
+        assert_eq!(room(&plot, &[]), 4);
+        assert!(takes(&plot, 4));
+        let four: Vec<_> = pack(&all, &[], 4);
+        plot.station_count = 4;
+        assert_eq!(room(&plot, &four), 0);
+        assert!(spots(&plot, &four).is_empty());
+    }
+
+    /// Indoors first, then the yard, each spaced only within its own place:
+    /// a yard spot may stand just the other side of the wall from a station
+    /// inside
+    #[test]
+    fn indoors_first_then_the_yard_through_the_wall() {
+        let mut plot = home("suburban", 130.0, 130.0, 4, 3);
+        let b = Building::of(&plot).unwrap();
+        let all = spots(&plot, &[]);
+        assert!(b.contains(all[0]), "indoors first");
+        assert!(all.iter().any(|p| !b.contains(*p)), "then the yard");
+        assert_eq!(room(&plot, &[]), 7);
+        // The house full: its back wall is at y = 1084, the yard behind
+        let inside: Vec<_> = pack(&ordered(b.footprint, &[], 4, None), &[], 4);
+        assert_eq!(inside.len(), 4);
+        plot.station_count = 4;
+        let next = spots(&plot, &inside);
+        assert!(next.iter().all(|p| !b.contains(*p)), "only the yard is left");
+        assert_eq!(room(&plot, &inside), 3);
+        assert!(
+            next.iter().any(|p| inside.iter().any(|s| !clear(*s, *p))),
+            "a yard spot within 55 of a station inside"
+        );
+    }
+
+    /// The card's plan: the building's footprint, and the stations inside it first
+    #[test]
+    fn a_layout_fills_the_building_then_the_yard() {
+        let corners = [(0.0, 0.0), (130.0, 0.0), (130.0, 130.0), (0.0, 130.0)];
+        let (f, dots) = layout_in(corners, Zone::Suburban, 6);
+        let f = f.expect("a house");
+        assert_eq!(dots.len(), 6);
+        let indoors = dots.iter().filter(|p| quad_contains(&f, p.0, p.1)).count();
+        assert_eq!(indoors, 4, "{dots:?}");
+        let (none, _) = layout_in(corners, Zone::GuildDistrict, 4);
+        assert_eq!(none, None);
     }
 
     /// A `w` by `h` lot round (1000, 1000), turned `turn` radians.

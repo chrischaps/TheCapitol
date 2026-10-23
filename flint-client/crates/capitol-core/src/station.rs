@@ -13,10 +13,13 @@
 //! tests in the server's order (`handle_place_station` in
 //! `backend/src/ws/connection.rs`):
 //! - within 75 of you
-//! - on a lot: one you own (the terrain lot, B7), with room on it
+//! - on a lot: one you own (the terrain lot, B7), with room on it where the
+//!   spot is: indoors, inside the building that comes with the deed, or in
+//!   the yard (V3.1, #473)
 //! - on no lot: a type that may stand off a plot (the catalog's
 //!   `off_plot`, only the workbench), on dry ground (#187)
-//! - at least 50 from every other station
+//! - at least 50 from every other station in the same place: in the same
+//!   building, or both outdoors. A wall stands between the two.
 //!
 //! Your own plots come from the store; whether any lot covers the spot, and
 //! whether it's water, come from `/terrain`. Without a terrain, every spot
@@ -30,12 +33,13 @@
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::{PlotInfo, SlotItem, StationInfo};
-use capitol_protocol::rules::{self, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
+use capitol_protocol::rules::{self, building, Zone, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_protocol::terrain::{quad_contains, TerrainResponse};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
 use crate::catalog::Catalog;
+use crate::sim::lot::Building;
 use crate::state::{answers, GameState, StateEvent};
 
 pub mod visit;
@@ -60,8 +64,9 @@ pub enum Refusal {
     TooFar,
     /// On a lot that isn't yours: someone else's, or nobody's.
     NotYourPlot,
-    /// On your plot, but it holds all the stations it can.
-    PlotFull { capacity: i32 },
+    /// On your plot, but the place the spot is in holds all it can: indoors
+    /// (`Some(true)`), the yard (`Some(false)`), or a lot with no building.
+    PlotFull { capacity: i32, indoors: Option<bool> },
     /// On no lot, and this station only goes on a plot.
     NeedsAPlot,
     /// On no lot, but in the water.
@@ -76,7 +81,9 @@ impl Refusal {
         match self {
             Refusal::TooFar => "Too far from you".into(),
             Refusal::NotYourPlot => "Not on a plot you own".into(),
-            Refusal::PlotFull { capacity } => format!("This plot is full ({capacity}/{capacity})"),
+            Refusal::PlotFull { capacity, indoors: None } => format!("This plot is full ({capacity}/{capacity})"),
+            Refusal::PlotFull { capacity, indoors: Some(true) } => format!("No room left indoors ({capacity}/{capacity})"),
+            Refusal::PlotFull { capacity, indoors: Some(false) } => format!("No room left in the yard ({capacity}/{capacity})"),
             Refusal::NeedsAPlot => "This only goes on a plot you own".into(),
             Refusal::InWater => "Not on the water".into(),
             Refusal::TooClose => "Too close to another station".into(),
@@ -103,16 +110,30 @@ pub fn check<'a>(
     if (x - you[0]).hypot(y - you[1]) > STATION_INTERACTION_RANGE {
         return Err(Refusal::TooFar);
     }
+    let stations: Vec<&StationInfo> = stations.into_iter().collect();
     let plot = match plots
         .iter()
         .find(|p| p.owner_id == Some(me) && p.contains(x, y))
     {
-        Some(plot) if plot.station_count >= plot.station_capacity => {
-            return Err(Refusal::PlotFull {
-                capacity: plot.station_capacity,
-            });
+        Some(plot) => {
+            // Its building's room where the spot is, or the lot's as a whole
+            let (count, capacity, indoors) = match Building::of(plot) {
+                Some(b) => {
+                    let indoors = b.contains((x, y));
+                    let count = stations
+                        .iter()
+                        .filter(|s| plot.contains(s.x, s.y) && b.contains((s.x, s.y)) == indoors)
+                        .count() as i32;
+                    let room = if indoors { b.indoor_room } else { b.yard_room };
+                    (count, room as i32, Some(indoors))
+                }
+                None => (plot.station_count, plot.station_capacity, None),
+            };
+            if count >= capacity {
+                return Err(Refusal::PlotFull { capacity, indoors });
+            }
+            Some(plot.id)
         }
-        Some(plot) => Some(plot.id),
         None => {
             let terrain = terrain.ok_or(Refusal::NotYourPlot)?;
             if terrain
@@ -134,13 +155,34 @@ pub fn check<'a>(
             None
         }
     };
-    if stations
-        .into_iter()
-        .any(|s| (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING)
-    {
+    // Only in the same place: in the same building, or both outdoors
+    let place = building_at(x, y, plots, terrain);
+    if stations.iter().any(|s| {
+        (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING && building_at(s.x, s.y, plots, terrain) == place
+    }) {
         return Err(Refusal::TooClose);
     }
     Ok(plot)
+}
+
+/// The footprint of the building `(x, y)` is inside, or `None` outdoors: a
+/// lot's from `/terrain`, or, without it, one of `plots`' (V3.1, #473).
+fn building_at(x: f64, y: f64, plots: &[PlotInfo], terrain: Option<&TerrainResponse>) -> Option<[(f64, f64); 4]> {
+    let inside = |corners: &[(f64, f64); 4], zone: &str| {
+        let footprint = building::footprint(corners, Zone::from_str(zone)?)?;
+        quad_contains(&footprint, x, y).then_some(footprint)
+    };
+    match terrain {
+        Some(t) => t
+            .terrain_plots
+            .iter()
+            .filter(|lot| quad_contains(&lot.corners, x, y))
+            .find_map(|lot| inside(&lot.corners, &lot.zone)),
+        None => plots
+            .iter()
+            .filter(|p| p.contains(x, y))
+            .find_map(|p| inside(&crate::sim::lot::corners(p), &p.zone_id)),
+    }
 }
 
 /// The kit being placed.
@@ -380,6 +422,8 @@ mod tests {
             station_capacity: 16,
             terrain_id: Some(format!("lot_{id}")),
             corners: Some([(x, y), (x1, y), (x1, y1), (x, y1)]),
+            indoor_room: None,
+            yard_room: None,
             owner_citizen: false,
         }
     }
@@ -474,9 +518,10 @@ mod tests {
             "75 is in range"
         );
 
-        let near = [station(1100.0, 1149.0)];
+        // Both inside the house, which runs from 6 to 126 back (#473)
+        let near = [station(1100.0, 1051.0)];
         assert_eq!(at(1100.0, 1100.0, &near), Err(Refusal::TooClose), "49 away");
-        assert_eq!(at(1100.0, 1099.0, &near), Ok(Some(mine.id)), "50 is clear");
+        assert_eq!(at(1100.0, 1101.0, &near), Ok(Some(mine.id)), "50 is clear");
     }
 
     #[test]
@@ -531,6 +576,28 @@ mod tests {
         assert_eq!(r, Err(Refusal::TooClose));
     }
 
+    /// The building's room and the yard's are separate, and a wall stands
+    /// between them: a full house refuses a spot inside, and a spot in the
+    /// yard is spaced only from the yard's stations (V3.1, #473)
+    #[test]
+    fn indoors_and_the_yard_are_each_their_own_place() {
+        let mut home = plot(10, 1000.0, 1000.0, Some(ME), 4);
+        home.corners = Some([(1000.0, 1000.0), (1130.0, 1000.0), (1130.0, 1130.0), (1000.0, 1130.0)]);
+        home.bounds = Bounds::new(1000.0, 1000.0, 1130.0, 1130.0);
+        (home.indoor_room, home.yard_room, home.station_capacity) = (Some(4), Some(3), 7);
+        // The house runs from 6 back to 84, so its back wall is at y = 1084
+        let inside = [station(1030.0, 1030.0), station(1090.0, 1030.0), station(1030.0, 1075.0), station(1090.0, 1075.0)];
+        let full = check([1060.0, 1052.0], [1060.0, 1052.0], ME, false, &inside, &[home.clone()], None);
+        assert_eq!(full, Err(Refusal::PlotFull { capacity: 4, indoors: Some(true) }));
+        assert_eq!(full.unwrap_err().words(), "No room left indoors (4/4)");
+        let yard = check([1060.0, 1100.0], [1060.0, 1100.0], ME, false, &inside, &[home.clone()], None);
+        assert_eq!(yard, Ok(Some(home.id)), "39 from a station inside, through the wall");
+        let mut both = inside.to_vec();
+        both.push(station(1100.0, 1110.0));
+        let crowded = check([1060.0, 1100.0], [1060.0, 1100.0], ME, false, &both, &[home.clone()], None);
+        assert_eq!(crowded, Err(Refusal::TooClose), "41 from one in the yard");
+    }
+
     #[test]
     fn a_full_plot_takes_no_more() {
         let full = plot(10, 1000.0, 1000.0, Some(ME), 16);
@@ -543,7 +610,7 @@ mod tests {
             &[full],
             None,
         );
-        assert_eq!(r, Err(Refusal::PlotFull { capacity: 16 }));
+        assert_eq!(r, Err(Refusal::PlotFull { capacity: 16, indoors: None }));
         assert_eq!(r.unwrap_err().words(), "This plot is full (16/16)");
     }
 
@@ -564,7 +631,7 @@ mod tests {
             &[full],
             None,
         );
-        assert_eq!(r, Err(Refusal::PlotFull { capacity: 16 }));
+        assert_eq!(r, Err(Refusal::PlotFull { capacity: 16, indoors: None }));
     }
 
     #[test]

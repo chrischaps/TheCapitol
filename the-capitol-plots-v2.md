@@ -117,11 +117,12 @@ Under today's `size_category`, the v2 lots come out:
   | zone | lot | building | indoor room at 50 | yard room at 50 | what it is |
   |---|---|---|---|---|---|
   | urban | ~90 × 93 | the lot's width, ~85% of its depth (~85 × 78) | 4 | 0 or 1 | a workshop house: the whole lot but a strip of yard behind |
-  | suburban | ~130 × 130 | the width, ~55% of the depth (~120 × 72) | 4 | ~4 | a house and workshop at the front, a garden behind |
+  | suburban | ~130 × 130 | the width, ~60% of the depth, 6 back (~120 × 78) | 4 | ~4 | a house and workshop at the front, a garden behind |
   | rural | ~135 × 255 | a farmhouse and barn, ~110 × 90, standing back on the drive | 4 | ~10 | the farmstead in its fields |
 
-  The numbers are estimates. V3.1 measures them from the v2 lots with `station_room`, the footprint taken out of the yard.
+  *As built (V3.1, #473), measured on the default world by `station_room::world_tests`:* the shapes are `rules::building::shape`: urban 0 back, 85% deep, 2.5 margins; suburban 6 back, 60% deep, 5 margins; rural 40 back, 35% deep, 12 margins. **Every urban lot is 4 indoors and 0 in the yard** (all 1016). The suburb's median is 4 indoors and 8 in all, from 2 to 14, and 92% take a whole workshop, as the lots alone did; 55% deep (as estimated) left it at 3 indoors, since 72 deep less the walls' 10 each side is one row of stations, not two. The farms' median is 4 indoors and about 11 in the yard, and every farm takes the 12 it was laid for. A home lot too small for a footprint at least 20 each way is all yard.
 - **Indoor room** is counted as outdoors is: stations 50 apart (`STATION_MIN_SPACING`), packed by `station_room`, inside the footprint. One rule everywhere, and it's what a citizen finds when it builds.
+- **A wall stands between indoors and out.** The spacing holds within a place: indoors in one building, or outdoors. A station inside and one in the yard may stand closer than 50 through the wall, and so may two in buildings next door. *As built (#473):* without it the two rooms couldn't be packed apart, and a capacity of indoor plus yard room wouldn't be reachable. Floors (V3.3) make each storey a place of its own.
 - **A station is indoors** when its position is inside the footprint and its `floor` says which storey it's on (0 is the ground). The server keeps it in `stations.indoors`, set when the station is placed. Footprints don't move unless the lot does.
 - **Fire indoors.** The kiln and the forge may stand indoors on the ground floor, where a chimney rises through the roof (drawn, §5.7). They can't go upstairs (`ground_only` in `stations.toml`).
 
@@ -185,6 +186,12 @@ There's no zone rule:
 - **What changes:** `size_category` stays as a label, but no longer sets capacity.
 - **Stations by place:** each counts against its place, indoors on its storey or in the yard, so a full yard can't borrow from upstairs.
 
+*As built (V3.1, #473):*
+- **Filling it in.** SQL can't pack, so the migration (`20261223_001_building_room.sql`) adds the columns empty, and `plot_sync::fill_rooms` fills every lot that has none, in the sync's transaction: on the first startup after it, every lot (about 3000, a few seconds in debug, off the async threads), and after that only new lots and reshaped ones, whose room the upsert clears. It marks the stations already on them indoors or out too.
+- **Capacity in SQL** is `models::plot::STATION_CAPACITY`: `indoor_room + yard_room`, or a guild hall's size category where there's no building. V3.3 multiplies the indoor room by `1 + floors` there.
+- **Placement** (`station_placement`) tells indoors by the footprint, counts the stations in that place against its room, and refuses with "No room left indoors" or "in the yard". The spacing test is within the place (§5.1).
+- **The clients.** `PlotInfo` gains `indoor_room` and `yard_room`. The Flint client's placement ghost judges room and spacing by place, and `sim::lot` (the citizens' spots) packs indoors first, then the yard, each round the stations in its place, so citizens keep placing until V3.6 (#478) teaches them floors and repairs. The zone card draws each zone's typical building on its lot, with the stations inside it first, and says "4, more with floors".
+
 ### 5.7 Drawing it: the building and the cutaway (Flint)
 
 - **On the footprint.** `world/houses.rs` draws the building on `rules::building::footprint`, not on seeded sizes. The seed still picks its style (walls, roof, windows, chimney). So a station indoors is inside the walls you see, and #462's stations in the walls go away.
@@ -227,7 +234,7 @@ There's no zone rule:
 
 | Issue | Package | Size | Depends on |
 |---|---|---|---|
-| [#473](https://github.com/chrischaps/TheCapitol/issues/473) | V3.1 **The building and capacity:** `rules::building::footprint`; indoor and yard room in `plot_sync`; capacity from them (§5.6, settles #424); `stations.indoors`; `PlotInfo` | M | |
+| [#473](https://github.com/chrischaps/TheCapitol/issues/473) | V3.1 **The building and capacity:** `rules::building::footprint`; indoor and yard room in `plot_sync`; capacity from them (§5.6, settles #424); `stations.indoors`; `PlotInfo`. *Built: the shapes measured (§5.1), a wall between indoors and out, the citizens and the ghost by place (§5.6)* | M | |
 | [#474](https://github.com/chrischaps/TheCapitol/issues/474) | V3.2 **Weather:** station condition; slow wear on claimed plots, fast wear and the fall on public land; the faster tool wear; the pause at 25; repair; the hourly sweep; the tunables and the books | L | #473 |
 | [#475](https://github.com/chrischaps/TheCapitol/issues/475) | V3.3 **Floors:** `rules::floors` (doubling, no cap), the permit and goods, build time, `POST /plots/{id}/floors`, stations upstairs, no fire upstairs, release and refunds | L | #473 |
 | [#476](https://github.com/chrischaps/TheCapitol/issues/476) | V3.4 **Flint, the buildings and the cutaway:** houses on the footprint (closes #462), the cutaway at 25 m and 10 m, chimneys, storeys and scaffold, weathered stations | L | #473 |

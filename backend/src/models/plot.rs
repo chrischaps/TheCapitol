@@ -37,6 +37,12 @@ pub const PLOT_COLUMNS: &str = "id, zone_id, grid_x, grid_y, world_x, world_y,
     size_category, plot_type, owner_id, claimed_at,
     assessed_value, last_tax_paid, tax_owed, station_count, terrain_id, corners";
 
+/// A plot's station capacity, as SQL over `plots p` joined to its
+/// `plot_size_categories psc` (Plots v2 §5.6, V3.1, #473): its building's
+/// room indoors plus its yard's, or, for a lot with no building (a guild
+/// hall), its size category's.
+pub const STATION_CAPACITY: &str = "COALESCE(p.indoor_room + p.yard_room, psc.station_capacity)";
+
 /// The flattened `corners` column as four points, if it holds them.
 pub fn corners_from_column(column: Option<&[f64]>) -> Option<[(f64, f64); 4]> {
     match column {
@@ -123,7 +129,11 @@ pub struct PlotWithJoins {
     pub owner_name: Option<String>,
     /// The owner is a citizen (C0.1)
     pub owner_citizen: bool,
+    /// [`STATION_CAPACITY`]
     pub station_capacity: i32,
+    /// Its building's room (V3.1, #473), `None` for a guild hall's
+    pub indoor_room: Option<i32>,
+    pub yard_room: Option<i32>,
     /// The zone's `deed_cost`, joined from `zones`, before the zone's deed
     /// price tunable (D6.1): [`PlotWithJoins::to_plot_info`] applies it.
     pub deed_cost: Option<i32>,
@@ -158,6 +168,8 @@ impl PlotWithJoins {
             station_capacity: self.station_capacity,
             terrain_id: self.terrain_id.clone(),
             corners: corners_from_column(self.corners.as_deref()),
+            indoor_room: self.indoor_room,
+            yard_room: self.yard_room,
         }
     }
 }

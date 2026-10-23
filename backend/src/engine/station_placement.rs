@@ -6,11 +6,20 @@
 //! - the station type exists
 //! - the spot is within the type's `interaction_range` of where you stand
 //! - where it stands ([`site`]):
-//!   - on a lot: the lot is yours, with room on it
+//!   - on a lot: the lot is yours, with room on it where the spot is,
+//!     indoors or in the yard (V3.1, #473)
 //!   - on no lot: the type is `off_plot` (only the workbench), and the
 //!     ground is dry (#187)
 //! - you hold its kit
-//! - it's at least `STATION_MIN_SPACING` from every other station
+//! - it's at least `STATION_MIN_SPACING` from every other station in the
+//!   same place: outdoors, or indoors in the same building. A wall stands
+//!   between a station indoors and one out, or one next door.
+//!
+//! A home lot's building stands on `rules::building::footprint`. A station
+//! inside it is indoors (`stations.indoors`), and counts against the
+//! building's room, `plots.indoor_room`; one outside counts against the
+//! yard's, `plots.yard_room` (Plots v2 §5.6). A guild hall has no building,
+//! and its size category's capacity holds for the lot as a whole.
 //!
 //! A station off a plot has no `plot_id`. Only its owner may use it
 //! (`container_access::station_access`), it pays no tax, and no plot's
@@ -18,7 +27,7 @@
 //! takes it down (`plot_sync`, #188).
 
 use capitol_protocol::rules::stacking::Pick;
-use capitol_protocol::rules::{in_water, water_name, STATION_MIN_SPACING};
+use capitol_protocol::rules::{building, in_water, water_name, Zone, STATION_MIN_SPACING};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -34,7 +43,9 @@ pub enum PlacementError {
     TooFar,
     /// On a lot that isn't the player's: someone else's, or nobody's.
     NotYourPlot,
-    PlotFull { count: i32, capacity: i32 },
+    /// The place the spot is in holds all it can: indoors (`Some(true)`),
+    /// the yard (`Some(false)`), or a lot with no building as a whole.
+    PlotFull { count: i32, capacity: i32, indoors: Option<bool> },
     /// On no lot, and the type isn't one that may stand off a plot.
     NeedsAPlot,
     /// On no lot, in the water of this ring.
@@ -51,7 +62,13 @@ impl PlacementError {
             PlacementError::UnknownType(t) => format!("Unknown station type: {t}"),
             PlacementError::TooFar => "Too far to place station".into(),
             PlacementError::NotYourPlot => "You don't own this plot".into(),
-            PlacementError::PlotFull { count, capacity } => format!("Plot is at capacity ({count}/{capacity})"),
+            PlacementError::PlotFull { count, capacity, indoors: None } => format!("Plot is at capacity ({count}/{capacity})"),
+            PlacementError::PlotFull { count, capacity, indoors: Some(true) } => {
+                format!("No room left indoors ({count}/{capacity})")
+            }
+            PlacementError::PlotFull { count, capacity, indoors: Some(false) } => {
+                format!("No room left in the yard ({count}/{capacity})")
+            }
             PlacementError::NeedsAPlot => "Must place station on a plot".into(),
             PlacementError::InWater(ring) => format!("Can't build in {}", water_name(ring)),
             PlacementError::KitNotFound => "Kit item not found".into(),
@@ -85,7 +102,13 @@ impl From<PlacementError> for crate::error::AppError {
 pub struct Lot {
     pub id: Uuid,
     pub owner_id: Option<Uuid>,
+    /// Whether the spot is inside the lot's building, or `None` for a lot
+    /// with none (a guild hall)
+    pub indoors: Option<bool>,
+    /// The stations in the spot's place, indoors or in the yard, or on the
+    /// whole lot where it has no building
     pub station_count: i32,
+    /// What that place holds
     pub station_capacity: i32,
 }
 
@@ -100,7 +123,11 @@ pub fn site(player_id: Uuid, off_plot: bool, lot: Option<&Lot>, water: Option<&s
                 return Err(PlacementError::NotYourPlot);
             }
             if lot.station_count >= lot.station_capacity {
-                return Err(PlacementError::PlotFull { count: lot.station_count, capacity: lot.station_capacity });
+                return Err(PlacementError::PlotFull {
+                    count: lot.station_count,
+                    capacity: lot.station_capacity,
+                    indoors: lot.indoors,
+                });
             }
             Ok(Some(lot.id))
         }
@@ -246,13 +273,18 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
         return Err(PlacementError::KitNotFound);
     };
 
+    // Only in the same place: indoors in this building, or outdoors
+    let indoors = lot.as_ref().and_then(|l| l.indoors).unwrap_or(false);
     let nearby: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM stations
-         WHERE (position_x - $1)^2 + (position_y - $2)^2 < $3",
+         WHERE (position_x - $1)^2 + (position_y - $2)^2 < $3
+           AND indoors = $4 AND (NOT $4 OR plot_id = $5)",
     )
     .bind(x)
     .bind(y)
     .bind(STATION_MIN_SPACING * STATION_MIN_SPACING)
+    .bind(indoors)
+    .bind(plot_id)
     .fetch_optional(&mut *tx)
     .await?;
     if nearby.is_some() {
@@ -268,8 +300,8 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
 
     let station_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality, kit_maker_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality, kit_maker_id, indoors)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(station_id)
     .bind(station_type)
@@ -279,6 +311,7 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
     .bind(plot_id)
     .bind(kit_quality)
     .bind(kit_maker)
+    .bind(indoors)
     .execute(&mut *tx)
     .await?;
 
@@ -332,8 +365,9 @@ async fn lot_at(db: &PgPool, tx: &mut PgConnection, x: f64, y: f64) -> Result<Op
     let Some(plot) = crate::routes::plots::find_plot_at_position(db, x, y).await? else {
         return Ok(None);
     };
-    let (owner_id, station_count, station_capacity): (Option<Uuid>, i32, i32) = sqlx::query_as(
-        "SELECT p.owner_id, p.station_count, psc.station_capacity
+    type Row = (Option<Uuid>, i32, i32, Option<i32>, Option<i32>);
+    let (owner_id, station_count, station_capacity, indoor_room, yard_room): Row = sqlx::query_as(
+        "SELECT p.owner_id, p.station_count, psc.station_capacity, p.indoor_room, p.yard_room
          FROM plots p
          JOIN plot_size_categories psc ON p.size_category = psc.id
          WHERE p.id = $1
@@ -342,7 +376,25 @@ async fn lot_at(db: &PgPool, tx: &mut PgConnection, x: f64, y: f64) -> Result<Op
     .bind(plot.id)
     .fetch_one(&mut *tx)
     .await?;
-    Ok(Some(Lot { id: plot.id, owner_id, station_count, station_capacity }))
+    let (Some(indoor_room), Some(yard_room), Some(corners), Some(zone)) =
+        (indoor_room, yard_room, plot.quad(), Zone::from_str(&plot.zone_id))
+    else {
+        // No building: the lot as a whole
+        return Ok(Some(Lot { id: plot.id, owner_id, indoors: None, station_count, station_capacity }));
+    };
+    let indoors = building::indoors(&corners, zone, x, y);
+    let in_place: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stations WHERE plot_id = $1 AND indoors = $2")
+        .bind(plot.id)
+        .bind(indoors)
+        .fetch_one(&mut *tx)
+        .await?;
+    Ok(Some(Lot {
+        id: plot.id,
+        owner_id,
+        indoors: Some(indoors),
+        station_count: in_place as i32,
+        station_capacity: if indoors { indoor_room } else { yard_room },
+    }))
 }
 
 #[cfg(test)]
@@ -350,7 +402,7 @@ mod tests {
     use super::*;
 
     fn lot(owner: Option<Uuid>, count: i32) -> Lot {
-        Lot { id: Uuid::from_u128(7), owner_id: owner, station_count: count, station_capacity: 4 }
+        Lot { id: Uuid::from_u128(7), owner_id: owner, indoors: Some(true), station_count: count, station_capacity: 4 }
     }
 
     #[test]
@@ -366,9 +418,11 @@ mod tests {
             );
             assert!(matches!(
                 site(me, off_plot, Some(&lot(Some(me), 4)), None),
-                Err(PlacementError::PlotFull { count: 4, capacity: 4 })
+                Err(PlacementError::PlotFull { count: 4, capacity: 4, indoors: Some(true) })
             ));
         }
+        let full = site(me, false, Some(&lot(Some(me), 4)), None).unwrap_err();
+        assert_eq!(full.message(), "No room left indoors (4/4)");
     }
 
     #[test]
@@ -558,5 +612,95 @@ mod tests {
         assert_eq!(stations_of(&db, me).await, 1);
         assert!(!kit_exists(&db, first).await);
         assert!(kit_exists(&db, second).await, "the second kit stays a kit");
+    }
+
+    /// `owner`'s lot of `zone`, a box `w` wide along the street (y = 1000)
+    /// and `h` deep, with its room worked out as the startup sync does
+    async fn home(db: &PgPool, owner: Uuid, zone: &str, w: f64, h: f64) -> Uuid {
+        let id = Uuid::new_v4();
+        let corners = vec![1000.0, 1000.0, 1000.0 + w, 1000.0, 1000.0 + w, 1000.0 + h, 1000.0, 1000.0 + h];
+        sqlx::query(
+            "INSERT INTO plots (id, terrain_id, zone_id, grid_x, grid_y, world_x, world_y,
+                                bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
+                                size_category, owner_id, corners)
+             VALUES ($1, $2, $3, 0, 0, $4, $5, 1000, 1000, $6, $7, 'large', $8, $9)",
+        )
+        .bind(id)
+        .bind(format!("test-{id}"))
+        .bind(zone)
+        .bind((1000.0 + w / 2.0) as f32)
+        .bind((1000.0 + h / 2.0) as f32)
+        .bind((1000.0 + w) as f32)
+        .bind((1000.0 + h) as f32)
+        .bind(owner)
+        .bind(corners)
+        .execute(db)
+        .await
+        .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        crate::engine::plot_sync::fill_rooms(&mut tx).await.unwrap();
+        tx.commit().await.unwrap();
+        id
+    }
+
+    /// `n` more workbench kits in `me`'s inventory, after the one `builder` gave
+    async fn kits(db: &PgPool, me: Uuid, first: Uuid, n: i32) -> Vec<Uuid> {
+        let inventory: Uuid = sqlx::query_scalar("SELECT container_id FROM items WHERE id = $1")
+            .bind(first)
+            .fetch_one(db)
+            .await
+            .unwrap();
+        let mut out = vec![first];
+        for slot in 1..=n {
+            out.push(kit(db, me, inventory, slot, 50).await);
+        }
+        out
+    }
+
+    fn at(player_id: Uuid, kit_item_id: Uuid, x: f64, y: f64) -> Request<'static> {
+        Request { player_id, station_type: "workbench", x, y, kit_item_id, at: (x, y), water: None }
+    }
+
+    /// An urban lot holds 4 indoors and nothing in the yard behind (V3.1, #473)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn an_urban_lot_holds_four_indoors_and_no_yard(db: PgPool) {
+        let (me, first) = builder(&db, "builder", 50).await;
+        let plot = home(&db, me, "urban", 90.0, 93.0).await;
+        let rooms: (Option<i32>, Option<i32>) =
+            sqlx::query_as("SELECT indoor_room, yard_room FROM plots WHERE id = $1").bind(plot).fetch_one(&db).await.unwrap();
+        assert_eq!(rooms, (Some(4), Some(0)));
+        let k = kits(&db, me, first, 5).await;
+        for (i, (x, y)) in [(1017.0, 1015.0), (1072.0, 1015.0), (1017.0, 1070.0), (1072.0, 1070.0)].into_iter().enumerate() {
+            let placed = place(&db, at(me, k[i], x, y)).await.unwrap();
+            assert_eq!(placed.plot_id, Some(plot));
+        }
+        let indoors = count(&db, "SELECT COUNT(*) FROM stations WHERE plot_id = $1 AND indoors", plot).await;
+        assert_eq!(indoors, 4);
+        let full = place(&db, at(me, k[4], 1045.0, 1042.0)).await.err().unwrap();
+        assert!(matches!(full, PlacementError::PlotFull { count: 4, capacity: 4, indoors: Some(true) }), "{full:?}");
+        let yard = place(&db, at(me, k[5], 1045.0, 1088.0)).await.err().unwrap();
+        assert!(matches!(yard, PlacementError::PlotFull { count: 0, capacity: 0, indoors: Some(false) }), "{yard:?}");
+    }
+
+    /// A wall stands between a station indoors and one in the yard, so the
+    /// spacing holds within each place, not across (V3.1, #473)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_spacing_holds_within_a_place_not_through_a_wall(db: PgPool) {
+        let (me, first) = builder(&db, "builder", 50).await;
+        let plot = home(&db, me, "suburban", 130.0, 130.0).await;
+        let k = kits(&db, me, first, 2).await;
+        // The house runs 78 deep from 6 back, to y = 1084
+        place(&db, at(me, k[0], 1065.0, 1078.0)).await.unwrap();
+        place(&db, at(me, k[1], 1065.0, 1100.0)).await.unwrap();
+        let flags: Vec<bool> = sqlx::query_scalar("SELECT indoors FROM stations WHERE plot_id = $1 ORDER BY position_y")
+            .bind(plot)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(flags, vec![true, false], "22 apart through the back wall");
+        let crowded = place(&db, at(me, k[2], 1090.0, 1110.0)).await.err().unwrap();
+        assert!(matches!(crowded, PlacementError::TooClose), "{crowded:?}");
     }
 }

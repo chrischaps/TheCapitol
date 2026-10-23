@@ -128,6 +128,8 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
         station_capacity: 2,
         terrain_id: None,
         corners: None,
+        indoor_room: None,
+        yard_room: None,
         owner_citizen: false,
     }
 }

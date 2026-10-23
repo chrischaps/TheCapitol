@@ -20,21 +20,25 @@
 //!   owner's on someone else's lot, counted by no plot and closed to the
 //!   lot's owner.
 //!
-//! Size and station capacity follow the lot's area ([`size_category`]). The
-//! deed cost stays per zone (`zones.deed_cost`).
+//! A home lot's station capacity is its building's room (Plots v2 §5.6,
+//! V3.1, #473): indoors on each storey and in the yard, packed by
+//! `station_room::room` ([`fill_rooms`]). `size_category` follows the lot's
+//! area ([`size_category`]) and stays as a label, and is still a guild
+//! hall's capacity. The deed cost stays per zone (`zones.deed_cost`).
 
 use std::collections::HashMap;
 
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
+use capitol_protocol::rules::{building, Zone};
 use capitol_protocol::terrain::{quad_contains, TerrainPlot};
 use capitol_protocol::ws::ServerMessage;
 
 use crate::engine::currency::{add_strands_in, TransactionType};
 use crate::engine::notices;
 use crate::engine::station_removal::{return_plot_stations, return_stations};
-use crate::models::corners_from_column;
+use crate::models::{corners_from_column, station_room};
 use crate::models::geom::quads_overlap_strict;
 
 /// What to do with an owned plot whose lot is gone or has changed shape.
@@ -131,6 +135,9 @@ pub struct SyncReport {
     /// The owners of released granted plots, whose deed grant was handed
     /// back to spend again (#440)
     pub grants_returned: Vec<Uuid>,
+    /// The lots whose room was worked out (V3.1, #473): new ones, reshaped
+    /// ones, and on the first startup after the building came in, every one
+    pub roomed: usize,
 }
 
 #[derive(Debug)]
@@ -149,8 +156,9 @@ impl From<sqlx::Error> for SyncError {
     }
 }
 
-/// The size category for a lot in this zone of this area, which sets its
-/// station capacity (`plot_size_categories`). Urban lots come out medium,
+/// The size category for a lot in this zone of this area: a label since a
+/// home lot's building sets its capacity (V3.1, #473), and still a guild
+/// hall's capacity (`plot_size_categories`). Urban lots come out medium,
 /// suburban large and rural fields estates. A guild district lot is always a
 /// guild hall, whatever its area (#83): that's the zone's `plot_size_category`.
 pub fn size_category(zone: &str, area: f64) -> &'static str {
@@ -390,11 +398,87 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
             report.displaced.push((c, notice));
         }
     }
+    report.roomed = fill_rooms(&mut tx).await?;
     crate::engine::ledger::commit(tx, flows).await?;
 
     report.conflicts = conflicts;
     report.held_back = held.into_iter().map(String::from).collect();
     Ok(report)
+}
+
+/// Work out the room of every lot that has none yet, in `tx` (V3.1, #473):
+/// a new lot, one that changed shape (the upsert clears it), and on the first
+/// startup after the building came in, every lot. Each is packed as
+/// `station_room::room` packs it, and the stations on it are marked indoors
+/// or out by its footprint. A lot of a zone with no building (a guild hall)
+/// keeps none, and its size category stays its capacity. Returns how many
+/// lots it filled.
+pub async fn fill_rooms(tx: &mut PgConnection) -> Result<usize, sqlx::Error> {
+    let rows: Vec<(Uuid, String, Option<Vec<f64>>)> = sqlx::query_as(
+        "SELECT id, zone_id, corners FROM plots WHERE indoor_room IS NULL AND corners IS NOT NULL",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let lots: Vec<(Uuid, Zone, [(f64, f64); 4])> = rows
+        .into_iter()
+        .filter_map(|(id, zone, corners)| {
+            let zone = Zone::from_str(&zone)?;
+            building::shape(zone)?;
+            Some((id, zone, corners_from_column(corners.as_deref())?))
+        })
+        .collect();
+    if lots.is_empty() {
+        return Ok(0);
+    }
+    // Packing a whole world takes a few seconds in debug: off the async threads
+    let packed = lots.clone();
+    let rooms: Vec<station_room::Room> = tokio::task::spawn_blocking(move || {
+        packed.iter().filter_map(|(_, zone, corners)| station_room::room(corners, *zone)).collect()
+    })
+    .await
+    .expect("packing the lots panicked");
+    let ids: Vec<Uuid> = lots.iter().map(|l| l.0).collect();
+    let indoor: Vec<i32> = rooms.iter().map(|r| r.indoor as i32).collect();
+    let yard: Vec<i32> = rooms.iter().map(|r| r.yard as i32).collect();
+    sqlx::query(
+        "UPDATE plots p SET indoor_room = r.indoor, yard_room = r.yard
+         FROM UNNEST($1::uuid[], $2::int4[], $3::int4[]) AS r(id, indoor, yard)
+         WHERE p.id = r.id",
+    )
+    .bind(&ids)
+    .bind(&indoor)
+    .bind(&yard)
+    .execute(&mut *tx)
+    .await?;
+
+    // Their stations, indoors or out
+    let stations: Vec<(Uuid, Uuid, f32, f32, bool)> = sqlx::query_as(
+        "SELECT id, plot_id, position_x, position_y, indoors FROM stations WHERE plot_id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let by_id: HashMap<Uuid, (Zone, [(f64, f64); 4])> = lots.iter().map(|(id, zone, c)| (*id, (*zone, *c))).collect();
+    let (moved, inside): (Vec<Uuid>, Vec<bool>) = stations
+        .into_iter()
+        .filter_map(|(id, plot_id, x, y, was)| {
+            let (zone, corners) = by_id.get(&plot_id)?;
+            let now = building::indoors(corners, *zone, x as f64, y as f64);
+            (now != was).then_some((id, now))
+        })
+        .unzip();
+    if !moved.is_empty() {
+        sqlx::query(
+            "UPDATE stations s SET indoors = r.indoors
+             FROM UNNEST($1::uuid[], $2::bool[]) AS r(id, indoors)
+             WHERE s.id = r.id",
+        )
+        .bind(&moved)
+        .bind(&inside)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(ids.len())
 }
 
 /// The lots that overlap one of the `kept` owned plots, by id, sorted. A lot
@@ -503,7 +587,8 @@ impl Columns {
                  world_x = EXCLUDED.world_x, world_y = EXCLUDED.world_y,
                  bounds_min_x = EXCLUDED.bounds_min_x, bounds_min_y = EXCLUDED.bounds_min_y,
                  bounds_max_x = EXCLUDED.bounds_max_x, bounds_max_y = EXCLUDED.bounds_max_y,
-                 size_category = EXCLUDED.size_category, corners = EXCLUDED.corners",
+                 size_category = EXCLUDED.size_category, corners = EXCLUDED.corners,
+                 indoor_room = NULL, yard_room = NULL",
         )
         .bind(&self.terrain_id)
         .bind(&self.zone_id)
