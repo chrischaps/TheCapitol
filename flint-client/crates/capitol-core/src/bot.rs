@@ -1858,6 +1858,24 @@ impl Bot {
         self.go_to_stall(&stall_id)
     }
 
+    /// Posts a commission on the hall's board (Commons S2.1) and returns it
+    /// as posted. The bot must be at the Exchange hall ([`Bot::go_to_exchange`]).
+    pub fn post_commission(
+        &mut self,
+        post: capitol_protocol::rest::PostCommission,
+    ) -> Result<capitol_protocol::rest::Commission, BotError> {
+        match self.call("posting a commission", RestRequest::PostCommission(post))? {
+            RestResponse::Commission(commission) => {
+                self.log(format!(
+                    "posted a commission for {} {} at {} each",
+                    commission.quantity, commission.item_type, commission.price
+                ));
+                Ok(commission)
+            }
+            other => Err(unexpected("posting a commission", &other)),
+        }
+    }
+
     /// Strands and goods from nowhere, on a server with `DEV_GRANTS` on (E3.8).
     /// The goods land in the market box.
     pub fn grant(&mut self, request: GrantRequest) -> Result<GrantResponse, BotError> {

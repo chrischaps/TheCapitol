@@ -1036,10 +1036,10 @@ const CLOSING: (&str, &str) = (
      The rest is yours: make, trade, and make your name.",
 );
 
-/// The closing card's way on: where the city says what it's doing. The
-/// Wanted page joins it once the board's commissions are in (S2.3,
-/// [#389](https://github.com/chrischaps/TheCapitol/issues/389)).
-const CLOSING_ON: &str = "the Gazette, each morning";
+/// The closing card's way on: where the city says what it's doing, and
+/// what it wants (the board's two pages, S2.3). G opens the Gazette's page,
+/// and the Wanted tab is beside it.
+const CLOSING_ON: &str = "the Gazette each morning, and Wanted: work people will pay for";
 
 /// The last card: the road is walked, the seal pressed, and where to look
 /// from here. `compact` leaves out its words.

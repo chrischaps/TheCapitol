@@ -299,7 +299,7 @@ fn stall_under_cursor() {
     ()
 }
 
-// The Gazette's notice board under the cursor: open the paper.
+// The notice board under the cursor: open it, on Wanted or the Gazette.
 fn read_gazette() {                 // E3.9
     if !board_under_cursor() { return false; }
     cap_read_gazette();
@@ -1275,14 +1275,22 @@ fn draw_stall(s, over, walking, now) {
 // ── The Gazette's notice board (E3.9) ────────────────────────────────────
 
 // Its name and what a click does, over it while you hover it; and while an
-// edition waits unread, a gold glint breathing over its lamp.
+// edition waits unread, or a commission is pinned there that your pack
+// could fill (S2.3), a gold glint breathing over its lamp.
 fn draw_board(h, over, now) {
-    if h.news && !h.reading { draw_news_glint(h, now); }
+    let fill = h.fill > 0;
+    if (h.news || fill) && !h.reading { draw_news_glint(h, now); }
     if !over || h.reading { return; }
     let at = world_to_screen(h.board_x, h.board_y + 0.6, h.board_z);
     if !at.visible { return; }
-    let title = "The Capitol Gazette";
-    let line = if h.news { "A new edition · click to read" } else { "Click to read · G" };
+    let title = "The Notice Board";
+    let line = if h.news {
+        "A new edition · click to read"
+    } else if fill {
+        `${h.fill} wanted that you could fill`
+    } else {
+        "Wanted, and the Gazette · click to read"
+    };
     let size = 16.0;
     let m = measure_text_ex(title, size, "display", 0.0);
     let top = (at.y - 40.0).max(64.0);
@@ -1294,7 +1302,7 @@ fn draw_board(h, over, now) {
     });
     let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
-    let ink = if h.news { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
+    let ink = if h.news || fill { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
     draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{
         font: "strong", color: [0.0, 0.0, 0.0, 0.55],
     });

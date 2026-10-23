@@ -116,6 +116,10 @@ const ADMIN_TAG: Tag = 100;
 /// state takes the answer, as every answer.
 const TUTORIAL_TAG: Tag = 150;
 
+/// The tag on the board's calls (Commons S2.3): the board, your claims,
+/// posting, delivering, claiming and the rest, one at a time.
+const BOARD_TAG: Tag = 160;
+
 /// How often the directory and your stall are asked for again, while in the
 /// world: they change only when a merchant rents, stocks or sells out.
 const BAZAAR_REFRESH: Duration = Duration::from_secs(60);
@@ -249,6 +253,10 @@ pub struct Session {
     mail_open: bool,
     /// Letters that came, for their toasts (`letter_note`): title and body.
     letter_notes: Vec<(String, String)>,
+    /// The hall's board of commissions (S2.3), and a walk to the hall to
+    /// post or deliver there.
+    board: capitol_core::commissions::Board,
+    board_walk: capitol_core::hall::Visit,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -461,6 +469,8 @@ impl Session {
             mail: Default::default(),
             mail_open: false,
             letter_notes: Vec::new(),
+            board: Default::default(),
+            board_walk: capitol_core::hall::Visit::default(),
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -535,6 +545,7 @@ impl Session {
         self.visit.walked();
         self.approach.walked();
         self.hall.walked();
+        self.board_walk.walked();
         self.stall.walked();
         self.walk(now, x, y);
     }
@@ -551,6 +562,7 @@ impl Session {
         self.visit.walked();
         self.approach.walked();
         self.hall.walked();
+        self.board_walk.walked();
         self.stall.walked();
         self.route.stop();
         if let Some((x, y)) = self.motion.stop(now) {
@@ -656,6 +668,7 @@ impl Session {
         self.harvest.walked();
         self.approach.walked();
         self.hall.walked();
+        self.board_walk.walked();
         self.stall.walked();
         if let Some(step) = self.visit.click(station, &self.state, now) {
             self.station_step(now, step);
@@ -711,6 +724,7 @@ impl Session {
         self.visit.walked();
         self.approach.walked();
         self.hall.walked();
+        self.board_walk.walked();
         match self.stall.click(streets, stall, at) {
             capitol_core::bazaar::Step::Open => true,
             capitol_core::bazaar::Step::WalkTo { x, y } => {
@@ -861,7 +875,7 @@ impl Session {
     }
 
     /// Turns a delivery to your commission, or its expiry, into a toast, as
-    /// a bazaar sale is (Commons S2.1). The board itself is S2.3's (#389).
+    /// a bazaar sale is (Commons S2.1). The board itself is `board` (S2.3).
     fn note_commission(&mut self, change: &StateEvent) {
         let catalog = self.state.catalog();
         let note = match change {
@@ -1647,6 +1661,109 @@ impl Session {
         }
     }
 
+    /// The hall's board of commissions (S2.3).
+    pub fn board(&self) -> &capitol_core::commissions::Board {
+        &self.board
+    }
+
+    pub fn board_mut(&mut self) -> &mut capitol_core::commissions::Board {
+        &mut self.board
+    }
+
+    /// Do `ask` on the board: at once, or, for a post or a delivery away
+    /// from the hall, once a walk to its door comes into range. Walking
+    /// anywhere else on the way drops it.
+    pub fn board_act(&mut self, now: Instant, hall: Option<&Landmark>, ask: capitol_core::commissions::Ask) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        let (Some(hall), Some(me), true) = (hall, self.state.local_player(), ask.at_the_hall()) else {
+            self.board.queue(ask);
+            return;
+        };
+        let at = [me.x, me.y];
+        self.harvest.walked();
+        self.visit.walked();
+        self.approach.walked();
+        self.stall.walked();
+        self.hall.walked();
+        match self.board_walk.click(hall, at) {
+            capitol_core::hall::Step::Open => self.board.queue(ask),
+            capitol_core::hall::Step::WalkTo { x, y } => {
+                self.board.hold(ask);
+                self.walk(now, x, y);
+            }
+        }
+    }
+
+    /// Whether you're walking to the hall to post or deliver.
+    pub fn walking_to_board(&self) -> bool {
+        self.board.held().is_some() && self.board_walk.walking()
+    }
+
+    /// Each frame: a walk to the hall for the board arrives, or was
+    /// abandoned.
+    fn tend_board_walk(&mut self, terrain: &TerrainSource) {
+        if self.board.held().is_none() {
+            return;
+        }
+        let hall = terrain.landmark(capitol_core::protocol::terrain::LandmarkKind::ExchangeHall);
+        let at = self.state.local_player().map(|me| [me.x, me.y]);
+        match (hall, at) {
+            (Some(hall), Some(at)) if self.board_walk.arrived(hall, at) => self.board.release(),
+            _ if !self.board_walk.walking() => self.board.drop_held(),
+            _ => {}
+        }
+    }
+
+    fn tend_board(&mut self) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        use capitol_core::commissions::Ask;
+        if let Some(ask) = self.board.wants() {
+            let request = match &ask {
+                Ask::Board => RestRequest::Commissions(Default::default()),
+                Ask::Claims => RestRequest::MyClaims,
+                Ask::Post(post) => RestRequest::PostCommission(post.clone()),
+                Ask::Deliver { commission_id, request } => {
+                    RestRequest::DeliverCommission { commission_id: *commission_id, request: request.clone() }
+                }
+                Ask::Cancel(id) => RestRequest::CancelCommission { commission_id: *id },
+                Ask::Claim { commission_id, quantity } => RestRequest::ClaimCommission {
+                    commission_id: *commission_id,
+                    request: capitol_core::protocol::rest::ClaimCommission { quantity: *quantity },
+                },
+                Ask::Release(id) => RestRequest::ReleaseClaim { commission_id: *id },
+            };
+            self.board.sent(ask);
+            self.net.rest(request, BOARD_TAG);
+        }
+    }
+
+    /// Turns a claim's notice into a toast, and asks for your claims again.
+    fn note_claim(&mut self, change: &StateEvent) {
+        use capitol_core::commissions as cm;
+        let catalog = self.state.catalog();
+        let now = self.state.utc_now();
+        let (title, body) = match change {
+            StateEvent::CommissionClaimed { item_type, claimant_name, claimant_citizen, quantity, until } => {
+                cm::claimed_words(claimant_name, *claimant_citizen, *quantity, &catalog.item_name(item_type), *until, now)
+            }
+            StateEvent::ClaimDueSoon { item_type, quantity, delivered, until, .. } => {
+                cm::due_soon_words(*quantity, *delivered, &catalog.item_name(item_type), *until, now)
+            }
+            StateEvent::ClaimLapsed { item_type, claimant_id, claimant_name, claimant_citizen, quantity, delivered, .. } => {
+                let mine = self.state.me() == Some(*claimant_id);
+                cm::lapsed_words(mine, claimant_name, *claimant_citizen, *quantity, *delivered, &catalog.item_name(item_type))
+            }
+            _ => return,
+        };
+        tracing::info!("commission: {title}: {body}");
+        self.market_notes.push(TradeNote::new(title, body));
+        self.board.claims_changed();
+    }
+
     fn tend_card(&mut self) {
         if self.auth.phase() != Phase::InWorld {
             return;
@@ -1846,6 +1963,7 @@ impl Session {
         self.harvest.walked();
         self.visit.walked();
         self.hall.walked();
+        self.board_walk.walked();
         self.stall.walked();
         self.trade_step(now, step);
         self.note_approach();
@@ -2283,6 +2401,23 @@ impl Session {
                         self.mail.failed(why);
                     }
                 },
+                NetEvent::Rest(BOARD_TAG, result) => match result {
+                    Ok(RestResponse::Commissions(answer)) => self.board.listed(answer.clone()),
+                    Ok(RestResponse::Claims(answer)) => self.board.claims_listed(answer.clone()),
+                    Ok(RestResponse::Commission(commission)) => self.board.posted(commission.clone()),
+                    Ok(RestResponse::Delivered(delivery)) => {
+                        let name = self.state.catalog().item_name(&delivery.commission.item_type);
+                        tracing::info!("board: delivered {} {name} for {}", delivery.units.count(), delivery.paid);
+                        self.board.delivered(delivery.clone(), &name);
+                    }
+                    Ok(RestResponse::Claim(answer)) => self.board.claimed(answer.clone()),
+                    Ok(other) => tracing::warn!("board: an answer it didn't ask for: {other:?}"),
+                    Err(e) => {
+                        let why = refusal(e);
+                        tracing::info!("board: refused: {why}");
+                        self.board.failed(why);
+                    }
+                },
                 NetEvent::Rest(CARD_TAG, result) => match result {
                     Ok(RestResponse::Card(card)) => self.cards.answered(card.clone()),
                     Ok(_) => self.cards.failed(false),
@@ -2374,6 +2509,7 @@ impl Session {
                     // What was in flight went down with the old socket
                     self.chat.connected();
                     self.mail.connected();
+                    self.board.connected();
                 }
             }
             let trade_before = self.state.trade().clone();
@@ -2475,6 +2611,10 @@ impl Session {
                     StateEvent::BazaarSale { .. } | StateEvent::StallLapsed { .. } => self.note_bazaar(change),
                     StateEvent::CommissionDelivered { .. } | StateEvent::CommissionExpired { .. } => {
                         self.note_commission(change)
+                    }
+                    StateEvent::Board(commission) => self.board.apply(commission.clone()),
+                    StateEvent::CommissionClaimed { .. } | StateEvent::ClaimDueSoon { .. } | StateEvent::ClaimLapsed { .. } => {
+                        self.note_claim(change)
                     }
                     StateEvent::GazettePublished { day, headline, .. } => {
                         self.gazette.published(*day, headline)
@@ -2591,6 +2731,8 @@ impl Session {
             self.tend_card();
             self.tend_mutes();
             self.tend_mail();
+            self.tend_board_walk(terrain);
+            self.tend_board();
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -2695,6 +2837,8 @@ impl Session {
             self.chat = capitol_core::chat::Chat::new();
             self.mail.signed_out();
             self.letter_notes.clear();
+            self.board.signed_out();
+            self.board_walk = capitol_core::hall::Visit::default();
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();
@@ -3394,6 +3538,97 @@ mod tests {
     /// session buys it at the price the preview quoted, hears the fill,
     /// collects it from the market box, then rests a bid and cancels it.
     /// Every fee is checked against the preview's.
+    /// The board's calls end to end (S2.3): a bot posts a commission for
+    /// fiber at the hall; the session, signed in as a second account standing
+    /// at the hall with fiber, sees it on the board, claims it, and delivers
+    /// from its pack through the form's rules; and the units land in the
+    /// poster's market box at the hall, paid from the escrow.
+    #[test]
+    #[ignore = "needs the local stack"]
+    fn a_commission_is_posted_claimed_and_delivered() {
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::commissions::{Ask, Showing};
+        use capitol_core::net::NetConfig;
+        use capitol_core::protocol::rest::PostCommission;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100_000_000;
+
+        // The poster: a bot at the hall asks for three fiber at 2 each
+        let mut poster = Bot::sign_in(NetConfig::with_base_url(&server), &Account::numbered(&format!("cposter{stamp}"), 1))
+            .expect("poster signed in");
+        poster.go_to_exchange().expect("the poster at the hall");
+        let posted = poster
+            .post_commission(PostCommission { item_type: "fiber".into(), min_quality: 0, quantity: 3, price: 2, due_days: 1 })
+            .expect("posted");
+
+        // The deliverer: buys four fiber as a bot, then signs in through the
+        // session, wherever the spawn put them
+        let deliverer = Account::numbered(&format!("cdeliver{stamp}"), 1);
+        let mut bot = Bot::sign_in(NetConfig::with_base_url(&server), &deliverer).expect("deliverer registered");
+        bot.withdraw_fiber(4).expect("withdrew fiber");
+        drop(bot);
+        let dir = std::env::temp_dir().join(format!("capitol-board-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        // The live world's, so the hall is where the server has it
+        let mut terrain = TerrainSource::online(&server);
+        session.log_in(&deliverer.email, &deliverer.password);
+        let hall = loop {
+            if let Some(hall) = terrain.landmark(capitol_core::protocol::terrain::LandmarkKind::ExchangeHall) {
+                break hall.clone();
+            }
+            session.update(Instant::now(), &mut terrain);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the pack and the board", &|s| {
+            s.state().inventory().is_some() && s.board().commission(posted.id).is_some()
+        });
+        let me = session.state().me();
+        let fill: Vec<_> = session.board().can_fill(session.state().inventory(), me).iter().map(|c| c.id).collect();
+        assert!(fill.contains(&posted.id), "the pack can fill it");
+
+        // Claim all three, from anywhere
+        session.board_act(Instant::now(), None, Ask::Claim { commission_id: posted.id, quantity: 3 });
+        wait(&mut session, "the claim", &|s| s.board().my_claim(posted.id).is_some());
+        assert_eq!(session.board().commission(posted.id).unwrap().claimed, 3);
+
+        // Deliver through the form's rules: the lowest that meet it, all three
+        let pack = session.state().inventory().cloned();
+        session.board_mut().start_delivery(posted.id, pack.as_ref(), me);
+        assert_eq!(session.board().showing(), Showing::Deliver(posted.id));
+        let ask = session.board().deliver(pack.as_ref(), me).expect("a delivery that previews");
+        // Away from the hall: held while the session walks there, then sent
+        session.board_act(Instant::now(), Some(&hall), ask);
+        assert!(session.walking_to_board() || session.board().busy());
+        wait(&mut session, "the walk and the delivery's answer", &|s| !s.board().busy());
+        assert_eq!(session.board().refused(), None);
+        assert_eq!(session.board().done(), Some("Delivered 3 Plant Fiber and was paid 6 Strands."));
+        assert!(session.board().commission(posted.id).is_none(), "filled, so off the board");
+
+        // The poster hears it, and the fiber is in their box at the hall
+        poster
+            .until("the delivery's notice", Duration::from_secs(20), |_, events| {
+                events.iter().any(|e| matches!(e, StateEvent::CommissionDelivered { left: 0, .. }))
+            })
+            .expect("the poster heard the delivery");
+        poster.fetch_market_box().expect("the box");
+        assert_eq!(poster.count(capitol_core::catalog::container_type::MARKET_BOX, "fiber"), 3);
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[ignore = "needs the local stack"]
     fn a_market_order_is_placed_filled_collected_and_cancelled() {

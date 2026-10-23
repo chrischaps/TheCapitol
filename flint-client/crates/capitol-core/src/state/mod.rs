@@ -36,7 +36,7 @@ mod trade;
 use std::collections::HashMap;
 
 use capitol_protocol::rest::{
-    CatalogResponse, ClaimedPlot, PauseReason, PlotInfo, RecipeInfo, ResourceNodeInfo,
+    CatalogResponse, ClaimedPlot, Commission, PauseReason, PlotInfo, RecipeInfo, ResourceNodeInfo,
     StationInfo, Subscription, SubscriptionStatus, ZoneFactsResponse, FreeLotsResponse, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
@@ -335,6 +335,40 @@ pub enum StateEvent {
         delivered: i32,
         quantity: i32,
         refunded: i64,
+    },
+    /// A commission went up on the hall's board, was delivered to or
+    /// claimed, or came down (`commission_posted`, `commission_updated`,
+    /// `commission_closed`, Commons S2.1): its `status` says which. The
+    /// board's store keeps them (`commissions::Board`, S2.3).
+    Board(Commission),
+    /// Someone claimed part of your commission (`commission_claimed`, S2.2)
+    CommissionClaimed {
+        item_type: String,
+        claimant_name: String,
+        /// The claimant is a citizen (C0.1)
+        claimant_citizen: bool,
+        quantity: i32,
+        until: DateTime<Utc>,
+    },
+    /// An hour or less is left on your claim (`claim_due_soon`, S2.2)
+    ClaimDueSoon {
+        commission_id: Uuid,
+        item_type: String,
+        quantity: i32,
+        delivered: i32,
+        until: DateTime<Utc>,
+    },
+    /// A claim ran out, or was given up late (`claim_lapsed`, S2.2): yours,
+    /// or one on your commission (compare `claimant_id` with yours)
+    ClaimLapsed {
+        commission_id: Uuid,
+        item_type: String,
+        claimant_id: Uuid,
+        claimant_name: String,
+        /// The claimant is a citizen (C0.1)
+        claimant_citizen: bool,
+        quantity: i32,
+        delivered: i32,
     },
     /// A bazaar answer changed [`GameState::bazaar`]: the directory, a shop
     /// seen at its stall, or yours.
@@ -984,12 +1018,48 @@ impl GameState {
                     paid: *paid,
                 });
             }
-            // Commons S2.1: the hall's board, to everyone. Nothing here keeps
-            // the board yet: the Wanted page's store does (S2.3, #389).
-            M::CommissionPosted { .. } | M::CommissionUpdated { .. } | M::CommissionClosed { .. } => {}
-            // Commons S2.2: claims' notices, to the poster and the claimant.
-            // The Wanted page (S2.3, #389) shows and toasts them.
-            M::CommissionClaimed { .. } | M::ClaimDueSoon { .. } | M::ClaimLapsed { .. } => {}
+            // Commons S2.1: the hall's board, to everyone. The Wanted page's
+            // store keeps it (`commissions::Board`, S2.3).
+            M::CommissionPosted { commission } | M::CommissionUpdated { commission } | M::CommissionClosed { commission } => {
+                out.push(StateEvent::Board(commission.clone()))
+            }
+            // Commons S2.2: claims' notices, to the poster and the claimant
+            M::CommissionClaimed { item_type, claimant_name, claimant_citizen, quantity, until, .. } => {
+                out.push(StateEvent::CommissionClaimed {
+                    item_type: item_type.clone(),
+                    claimant_name: claimant_name.clone(),
+                    claimant_citizen: *claimant_citizen,
+                    quantity: *quantity,
+                    until: *until,
+                })
+            }
+            M::ClaimDueSoon { commission_id, item_type, quantity, delivered, until, .. } => {
+                out.push(StateEvent::ClaimDueSoon {
+                    commission_id: *commission_id,
+                    item_type: item_type.clone(),
+                    quantity: *quantity,
+                    delivered: *delivered,
+                    until: *until,
+                })
+            }
+            M::ClaimLapsed {
+                commission_id,
+                item_type,
+                claimant_id,
+                claimant_name,
+                claimant_citizen,
+                quantity,
+                delivered,
+                ..
+            } => out.push(StateEvent::ClaimLapsed {
+                commission_id: *commission_id,
+                item_type: item_type.clone(),
+                claimant_id: *claimant_id,
+                claimant_name: claimant_name.clone(),
+                claimant_citizen: *claimant_citizen,
+                quantity: *quantity,
+                delivered: *delivered,
+            }),
             // Commons S2.1: to the poster
             M::CommissionDelivered { item_type, deliverer_name, deliverer_citizen, units, paid, left, .. } => {
                 out.push(StateEvent::CommissionDelivered {
@@ -1337,6 +1407,11 @@ impl GameState {
             | R::Letter(_)
             | R::LettersUnread(_)
             | R::Byline(_)
+            | R::Commissions(_)
+            | R::Commission(_)
+            | R::Delivered(_)
+            | R::Claim(_)
+            | R::Claims(_)
             | R::CreatedApiKey(_)
             | R::ApiKeys(_)
             | R::Citizen(_)

@@ -58,6 +58,7 @@ pub mod bot;
 pub mod card;
 pub mod catalog;
 pub mod chat;
+pub mod commissions;
 pub mod citizen;
 pub mod craft;
 pub mod deeds;

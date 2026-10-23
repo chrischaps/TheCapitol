@@ -189,6 +189,21 @@ pub enum RestRequest {
     /// `PUT /gazette/byline`
     SetByline(GazetteByline),
 
+    /// `GET /commissions?item=&mine=&status=`: the hall's board (S2.1)
+    Commissions(CommissionsQuery),
+    /// `POST /commissions`: post one, at the hall
+    PostCommission(PostCommission),
+    /// `POST /commissions/{id}/deliver`: units toward one, at the hall
+    DeliverCommission { commission_id: Uuid, request: DeliverCommission },
+    /// `DELETE /commissions/{id}`: take yours down
+    CancelCommission { commission_id: Uuid },
+    /// `POST /commissions/{id}/claim`: promise units (S2.2)
+    ClaimCommission { commission_id: Uuid, request: ClaimCommission },
+    /// `DELETE /commissions/{id}/claim`: give your claim up
+    ReleaseClaim { commission_id: Uuid },
+    /// `GET /commissions/claims`: your standing claims
+    MyClaims,
+
     /// `GET /bazaar`: the directory of shops (E3.10)
     Bazaar,
     /// `GET /bazaar/mine`
@@ -304,6 +319,16 @@ pub enum RestResponse {
     Gazette(Box<GazetteResponse>),
     /// Your byline as it now stands
     Byline(GazetteByline),
+    /// The board, or a part of it (S2.1)
+    Commissions(CommissionsResponse),
+    /// A commission as posted, or as cancelled or withdrawn
+    Commission(Commission),
+    /// What a delivery did
+    Delivered(CommissionDelivery),
+    /// A claim made or ended, and the commission after it (S2.2)
+    Claim(ClaimResponse),
+    /// Your standing claims
+    Claims(ClaimsResponse),
     /// A station's automation as configured, started or stopped
     Automation {
         station_id: Uuid,
@@ -398,6 +423,9 @@ impl RestRequest {
             | Subscribe(_)
             | Grant(_)
             | PlaceOrder(_)
+            | PostCommission(_)
+            | DeliverCommission { .. }
+            | ClaimCommission { .. }
             | CollectMarketBox(_)
             | CollectImpound(_)
             | StartAutomation { .. }
@@ -414,9 +442,14 @@ impl RestRequest {
             | SetTunables(_)
             | SetTutorialDismissed(_)
             | Mute { .. } => Method::PUT,
-            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } | Unmute { .. } | DropLetter { .. } => {
-                Method::DELETE
-            }
+            RemoveStation { .. }
+            | RevokeApiKey { .. }
+            | CancelOrder { .. }
+            | Unlist { .. }
+            | Unmute { .. }
+            | DropLetter { .. }
+            | CancelCommission { .. }
+            | ReleaseClaim { .. } => Method::DELETE,
             ApiKeys
             | Health
             | Terrain { .. }
@@ -451,6 +484,8 @@ impl RestRequest {
             | MarketListings
             | MarketBox
             | Gazette { .. }
+            | Commissions(_)
+            | MyClaims
             | Bazaar
             | MyStall
             | Shop { .. }
@@ -532,6 +567,13 @@ impl RestRequest {
             Gazette { day: None } => "/gazette/latest".into(),
             Gazette { day: Some(_) } => "/gazette".into(),
             SetByline(_) => "/gazette/byline".into(),
+            Commissions(_) | PostCommission(_) => "/commissions".into(),
+            MyClaims => "/commissions/claims".into(),
+            CancelCommission { commission_id } => format!("/commissions/{commission_id}"),
+            DeliverCommission { commission_id, .. } => format!("/commissions/{commission_id}/deliver"),
+            ClaimCommission { commission_id, .. } | ReleaseClaim { commission_id } => {
+                format!("/commissions/{commission_id}/claim")
+            }
             Bazaar => "/bazaar".into(),
             MyStall => "/bazaar/mine".into(),
             Shop { stall_id } => format!("/bazaar/stalls/{stall_id}"),
@@ -573,6 +615,10 @@ impl RestRequest {
             PlaceOrder(b) => req.json(b),
             CollectMarketBox(b) | CollectImpound(b) => req.json(b),
             SetByline(b) => req.json(b),
+            Commissions(q) => req.query(q),
+            PostCommission(b) => req.json(b),
+            DeliverCommission { request, .. } => req.json(request),
+            ClaimCommission { request, .. } => req.json(request),
             ConfigureAutomation { request, .. } => req.json(request),
             RentStall { request, .. } => req.json(request),
             Stock(b) => req.json(b),
@@ -666,6 +712,11 @@ impl RestRequest {
             Q::CollectMarketBox(_) | Q::CollectImpound(_) => A::Collected(de(body)?),
             Q::Gazette { .. } => A::Gazette(Box::new(de(body)?)),
             Q::SetByline(_) => A::Byline(de(body)?),
+            Q::Commissions(_) => A::Commissions(de(body)?),
+            Q::PostCommission(_) | Q::CancelCommission { .. } => A::Commission(de(body)?),
+            Q::DeliverCommission { .. } => A::Delivered(de(body)?),
+            Q::ClaimCommission { .. } | Q::ReleaseClaim { .. } => A::Claim(de(body)?),
+            Q::MyClaims => A::Claims(de(body)?),
             Q::ConfigureAutomation { station_id, .. }
             | Q::StartAutomation { station_id }
             | Q::StopAutomation { station_id } => A::Automation {
@@ -864,6 +915,34 @@ mod tests {
             ),
             (RestRequest::ReadLetter { letter_id: id }, "POST", format!("/letters/{id}/read")),
             (RestRequest::DropLetter { letter_id: id }, "DELETE", format!("/letters/{id}")),
+            (RestRequest::Commissions(Default::default()), "GET", "/commissions".into()),
+            (
+                RestRequest::PostCommission(PostCommission {
+                    item_type: "plank".into(),
+                    min_quality: 0,
+                    quantity: 1,
+                    price: 1,
+                    due_days: 1,
+                }),
+                "POST",
+                "/commissions".into(),
+            ),
+            (
+                RestRequest::DeliverCommission {
+                    commission_id: id,
+                    request: DeliverCommission { item_id: id, qualities: None, quantity: None },
+                },
+                "POST",
+                format!("/commissions/{id}/deliver"),
+            ),
+            (RestRequest::CancelCommission { commission_id: id }, "DELETE", format!("/commissions/{id}")),
+            (
+                RestRequest::ClaimCommission { commission_id: id, request: ClaimCommission { quantity: 1 } },
+                "POST",
+                format!("/commissions/{id}/claim"),
+            ),
+            (RestRequest::ReleaseClaim { commission_id: id }, "DELETE", format!("/commissions/{id}/claim")),
+            (RestRequest::MyClaims, "GET", "/commissions/claims".into()),
             (
                 RestRequest::PlayerCardByName { name: "Ada Reeder/2?é".into() },
                 "GET",

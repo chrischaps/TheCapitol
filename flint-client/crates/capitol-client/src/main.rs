@@ -144,6 +144,11 @@ struct Args {
     /// Offline, open the Capitol Gazette on a sample edition (E3.9)
     #[arg(long)]
     gazette_sample: bool,
+    /// Offline, open the notice board's Wanted page (S2.3) on sample
+    /// commissions: "list" (the default), "post" or "deliver" for a form, or
+    /// "glint" to leave it closed and see the board's glint and hover line
+    #[arg(long, value_name = "VIEW", num_args = 0..=1, default_missing_value = "list")]
+    board_sample: Option<String>,
     /// Offline, open the zone card (#444) on sample facts: "urban",
     /// "suburban", "rural", or "compare" (the default) for all three
     #[arg(long, value_name = "ZONE", num_args = 0..=1, default_missing_value = "compare")]
@@ -396,6 +401,7 @@ fn main() -> Result<()> {
         .with_deeds_sample(args.deeds_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_card_sample(args.card_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_mail_sample(args.mail_sample.as_deref().filter(|_| args.offline.is_some()))
+        .with_board_sample(args.board_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_impound_sample(args.impound_sample && args.offline.is_some())
         .with_chat_sample(args.chat_sample && args.offline.is_some())
         .with_hints_sample(args.hints_sample.as_deref().filter(|_| args.offline.is_some()))

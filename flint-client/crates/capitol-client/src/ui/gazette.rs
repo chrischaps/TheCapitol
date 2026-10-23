@@ -1,7 +1,11 @@
-//! The Capitol Gazette (E3.9): the latest edition as a page of newsprint.
+//! The notice board's two pages (Commons S2.3): *Wanted*, the city's
+//! commissions pinned to cork (`ui/board.rs`), and The Capitol Gazette
+//! (E3.9), the latest edition as a page of newsprint. Tabs at the top turn
+//! between them.
 //!
-//! G, the header's Gazette chip, or a click on the notice board in the
-//! Exchange hall's forecourt opens it. It's the one light page in the game:
+//! G or the header's Gazette chip opens the Gazette's page; a click on the
+//! notice board in the Exchange hall's forecourt opens the board on Wanted,
+//! or on the Gazette while there's an edition you haven't read. It's the one light page in the game:
 //! warm paper and dark ink (`theme::PAPER`, `theme::INK`), the masthead and
 //! headline in the inscriptional capitals, then three columns: the Exchange
 //! with its small price table, the finest sale and the land office, and the
@@ -25,6 +29,8 @@ use egui::{Align, Align2, Color32, Id, Layout, Margin, RichText, Sense, Stroke};
 use flint_runtime::PersistentStore;
 use uuid::Uuid;
 
+use super::board;
+use super::icons::ItemIcons;
 use super::theme::{self, size};
 
 /// The open and close fade, in seconds, and how far it rises as it comes.
@@ -55,11 +61,32 @@ pub enum Action {
     Byline(bool),
     /// See who someone named on the page is: their card (S0.3)
     Card(String),
+    /// Something on the Wanted page (S2.3)
+    Board(board::Action),
+}
+
+/// The board's pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Page {
+    /// The commissions (S2.3)
+    Wanted,
+    #[default]
+    Gazette,
+}
+
+/// The Wanted page's board and what it draws from. Without it (offline,
+/// the Gazette's sample) there's only the Gazette, and no tabs.
+pub struct Wanted<'a> {
+    pub board: &'a mut capitol_core::commissions::Board,
+    pub view: board::View<'a>,
+    pub icons: &'a mut ItemIcons,
 }
 
 /// The panel and the file that keeps what you've read.
 pub struct GazettePanel {
     pub open: bool,
+    /// The page it's turned to
+    pub page: Page,
     was_open: bool,
     /// Open when `reading` last looked
     reading: bool,
@@ -77,11 +104,37 @@ impl Default for GazettePanel {
 
 impl GazettePanel {
     pub fn load(path: impl Into<PathBuf>) -> Self {
-        Self { open: false, was_open: false, reading: false, file: ReadFile::load(path), account: None, rect: None }
+        Self {
+            open: false,
+            page: Page::default(),
+            was_open: false,
+            reading: false,
+            file: ReadFile::load(path),
+            account: None,
+            rect: None,
+        }
     }
 
+    /// G: open on the Gazette's page, turn to it, or close.
     pub fn toggle(&mut self) {
-        self.open = !self.open;
+        if self.open && self.page != Page::Gazette {
+            self.page = Page::Gazette;
+        } else {
+            self.open = !self.open;
+            self.page = Page::Gazette;
+        }
+    }
+
+    /// A click on the notice board: open on Wanted, or on the Gazette while
+    /// there's an edition you haven't read.
+    pub fn open_board(&mut self, news: bool) {
+        self.open = true;
+        self.page = if news { Page::Gazette } else { Page::Wanted };
+    }
+
+    /// Whether the Gazette's page is the one being read.
+    pub fn reading_gazette(&self) -> bool {
+        self.open && self.page == Page::Gazette
     }
 
     /// Follow whoever is signed in on `server`: tell the reader which day
@@ -99,9 +152,10 @@ impl GazettePanel {
     /// Each frame: opened, turn to the latest; while open, count it read
     /// (it may arrive after the page opens), and keep it.
     pub fn reading(&mut self, reader: &mut Reader) {
-        let fresh = self.open && !self.reading;
-        self.reading = self.open;
-        if !self.open {
+        let open = self.reading_gazette();
+        let fresh = open && !self.reading;
+        self.reading = open;
+        if !open {
             return;
         }
         let read = if fresh { reader.open() } else { reader.mark_read() };
@@ -110,7 +164,7 @@ impl GazettePanel {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, view: &View) -> Option<Action> {
+    pub fn show(&mut self, ctx: &egui::Context, view: &View, mut wanted: Option<Wanted>) -> Option<Action> {
         let shown = ctx.animate_bool_with_time(Id::new("capitol_gazette_fade"), self.open, FADE);
         self.rect = None;
         if shown <= 0.0 {
@@ -126,20 +180,95 @@ impl GazettePanel {
         let width = PAGE_WIDTH.min(screen.width() - 32.0).max(280.0);
         let height = (screen.height() - 40.0).max(200.0);
         let mut action = None;
+        if wanted.is_none() {
+            self.page = Page::Gazette;
+        }
         let area = egui::Area::new(Id::new("capitol_gazette"))
             .anchor(Align2::CENTER_TOP, [0.0, screen.top() + 14.0 - RISE * (1.0 - ease)])
             .interactable(self.open)
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
-                paper().show(ui, |ui| {
-                    ui.set_width(width - 40.0);
-                    ui.visuals_mut().override_text_color = Some(theme::INK);
-                    action = page(ui, view, &mut self.open, height - 40.0);
-                });
+                match (self.page, wanted.as_mut()) {
+                    (Page::Wanted, Some(w)) => {
+                        cork().show(ui, |ui| {
+                            let flecks = ui.painter().add(egui::Shape::Noop);
+                            ui.set_width(width - 40.0);
+                            tabs(ui, &mut self.page, &mut self.open, true);
+                            ui.add_space(8.0);
+                            let room = (height - 150.0).max(120.0);
+                            action = board::page(ui, w.board, &w.view, w.icons, room).map(Action::Board);
+                            let rect = ui.min_rect().expand(14.0);
+                            ui.painter().set(flecks, egui::Shape::Vec(theme::cork_flecks(rect)));
+                        });
+                    }
+                    (_, w) => {
+                        paper().show(ui, |ui| {
+                            ui.set_width(width - 40.0);
+                            ui.visuals_mut().override_text_color = Some(theme::INK);
+                            if w.is_some() {
+                                tabs(ui, &mut self.page, &mut self.open, false);
+                                ui.add_space(4.0);
+                            }
+                            action = page(ui, view, &mut self.open, height - 40.0 - if w.is_some() { 34.0 } else { 0.0 }, w.is_none());
+                        });
+                    }
+                }
             });
         self.rect = self.open.then_some(area.response.rect);
         action
     }
+}
+
+/// The board's tabs, *Wanted* and *The Gazette*, and the ×. `on_cork`:
+/// drawn over the Wanted page's cork, so the paper tabs stand out.
+fn tabs(ui: &mut egui::Ui, page: &mut Page, open: &mut bool, on_cork: bool) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (p, title) in [(Page::Wanted, "Wanted"), (Page::Gazette, "The Gazette")] {
+            let on = *page == p;
+            let (fill, edge, colour) = match (on, on_cork) {
+                (true, _) => (theme::PAPER, theme::INK, theme::INK),
+                (false, true) => (theme::PAPER_DEEP.gamma_multiply(0.8), theme::PAPER_EDGE, theme::INK_DIM),
+                (false, false) => (theme::PAPER_DEEP, theme::PAPER_EDGE, theme::INK_DIM),
+            };
+            let tab = egui::Frame::none()
+                .fill(fill)
+                .stroke(Stroke::new(1.0_f32, edge))
+                .rounding(egui::Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 })
+                .inner_margin(Margin::symmetric(12.0, 3.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(title).font(theme::display(size::BODY)).color(colour).extra_letter_spacing(1.2));
+                });
+            if tab.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *page = p;
+            }
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let colour = if on_cork { theme::PAPER } else { theme::INK };
+            if ui
+                .add(egui::Label::new(RichText::new("×").font(theme::body(size::LARGE + 3.0)).color(colour)).sense(Sense::click()))
+                .on_hover_text("Close the board (G)")
+                .clicked()
+            {
+                *open = false;
+            }
+        });
+    });
+}
+
+/// The Wanted page's ground: cork in an oak frame.
+fn cork() -> egui::Frame {
+    egui::Frame::none()
+        .fill(theme::CORK)
+        .stroke(Stroke::new(5.0_f32, theme::OAK))
+        .rounding(3.0)
+        .inner_margin(Margin::symmetric(20.0, 16.0))
+        .shadow(egui::epaint::Shadow {
+            offset: [0.0, 6.0].into(),
+            blur: 24.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(140),
+        })
 }
 
 /// The sheet: paper, a thin deckle edge, a little shadow.
@@ -159,10 +288,10 @@ fn paper() -> egui::Frame {
 
 /// The page: the arrows and the fold stay put, and everything under them
 /// scrolls, so a short window still reaches the columns.
-fn page(ui: &mut egui::Ui, view: &View, open: &mut bool, height: f32) -> Option<Action> {
+fn page(ui: &mut egui::Ui, view: &View, open: &mut bool, height: f32, fold: bool) -> Option<Action> {
     let mut action = None;
     let reader = view.reader;
-    turns(ui, reader, open, &mut action);
+    turns(ui, reader, open, fold, &mut action);
     let room = (height - 36.0).max(120.0);
     egui::ScrollArea::vertical()
         .max_height(room)
@@ -218,18 +347,19 @@ fn page(ui: &mut egui::Ui, view: &View, open: &mut bool, height: f32) -> Option<
     action
 }
 
-/// The arrows to the days either side, and the fold.
-fn turns(ui: &mut egui::Ui, reader: &Reader, open: &mut bool, action: &mut Option<Action>) {
+/// The arrows to the days either side, and the fold, unless the tabs have it.
+fn turns(ui: &mut egui::Ui, reader: &Reader, open: &mut bool, fold: bool, action: &mut Option<Action>) {
     ui.horizontal(|ui| {
         let (back, on) = reader.can_turn();
         if turn_button(ui, "‹ Earlier", back).clicked() {
             *action = Some(Action::Turn(-1));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add(egui::Label::new(ink("×", size::LARGE + 3.0)).sense(Sense::click()))
-                .on_hover_text("Fold it away (G)")
-                .clicked()
+            if fold
+                && ui
+                    .add(egui::Label::new(ink("×", size::LARGE + 3.0)).sense(Sense::click()))
+                    .on_hover_text("Fold it away (G)")
+                    .clicked()
             {
                 *open = false;
             }
@@ -788,11 +918,59 @@ mod tests {
                     ..Default::default()
                 };
                 let _ = ctx.run(input, |ctx| {
-                    panel.show(ctx, &View { reader: &reader, online: true });
+                    panel.show(ctx, &View { reader: &reader, online: true }, None);
                 });
             }
             let rect = panel.rect.expect("drawn");
             assert!(rect.width() <= width, "{width}: {rect:?}");
+        }
+    }
+
+    /// The board (S2.3): a click on it opens Wanted, or the Gazette while
+    /// there's news; G turns to the Gazette, then closes; and both pages
+    /// draw with the tabs.
+    #[test]
+    fn the_board_turns_between_its_pages() {
+        let mut panel = GazettePanel::load(temp("pages"));
+        panel.open_board(false);
+        assert_eq!((panel.open, panel.page), (true, Page::Wanted));
+        assert!(!panel.reading_gazette(), "Wanted doesn't count the Gazette read");
+        panel.toggle();
+        assert_eq!((panel.open, panel.page), (true, Page::Gazette), "G turns to the Gazette");
+        panel.toggle();
+        assert!(!panel.open, "then folds it");
+        panel.open_board(true);
+        assert_eq!(panel.page, Page::Gazette, "news first");
+
+        let reader = sample();
+        let catalog = capitol_core::catalog::Catalog::fallback();
+        let (mut board, pack, me, now) = board::sample("", &catalog);
+        let mut icons = ItemIcons::load(std::path::Path::new(ItemIcons::DIR));
+        for page in [Page::Wanted, Page::Gazette] {
+            panel.page = page;
+            let ctx = theme::test_context();
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    let view = board::View {
+                        pack: pack.as_ref(),
+                        me: Some(me),
+                        strands: Some(500),
+                        now,
+                        catalog: &catalog,
+                        at_hall: true,
+                        walking: false,
+                        online: true,
+                    };
+                    let wanted = Wanted { board: &mut board, view, icons: &mut icons };
+                    assert_eq!(panel.show(ctx, &View { reader: &reader, online: true }, Some(wanted)), None);
+                });
+            }
+            assert_eq!(panel.page, page);
+            assert!(panel.rect.expect("drawn").height() <= 720.0);
         }
     }
 }

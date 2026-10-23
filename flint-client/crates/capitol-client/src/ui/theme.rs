@@ -190,6 +190,19 @@ pub const INK_RULE: Color32 = rgba(35, 30, 23, 0.55);
 /// gone dark enough to read on paper
 pub const INK_UP: Color32 = rgb(0x2f6b3a);
 pub const INK_DOWN: Color32 = rgb(0x9b2f25);
+/// A shade of the paper, for a field or a button set on it
+pub const PAPER_DEEP: Color32 = rgb(0xe2d3b0);
+/// A pencil's grey, for what's jotted on a card rather than printed: the
+/// claims' tally on the Wanted page (S2.3)
+pub const PENCIL: Color32 = rgba(62, 60, 58, 0.8);
+
+/// The notice board's Wanted page (Commons S2.3): cork, darker flecks in
+/// it, the oak frame round it, and the brass of the pins in the cards.
+pub const CORK: Color32 = rgb(0x9a7651);
+pub const CORK_FLECK: Color32 = rgba(70, 48, 28, 0.35);
+pub const OAK: Color32 = rgb(0x5a3e24);
+pub const BRASS: Color32 = rgb(0xb8913a);
+pub const BRASS_LIGHT: Color32 = rgb(0xf0d79a);
 
 // ---------------------------------------------------------------------------
 // Type
@@ -913,6 +926,84 @@ pub fn step_pips(ui: &mut Ui, steps: usize, at: usize) {
             }
         }
     }
+}
+
+/// The flecks in cork filling `rect`, the same each frame (Commons S2.3).
+/// The cork itself is [`CORK`], a frame's fill.
+pub fn cork_flecks(rect: egui::Rect) -> Vec<egui::Shape> {
+    // A fixed scatter, so the flecks don't swim as the page redraws
+    let mut seed: u32 = 0x2f6b_3a91;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed % 10_000) as f32 / 10_000.0
+    };
+    let count = ((rect.area() / 260.0) as usize).min(1600);
+    (0..count)
+        .map(|_| {
+            let p = rect.min + egui::vec2(next() * rect.width(), next() * rect.height());
+            egui::Shape::circle_filled(p, 0.6 + next() * 1.1, CORK_FLECK)
+        })
+        .collect()
+}
+
+/// A brass drawing pin of radius `r` at `c`, as it pins a card to the board:
+/// its shadow on the paper, the head, and a glint on it.
+pub fn pin(painter: &egui::Painter, c: egui::Pos2, r: f32) {
+    painter.circle_filled(c + egui::vec2(r * 0.35, r * 0.45), r, Color32::from_black_alpha(70));
+    painter.circle_filled(c, r, BRASS);
+    painter.circle_stroke(c, r, Stroke::new(0.8_f32, OAK.gamma_multiply(0.8)));
+    painter.circle_filled(c - egui::vec2(r * 0.32, r * 0.32), r * 0.32, BRASS_LIGHT);
+}
+
+/// `n` pencilled tally marks from `left` along a line at `mid` (fours with
+/// a stroke across), `h` tall, in [`PENCIL`]. At most `most` are drawn.
+/// Returns how wide they ran.
+pub fn tally(painter: &egui::Painter, left: egui::Pos2, h: f32, n: usize, most: usize) -> f32 {
+    let stroke = Stroke::new(1.2_f32, PENCIL);
+    let gap = h * 0.28;
+    let mut x = left.x;
+    for i in 0..n.min(most) {
+        let in_five = i % 5;
+        if in_five == 4 {
+            // The fifth strikes the four before it
+            let from = x - gap * 4.0 - gap * 0.3;
+            painter.line_segment([egui::pos2(from, left.y + h * 0.75), egui::pos2(x - gap * 0.2, left.y + h * 0.2)], stroke);
+            x += gap * 1.6;
+            continue;
+        }
+        // A hand's wobble: each stroke leans a little its own way
+        let lean = [0.0, 0.6, -0.4, 0.3][in_five] * gap * 0.3;
+        painter.line_segment([egui::pos2(x + lean, left.y), egui::pos2(x - lean, left.y + h)], stroke);
+        x += gap;
+    }
+    x - left.x
+}
+
+/// Widgets for a card of paper: fields and buttons in a deeper shade of it,
+/// edged and lettered in ink, as the Wanted page's forms are (S2.3).
+pub fn paper_widgets(ui: &mut Ui) {
+    let v = ui.visuals_mut();
+    v.override_text_color = Some(INK);
+    v.extreme_bg_color = PAPER_DEEP;
+    v.selection.bg_fill = PAPER_EDGE;
+    v.selection.stroke = Stroke::new(1.0_f32, INK);
+    v.text_cursor.stroke = Stroke::new(1.5_f32, INK);
+    for (w, fill) in [
+        (&mut v.widgets.inactive, PAPER_DEEP),
+        (&mut v.widgets.hovered, PAPER_EDGE),
+        (&mut v.widgets.active, PAPER_EDGE),
+    ] {
+        w.bg_fill = fill;
+        w.weak_bg_fill = fill;
+        w.bg_stroke = Stroke::new(1.0_f32, INK_RULE);
+        w.fg_stroke = Stroke::new(1.0_f32, INK);
+    }
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, INK);
+    // What a disabled widget fades toward: the paper, not the dark panels
+    v.widgets.noninteractive.weak_bg_fill = PAPER;
+    v.widgets.noninteractive.bg_fill = PAPER;
 }
 
 /// A tick, drawn rather than set in type, in `colour`, filling `rect`.

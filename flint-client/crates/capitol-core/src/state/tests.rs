@@ -243,10 +243,10 @@ fn test_for(message: &M) -> fn() {
         M::Resync { .. } => a_socket_that_fell_behind_resyncs_like_a_reconnect,
         M::Said { .. } => said_is_reported,
         M::LetterArrived { .. } => a_letter_is_reported,
-        M::CommissionPosted { .. } => the_board_changes_nothing_yet,
-        M::CommissionUpdated { .. } => the_board_changes_nothing_yet,
-        M::CommissionClosed { .. } => the_board_changes_nothing_yet,
-        M::CommissionClaimed { .. } | M::ClaimDueSoon { .. } | M::ClaimLapsed { .. } => the_board_changes_nothing_yet,
+        M::CommissionPosted { .. } => the_board_is_reported,
+        M::CommissionUpdated { .. } => the_board_is_reported,
+        M::CommissionClosed { .. } => the_board_is_reported,
+        M::CommissionClaimed { .. } | M::ClaimDueSoon { .. } | M::ClaimLapsed { .. } => claim_notices_are_reported,
         M::CommissionDelivered { .. } => commission_notices_are_reported,
         M::CommissionExpired { .. } => commission_notices_are_reported,
         M::GuildChanged { .. } | M::GuildNotice { .. } => guild_messages_are_reported,
@@ -1399,22 +1399,52 @@ fn server_fixture(name: &str) -> M {
     serde_json::from_str(&json).unwrap()
 }
 
-/// The board's messages, and the claims' notices (S2.2), keep nothing until
-/// the Wanted page's store (S2.3)
+/// The board's messages go to the Wanted page's store (S2.3) as they are
 #[test]
-fn the_board_changes_nothing_yet() {
+fn the_board_is_reported() {
     let mut state = connected();
-    let names = [
-        "commission_posted",
-        "commission_updated",
-        "commission_closed",
-        "commission_claimed",
-        "claim_due_soon",
-        "claim_lapsed",
-    ];
-    for name in names {
-        assert_eq!(state.apply_ws(&server_fixture(name)), vec![], "{name}");
+    for name in ["commission_posted", "commission_updated", "commission_closed"] {
+        let (M::CommissionPosted { commission } | M::CommissionUpdated { commission } | M::CommissionClosed { commission }) =
+            server_fixture(name)
+        else {
+            unreachable!()
+        };
+        assert_eq!(state.apply_ws(&server_fixture(name)), vec![StateEvent::Board(commission)], "{name}");
     }
+}
+
+/// The claims' notices (S2.2), for the toasts and the board's claims
+#[test]
+fn claim_notices_are_reported() {
+    let mut state = connected();
+    let until = "2026-10-23T12:00:00Z".parse().unwrap();
+    let commission_id = Uuid::parse_str("6a1f0c2e-4b7d-4e19-9c3a-0000000000d1").unwrap();
+    assert_eq!(
+        state.apply_ws(&server_fixture("commission_claimed")),
+        vec![StateEvent::CommissionClaimed {
+            item_type: "iron_ore".into(),
+            claimant_name: "Citizen Cy".into(),
+            claimant_citizen: true,
+            quantity: 4,
+            until,
+        }]
+    );
+    assert_eq!(
+        state.apply_ws(&server_fixture("claim_due_soon")),
+        vec![StateEvent::ClaimDueSoon { commission_id, item_type: "iron_ore".into(), quantity: 4, delivered: 1, until }]
+    );
+    assert_eq!(
+        state.apply_ws(&server_fixture("claim_lapsed")),
+        vec![StateEvent::ClaimLapsed {
+            commission_id,
+            item_type: "iron_ore".into(),
+            claimant_id: Uuid::parse_str("6a1f0c2e-4b7d-4e19-9c3a-000000000003").unwrap(),
+            claimant_name: "bea".into(),
+            claimant_citizen: false,
+            quantity: 4,
+            delivered: 1,
+        }]
+    );
 }
 
 #[test]

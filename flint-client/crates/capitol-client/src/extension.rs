@@ -82,6 +82,18 @@ struct DeedsSample {
     grant: capitol_core::protocol::tutorial::Grant,
 }
 
+/// `--board-sample` (S2.3): the notice board offline, on sample
+/// commissions, a pack, you, and the server's clock, with the Gazette's
+/// sample edition on its other page.
+struct BoardSample {
+    board: capitol_core::commissions::Board,
+    pack: Option<capitol_core::state::Container>,
+    me: uuid::Uuid,
+    now: capitol_core::chrono::DateTime<capitol_core::chrono::Utc>,
+    catalog: capitol_core::catalog::Catalog,
+    reader: capitol_core::gazette::Reader,
+}
+
 
 /// `--citizen-sample stroll` (#346), once the camera settled: where it
 /// looked, where it stood, the street there (#349) and when.
@@ -185,6 +197,9 @@ pub struct CapitolExtension {
     /// read offline.
     gazette: ui::gazette::GazettePanel,
     gazette_sample: Option<capitol_core::gazette::Reader>,
+    /// `--board-sample`: the board's Wanted page (S2.3) on sample
+    /// commissions and a pack, offline.
+    board_sample: Option<BoardSample>,
     /// A person's card (S0.3), and `--card-sample`: a card, and today's
     /// game day, to show offline.
     card: ui::card::CardPanel,
@@ -323,6 +338,7 @@ impl CapitolExtension {
             market_sample: None,
             gazette: ui::gazette::GazettePanel::default(),
             gazette_sample: None,
+            board_sample: None,
             card: ui::card::CardPanel::default(),
             card_sample: None,
             mail: ui::mail::MailPanel::default(),
@@ -592,6 +608,22 @@ impl CapitolExtension {
         self
     }
 
+    /// Offline, open the notice board's Wanted page (S2.3) on sample
+    /// commissions (`--board-sample`): "list" (the default), "post" or
+    /// "deliver" for a form, or "glint" to leave it closed, so the board in
+    /// the forecourt shows that your pack could fill some.
+    pub fn with_board_sample(mut self, which: Option<&str>) -> Self {
+        if let (Some(which), None) = (which, &self.session) {
+            let catalog = capitol_core::catalog::Catalog::fallback();
+            let (board, pack, me, now) = ui::board::sample(which, &catalog);
+            self.board_sample = Some(BoardSample { board, pack, me, now, catalog, reader: ui::gazette::sample() });
+            if which != "glint" {
+                self.gazette.open_board(false);
+            }
+        }
+        self
+    }
+
     /// Offline, open the chat on a sample of both channels, with the
     /// crafting and inventory panels open and the hint card up
     /// (`--chat-sample`, S1.3).
@@ -791,6 +823,15 @@ impl CapitolExtension {
             (None, Some(reader)) => reader.unread(),
             _ => false,
         };
+        // The Wanted page (S2.3): commissions pinned there your pack could fill
+        let fill = match (&self.session, &self.board_sample) {
+            (Some(session), _) => {
+                let state = session.state();
+                session.board().can_fill(state.inventory(), state.me()).len()
+            }
+            (None, Some(s)) => s.board.can_fill(s.pack.as_ref(), Some(s.me)).len(),
+            _ => 0,
+        };
         let (office, office_top) = site.office();
         Some(script_api::HallMark {
             corners: hall.corners.map(world),
@@ -802,6 +843,7 @@ impl CapitolExtension {
             board,
             board_top,
             news,
+            fill,
             reading: self.gazette.open,
             office,
             office_top,
@@ -1299,8 +1341,10 @@ impl PlayerExtension for CapitolExtension {
         if !self.at_login() && ctx.input.is_action_just_pressed("gazette") {
             self.gazette.toggle();
         }
+        // A click on the notice board: Wanted, or the Gazette while there's news
         if self.shared.read_gazette.swap(false, Ordering::Relaxed) {
-            self.gazette.open = true;
+            let news = self.session.as_ref().is_some_and(|s| s.gazette().unread());
+            self.gazette.open_board(news);
         }
         // The Deeds Office (#448): a click on its desk, from anywhere (D8)
         if self.shared.open_office.swap(false, Ordering::Relaxed) {
@@ -2253,13 +2297,45 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::impound::Action::Close) => self.impound.open = false,
                     None => {}
                 }
-                // The Gazette (E3.9)
-                let view = ui::gazette::View { reader: session.gazette(), online: true };
-                match self.gazette.show(ctx, &view) {
+                // The notice board: Wanted (S2.3) and the Gazette (E3.9). The
+                // board is taken out to be drawn beside the state it reads.
+                let mut board = std::mem::take(session.board_mut());
+                let hall = self.terrain.landmark(LandmarkKind::ExchangeHall);
+                let action = {
+                    let state = session.state();
+                    let at_hall = match (hall, state.local_player()) {
+                        (Some(hall), Some(me)) => rules::market::at_the_hall(hall, me.x, me.y),
+                        _ => false,
+                    };
+                    let wanted = ui::gazette::Wanted {
+                        board: &mut board,
+                        view: ui::board::View {
+                            pack: state.inventory(),
+                            me: state.me(),
+                            strands: state.strands(),
+                            now: state.utc_now(),
+                            catalog: state.catalog(),
+                            at_hall,
+                            walking: session.walking_to_board(),
+                            online: true,
+                        },
+                        icons: &mut self.icons,
+                    };
+                    let view = ui::gazette::View { reader: session.gazette(), online: true };
+                    self.gazette.show(ctx, &view, Some(wanted))
+                };
+                *session.board_mut() = board;
+                match action {
                     Some(ui::gazette::Action::Turn(by)) => session.gazette_mut().turn(by),
                     Some(ui::gazette::Action::Byline(named)) => session.set_byline(named),
                     Some(ui::gazette::Action::Card(name)) => {
                         session.open_card(capitol_core::card::Who::Name(name), None)
+                    }
+                    Some(ui::gazette::Action::Board(ui::board::Action::Act(ask))) => {
+                        session.board_act(now, hall, ask)
+                    }
+                    Some(ui::gazette::Action::Board(ui::board::Action::Card(id))) => {
+                        session.open_card(capitol_core::card::Who::Id(id), None)
                     }
                     None => {}
                 }
@@ -2624,9 +2700,31 @@ impl PlayerExtension for CapitolExtension {
         if let Some(reader) = &mut self.gazette_sample {
             self.gazette.reading(reader);
             if let Some(ui::gazette::Action::Turn(by)) =
-                self.gazette.show(ctx, &ui::gazette::View { reader, online: false })
+                self.gazette.show(ctx, &ui::gazette::View { reader, online: false }, None)
             {
                 reader.turn(by);
+            }
+        }
+        if let Some(s) = &mut self.board_sample {
+            let wanted = ui::gazette::Wanted {
+                board: &mut s.board,
+                view: ui::board::View {
+                    pack: s.pack.as_ref(),
+                    me: Some(s.me),
+                    strands: Some(1200),
+                    now: s.now,
+                    catalog: &s.catalog,
+                    at_hall: false,
+                    walking: false,
+                    online: false,
+                },
+                icons: &mut self.icons,
+            };
+            self.gazette.reading(&mut s.reader);
+            if let Some(ui::gazette::Action::Turn(by)) =
+                self.gazette.show(ctx, &ui::gazette::View { reader: &s.reader, online: false }, Some(wanted))
+            {
+                s.reader.turn(by);
             }
         }
         if let Some(facts) = &self.zone_card_sample {

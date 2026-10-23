@@ -155,6 +155,8 @@ pub struct HallMark {
     pub board_top: [f32; 3],
     /// An edition is out that you haven't read.
     pub news: bool,
+    /// How many commissions on its Wanted page your pack could fill (S2.3)
+    pub fill: usize,
     /// The Gazette is open.
     pub reading: bool,
     /// The Deeds Office's desk beside it (#448): round its slot, and the
@@ -918,11 +920,12 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         }
     });
     // `cap_hall() -> #{ corners, door_x, door_z, x, y, z, near, goods, open,
-    // board_x, board_y, board_z, news, reading, office_x, office_y, office_z,
+    // board_x, board_y, board_z, news, fill, reading, office_x, office_y, office_z,
     // deed_waits, office_open } or ()`: the Exchange hall
     // (E3.7), world metres. `board_*` is the top of the Gazette's notice
     // board in its forecourt (E3.9), `news` an edition you haven't read,
-    // and `reading` the Gazette open. `office_*` is the top of the Deeds
+    // `fill` how many commissions on its Wanted page your pack could fill
+    // (S2.3), and `reading` the board open. `office_*` is the top of the Deeds
     // Office's awning beside it (#448), `deed_waits` your deed earned and
     // unspent, and `office_open` its panel open. `corners` is
     // [[x, z], ...] round its footprint, `door_*` the middle of its entrance
@@ -953,6 +956,7 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("board_y".into(), (h.board_top[1] as f64).into());
         m.insert("board_z".into(), (h.board_top[2] as f64).into());
         m.insert("news".into(), h.news.into());
+        m.insert("fill".into(), (h.fill as i64).into());
         m.insert("reading".into(), h.reading.into());
         m.insert("office_x".into(), (h.office_top[0] as f64).into());
         m.insert("office_y".into(), (h.office_top[1] as f64).into());
