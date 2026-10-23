@@ -1370,6 +1370,12 @@ impl PlayerExtension for CapitolExtension {
             // The road in's card follows the server's tour (#441), which
             // judges the walking, gathering and making itself
             self.hints.follow(session.state().tutorial());
+            // The bid step opens the market on an item to bid for (#494)
+            if self.market.open {
+                if let Some(item) = self.hints.bid_lead() {
+                    self.market.lead_bid(item);
+                }
+            }
             // The market box is waived with words when nothing's in it (#446, D10)
             let goods = session.state().market_box().map(|b| capitol_core::hall::goods_waiting(Some(b)));
             self.hints.market_box(goods, now);

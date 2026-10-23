@@ -262,6 +262,25 @@ impl MarketPanel {
         self.form.picks_of = Some(item.item_id);
     }
 
+    /// Leads the panel to a bid on `item_type` (the road in's bid step,
+    /// #494): its book and the Buy form, nothing typed, and the item list
+    /// in view, where one not trading yet still takes a bid.
+    pub fn lead_bid(&mut self, item_type: &str) {
+        if self.selected.as_deref() != Some(item_type) {
+            self.form.price.clear();
+            self.form.quantity.clear();
+        }
+        self.select(item_type);
+        if matches!(self.tab, Tab::Bazaar | Tab::New) {
+            self.tab = Tab::Items;
+        }
+        self.pane = Pane::Book;
+        self.form.side = OrderSide::Buy;
+        self.form.stack = None;
+        self.form.picks.clear();
+        self.form.picks_of = None;
+    }
+
     /// Opens the panel on `item_type` with the form filled in, for captures
     /// (`--market-sample`, `--market`): "plank" opens its book, and
     /// "plank:buy:10@41:B" fills a buy of 10 at 41, B or better. Anywhere
@@ -2472,6 +2491,24 @@ mod tests {
         panel.offer(&planks);
         assert_eq!((panel.form.quantity.as_str(), panel.form.price.as_str()), ("8", "50"));
         assert!(panel.form.picks.iter().all(|(_, take)| *take == 0));
+    }
+
+    /// The road in's bid step (#494) leads from the sell just placed to a
+    /// clean Buy form on stone's book, from whichever tab was up.
+    #[test]
+    fn the_bid_step_leads_to_a_clean_buy_form() {
+        let mut sample = Sample::new();
+        let planks = blended(&mut sample);
+        let mut panel = open();
+        panel.offer(&planks);
+        panel.form.price = "50".into();
+        panel.tab = Tab::New;
+        panel.lead_bid("stone");
+        assert_eq!(panel.selected.as_deref(), Some("stone"));
+        assert_eq!((panel.tab, panel.pane, panel.form.side), (Tab::Items, Pane::Book, OrderSide::Buy));
+        assert_eq!((panel.form.quantity.as_str(), panel.form.price.as_str()), ("", ""));
+        assert_eq!((panel.form.stack, panel.form.picks_of), (None, None));
+        assert!(panel.form.picks.is_empty());
     }
 
     #[test]

@@ -202,10 +202,13 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
              Put up something you made on the road: a rope, a handle, an edge.",
             "[M] the market  ·  Sell",
         ),
+        // A bid needs no seller (#494): the book may be empty (plan D10),
+        // so the card says so, and the market opens on stone ([`BID_FOR`])
         Step::BuyOrder => (
             "Bid for something",
-            "Now bid for something you haven't got. Your Strands wait in escrow with the price, \
-             and come back if you cancel.",
+            "A bid needs no seller: you name a price, and it waits on the book until someone meets it, \
+             even for an item not trading yet. Try stone: a workbench at home knaps it into edges. \
+             Your Strands wait in escrow, and come back if you cancel.",
             "[M] the market  ·  Buy",
         ),
         Step::CollectBox => (
@@ -342,6 +345,11 @@ const BOX_EMPTY: &str = "Nothing's filled yet, so your box is empty: a price can
 /// How long the market box's card says it's empty before it's waived.
 const WAIVE_AFTER: Duration = Duration::from_secs(7);
 
+/// What the bid step leads the market to (#494): stone, which Settle in's
+/// workbench knaps at home ([`Step::SetAutomation`]). An empty book still
+/// takes a bid, so the step never waits on a seller (plan D10).
+pub const BID_FOR: &str = "stone";
+
 /// A step's words on its card: [`words`], but for the market box once it's
 /// known empty (`box_goods`, `Some(false)`), and Settle in's for your own
 /// lot (`home`, [`home_words`]).
@@ -468,6 +476,8 @@ pub struct Hints {
     home: Option<Home>,
     /// The tax card's "Noted" was clicked: [`Hints::noted`] tells it.
     noted: bool,
+    /// The bid step has led the market to [`BID_FOR`] ([`Hints::bid_lead`]).
+    bid_led: bool,
 }
 
 impl Hints {
@@ -595,6 +605,17 @@ impl Hints {
                 next => next,
             },
         }
+    }
+
+    /// What to open the market on for the bid step (#494): [`BID_FOR`],
+    /// once a session, while the step's card is up. Call while the market
+    /// is open, so the lead lands where it's seen.
+    pub fn bid_lead(&mut self) -> Option<&'static str> {
+        if self.bid_led || self.leading() != Some(Step::BuyOrder) {
+            return None;
+        }
+        self.bid_led = true;
+        Some(BID_FOR)
     }
 
     /// The tour as the server last said, if it has.
@@ -1404,6 +1425,29 @@ mod tests {
         hints.market_box(Some(false), t0);
         assert_eq!(hints.waive(later), None);
         assert_eq!(body(Step::BuyOrder, Some(false), None), words(Step::BuyOrder).1);
+    }
+
+    /// The bid step leads the market to stone once (#494), and says a bid
+    /// needs no seller, since the book may be empty (D10). No other step
+    /// leads it, and a hidden card doesn't.
+    #[test]
+    fn the_bid_step_leads_the_market_to_stone_once() {
+        let t0 = Instant::now();
+        let mut hints = Hints::default();
+        hints.with_sample("sell_order");
+        hints.card = next_card(None, hints.tour.unwrap(), t0);
+        assert_eq!(hints.bid_lead(), None, "the sell step leads nowhere");
+
+        let mut hints = Hints::default();
+        hints.with_sample("buy_order");
+        hints.asked_hidden = Some(true);
+        hints.card = next_card(None, hints.tour.unwrap(), t0);
+        assert_eq!(hints.bid_lead(), None, "hidden");
+        hints.asked_hidden = Some(false);
+        assert_eq!(hints.bid_lead(), Some(BID_FOR));
+        assert_eq!(hints.bid_lead(), None, "once");
+        assert!(words(Step::BuyOrder).1.contains("needs no seller"));
+        assert!(words(Step::BuyOrder).1.contains("Try stone"));
     }
 
     /// Settle in speaks of your own lot (#449): what it fits against what
