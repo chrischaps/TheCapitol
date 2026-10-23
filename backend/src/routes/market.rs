@@ -1,6 +1,6 @@
 //! `/market` (E3.3, economy plan D7): placing and cancelling orders, an item's
 //! book, your orders, price history, the summary of every item with activity,
-//! and the market box.
+//! the newest sells across every item (#493), and the market box.
 //!
 //! Placing and cancelling are `engine::market`'s, one transaction each. Once
 //! one commits, the route tells the book (`Market::placed`, `cancelled`) and
@@ -21,8 +21,8 @@ use axum::{
 };
 use capitol_protocol::rest::{
     Candle, CollectRequest, CollectResponse, ContainerResponse, MarketDepthQuery, MarketDepthResponse,
-    MarketHistoryQuery, MarketHistoryResponse, MarketItemSummary, MarketOrder, MarketSummaryResponse,
-    MarketTrade, MyFill, MyOrdersQuery, PlaceOrder,
+    MarketHistoryQuery, MarketHistoryResponse, MarketItemSummary, MarketListingsResponse, MarketOrder,
+    MarketSummaryResponse, MarketTrade, MyFill, MyOrdersQuery, PlaceOrder,
 };
 use capitol_protocol::rules::market::{at_the_hall, grade_floor, OrderSide, HALL_RANGE};
 use chrono::{DateTime, Duration, Utc};
@@ -53,6 +53,8 @@ const CLOSED_ORDERS: i64 = 100;
 const RECENT_TRADES: i64 = 50;
 /// And how many of your own fills, for the chart to mark.
 const MY_FILLS: i64 = 200;
+/// How many of the newest sells `/market/listings` lists (#493).
+const LISTINGS: usize = 100;
 
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -61,6 +63,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/orders/{id}", delete(cancel_order))
         .route("/history", get(history))
         .route("/summary", get(summary))
+        .route("/listings", get(listings))
         .route("/box", get(get_box))
         .route("/box/collect", post(collect))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -462,6 +465,21 @@ pub async fn summary(State(state): State<AppState>) -> Result<Json<MarketSummary
     Ok(Json(MarketSummaryResponse {
         items: items.into_values().collect(),
     }))
+}
+
+/// What's for sale across every item: the newest sells on the book, newest
+/// first (#493)
+#[utoipa::path(
+    get,
+    path = "/market/listings",
+    responses((status = 200, description = "The latest 100, from the book", body = MarketListingsResponse)),
+    security(("bearer_auth" = [])),
+    tag = "Market"
+)]
+pub async fn listings(State(state): State<AppState>) -> Json<MarketListingsResponse> {
+    Json(MarketListingsResponse {
+        listings: state.market.listings(LISTINGS),
+    })
 }
 
 /// Your market box: what you bought, and sells that came back

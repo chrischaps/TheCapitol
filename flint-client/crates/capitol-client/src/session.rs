@@ -34,7 +34,7 @@ use capitol_core::net::{
 use capitol_core::paths::{Walk, WalkGraph};
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{
-    BuyListing, CollectRequest, DepositRequest, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PauseReason,
+    BuyListing, CollectRequest, DepositRequest, MarketListingsResponse, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PauseReason,
     PayTaxRequest, PlaceOrder, PositionQuery, RentStall, SlotItem, SplitStackRequest, StockListing, WithdrawRequest,
 };
 use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
@@ -221,6 +221,8 @@ pub struct Session {
     market_asked: Option<Instant>,
     /// Every item with activity, from `/market/summary`.
     market_summary: Option<MarketSummaryResponse>,
+    /// The newest sells across every item, from `/market/listings` (#493).
+    market_listings: Option<MarketListingsResponse>,
     /// A place, cancel or collect is out.
     market_busy: bool,
     /// Why the last one was refused, and when.
@@ -445,6 +447,7 @@ impl Session {
             admin: Default::default(),
             market_asked: None,
             market_summary: None,
+            market_listings: None,
             market_busy: false,
             market_refused: None,
             impound_busy: false,
@@ -1534,6 +1537,11 @@ impl Session {
         self.market_summary.as_ref()
     }
 
+    /// The newest sells across every item, once fetched (#493).
+    pub fn market_listings(&self) -> Option<&MarketListingsResponse> {
+        self.market_listings.as_ref()
+    }
+
     /// What's worth a toast about your orders since the last call.
     pub fn take_market_notes(&mut self) -> Vec<TradeNote> {
         std::mem::take(&mut self.market_notes)
@@ -1541,7 +1549,7 @@ impl Session {
 
     /// Sends what the market store wants said (watching, and asking again),
     /// and while the panel is open asks again for the summary, your orders
-    /// and the market box every [`MARKET_REFRESH`].
+    /// the newest listings and the market box every [`MARKET_REFRESH`].
     fn tend_market(&mut self, now: Instant) {
         for message in self.state.market_mut().take_outgoing() {
             self.net.ws(message);
@@ -1557,6 +1565,7 @@ impl Session {
         }
         self.market_asked = Some(now);
         self.net.rest(RestRequest::MarketSummary, MARKET_READ_TAG);
+        self.net.rest(RestRequest::MarketListings, MARKET_READ_TAG);
         self.net
             .rest(RestRequest::MyOrders(MyOrdersQuery::default()), MARKET_READ_TAG);
         self.net.rest(RestRequest::MarketBox, MARKET_READ_TAG);
@@ -2301,6 +2310,9 @@ impl Session {
                 NetEvent::Rest(MARKET_READ_TAG, Ok(RestResponse::MarketSummary(summary))) => {
                     self.market_summary = Some(summary.clone());
                 }
+                NetEvent::Rest(MARKET_READ_TAG, Ok(RestResponse::MarketListings(listings))) => {
+                    self.market_listings = Some(listings.clone());
+                }
                 NetEvent::Rest(ADMIN_TAG, Ok(response)) => self.admin.observe(response),
                 NetEvent::Rest(ADMIN_TAG, Err(e)) => {
                     tracing::warn!("admin: a read failed: {e}");
@@ -2673,6 +2685,7 @@ impl Session {
             self.receipt = None;
             self.market_asked = None;
             self.market_summary = None;
+            self.market_listings = None;
             self.market_busy = false;
             self.market_refused = None;
             self.market_notes.clear();

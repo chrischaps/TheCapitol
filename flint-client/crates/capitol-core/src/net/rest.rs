@@ -175,6 +175,8 @@ pub enum RestRequest {
     MarketHistory(MarketHistoryQuery),
     /// `GET /market/summary`
     MarketSummary,
+    /// `GET /market/listings`: the newest sells across every item (#493)
+    MarketListings,
     /// `GET /market/box`
     MarketBox,
     /// `POST /market/box/collect`
@@ -295,6 +297,7 @@ pub enum RestResponse {
     MyOrders(Vec<MarketOrder>),
     MarketHistory(MarketHistoryResponse),
     MarketSummary(MarketSummaryResponse),
+    MarketListings(MarketListingsResponse),
     MarketBox(ContainerResponse),
     Collected(CollectResponse),
     /// An edition, if there is one, and your byline
@@ -445,6 +448,7 @@ impl RestRequest {
             | MyOrders(_)
             | MarketHistory(_)
             | MarketSummary
+            | MarketListings
             | MarketBox
             | Gazette { .. }
             | Bazaar
@@ -521,6 +525,7 @@ impl RestRequest {
             MyOrders(_) => "/market/orders/mine".into(),
             MarketHistory(_) => "/market/history".into(),
             MarketSummary => "/market/summary".into(),
+            MarketListings => "/market/listings".into(),
             MarketBox => "/market/box".into(),
             CollectMarketBox(_) => "/market/box/collect".into(),
             CollectImpound(_) => "/inventory/impound/collect".into(),
@@ -656,6 +661,7 @@ impl RestRequest {
             Q::MyOrders(_) => A::MyOrders(de(body)?),
             Q::MarketHistory(_) => A::MarketHistory(de(body)?),
             Q::MarketSummary => A::MarketSummary(de(body)?),
+            Q::MarketListings => A::MarketListings(de(body)?),
             Q::MarketBox => A::MarketBox(de(body)?),
             Q::CollectMarketBox(_) | Q::CollectImpound(_) => A::Collected(de(body)?),
             Q::Gazette { .. } => A::Gazette(Box::new(de(body)?)),
@@ -950,6 +956,7 @@ mod tests {
                 "/market/history".into(),
             ),
             (RestRequest::MarketSummary, "GET", "/market/summary".into()),
+            (RestRequest::MarketListings, "GET", "/market/listings".into()),
             (RestRequest::MarketBox, "GET", "/market/box".into()),
             (
                 RestRequest::CollectMarketBox(Default::default()),

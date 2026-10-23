@@ -2160,6 +2160,7 @@ impl PlayerExtension for CapitolExtension {
                 let view = ui::market::View {
                     catalog: state.catalog(),
                     summary: session.market_summary().map(|s| s.items.as_slice()),
+                    listings: session.market_listings().map(|l| l.listings.as_slice()),
                     book: self.market.selected.as_deref().and_then(|i| market.book(i)),
                     history: market.history(),
                     orders: market.open_orders(),

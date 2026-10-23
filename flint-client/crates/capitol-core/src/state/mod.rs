@@ -1328,6 +1328,7 @@ impl GameState {
             | R::Zones(_)
             | R::MarketHistory(_)
             | R::MarketSummary(_)
+            | R::MarketListings(_)
             | R::Collected(_)
             | R::Gazette(_)
             | R::Card(_)

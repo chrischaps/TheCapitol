@@ -562,6 +562,16 @@ impl Book {
         items
     }
 
+    /// The latest `limit` sells on the book across every item, newest first
+    /// (#493). Expired and stalled ones count until they leave the book, as
+    /// in [`Book::depth`].
+    pub fn newest_sells(&self, limit: usize) -> Vec<&BookOrder> {
+        let mut sells: Vec<&BookOrder> = self.orders.values().filter(|o| o.side == OrderSide::Sell).collect();
+        sells.sort_unstable_by_key(|o| std::cmp::Reverse(o.time()));
+        sells.truncate(limit);
+        sells
+    }
+
     /// `item_type`'s book, aggregated by price and grade, in book order
     /// (`rules::market::sort_levels`): a buy at its `min_grade` and rule, a
     /// sell at the grade of each of its units. Expired and stalled orders
@@ -697,6 +707,27 @@ pub(crate) mod tests {
         assert_eq!((fills[0].buy, fills[0].sell), (bid.id, ask.id));
         // Both done; the 9 still rests
         assert_eq!(book.len(), 1);
+    }
+
+    #[test]
+    fn the_newest_sells_come_first_across_items_and_a_filled_one_goes() {
+        let mut o = Orders::new();
+        let mut book = Book::new();
+        let rope = o.sell(1, 10, Units::uniform(5, 60));
+        let plank = BookOrder { item_type: "plank".into(), ..o.sell(2, 30, Units::uniform(2, 80)) };
+        let newest = o.sell(3, 12, Units::uniform(4, 40));
+        for order in [&rope, &plank, &newest] {
+            book.insert(order.clone());
+        }
+        book.insert(o.buy(4, 1, 5, "F", GradeRule::Average));
+        let ids = |book: &Book, n| book.newest_sells(n).iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(ids(&book, 10), vec![newest.id, plank.id, rope.id], "no buys, newest first");
+        assert_eq!(ids(&book, 2), vec![newest.id, plank.id]);
+
+        // The cheapest rope sells out, and is gone from the list
+        book.insert(o.buy(5, 10, 5, "F", GradeRule::Average));
+        run(&mut book, now());
+        assert_eq!(ids(&book, 10), vec![newest.id, plank.id]);
     }
 
     #[test]

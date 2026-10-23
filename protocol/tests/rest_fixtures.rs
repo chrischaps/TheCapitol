@@ -9,6 +9,8 @@
 //! `fixtures/rest/market_depth.json`, `market_history.json` and
 //! `market_summary.json` are `GET /market/orders`, `/market/history` and
 //! `/market/summary` (E3.3).
+//! `fixtures/rest/market_listings.json` is `GET /market/listings` (#493): a
+//! blended lot of planks listed after a single quality of rope.
 //! `fixtures/rest/bazaar_directory.json` and `bazaar_shop.json` are
 //! `GET /bazaar` and `GET /bazaar/stalls/{id}` (E3.10).
 //! `fixtures/rest/gazette.json` is `GET /gazette/latest` (E3.9), written by the
@@ -71,7 +73,7 @@ use std::path::Path;
 use capitol_protocol::rest::{
     BazaarDirectory, BazaarShop,
     AutomationMode, AutomationState, CatalogResponse, GazetteResponse, MarketDepthResponse, MarketHistoryResponse,
-    MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
+    MarketListingsResponse, MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
 use capitol_protocol::metrics::{Feed, Sample, TownReport, ROLE_PERSON};
@@ -156,6 +158,15 @@ fn history_and_the_summary_round_trip() {
     let summary: MarketSummaryResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(summary.items[1].last_price, None);
     assert_eq!(serde_json::to_string(&summary).unwrap(), json);
+}
+
+#[test]
+fn the_newest_listings_round_trip_newest_first() {
+    let json = fixture("market_listings.json");
+    let listings: MarketListingsResponse = serde_json::from_str(&json).unwrap();
+    assert!(listings.listings.windows(2).all(|w| w[0].listed_at >= w[1].listed_at));
+    assert!(listings.listings.iter().all(|l| l.min_quality <= l.quality));
+    assert_eq!(serde_json::to_string(&listings).unwrap(), json);
 }
 
 #[test]

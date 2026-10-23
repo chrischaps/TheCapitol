@@ -43,7 +43,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::Instrument;
 
-use capitol_protocol::rest::{DepthLevel, MarketOrder, MarketTrade};
+use capitol_protocol::rest::{DepthLevel, MarketListing, MarketOrder, MarketTrade};
 use capitol_protocol::rules::market::{self, GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::Units;
@@ -180,6 +180,29 @@ impl Market {
             .collect();
         out.sort();
         out
+    }
+
+    /// The latest `limit` sells on the book across every item, newest first
+    /// (#493): read from the book itself, since nothing publishes them.
+    pub fn listings(&self, limit: usize) -> Vec<MarketListing> {
+        self.book()
+            .newest_sells(limit)
+            .into_iter()
+            .filter_map(|o| {
+                let quality = o.units.mean()?;
+                Some(MarketListing {
+                    order_id: o.id,
+                    item_type: o.item_type.clone(),
+                    grade: quality_grade(quality).to_string(),
+                    quality,
+                    min_quality: o.units.min()?,
+                    price: o.price,
+                    quantity: o.remaining,
+                    listed_at: o.created_at,
+                    expires_at: o.expires_at,
+                })
+            })
+            .collect()
     }
 
     fn book(&self) -> MutexGuard<'_, Book> {

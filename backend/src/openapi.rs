@@ -17,7 +17,8 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rest::{
     Candle, CollectRequest, CollectResponse, DepthLevel, MarketDepthResponse, MarketHistoryResponse,
-    MarketItemSummary, MarketOrder, MarketSummaryResponse, MarketTrade, MyFill, PlaceOrder,
+    MarketItemSummary, MarketListing, MarketListingsResponse, MarketOrder, MarketSummaryResponse, MarketTrade, MyFill,
+    PlaceOrder,
 };
 use capitol_protocol::rest::{
     BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, MyStallResponse, RentStall,
@@ -182,6 +183,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::market::my_orders,
         crate::routes::market::history,
         crate::routes::market::summary,
+        crate::routes::market::listings,
         crate::routes::market::get_box,
         crate::routes::market::collect,
         // Bazaar
@@ -343,6 +345,8 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         MyFill,
         MarketItemSummary,
         MarketSummaryResponse,
+        MarketListing,
+        MarketListingsResponse,
         CollectRequest,
         CollectResponse,
         BazaarDirectory,

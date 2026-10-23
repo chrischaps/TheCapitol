@@ -28,7 +28,12 @@
 //!   fills in gold and the latest trades (`market_chart`). A trade clicked
 //!   there goes back to the book with its price in the form.
 //!
-//! - **The bazaar** (E3.11), the third tab: the directory of the bazaar's
+//! - **New** (#493), the third tab, across the panel: every sell still on
+//!   the book, newest first (`GET /market/listings`), with its item, grade,
+//!   mean and lowest quality, quantity and price, yours marked. A click opens
+//!   its item's book with the form filled as a buy at its price, as taking
+//!   its ask on the ladder would. The search narrows it by item.
+//! - **The bazaar** (E3.11), the fourth tab: the directory of the bazaar's
 //!   stalls across the avenue (`GET /bazaar`), from anywhere: each shop's
 //!   name, its keeper and the kinds of goods it has, and which stalls are
 //!   to let. No prices, quantities or grades: those are seen at the stall
@@ -41,8 +46,8 @@
 use capitol_core::catalog::Catalog;
 use capitol_core::market::{self, Book, ChartKey, Draft, FormRefusal, History, OrderQuote};
 use capitol_core::protocol::rest::{
-    BazaarDirectory, DepthLevel, MarketHistoryResponse, MarketItemSummary, MarketOrder, MarketTrade, MyFill, PlaceOrder,
-    SlotItem,
+    BazaarDirectory, DepthLevel, MarketHistoryResponse, MarketItemSummary, MarketListing, MarketOrder, MarketTrade, MyFill,
+    PlaceOrder, SlotItem,
 };
 use capitol_core::protocol::rules::market::{GradeRule, OrderSide};
 use capitol_core::protocol::tunables::Fees;
@@ -76,6 +81,11 @@ const FADE: f32 = 0.18;
 const RISE: f32 = 12.0;
 /// The grades a buy can ask for, best first.
 const GRADES: [&str; 5] = ["A", "B", "C", "D", "F"];
+/// Where the New tab's columns stand, from a row's left.
+const LISTING_NAME: f32 = 34.0;
+const LISTING_GRADE: f32 = 250.0;
+const LISTING_QTY: f32 = 500.0;
+const LISTING_PRICE: f32 = 580.0;
 
 /// What the panel asks for this frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +104,8 @@ pub struct View<'a> {
     pub catalog: &'a Catalog,
     /// Every item with activity, once fetched
     pub summary: Option<&'a [MarketItemSummary]>,
+    /// The newest sells across every item, once fetched (#493)
+    pub listings: Option<&'a [MarketListing]>,
     /// The selected item's book, once its whole book has arrived
     pub book: Option<&'a Book>,
     /// The chart's history, once it has arrived. It's shown only while its
@@ -158,6 +170,8 @@ pub enum Tab {
     #[default]
     Items,
     Orders,
+    /// The newest sells across every item (#493)
+    New,
     /// The bazaar's directory (E3.11)
     Bazaar,
 }
@@ -192,6 +206,7 @@ pub struct MarketPanel {
     level_rows: Vec<(DepthLevel, egui::Rect)>,
     cancels: Vec<(Uuid, egui::Rect)>,
     stall_rows: Vec<(String, egui::Rect)>,
+    listing_rows: Vec<(Uuid, egui::Rect)>,
     place: Option<egui::Rect>,
     /// Where the panel was drawn this frame. `None` while it's closed.
     pub rect: Option<egui::Rect>,
@@ -251,14 +266,15 @@ impl MarketPanel {
     /// (`--market-sample`, `--market`): "plank" opens its book, and
     /// "plank:buy:10@41:B" fills a buy of 10 at 41, B or better. Anywhere
     /// after the item, "chart" shows the chart, and "1d", "line" or
-    /// "grade-B" (or "grade-all") set it up; "bazaar" opens the bazaar's
-    /// directory (E3.11).
+    /// "grade-B" (or "grade-all") set it up; "new" opens the newest
+    /// listings (#493), and "bazaar" the bazaar's directory (E3.11).
     pub fn preset(&mut self, spec: &str) {
         self.open = true;
         let mut kept = Vec::new();
         for part in spec.split(':') {
             match part {
                 "chart" => self.pane = Pane::Chart,
+                "new" => self.tab = Tab::New,
                 "bazaar" => self.tab = Tab::Bazaar,
                 "1h" => self.chart.bucket = market::Bucket::Hour,
                 "1d" => self.chart.bucket = market::Bucket::Day,
@@ -352,10 +368,12 @@ impl MarketPanel {
             });
         });
         ui.add_space(4.0);
-        if self.tab == Tab::Bazaar {
+        if matches!(self.tab, Tab::New | Tab::Bazaar) {
             self.tabs(ui, view.orders.len());
             ui.add_space(6.0);
-            if let Some(asked) = self.bazaar(ui, icons, view) {
+            if self.tab == Tab::New {
+                self.listings(ui, icons, view);
+            } else if let Some(asked) = self.bazaar(ui, icons, view) {
                 action = Some(asked);
             }
             ui.add_space(6.0);
@@ -377,7 +395,7 @@ impl MarketPanel {
                             action = Some(asked);
                         }
                     }
-                    Tab::Bazaar => {}
+                    Tab::New | Tab::Bazaar => {}
                 }
             });
             match self.pane {
@@ -408,7 +426,7 @@ impl MarketPanel {
         action
     }
 
-    /// Items, Orders and Bazaar, the open one gold and underlined.
+    /// Items, Orders, New and Bazaar, the open one gold and underlined.
     fn tabs(&mut self, ui: &mut egui::Ui, orders: usize) {
         let (row, _) = ui.allocate_exact_size(egui::vec2(ITEMS_WIDTH, 26.0), Sense::hover());
         ui.painter().hline(
@@ -416,16 +434,19 @@ impl MarketPanel {
             row.bottom() - 0.5,
             Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.5)),
         );
-        let width = row.width() / 3.0;
         let mine = format!("Orders · {orders}");
-        for (i, (tab, name)) in [(Tab::Items, "Items"), (Tab::Orders, mine.as_str()), (Tab::Bazaar, "Bazaar")]
-            .into_iter()
-            .enumerate()
-        {
-            let rect = egui::Rect::from_min_size(
-                row.min + egui::vec2(width * i as f32, 0.0),
-                egui::vec2(width, row.height()),
-            );
+        // Each as wide as its name needs, Orders widest for its count
+        let tabs = [
+            (Tab::Items, "Items", 0.22),
+            (Tab::Orders, mine.as_str(), 0.32),
+            (Tab::New, "New", 0.19),
+            (Tab::Bazaar, "Bazaar", 0.27),
+        ];
+        let mut x = row.left();
+        for (i, (tab, name, share)) in tabs.into_iter().enumerate() {
+            let width = row.width() * share;
+            let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), egui::vec2(width, row.height()));
+            x += width;
             let response = ui
                 .interact(rect, Id::new(("capitol_market_tab", i)), Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -454,6 +475,162 @@ impl MarketPanel {
                 self.tab = tab;
             }
         }
+    }
+
+    // -- New on the book (#493) -----------------------------------------------
+
+    /// Every sell still on the book across the panel, newest first: a click
+    /// opens its item's book with a buy at its price in the form.
+    fn listings(&mut self, ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View) {
+        let width = ITEMS_WIDTH + LADDER_WIDTH + FORM_WIDTH + 2.0 * GUTTER;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Find an item…")
+                    .desired_width(ITEMS_WIDTH + 60.0)
+                    .char_limit(24),
+            );
+            ui.label(theme::dim("Still for sale, newest first. Click one for its book.").size(size::SMALL));
+        });
+        ui.add_space(6.0);
+        let needle = self.search.trim().to_lowercase();
+        self.listing_rows.clear();
+        let now = capitol_core::chrono::Utc::now();
+        let mut picked = None;
+        theme::well().show(ui, |ui| {
+            ui.set_width(width - 16.0);
+            listings_head(ui);
+            egui::ScrollArea::vertical()
+                .id_salt("capitol_market_listings")
+                .max_height(COLUMN_HEIGHT - 50.0)
+                .min_scrolled_height(COLUMN_HEIGHT - 50.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let Some(listings) = view.listings else {
+                        ui.label(theme::dim("Asking the market…").size(size::SMALL));
+                        return;
+                    };
+                    let matches =
+                        |l: &&MarketListing| needle.is_empty() || view.catalog.item_name(&l.item_type).to_lowercase().contains(&needle);
+                    let shown: Vec<&MarketListing> = listings.iter().filter(matches).collect();
+                    if shown.is_empty() {
+                        let line = if needle.is_empty() { "Nothing is for sale on the book." } else { "None of that is for sale." };
+                        ui.label(theme::dim(line).size(size::SMALL));
+                    }
+                    for listing in shown {
+                        let mine = view.orders.iter().any(|o| o.id == listing.order_id);
+                        if self.listing_row(ui, icons, view.catalog, listing, mine, now) {
+                            picked = Some(listing.clone());
+                        }
+                    }
+                });
+        });
+        if let Some(listing) = picked {
+            self.select(&listing.item_type);
+            self.tab = Tab::Items;
+            self.pane = Pane::Book;
+            self.take(DepthLevel {
+                side: OrderSide::Sell,
+                price: listing.price,
+                grade: listing.grade,
+                grade_rule: None,
+                quantity: listing.quantity as i64,
+                orders: 1,
+            });
+        }
+    }
+
+    /// One sell: the item, its grade and qualities, how many at what, and
+    /// how long ago it was listed. True if it was clicked.
+    fn listing_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        icons: &mut ItemIcons,
+        catalog: &Catalog,
+        listing: &MarketListing,
+        mine: bool,
+        now: capitol_core::chrono::DateTime<capitol_core::chrono::Utc>,
+    ) -> bool {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if mine {
+            "Yours: open its book"
+        } else {
+            "Open its book, with a buy at this price"
+        });
+        self.listing_rows.push((listing.order_id, rect));
+        let painter = ui.painter();
+        if mine {
+            painter.rect_filled(rect, 4.0, GOLD_WASH);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 4.0, theme::SLOT_HOVER.gamma_multiply(0.6));
+        }
+        let y = rect.center().y;
+        icons.paint(
+            ui,
+            egui::Rect::from_center_size(egui::pos2(rect.left() + 16.0, y), egui::vec2(20.0, 20.0)),
+            &listing.item_type,
+        );
+        let painter = ui.painter();
+        painter.text(
+            egui::pos2(rect.left() + LISTING_NAME, y),
+            Align2::LEFT_CENTER,
+            catalog.item_name(&listing.item_type),
+            theme::body(size::BODY),
+            TEXT,
+        );
+        if mine {
+            painter.text(
+                egui::pos2(rect.left() + LISTING_GRADE - 12.0, y),
+                Align2::RIGHT_CENTER,
+                "yours",
+                theme::strong(size::LABEL),
+                GOLD,
+            );
+        }
+        grade_pill(painter, egui::pos2(rect.left() + LISTING_GRADE, y), &listing.grade, None);
+        // Units keep their own quality: the mean, and the lowest when it differs
+        let quality = if listing.min_quality < listing.quality {
+            format!("q {} · lowest {}", listing.quality, listing.min_quality)
+        } else {
+            format!("q {}", listing.quality)
+        };
+        painter.text(
+            egui::pos2(rect.left() + LISTING_GRADE + 28.0, y),
+            Align2::LEFT_CENTER,
+            quality,
+            theme::body(size::SMALL),
+            DIM,
+        );
+        painter.text(
+            egui::pos2(rect.left() + LISTING_QTY, y),
+            Align2::RIGHT_CENTER,
+            grouped(listing.quantity as i64),
+            theme::body(size::BODY),
+            TEXT,
+        );
+        painter.text(
+            egui::pos2(rect.left() + LISTING_PRICE, y),
+            Align2::RIGHT_CENTER,
+            grouped(listing.price),
+            theme::strong(size::BODY),
+            GOLD,
+        );
+        painter.text(
+            egui::pos2(rect.right() - 26.0, y),
+            Align2::RIGHT_CENTER,
+            listed_ago((now - listing.listed_at).num_seconds()),
+            theme::body(size::SMALL),
+            DIM,
+        );
+        painter.text(
+            egui::pos2(rect.right() - 8.0, y),
+            Align2::RIGHT_CENTER,
+            "›",
+            theme::strong(size::BODY),
+            if response.hovered() { GOLD } else { DIM },
+        );
+        response.clicked()
     }
 
     // -- The bazaar (E3.11) ---------------------------------------------------
@@ -1550,6 +1727,34 @@ fn columns_head(ui: &mut egui::Ui) {
     );
 }
 
+/// The New tab's column heads, over [`MarketPanel::listing_row`]'s columns.
+fn listings_head(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), Sense::hover());
+    let painter = ui.painter();
+    let font = theme::body(size::TINY);
+    let y = rect.center().y;
+    for (x, align, text) in [
+        (rect.left() + LISTING_NAME, Align2::LEFT_CENTER, "ITEM"),
+        (rect.left() + LISTING_GRADE, Align2::LEFT_CENTER, "GRADE"),
+        (rect.left() + LISTING_QTY, Align2::RIGHT_CENTER, "QTY"),
+        (rect.left() + LISTING_PRICE, Align2::RIGHT_CENTER, "EACH"),
+        (rect.right() - 26.0, Align2::RIGHT_CENTER, "LISTED"),
+    ] {
+        painter.text(egui::pos2(x, y), align, text, font.clone(), DIM);
+    }
+}
+
+/// How long ago something `secs` old was listed: `just now`, `12 min ago`,
+/// `3 h ago`, `2 d ago`.
+fn listed_ago(secs: i64) -> String {
+    match secs.max(0) {
+        0..=59 => "just now".to_owned(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => format!("{} h ago", secs / 3600),
+        _ => format!("{} d ago", secs / 86_400),
+    }
+}
+
 /// The line between asks and bids: the spread, or what's missing.
 fn spread(ui: &mut egui::Ui, book: &Book) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
@@ -1790,6 +1995,8 @@ fn cursor(enabled: bool) -> egui::CursorIcon {
 pub struct Sample {
     pub catalog: Catalog,
     pub summary: Vec<MarketItemSummary>,
+    /// The newest sells across the items, two of them yours
+    pub listings: Vec<MarketListing>,
     pub book: Book,
     pub orders: Vec<MarketOrder>,
     pub inventory: Container,
@@ -1893,6 +2100,32 @@ impl Sample {
             )],
         );
         let (trades, mine) = sample_trades(capitol_core::chrono::Utc::now());
+        let listed = |n: u128, item: &str, grade: &str, quality, min_quality, price, quantity, mins: i64| {
+            let listed_at = capitol_core::chrono::Utc::now() - capitol_core::chrono::Duration::minutes(mins);
+            MarketListing {
+                order_id: Uuid::from_u128(n),
+                item_type: item.into(),
+                grade: grade.into(),
+                quality,
+                min_quality,
+                price,
+                quantity,
+                listed_at,
+                expires_at: listed_at + capitol_core::chrono::Duration::days(7),
+            }
+        };
+        // Orders 2 and 3 are yours
+        let listings = vec![
+            listed(10, "plank", "B", 74, 61, 41, 12, 2),
+            listed(11, "iron_ingot", "A", 88, 88, 121, 3, 9),
+            listed(2, "rope", "C", 58, 48, 14, 4, 26),
+            listed(12, "log", "D", 37, 30, 6, 80, 47),
+            listed(3, "plank", "A", 80, 80, 44, 6, 95),
+            listed(13, "brick", "C", 55, 52, 9, 40, 180),
+            listed(14, "plank", "C", 62, 44, 43, 30, 410),
+            listed(15, "rope", "D", 33, 33, 11, 18, 1500),
+            listed(16, "log", "B", 71, 64, 7, 120, 3200),
+        ];
         Sample {
             catalog: Catalog::fallback(),
             summary: vec![
@@ -1902,6 +2135,7 @@ impl Sample {
                 summary("log", 6, 0, 240),
                 summary("brick", 9, -2, 60),
             ],
+            listings,
             book: Book { seq: 1, levels },
             orders: vec![
                 order(
@@ -1981,6 +2215,7 @@ impl Sample {
         View {
             catalog: &self.catalog,
             summary: Some(&self.summary),
+            listings: Some(&self.listings),
             book: (selected == Some("plank")).then_some(&self.book),
             history,
             orders: self.orders.iter().collect(),
@@ -2352,6 +2587,40 @@ mod tests {
         let history = sample.history(&day);
         run(&mut panel, &sample.view_with(Some("plank"), Some(&history)), None);
         assert!(panel.chart_state.tape_rows.is_empty());
+    }
+
+    #[test]
+    fn new_lists_the_newest_yours_marked_and_a_click_opens_its_book() {
+        let sample = Sample::new();
+        let mut panel = open();
+        panel.preset("new");
+        run(&mut panel, &sample.view(None), None);
+        let rect = panel.rect.unwrap();
+        assert!(rect.width() < 1280.0 - 32.0 && rect.bottom() < 720.0, "{rect:?}");
+        let rows: Vec<Uuid> = panel.listing_rows.iter().map(|(id, _)| *id).collect();
+        assert_eq!(rows[..3], [Uuid::from_u128(10), Uuid::from_u128(11), Uuid::from_u128(2)], "newest first");
+
+        // The search narrows it to one item
+        panel.search = "rope".into();
+        run(&mut panel, &sample.view(None), None);
+        assert_eq!(panel.listing_rows.len(), 2);
+        panel.search.clear();
+
+        // A click on the iron opens its book, a buy at its price in the form
+        run(&mut panel, &sample.view(None), None);
+        let (_, at) = panel.listing_rows[1];
+        run(&mut panel, &sample.view(None), Some(at.center()));
+        assert_eq!(panel.selected.as_deref(), Some("iron_ingot"));
+        assert_eq!((panel.tab, panel.pane, panel.form.side), (Tab::Items, Pane::Book, OrderSide::Buy));
+        assert_eq!((panel.form.price.as_str(), panel.form.quantity.as_str()), ("121", "3"));
+    }
+
+    #[test]
+    fn listed_ago_reads_in_the_largest_whole_unit() {
+        assert_eq!(listed_ago(20), "just now");
+        assert_eq!(listed_ago(26 * 60), "26 min ago");
+        assert_eq!(listed_ago(410 * 60), "6 h ago");
+        assert_eq!(listed_ago(3 * 86_400), "3 d ago");
     }
 
     #[test]

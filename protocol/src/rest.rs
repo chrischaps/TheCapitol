@@ -1881,6 +1881,36 @@ pub struct MarketSummaryResponse {
     pub items: Vec<MarketItemSummary>,
 }
 
+/// One sell order still on the book, as `GET /market/listings` lists it
+/// (#493). No seller: the book is anonymous, as its depth is. Units keep
+/// their own quality, so it says the mean and the lowest, as a trade does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketListing {
+    pub order_id: Uuid,
+    pub item_type: String,
+    /// The grade of `quality`
+    pub grade: String,
+    /// The mean of the units still for sale, rounded down
+    pub quality: i32,
+    /// The lowest of them
+    pub min_quality: i32,
+    /// Strands per unit
+    pub price: i64,
+    /// Units still for sale
+    pub quantity: i32,
+    pub listed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// `GET /market/listings`: the sell orders on the book across every item,
+/// newest first (#493).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketListingsResponse {
+    pub listings: Vec<MarketListing>,
+}
+
 /// `POST /market/box/collect`: what to take from the market box to the
 /// inventory.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
