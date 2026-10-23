@@ -56,6 +56,10 @@ pub struct Holdings {
     pub stations: HashSet<String>,
     /// The bot's plot, if it has one: how many more stations it takes.
     pub plot_room: Option<i32>,
+    /// How much of [`plot_room`](Self::plot_room) its role doesn't want for
+    /// its own stations: a station that may stand off a plot goes on the
+    /// plot only into this (#499).
+    pub plot_spare: i32,
     pub strands: i64,
     /// What a deed costs where the bot would buy one.
     pub deed_cost: i64,
@@ -115,7 +119,8 @@ pub enum Step {
         station: Option<String>,
     },
     /// Put a station down from its kit, on the bot's plot or (for a type
-    /// that may stand off a plot) wherever it stands.
+    /// that may stand off a plot, when the plot has no room or there's
+    /// none) wherever it stands.
     Place {
         kit: String,
         station: String,
@@ -290,7 +295,12 @@ impl<'a> Planner<'a> {
         if let Some(step) = self.obtain(&kit, 1)? {
             return Ok(Some(step));
         }
-        if kind.off_plot {
+        // One that may stand off a plot still goes on its own lot while
+        // there's room its role doesn't want, where it stays: off it, a
+        // bench was left wherever the day's work found it, and the spawn
+        // filled with them (#499)
+        let spare = self.holdings.plot_room.is_some_and(|room| room > 0) && self.holdings.plot_spare > 0;
+        if kind.off_plot && !spare {
             return Ok(Some(Step::Place {
                 kit,
                 station: station.to_string(),
@@ -399,6 +409,40 @@ mod tests {
                 on_plot: false,
             }),
             "a workbench stands off a plot (D10)"
+        );
+        // With a lot of its own and room its role doesn't want, the bench
+        // goes there (#499)
+        let mut home = holding(&[("workbench_kit", 1)]);
+        home.plot_room = Some(1);
+        home.plot_spare = 1;
+        assert_eq!(
+            plan(&home, Goal::hold("log", 1)),
+            Some(Step::Place {
+                kit: "workbench_kit".into(),
+                station: "workbench".into(),
+                on_plot: true,
+            })
+        );
+        // Room its role wants for its own stations, or a full lot, leaves it
+        // standing where it is
+        home.plot_spare = 0;
+        assert_eq!(
+            plan(&home, Goal::hold("log", 1)),
+            Some(Step::Place {
+                kit: "workbench_kit".into(),
+                station: "workbench".into(),
+                on_plot: false,
+            })
+        );
+        home.plot_room = Some(0);
+        home.plot_spare = 1;
+        assert_eq!(
+            plan(&home, Goal::hold("log", 1)),
+            Some(Step::Place {
+                kit: "workbench_kit".into(),
+                station: "workbench".into(),
+                on_plot: false,
+            })
         );
         // With the bench: knapped stone first, from stone by hand.
         let h = with(holding(&[]), &[], &["workbench"]);

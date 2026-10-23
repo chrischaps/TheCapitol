@@ -997,6 +997,15 @@ impl SimBot {
         // runs out of ground first (#305). A builder on one too small for its
         // chain stays stuck there (#405)
         h.plot_room = state.plots().first().map(|p| lot::room(p, &self.stations_at()));
+        // Past what its role still wants for its own, the room a workbench
+        // may take, so it stays home (#499)
+        let placed = self
+            .stations
+            .keys()
+            .filter(|kind| catalog.station_type(kind).is_some_and(|t| !t.off_plot))
+            .count() as i32;
+        let wanted = (self.role.room_wanted() - placed).max(0);
+        h.plot_spare = h.plot_room.map_or(0, |room| room - wanted);
         h
     }
 
@@ -1284,10 +1293,7 @@ impl SimBot {
             spots.truncate(PLACE_TRIES);
             spots
         } else {
-            let (x, y) = self.bot.position();
-            let mut spots = ring(x, y, 30.0);
-            spots.extend(ring(x, y, 90.0));
-            spots
+            off_lot_spots(self.bot.position(), &self.stations_at())
         };
         if spots.is_empty() {
             return Err(BotError::Failed(format!("no room on the plot for a {station}")));
@@ -1490,16 +1496,20 @@ impl SimBot {
 
 /// Which of `stations` (each by type) a citizen at `at` takes down as it
 /// packs up (#488): those not on a lot of its own (`own_lot`) and within
-/// [`PACK_UP_REACH`], nearest first. One set to work stays where its job is.
+/// [`PACK_UP_REACH`], nearest first. Only those it knows of: one it's lost
+/// sight of stays up, since it can't list its own (#500). One at work stays where its job is; a
+/// job set but stopped holds nothing there, and came down with it (#499).
 fn leaving(
     stations: Vec<(String, StationInfo)>,
     (x, y): (f64, f64),
     own_lot: impl Fn(f64, f64) -> bool,
 ) -> Vec<(String, StationInfo)> {
+    use capitol_protocol::rest::AutomationState;
     let away = |s: &StationInfo| (s.x - x).hypot(s.y - y);
+    let idle = |s: &StationInfo| s.automation.as_ref().is_none_or(|a| a.state == AutomationState::Stopped);
     let mut leaving: Vec<_> = stations
         .into_iter()
-        .filter(|(_, s)| s.automation.is_none() && !own_lot(s.x, s.y) && away(s) <= PACK_UP_REACH)
+        .filter(|(_, s)| idle(s) && !own_lot(s.x, s.y) && away(s) <= PACK_UP_REACH)
         .collect();
     leaving.sort_by(|a, b| away(&a.1).total_cmp(&away(&b.1)));
     leaving
@@ -1551,6 +1561,20 @@ fn rules_spawn_radius() -> f64 {
     (SPAWN_X - Zone::CENTER_X).hypot(SPAWN_Y - Zone::CENTER_Y)
 }
 
+/// Where a station may go off any lot, round `(x, y)`, nearest first: rings
+/// out to 210, leaving out those too close to a station it knows of. The
+/// spawn crowds with benches, and two rings of 30 and 90 weren't enough for
+/// Arrival's (#499).
+fn off_lot_spots((x, y): (f64, f64), known: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    use capitol_protocol::rules::STATION_MIN_SPACING;
+    let mut spots = ring(x, y, 30.0);
+    for r in [90.0, 150.0, 210.0] {
+        spots.extend(ring(x, y, r).into_iter().skip(1));
+    }
+    spots.retain(|&(sx, sy)| known.iter().all(|&(kx, ky)| (sx - kx).hypot(sy - ky) >= STATION_MIN_SPACING));
+    spots
+}
+
 /// `(x, y)` and six points round it at radius `r`.
 fn ring(x: f64, y: f64, r: f64) -> Vec<(f64, f64)> {
     let mut spots = vec![(x, y)];
@@ -1592,24 +1616,29 @@ mod tests {
     #[test]
     fn packing_up_takes_down_the_near_benches_off_its_lot() {
         use capitol_protocol::rest::{AutomationMode, AutomationState, StationAutomation};
-        let mut working = station("anvil", 30.0, 0.0);
-        working.1.automation = Some(StationAutomation {
-            recipe_id: "nails".into(),
-            mode: AutomationMode::Forever,
-            state: AutomationState::Stopped,
-            done: 0,
-        });
+        let job = |kind: &str, x: f64, state: AutomationState| {
+            let mut s = station(kind, x, 0.0);
+            s.1.automation = Some(StationAutomation {
+                recipe_id: "nails".into(),
+                mode: AutomationMode::Forever,
+                state,
+                done: 0,
+            });
+            s
+        };
         let stations = vec![
             station("workbench", 120.0, 0.0),
             station("kiln", 40.0, 0.0),
             station("loom", 500.0, 0.0),
             station("forge", 0.0, 60.0),
-            working,
+            job("anvil", 30.0, AutomationState::Running),
+            // A job set and stopped holds nothing there (#499)
+            job("sawbench", 80.0, AutomationState::Stopped),
         ];
         // Its lot is everything north of y = 50
         let leaving = leaving(stations, (0.0, 0.0), |_, y| y > 50.0);
         let kinds: Vec<&str> = leaving.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(kinds, ["kiln", "workbench"]);
+        assert_eq!(kinds, ["kiln", "sawbench", "workbench"]);
     }
 
     #[test]
@@ -1651,6 +1680,23 @@ mod tests {
             })
             .count();
         assert!((250..=420).contains(&venturers), "{venturers} of 1000 venture out first");
+    }
+
+    /// Off a lot (#499): four rings, nearest first, and none by a station.
+    #[test]
+    fn off_lot_spots_reach_further_and_keep_clear_of_stations() {
+        use capitol_protocol::rules::STATION_MIN_SPACING;
+        let all = off_lot_spots((0.0, 0.0), &[]);
+        assert_eq!(all.len(), 25);
+        assert_eq!(all[0], (0.0, 0.0));
+        let r = |&(x, y): &(f64, f64)| x.hypot(y);
+        assert!(all.windows(2).all(|w| r(&w[0]) <= r(&w[1]) + 1e-9));
+        assert!((r(all.last().unwrap()) - 210.0).abs() < 1e-9);
+        let known = [(0.0, 0.0), (90.0, 0.0)];
+        let clear = off_lot_spots((0.0, 0.0), &known);
+        // The centre's station takes the whole ring of 30, the other its spot
+        assert_eq!(clear.len(), 17);
+        assert!(clear.iter().all(|s| known.iter().all(|k| (s.0 - k.0).hypot(s.1 - k.1) >= STATION_MIN_SPACING)));
     }
 
     #[test]
