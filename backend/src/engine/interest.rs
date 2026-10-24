@@ -82,8 +82,13 @@ pub struct Positions {
 }
 
 impl Positions {
-    /// `recipes` names what the crafters are making, for [`Self::catch_up`]
-    pub fn of<'a>(players: impl IntoIterator<Item = &'a PlayerState>, recipes: &HashMap<String, Recipe>) -> Self {
+    /// `recipes` names what the crafters are making, for [`Self::catch_up`],
+    /// and `tags` each guild member's tag (S4.4)
+    pub fn of<'a>(
+        players: impl IntoIterator<Item = &'a PlayerState>,
+        recipes: &HashMap<String, Recipe>,
+        tags: &HashMap<Uuid, String>,
+    ) -> Self {
         let mut positions = Self::default();
         for p in players {
             let cell = cell_at(p.x, p.y);
@@ -104,6 +109,7 @@ impl Positions {
                 x: p.x,
                 y: p.y,
                 citizen: p.citizen,
+                tag: tags.get(&p.id).cloned(),
             });
         }
         positions
@@ -288,7 +294,7 @@ mod tests {
         let bram = player("Bram", 6000.0 + c + 10.0, 6000.0 - c + 10.0);
         let cleo = player("Cleo", 6000.0 + 2.0 * c + 10.0, 6000.0 + 10.0);
         let dot = player("Dot", 6000.0 - 1.0, 6000.0 + 10.0);
-        let positions = Positions::of([&ada, &bram, &cleo, &dot], &HashMap::new());
+        let positions = Positions::of([&ada, &bram, &cleo, &dot], &HashMap::new(), &HashMap::new());
 
         assert_eq!(names(&positions.near(positions.cell_of(ada.id))), ["Ada", "Bram", "Dot"]);
         assert_eq!(names(&positions.near(positions.cell_of(cleo.id))), ["Bram", "Cleo"]);
@@ -296,6 +302,19 @@ mod tests {
         assert!(positions.near(positions.cell_of(Uuid::new_v4())).is_empty());
         assert!(near(cell_at(ada.x, ada.y), cell_at(dot.x, dot.y)));
         assert!(!near(cell_at(dot.x, dot.y), cell_at(cleo.x, cleo.y)));
+    }
+
+    #[test]
+    fn a_members_position_carries_their_guild_tag() {
+        let ada = player("Ada", 6000.0, 6000.0);
+        let bram = player("Bram", 6010.0, 6000.0);
+        let tags = HashMap::from([(ada.id, "ROPE".to_string())]);
+        let positions = Positions::of([&ada, &bram], &HashMap::new(), &tags);
+        let near = positions.near(positions.cell_of(ada.id));
+        let tag_of = |name: &str| near.iter().find(|p| p.name == name).unwrap().tag.clone();
+        assert_eq!(tag_of("Ada").as_deref(), Some("ROPE"));
+        assert_eq!(tag_of("Bram"), None);
+        assert!(positions.message(positions.cell_of(ada.id)).contains(r#""tag":"ROPE""#));
     }
 
     /// The text built from the cells is what serde would have sent, byte for
@@ -306,7 +325,7 @@ mod tests {
         let mut wren = player("Wren", 6000.0 + c, 6000.0);
         wren.citizen = true;
         let players = [player("Ada", 6000.0, 6000.0), wren, player("Bram", 6000.0 - c, 6000.0 + c)];
-        let positions = Positions::of(&players, &HashMap::new());
+        let positions = Positions::of(&players, &HashMap::new(), &HashMap::new());
         for p in &players {
             let cell = positions.cell_of(p.id);
             let expected = serde_json::to_string(&ServerMessage::Positions { players: positions.near(cell) }).unwrap();
@@ -328,7 +347,7 @@ mod tests {
         bram.action_state =
             ActionState::Crafting { operation_id, recipe_id: "craft_rope".into(), progress: 40, duration: 50 };
         let cleo = player("Cleo", 6020.0, 6000.0);
-        let positions = Positions::of([&ada, &bram, &cleo], &HashMap::new());
+        let positions = Positions::of([&ada, &bram, &cleo], &HashMap::new(), &HashMap::new());
 
         let tags = |msgs: Vec<ServerMessage>| msgs.iter().map(|m| serde_json::to_value(m).unwrap()).collect::<Vec<_>>();
         let ada_msgs = tags(positions.catch_up(ada.id));
@@ -365,10 +384,10 @@ mod tests {
         let cleo = PlayerState { action_state: gathering.clone(), ..player("Cleo", x + c, y) };
         let mut dot = player("Dot", x, y - 2.0 * c);
         let far = PlayerState { action_state: gathering, ..player("Far", x - 3.0 * c, y) };
-        let before = Positions::of([&ada, &bram, &cleo, &dot, &far], &HashMap::new()).after(None);
+        let before = Positions::of([&ada, &bram, &cleo, &dot, &far], &HashMap::new(), &HashMap::new()).after(None);
         bram.x -= c;
         dot.y += c;
-        let now = Positions::of([&ada, &bram, &cleo, &dot, &far], &HashMap::new()).after(Some(&before));
+        let now = Positions::of([&ada, &bram, &cleo, &dot, &far], &HashMap::new(), &HashMap::new()).after(Some(&before));
         let mine = now.cell_of(ada.id);
         let sorted = |mut ids: Vec<Uuid>| {
             ids.sort();
@@ -379,12 +398,12 @@ mod tests {
         assert_eq!(sorted(now.come_into_sight(mine, None)), sorted(vec![bram.id, cleo.id]));
         assert!(now.come_into_sight(None, Some((&before, mine))).is_empty());
         // A tick missed: the movers aren't enough to go on, so it looks round
-        let later = Positions::of([&ada, &bram, &cleo, &dot, &far], &HashMap::new()).after(Some(&now));
+        let later = Positions::of([&ada, &bram, &cleo, &dot, &far], &HashMap::new(), &HashMap::new()).after(Some(&now));
         assert_eq!(later.come_into_sight(mine, Some((&before, mine))), [bram.id]);
         assert!(later.come_into_sight(mine, Some((&now, mine))).is_empty());
         // Ada walks two cells west: Far comes into sight, and Cleo goes out of it
         let ada_west = PlayerState { x: x - 2.0 * c, ..ada.clone() };
-        let moved = Positions::of([&ada_west, &bram, &cleo, &dot, &far], &HashMap::new()).after(Some(&now));
+        let moved = Positions::of([&ada_west, &bram, &cleo, &dot, &far], &HashMap::new(), &HashMap::new()).after(Some(&now));
         assert_eq!(moved.come_into_sight(moved.cell_of(ada.id), Some((&now, mine))), [far.id]);
         assert!(moved.sees(moved.cell_of(ada.id), far.id));
         assert!(!moved.sees(moved.cell_of(ada.id), cleo.id));
@@ -451,7 +470,7 @@ mod tests {
                         p.x += 5.0 * a.stable_cos();
                         p.y += 5.0 * a.stable_sin();
                     }
-                    let positions = Arc::new(Positions::of(&players, &HashMap::new()).after(last.as_deref()));
+                    let positions = Arc::new(Positions::of(&players, &HashMap::new(), &HashMap::new()).after(last.as_deref()));
                     last = Some(Arc::clone(&positions));
                     // Every player's event, on four ticks in ten
                     let sends = tick % 10 < EVENTS_PER_PLAYER_SECOND;
@@ -546,7 +565,7 @@ mod tests {
                     let t = Instant::now();
                     let all: Vec<PlayerPosition> = players
                         .iter()
-                        .map(|p| PlayerPosition { id: p.id, name: p.name.clone(), x: p.x, y: p.y, citizen: p.citizen })
+                        .map(|p| PlayerPosition { id: p.id, name: p.name.clone(), x: p.x, y: p.y, citizen: p.citizen, tag: None })
                         .collect();
                     before_tick += t.elapsed().as_nanos();
                     let t = Instant::now();
@@ -557,7 +576,7 @@ mod tests {
 
                     // After: the tick grids them; each socket joins its nine cells
                     let t = Instant::now();
-                    let positions = Positions::of(&players, &HashMap::new());
+                    let positions = Positions::of(&players, &HashMap::new(), &HashMap::new());
                     after_tick += t.elapsed().as_nanos();
                     let t = Instant::now();
                     for p in &players {

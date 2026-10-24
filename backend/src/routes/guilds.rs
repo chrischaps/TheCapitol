@@ -384,8 +384,11 @@ async fn answer(state: &AppState, player: Uuid, told: Told) -> Result<Json<MyGui
 }
 
 /// Sends a committed change's `guild_changed`, its notices and the payer's
-/// balance ([`Told::send`]).
+/// balance ([`Told::send`]), once the tags over their heads are read again
+/// (S4.4).
 async fn tell(state: &AppState, told: Told) {
+    // Their tags first, so the names over their heads change with the news
+    guilds::retag(&state.db, &state.game, &told.changed).await;
     let events = state.game.read().await.event_sender.clone();
     told.send(&state.db, &events).await;
 }

@@ -120,6 +120,11 @@ fn on_event(name, data) {
         toasts = add_toast(toasts, data.title, data.body, "note", t);
         return;
     }
+    // A guild's news (S4.4): marked in the guilds' verdigris
+    if name == "guild_note" {
+        toasts = add_toast(toasts, data.title, data.body, "guild", t);
+        return;
+    }
     // A letter came (S1.5): marked in the paper's warm white
     if name == "letter_note" {
         toasts = add_toast(toasts, data.title, data.body, "letter", t);
@@ -187,11 +192,12 @@ fn toast_alpha(q, now) {
 }
 
 // The kind's mark: gold for good news, ember for a refusal, water blue,
-// and paper for a letter.
+// paper for a letter, and verdigris for a guild's news (#6fb3a0).
 fn kind_colour(kind) {
     if kind == "good" { gold() }
     else if kind == "water" { [0.55, 0.75, 1.0] }
     else if kind == "letter" { [0.94, 0.90, 0.81] }
+    else if kind == "guild" { [0.435, 0.702, 0.627] }
     else { [0.91, 0.53, 0.35] }
 }
 

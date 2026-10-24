@@ -167,6 +167,9 @@ pub const CHIP: Color32 = rgba(26, 26, 36, 0.9);
 pub const GOLD_WASH: Color32 = rgba(201, 162, 39, 0.1);
 /// Gold catching the light: a gain to the balance, and its sparks (P7.1).
 pub const GOLD_LIGHT: Color32 = rgb(0xf2d675);
+/// A guild's colour (S4.4): verdigris, the green of an old hall's copper
+/// sign. Its tab, its talk and its panel's edge.
+pub const GUILD: Color32 = rgb(0x6fb3a0);
 /// The glass under a hint: a panel at half strength.
 pub const HINT: Color32 = rgba(15, 15, 25, 0.55);
 /// What dims the world while the connection is down.

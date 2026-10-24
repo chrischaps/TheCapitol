@@ -157,7 +157,8 @@ pub enum ClientMessage {
     ClaimPresence,
     // Commons S1.1: talk
     /// Say a line (Commons D1): `local` to those within
-    /// [`crate::rules::talk::HEARD`] of you, `capitol` to everyone. It's
+    /// [`crate::rules::talk::HEARD`] of you, `capitol` to everyone, `guild`
+    /// to your guild's members (S4.4). It's
     /// cleaned by [`crate::rules::talk::clean`] and counted in the account's
     /// chat bucket. Answered by the `said` everyone who hears it gets, you
     /// among them, or `error`. A watcher (E0.8) may say only `capitol`.
@@ -973,7 +974,7 @@ pub struct ItemCount {
     pub quantity: i32,
 }
 
-/// Where a line is said (Commons D1). Guilds come with S4.4.
+/// Where a line is said (Commons D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
@@ -981,6 +982,9 @@ pub enum Channel {
     Local,
     /// Heard by everyone in the world
     Capitol,
+    /// Heard by the speaker's guild's members wherever they are, watchers
+    /// too, and no one else (S4.4). Someone in no guild can't say it.
+    Guild,
 }
 
 /// Who holds a player's avatar, in [`ServerMessage::Presence`] (E0.8).
@@ -1004,6 +1008,10 @@ pub struct PlayerPosition {
     /// a person, so `positions` grows only by the citizens in it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub citizen: bool,
+    /// Their guild's tag (S4.4), shown after the name over their head.
+    /// Absent for someone in no guild.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// One line of a trade offer, as the server reports it in `trade_offer_updated`.

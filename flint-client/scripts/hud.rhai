@@ -111,6 +111,12 @@ fn names() {
             // The panels' body text, #e0e0e0.
             draw_text(t.x, t.y, t.name, t.size, 0.878, 0.878, 0.878, t.a);
         }
+        // Their guild's tag (S4.4), shadowed, in the panels' dim ink, #808080.
+        let g = t.tag;
+        if g != () {
+            draw_text(g.x + 1.0, g.y + 1.0, g.text, g.size, 0.0, 0.0, 0.0, 0.65 * t.a);
+            draw_text(g.x, g.y, g.text, g.size, 0.502, 0.502, 0.502, t.a);
+        }
     }
 }
 

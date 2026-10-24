@@ -2,7 +2,8 @@
 //! back what was said while you weren't looking.
 //!
 //! Bottom left and narrow. Two tabs, Local (within earshot, 3 m) and
-//! Capitol (everyone), each with what you haven't read. The log under them
+//! Capitol (everyone), and a third, Guild, for a guild's members (S4.4),
+//! each with what you haven't read. The log under them
 //! keeps its foot in view as lines come; hover a line for when it was said.
 //! A citizen's name carries their mark (C0.2), the lantern-pale lozenge the
 //! HUD draws by their name in the world. The input line is at the foot:
@@ -99,6 +100,8 @@ pub struct View {
     pub before: Option<egui::Rect>,
     /// Names open a person's card (S0.3). Offline they're plain.
     pub cards: bool,
+    /// Your guild's name, when you're in one: the Guild tab (S4.4)
+    pub guild: Option<String>,
 }
 
 /// What the reader did.
@@ -158,6 +161,10 @@ impl ChatPanel {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, log: &mut Log, chat: &mut Chat, view: &View) -> Option<Action> {
+        // Out of your guild, its tab goes
+        if self.tab == Channel::Guild && view.guild.is_none() {
+            self.tab = Channel::Local;
+        }
         // What's on the open tab counts as read
         if self.open {
             log.read(self.tab);
@@ -197,7 +204,7 @@ impl ChatPanel {
 
     fn body(&mut self, ui: &mut egui::Ui, log: &Log, chat: &mut Chat, view: &View, place: Place) -> Option<Action> {
         let mut action = None;
-        self.tabs(ui, log);
+        self.tabs(ui, log, view.guild.as_deref());
         theme::divider(ui);
         ui.add_space(4.0);
         let tab = self.tab;
@@ -240,21 +247,27 @@ impl ChatPanel {
         action
     }
 
-    /// Local and Capitol, each with its unread count, and the close cross.
-    fn tabs(&mut self, ui: &mut egui::Ui, log: &Log) {
+    /// Local, Capitol and, in a guild, Guild, each with its unread count,
+    /// and the close cross.
+    fn tabs(&mut self, ui: &mut egui::Ui, log: &Log, guild: Option<&str>) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            for channel in [Channel::Local, Channel::Capitol] {
+            let channels = [Channel::Local, Channel::Capitol].into_iter().chain(guild.map(|_| Channel::Guild));
+            for channel in channels {
                 let unread = log.unread(channel);
-                let name = match (channel, unread) {
-                    (Channel::Local, 0) => "Local".to_owned(),
-                    (Channel::Capitol, 0) => "Capitol".to_owned(),
-                    (Channel::Local, n) => format!("Local · {n}"),
-                    (Channel::Capitol, n) => format!("Capitol · {n}"),
+                let word = match channel {
+                    Channel::Local => "Local",
+                    Channel::Capitol => "Capitol",
+                    Channel::Guild => "Guild",
+                };
+                let name = match unread {
+                    0 => word.to_owned(),
+                    n => format!("{word} · {n}"),
                 };
                 let hover = match channel {
-                    Channel::Local => "Heard by those within 3 m of you",
-                    Channel::Capitol => "Heard by everyone in the city",
+                    Channel::Local => "Heard by those within 3 m of you".to_owned(),
+                    Channel::Capitol => "Heard by everyone in the city".to_owned(),
+                    Channel::Guild => format!("Heard by {}, wherever they are", guild.unwrap_or("your guild")),
                 };
                 if theme::toggle_chip(ui, &name, self.tab == channel).on_hover_text(hover).clicked() {
                     self.tab = channel;
@@ -276,6 +289,7 @@ impl ChatPanel {
         let hint = match self.tab {
             Channel::Local => "Say something nearby…",
             Channel::Capitol => "Say something to the city…",
+            Channel::Guild => "Say something to your guild…",
         };
         let field = egui::TextEdit::singleline(&mut chat.draft)
             .id(Id::new("capitol_chat_input"))
@@ -340,10 +354,10 @@ fn fade(age: f64) -> f32 {
     (1.0 - (age - BRIGHT) / FADING).clamp(0.0, 1.0) as f32
 }
 
-/// The last `n` lines heard on either channel, oldest first.
+/// The last `n` lines heard on any channel, oldest first.
 fn recent(log: &Log, n: usize) -> Vec<&Line> {
     let mut last: Vec<&Line> =
-        log.lines(Channel::Local).rev().take(n).chain(log.lines(Channel::Capitol).rev().take(n)).collect();
+        [Channel::Local, Channel::Capitol, Channel::Guild].into_iter().flat_map(|c| log.lines(c).rev().take(n)).collect();
     // Stable, so lines heard in one frame keep the order they came in
     last.sort_by(|a, b| a.at.total_cmp(&b.at));
     last.split_off(last.len().saturating_sub(n))
@@ -374,11 +388,13 @@ fn quiet(channel: Channel) -> &'static str {
     match channel {
         Channel::Local => "Nobody nearby has said anything yet.",
         Channel::Capitol => "The city is quiet.",
+        Channel::Guild => "Nobody in the guild has said anything yet.",
     }
 }
 
 /// One line: the name (a link to their card when `link`), a citizen's
-/// mark, then what they said. Closed (`!open`), a Capitol line says so.
+/// mark, then what they said. Closed (`!open`), a Capitol or a guild line
+/// says so.
 /// Hover it for when it was said. True if the name was clicked.
 fn said(ui: &mut egui::Ui, line: &Line, view: &View, link: bool, alpha: f32, open: bool) -> bool {
     let mut clicked = false;
@@ -386,8 +402,14 @@ fn said(ui: &mut egui::Ui, line: &Line, view: &View, link: bool, alpha: f32, ope
     let row = ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.multiply_opacity(alpha);
-        if !open && line.channel == Channel::Capitol {
-            ui.label(RichText::new("Capitol").size(size::LABEL).color(theme::GOLD_DIM));
+        match line.channel {
+            Channel::Capitol if !open => {
+                ui.label(RichText::new("Capitol").size(size::LABEL).color(theme::GOLD_DIM));
+            }
+            Channel::Guild if !open => {
+                ui.label(RichText::new("Guild").size(size::LABEL).color(theme::GUILD));
+            }
+            _ => {}
         }
         if line.citizen {
             citizen_mark(ui, size::BODY);
@@ -511,7 +533,7 @@ mod tests {
                 events: events.clone(),
                 ..Default::default()
             };
-            let view = View { now: Instant::now(), clock: 30.0, me: None, beside: None, before: None, cards: true };
+            let view = View { now: Instant::now(), clock: 30.0, me: None, beside: None, before: None, cards: true, guild: None };
             let _ = ctx.run(raw, |ctx| {
                 theme::install(ctx);
                 asked.extend(panel.show(ctx, log, chat, &view));

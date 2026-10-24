@@ -213,6 +213,22 @@ fn unit_variants_are_just_a_tag() {
 }
 
 #[test]
+fn a_guild_line_is_a_say_on_its_own_channel() {
+    // S4.4: a type has one fixture, `say`'s is local; the guild's is the
+    // same message on another channel.
+    let say = r#"{"type":"say","channel":"guild","text":"Hall at noon"}"#;
+    let msg: ClientMessage = serde_json::from_str(say).unwrap();
+    assert_eq!(
+        msg,
+        ClientMessage::Say {
+            channel: capitol_protocol::ws::Channel::Guild,
+            text: "Hall at noon".into()
+        }
+    );
+    assert_eq!(serde_json::to_string(&msg).unwrap(), say);
+}
+
+#[test]
 fn unknown_types_are_rejected() {
     assert!(serde_json::from_str::<ServerMessage>(r#"{"type":"teleported"}"#).is_err());
 }

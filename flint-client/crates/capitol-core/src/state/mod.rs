@@ -1285,6 +1285,7 @@ impl GameState {
                             x: me.x,
                             y: me.y,
                             citizen: me.citizen,
+                            tag: None,
                         },
                     );
                     out.push(StateEvent::PlayerJoined(me.player_id));
@@ -1446,6 +1447,9 @@ impl GameState {
             | R::Card(_)
             | R::Mutes(_)
             | R::Mailbox(_)
+            | R::MyGuild(_)
+            | R::Guilds(_)
+            | R::Guild(_)
             | R::Letter(_)
             | R::LettersUnread(_)
             | R::Byline(_)

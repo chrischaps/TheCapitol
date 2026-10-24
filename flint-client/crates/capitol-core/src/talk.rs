@@ -85,6 +85,8 @@ struct Spoken {
 pub struct Log {
     local: Book,
     capitol: Book,
+    /// Your guild's talk (S4.4)
+    guild: Book,
     /// Each speaker's latest local line while it shows.
     latest: HashMap<Uuid, Spoken>,
     /// After a reconnect: the Capitol lines already heard that the backlog
@@ -193,10 +195,16 @@ impl Log {
         Some((text, bubble_alpha(text, age)?, age))
     }
 
+    /// You left your guild, or joined another (S4.4): its talk goes with it.
+    pub fn left_guild(&mut self) {
+        self.guild = Book::default();
+    }
+
     fn book(&self, channel: Channel) -> &Book {
         match channel {
             Channel::Local => &self.local,
             Channel::Capitol => &self.capitol,
+            Channel::Guild => &self.guild,
         }
     }
 
@@ -204,6 +212,7 @@ impl Log {
         match channel {
             Channel::Local => &mut self.local,
             Channel::Capitol => &mut self.capitol,
+            Channel::Guild => &mut self.guild,
         }
     }
 }
@@ -237,11 +246,24 @@ mod tests {
             log.heard(line(1, Channel::Local, &format!("l{i}"), i as f64));
         }
         log.heard(line(2, Channel::Capitol, "c", 0.0));
+        log.heard(line(3, Channel::Guild, "g", 0.0));
         let texts: Vec<_> = log.lines(Channel::Local).map(|l| l.text.as_str()).collect();
         assert_eq!(texts.len(), KEPT);
         assert_eq!(texts[0], "l50");
         assert_eq!(texts[KEPT - 1], "l249");
         assert_eq!(log.lines(Channel::Capitol).count(), 1);
+        assert_eq!(log.lines(Channel::Guild).count(), 1);
+    }
+
+    #[test]
+    fn a_guild_line_hangs_over_no_one_and_goes_when_you_leave() {
+        let mut log = Log::new();
+        log.heard(line(1, Channel::Guild, "Hall at noon", 0.0));
+        assert!(log.bubble(Uuid::from_u128(1), 0.5).is_none(), "only local lines are spoken aloud");
+        assert_eq!(log.unread(Channel::Guild), 1);
+        log.left_guild();
+        assert_eq!(log.lines(Channel::Guild).count(), 0);
+        assert_eq!(log.unread(Channel::Guild), 0);
     }
 
     #[test]

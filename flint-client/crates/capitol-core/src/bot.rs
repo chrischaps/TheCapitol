@@ -2738,8 +2738,8 @@ mod tests {
         });
         let apart = |d: f64| ServerMessage::Positions {
             players: vec![
-                PlayerPosition { id: me, name: "Wren Cooper".into(), x: 6800.0, y: 6800.0, citizen: true },
-                PlayerPosition { id: ada, name: "Ada".into(), x: 6800.0 + d, y: 6800.0, citizen: false },
+                PlayerPosition { id: me, name: "Wren Cooper".into(), x: 6800.0, y: 6800.0, citizen: true, tag: None },
+                PlayerPosition { id: ada, name: "Ada".into(), x: 6800.0 + d, y: 6800.0, citizen: false, tag: None },
             ],
         };
         bot.state.apply_ws(&apart(20.0));

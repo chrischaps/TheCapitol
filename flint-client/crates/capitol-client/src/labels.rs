@@ -20,7 +20,9 @@
 //!
 //! A citizen's name has a small lozenge before it (C0.2, Citizens D3), in
 //! their lantern's pale. The name and the glyph are centred together over
-//! the head, and clash as one box.
+//! the head, and clash as one box. A guild member's tag follows the name in
+//! brackets (Commons S4.4), a little smaller and in the dim ink, and is
+//! part of the same box: "Ada Reeder [ROPE]".
 //!
 //! A line someone says (Commons S1.2, plan D3) hangs over their name in a
 //! bubble, wrapped to [`WRAP`] characters a row and [`ROWS`] rows, with an
@@ -60,6 +62,10 @@ const MIN_ALPHA: f32 = 0.02;
 /// to the name, as shares of the text size.
 pub const GLYPH_R: f32 = 0.24;
 pub const GLYPH_GAP: f32 = 0.3;
+/// A guild's tag after the name: its size, and the room before it, as
+/// shares of the name's size.
+pub const TAG_SIZE: f32 = 0.82;
+pub const TAG_GAP: f32 = 0.3;
 /// A bubble's rows: at most this many characters, and this many rows.
 pub const WRAP: usize = 28;
 pub const ROWS: usize = 3;
@@ -91,11 +97,22 @@ pub struct Tag {
     pub me: bool,
     /// A citizen's lozenge, left of the name: its centre and half-height.
     pub glyph: Option<[f32; 3]>,
+    /// Their guild's tag after the name (S4.4), bracketed.
+    pub tag: Option<GuildTag>,
     /// The name is drawn. False for a speaker whose name had no room: it's
     /// their bubble's caption instead.
     pub named: bool,
     /// What they're saying, over the name.
     pub bubble: Option<Bubble>,
+}
+
+/// A guild's tag after a name: the text, its top left and its size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuildTag {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
 }
 
 /// A line over a speaker's head: a box, its rows, and its tail.
@@ -263,7 +280,15 @@ pub fn place(
         } else {
             0.0
         };
-        let w = lead + name_w;
+        // The tag's text, size and width, after the name.
+        let tag = c.p.tag.as_deref().map(|t| {
+            let text = format!("[{t}]");
+            let size = size * TAG_SIZE;
+            let (w, th) = measure(&text, size);
+            (text, size, w, th)
+        });
+        let trail = tag.as_ref().map_or(0.0, |t| TAG_GAP * size + t.2);
+        let w = lead + name_w + trail;
         let (x, y) = (c.at[0] - w / 2.0, c.at[1] - h);
         if x + w < 0.0 || x > view[0] || y + h < 0.0 || y > view[1] {
             continue;
@@ -291,6 +316,13 @@ pub fn place(
                 caption: (!named).then_some(c.p.citizen),
             });
         }
+        // On the name's baseline: the smaller text sits low by the difference
+        let tag = tag.filter(|_| named).map(|(text, tag_size, _, th)| GuildTag {
+            text,
+            x: x + lead + name_w + TAG_GAP * size,
+            y: y + (h - th) * 0.8,
+            size: tag_size,
+        });
         placed.push(Tag {
             name: c.p.name.clone(),
             x: x + lead,
@@ -299,6 +331,7 @@ pub fn place(
             alpha: c.alpha,
             me: c.p.me,
             glyph: glyph.filter(|_| named),
+            tag,
             named,
             bubble: None,
         });
@@ -435,6 +468,7 @@ mod tests {
             alpha: 1.0,
             me,
             citizen: false,
+            tag: None,
             craft: None,
             line: None,
         }
@@ -476,6 +510,40 @@ mod tests {
         let (w, h) = measure("Ada", t.size);
         assert_eq!((t.x + w / 2.0, t.y + h), (500.0, 300.0));
         assert_eq!(t.alpha, 1.0);
+    }
+
+    #[test]
+    fn a_members_tag_follows_the_name_and_the_two_are_centred_as_one() {
+        let ada = PlayerLabel { tag: Some("ROPE".into()), ..standing("Ada", false, 0.0, -10.0) };
+        let tags = place(&[ada], &[Some([500.0, 300.0, 10.0])], VIEW, measure);
+        let t = &tags[0];
+        let g = t.tag.as_ref().expect("a tag");
+        assert_eq!(g.text, "[ROPE]");
+        let (name_w, _) = measure("Ada", t.size);
+        let (tag_w, _) = measure("[ROPE]", g.size);
+        assert!(g.size < t.size, "smaller than the name");
+        assert!((g.x - (t.x + name_w + TAG_GAP * t.size)).abs() < 0.01, "after the name");
+        // Name, gap and tag centred over the anchor
+        let middle = (t.x + g.x + tag_w) / 2.0;
+        assert!((middle - 500.0).abs() < 0.01, "{middle}");
+        // No tag without a guild
+        let tags = place(&[standing("Bram", false, 0.0, -10.0)], &[Some([500.0, 300.0, 10.0])], VIEW, measure);
+        assert_eq!(tags[0].tag, None);
+    }
+
+    #[test]
+    fn a_tag_is_part_of_the_names_box_in_a_clash() {
+        // Bram's name clears Ada's alone; her tag reaches him
+        let ada = PlayerLabel { tag: Some("ROPE".into()), ..standing("Ada", false, 0.0, -10.0) };
+        let bram = standing("Bram", false, 0.0, -11.0);
+        let size = SIZE_NEAR;
+        let ada_w = measure("Ada", size).0;
+        let at_ada = [500.0, 300.0, 10.0];
+        let at_bram = [500.0 + ada_w / 2.0 + GAP + 2.0 + measure("Bram", size).0 / 2.0, 300.0, 11.0];
+        let alone = place(&[standing("Ada", false, 0.0, -10.0), bram.clone()], &[Some(at_ada), Some(at_bram)], VIEW, measure);
+        assert_eq!(alone.len(), 2);
+        let tagged = place(&[ada, bram], &[Some(at_ada), Some(at_bram)], VIEW, measure);
+        assert_eq!(tagged.len(), 1, "the nearer, tagged name wins");
     }
 
     #[test]

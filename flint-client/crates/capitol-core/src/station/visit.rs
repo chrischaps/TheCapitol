@@ -239,6 +239,7 @@ mod tests {
                 x,
                 y,
                 citizen: false,
+                tag: None,
             }],
         })
     }

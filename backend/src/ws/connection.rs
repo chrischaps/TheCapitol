@@ -209,6 +209,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Who this socket's player has muted (S1.4): read on subscribe, and
     // again whenever they mute or unmute someone, on any device
     let mut muted: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    // The guild this socket's player is in (S4.4), whose talk it hears: read
+    // on subscribe, and again whenever their guild changes
+    let mut my_guild: Option<Uuid> = None;
 
     loop {
         tokio::select! {
@@ -324,6 +327,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         // below `heard_capitol`
                                         if first {
                                             muted = read_mutes(&state, player_id, muted).await;
+                                            my_guild = read_guild(&state, player_id, my_guild).await;
                                             let (seq, lines) = state.talk.backlog(&muted);
                                             heard_capitol = seq;
                                             for msg in lines {
@@ -390,6 +394,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         x,
                                         y,
                                         holds_avatar,
+                                        guild: my_guild,
                                     };
                                     match state.talk.say(&events, &state.limiter, speaker, channel, &text) {
                                         // Judged here, untested: the socket has no harness (#463)
@@ -1017,6 +1022,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         sees_everyone = false;
                         // A `mutes_changed` may be among what it missed
                         muted = read_mutes(&state, player_id, muted).await;
+                        // And a `guild_changed`
+                        my_guild = read_guild(&state, player_id, my_guild).await;
                         let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &market_items).await;
                         let mut sent = Ok(());
                         for msg in messages {
@@ -1078,7 +1085,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // Talk (S1.1): local by the cell and then the distance, Capitol to all
                     Ok(GameEvent::Said { seq, line }) => {
                         let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > heard_capitol;
-                        if fresh && crate::engine::talk::hears(&line, player_id, holds_avatar, seen.as_deref(), my_cell, &muted) {
+                        if fresh && crate::engine::talk::hears(&line, player_id, holds_avatar, seen.as_deref(), my_cell, &muted, my_guild) {
                             heard_capitol = heard_capitol.max(seq);
                             let _ = sender.send(Message::Text(serde_json::to_string(&line.message()).unwrap().into())).await;
                         }
@@ -1097,6 +1104,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     Ok(GameEvent::GuildChanged { guild_id, players }) => {
                         if players.contains(&player_id) {
+                            // In, out or still in: whose talk it hears (S4.4)
+                            my_guild = read_guild(&state, player_id, my_guild).await;
                             let msg = ServerMessage::GuildChanged { guild_id };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
@@ -1504,6 +1513,18 @@ async fn read_mutes(
         Ok(muted) => muted,
         Err(e) => {
             tracing::error!("Failed to read {player_id}'s mutes: {e:?}");
+            had
+        }
+    }
+}
+
+/// The guild `player_id` is in now (S4.4). If the database can't say, the
+/// guild the socket already had stands.
+async fn read_guild(state: &AppState, player_id: Uuid, had: Option<Uuid>) -> Option<Uuid> {
+    match crate::engine::guilds::guild_of_player(&state.db, player_id).await {
+        Ok(guild) => guild,
+        Err(e) => {
+            tracing::error!("Failed to read {player_id}'s guild: {e:?}");
             had
         }
     }

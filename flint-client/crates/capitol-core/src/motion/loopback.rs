@@ -227,6 +227,7 @@ impl Loopback {
             x: self.at.0,
             y: self.at.1,
             citizen: false,
+            tag: None,
         }];
         self.tell(now, ServerMessage::Positions { players });
     }

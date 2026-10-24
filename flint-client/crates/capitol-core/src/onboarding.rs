@@ -777,7 +777,7 @@ mod tests {
         assert_eq!(target(Step::OpenCard), Some(Target::Person));
         assert_eq!(target(Step::SayLocal), None, "said anywhere");
         assert_eq!(target(Step::ReadLetter), None, "read anywhere");
-        let at = |n: u128, x: f64, citizen: bool| PlayerPosition { id: Uuid::from_u128(n), name: format!("P{n}"), x, y: 0.0, citizen };
+        let at = |n: u128, x: f64, citizen: bool| PlayerPosition { id: Uuid::from_u128(n), name: format!("P{n}"), x, y: 0.0, citizen, tag: None };
         let me = Uuid::from_u128(1);
         let players = [at(1, 0.0, false), at(2, 40.0, false), at(3, -25.0, true)];
         assert_eq!(nearest_person(&players, Some(me), [0.0, 0.0]).unwrap().id, Uuid::from_u128(3), "a citizen's card will do");

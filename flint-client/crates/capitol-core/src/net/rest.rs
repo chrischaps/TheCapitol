@@ -64,6 +64,27 @@ pub enum RestRequest {
     ReadLetter { letter_id: Uuid },
     /// `DELETE /letters/{id}`: drop your copy
     DropLetter { letter_id: Uuid },
+    /// `GET /player/guild`: your guild, your role and what's waiting (S4.1)
+    MyGuild,
+    /// `GET /guilds`: the registry, the largest first
+    Guilds,
+    /// `GET /guilds/{id}`: a guild and its roster
+    Guild { guild_id: Uuid },
+    /// `POST /guilds`: found one, at the Exchange hall, for 500
+    FoundGuild(FoundGuild),
+    /// `POST /guilds/{id}/apply`: ask to join, or accept an invitation
+    ApplyToGuild { guild_id: Uuid },
+    /// `POST /guilds/{id}/invites/{player}`: invite, or accept an application
+    InviteToGuild { guild_id: Uuid, player_id: Uuid },
+    /// `DELETE /guilds/{id}/invites/{player}`: decline or withdraw either
+    DeclineGuildInvite { guild_id: Uuid, player_id: Uuid },
+    /// `POST /guilds/{id}/leave`
+    LeaveGuild { guild_id: Uuid },
+    /// `DELETE /guilds/{id}/members/{player}`: expel them
+    ExpelFromGuild { guild_id: Uuid, player_id: Uuid },
+    /// `PUT /guilds/{id}/members/{player}`: make them an officer, a member,
+    /// or the leader
+    SetGuildRole { guild_id: Uuid, player_id: Uuid, request: SetGuildRole },
     /// `POST /player/move`. The WebSocket `move` is what the game uses.
     PlayerMove(MoveRequest),
     /// `GET /player/inventory`
@@ -283,6 +304,12 @@ pub enum RestResponse {
     Letter(Letter),
     /// Your unread letters, after one is read or dropped
     LettersUnread(LettersUnread),
+    /// Your guild as it stands, after any guild action too (S4.1)
+    MyGuild(MyGuild),
+    /// The registry
+    Guilds(GuildsResponse),
+    /// A guild and its roster
+    Guild(GuildDetail),
     Move(MoveResponse),
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
@@ -431,6 +458,10 @@ impl RestRequest {
             | PlayerMove(_)
             | SendLetter(_)
             | ReadLetter { .. }
+            | FoundGuild(_)
+            | ApplyToGuild { .. }
+            | InviteToGuild { .. }
+            | LeaveGuild { .. }
             | Extract(_)
             | MoveItem(_)
             | SplitStack { .. }
@@ -462,6 +493,7 @@ impl RestRequest {
             | ConfigureAutomation { .. }
             | SetTunables(_)
             | SetTutorialDismissed(_)
+            | SetGuildRole { .. }
             | Mute { .. } => Method::PUT,
             RemoveStation { .. }
             | RevokeApiKey { .. }
@@ -469,6 +501,8 @@ impl RestRequest {
             | Unlist { .. }
             | Unmute { .. }
             | DropLetter { .. }
+            | DeclineGuildInvite { .. }
+            | ExpelFromGuild { .. }
             | CancelCommission { .. }
             | ReleaseClaim { .. }
             | WithdrawWages { .. }
@@ -481,6 +515,9 @@ impl RestRequest {
             | PlayerCardByName { .. }
             | Mutes
             | Letters(_)
+            | MyGuild
+            | Guilds
+            | Guild { .. }
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby(_)
@@ -542,6 +579,17 @@ impl RestRequest {
             Letters(_) | SendLetter(_) => "/letters".into(),
             ReadLetter { letter_id } => format!("/letters/{letter_id}/read"),
             DropLetter { letter_id } => format!("/letters/{letter_id}"),
+            MyGuild => "/player/guild".into(),
+            Guilds | FoundGuild(_) => "/guilds".into(),
+            Guild { guild_id } => format!("/guilds/{guild_id}"),
+            ApplyToGuild { guild_id } => format!("/guilds/{guild_id}/apply"),
+            InviteToGuild { guild_id, player_id } | DeclineGuildInvite { guild_id, player_id } => {
+                format!("/guilds/{guild_id}/invites/{player_id}")
+            }
+            LeaveGuild { guild_id } => format!("/guilds/{guild_id}/leave"),
+            ExpelFromGuild { guild_id, player_id } | SetGuildRole { guild_id, player_id, .. } => {
+                format!("/guilds/{guild_id}/members/{player_id}")
+            }
             PlayerMove(_) => "/player/move".into(),
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
@@ -632,6 +680,8 @@ impl RestRequest {
             PlayerMove(b) => req.json(b),
             SendLetter(b) => req.json(b),
             Letters(q) => req.query(q),
+            FoundGuild(b) => req.json(b),
+            SetGuildRole { request, .. } => req.json(request),
             Extract(b) => req.json(b),
             MoveItem(b) => req.json(b),
             SplitStack { request, .. } => req.json(request),
@@ -700,6 +750,16 @@ impl RestRequest {
             Q::Letters(_) => A::Mailbox(de(body)?),
             Q::SendLetter(_) => A::Letter(de(body)?),
             Q::ReadLetter { .. } | Q::DropLetter { .. } => A::LettersUnread(de(body)?),
+            Q::MyGuild
+            | Q::FoundGuild(_)
+            | Q::ApplyToGuild { .. }
+            | Q::InviteToGuild { .. }
+            | Q::DeclineGuildInvite { .. }
+            | Q::LeaveGuild { .. }
+            | Q::ExpelFromGuild { .. }
+            | Q::SetGuildRole { .. } => A::MyGuild(de(body)?),
+            Q::Guilds => A::Guilds(de(body)?),
+            Q::Guild { .. } => A::Guild(de(body)?),
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
@@ -998,6 +1058,28 @@ mod tests {
                 "/players/by-name/Ada%20Reeder%2F2%3F%C3%A9".into(),
             ),
             (RestRequest::Mutes, "GET", "/player/mutes".into()),
+            (RestRequest::MyGuild, "GET", "/player/guild".into()),
+            (RestRequest::Guilds, "GET", "/guilds".into()),
+            (RestRequest::Guild { guild_id: id }, "GET", format!("/guilds/{id}")),
+            (
+                RestRequest::FoundGuild(FoundGuild { name: "Rope Walkers".into(), tag: "ROPE".into(), charter: String::new() }),
+                "POST",
+                "/guilds".into(),
+            ),
+            (RestRequest::ApplyToGuild { guild_id: id }, "POST", format!("/guilds/{id}/apply")),
+            (RestRequest::InviteToGuild { guild_id: id, player_id: id }, "POST", format!("/guilds/{id}/invites/{id}")),
+            (RestRequest::DeclineGuildInvite { guild_id: id, player_id: id }, "DELETE", format!("/guilds/{id}/invites/{id}")),
+            (RestRequest::LeaveGuild { guild_id: id }, "POST", format!("/guilds/{id}/leave")),
+            (RestRequest::ExpelFromGuild { guild_id: id, player_id: id }, "DELETE", format!("/guilds/{id}/members/{id}")),
+            (
+                RestRequest::SetGuildRole {
+                    guild_id: id,
+                    player_id: id,
+                    request: SetGuildRole { role: capitol_protocol::rules::guild::GuildRole::Officer },
+                },
+                "PUT",
+                format!("/guilds/{id}/members/{id}"),
+            ),
             (RestRequest::Mute { player_id: id }, "PUT", format!("/players/{id}/mute")),
             (RestRequest::Unmute { player_id: id }, "DELETE", format!("/players/{id}/mute")),
             (

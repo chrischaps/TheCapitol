@@ -59,6 +59,7 @@ pub mod deeds;
 pub mod dev_overlay;
 pub mod exchange;
 pub mod gazette;
+pub mod guild;
 pub mod hints;
 pub mod hire;
 pub mod hud;

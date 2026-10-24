@@ -425,6 +425,8 @@ pub struct PlayerLabel {
     pub me: bool,
     /// A citizen (C0.1): their name carries the glyph (C0.2).
     pub citizen: bool,
+    /// Their guild's tag (S4.4), after the name.
+    pub tag: Option<String>,
     /// How far their craft has got, 0 to 1, while they craft (P5.5).
     pub craft: Option<f32>,
     /// What they're saying (Commons S1.2).
@@ -744,6 +746,15 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                         g.into()
                     });
                     m.insert("glyph".into(), glyph);
+                    let tag = t.tag.map_or(rhai::Dynamic::UNIT, |g| {
+                        let mut m = rhai::Map::new();
+                        m.insert("text".into(), g.text.into());
+                        m.insert("x".into(), (g.x as f64).into());
+                        m.insert("y".into(), (g.y as f64).into());
+                        m.insert("size".into(), (g.size as f64).into());
+                        m.into()
+                    });
+                    m.insert("tag".into(), tag);
                     m.insert("named".into(), t.named.into());
                     let bubble = t.bubble.map_or(rhai::Dynamic::UNIT, |b| bubble_map(&b).into());
                     m.insert("bubble".into(), bubble);
@@ -1420,6 +1431,7 @@ mod tests {
             alpha: 0.5,
             me: true,
             citizen: false,
+            tag: None,
             craft: Some(0.25),
             line: None,
         });
@@ -1650,6 +1662,7 @@ mod tests {
             alpha: 1.0,
             me,
             citizen: false,
+            tag: None,
             craft: None,
             line: None,
         };

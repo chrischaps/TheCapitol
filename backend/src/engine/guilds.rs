@@ -37,6 +37,8 @@
 //! returns a [`Told`]: who hears `guild_changed`, and the notices queued for
 //! those named, which wait for anyone away ([`notices::queue`]).
 
+use std::collections::HashMap;
+
 use capitol_protocol::rest::{
     Correspondent, GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary, MyGuild, Subscription,
     SubscriptionStatus,
@@ -997,6 +999,43 @@ pub async fn mine(db: &PgPool, player: Uuid) -> Result<MyGuild, GuildError> {
     Ok(MyGuild { guild: Some(detail(db, guild_id, Some(player)).await?), role, invites })
 }
 
+/// The guild `player` is in now (S4.4): the guild channel's reach.
+pub async fn guild_of_player(db: &PgPool, player: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
+    guild_of(&mut *db.acquire().await?, player).await
+}
+
+/// Each member's guild tag (S4.4), for the names over their heads: of
+/// everyone in a guild, or only of `players`. Someone in no guild isn't in
+/// it.
+pub async fn tags(db: &PgPool, players: Option<&[Uuid]>) -> Result<HashMap<Uuid, String>, sqlx::Error> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT m.player_id, g.tag FROM guild_members m JOIN guilds g ON g.id = m.guild_id
+         WHERE $1::uuid[] IS NULL OR m.player_id = ANY($1)",
+    )
+    .bind(players.map(<[Uuid]>::to_vec))
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Reads `players`' tags again into the game, after a change to their
+/// guild, so the next `positions` carries them. A failed read leaves the
+/// tags as they were.
+pub async fn retag(db: &PgPool, game: &tokio::sync::RwLock<super::GameState>, players: &[Uuid]) {
+    match tags(db, Some(players)).await {
+        Ok(now) => {
+            let mut game = game.write().await;
+            for player in players {
+                match now.get(player) {
+                    Some(tag) => game.guild_tags.insert(*player, tag.clone()),
+                    None => game.guild_tags.remove(player),
+                };
+            }
+        }
+        Err(e) => tracing::warn!("Couldn't read the guild tags of {} players: {e}", players.len()),
+    }
+}
+
 /// The guild standing at `guild_id`, locked for this transaction.
 async fn hold(conn: &mut PgConnection, guild_id: Uuid) -> Result<Held, GuildError> {
     let row: Option<(String, String)> =
@@ -1345,6 +1384,30 @@ mod tests {
     async fn take_in(db: &PgPool, guild_id: Uuid, leader: Uuid, player: Uuid, day: i64) {
         invite(db, leader, guild_id, player, at(day)).await.unwrap();
         apply(db, player, guild_id, at(day)).await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_tags_and_the_channel_follow_the_roster(db: PgPool) {
+        let ada = subscriber(&db, "Ada", 1000, 30).await;
+        let bram = player(&db, "Bram", 10).await;
+        let id = rope_walkers(&db, ada).await;
+        take_in(&db, id, ada, bram, 1).await;
+        let all = tags(&db, None).await.unwrap();
+        assert_eq!((all.get(&ada).map(String::as_str), all.get(&bram).map(String::as_str)), (Some("ROPE"), Some("ROPE")));
+        assert_eq!(guild_of_player(&db, bram).await.unwrap(), Some(id));
+
+        // Into the game: Bram leaves, and only his tag goes
+        let terrain = crate::models::TerrainConfig::get_default();
+        let game = tokio::sync::RwLock::new(crate::engine::GameState::with_terrain(crate::models::WorldGenParams::default(), terrain));
+        game.write().await.guild_tags = all;
+        let told = leave(&db, bram, id, at(2)).await.unwrap();
+        retag(&db, &game, &told.changed).await;
+        let now = game.read().await.guild_tags.clone();
+        assert_eq!(now.get(&ada).map(String::as_str), Some("ROPE"));
+        assert!(!now.contains_key(&bram));
+        assert_eq!(guild_of_player(&db, bram).await.unwrap(), None);
+        assert!(tags(&db, Some(&[bram])).await.unwrap().is_empty());
     }
 
     #[sqlx::test(migrations = "./migrations")]

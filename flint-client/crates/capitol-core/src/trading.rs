@@ -417,6 +417,7 @@ mod tests {
                     x: me[0],
                     y: me[1],
                     citizen: false,
+                    tag: None,
                 },
                 PlayerPosition {
                     id: BRAM,
@@ -424,6 +425,7 @@ mod tests {
                     x: bram[0],
                     y: bram[1],
                     citizen: false,
+                    tag: None,
                 },
             ],
         })

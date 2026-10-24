@@ -229,6 +229,8 @@ impl Players {
                     alpha: smooth(avatar.shown),
                     me: Some(*id) == me,
                     citizen: avatar.citizen,
+                    // Read each frame, so a join or a leave shows at once
+                    tag: state.player(*id).and_then(|p| p.tag.clone()),
                     craft: crafting.then_some(avatar.craft.shown),
                     // Filled from the talk log after (Commons S1.2)
                     line: None,
@@ -451,7 +453,7 @@ pub fn stroll(target: [f32; 2], camera: [f32; 2], street: Option<Street>, t: f32
         );
         let id = Uuid::from_u128(0xc0_03_00 + i as u128);
         state.apply_ws(&ServerMessage::PlayerJoined {
-            player: PlayerPosition { id, name: name.into(), x, y, citizen },
+            player: PlayerPosition { id, name: name.into(), x, y, citizen, tag: None },
         });
         // The server's heading: east 0, south (+Z) π/2. The one who lingers
         // looks across the street.
@@ -471,12 +473,13 @@ pub fn stroll(target: [f32; 2], camera: [f32; 2], street: Option<Street>, t: f32
 pub fn sample(target: [f32; 2], camera: [f32; 2]) -> (GameState, Vec<Pose>) {
     use capitol_core::net::ConnectionState;
     use capitol_core::protocol::ws::{PlayerPosition, ServerMessage};
-    const ROW: [(&str, bool); 5] = [
-        ("Wren Ashby", false),
-        ("Corin", true),
-        ("You", false),
-        ("Tam Hollis", false),
-        ("Elsbeth", true),
+    // Name, citizen, and guild tag (S4.4)
+    const ROW: [(&str, bool, Option<&str>); 5] = [
+        ("Wren Ashby", false, Some("ROPE")),
+        ("Corin", true, Some("ROPE")),
+        ("You", false, None),
+        ("Tam Hollis", false, None),
+        ("Elsbeth", true, Some("KILN")),
     ];
     const SPACING: f32 = 1.6;
     let me = Uuid::from_u128(0xc0_02_00 + 2);
@@ -489,7 +492,7 @@ pub fn sample(target: [f32; 2], camera: [f32; 2]) -> (GameState, Vec<Pose>) {
     // The server's heading toward the camera: east 0, south (+Z) π/2.
     let toward = f64::from(dz).atan2(f64::from(dx));
     let mid = (ROW.len() as f32 - 1.0) / 2.0;
-    for (i, (name, citizen)) in ROW.into_iter().enumerate() {
+    for (i, (name, citizen, tag)) in ROW.into_iter().enumerate() {
         let k = (i as f32 - mid) * SPACING;
         let [x, y] = crate::coords::to_server(target[0] + across[0] * k, target[1] + across[1] * k);
         let id = Uuid::from_u128(0xc0_02_00 + i as u128);
@@ -500,6 +503,7 @@ pub fn sample(target: [f32; 2], camera: [f32; 2]) -> (GameState, Vec<Pose>) {
                 x,
                 y,
                 citizen,
+                tag: tag.map(str::to_owned),
             },
         });
         // Each turned a little toward the middle of the row.

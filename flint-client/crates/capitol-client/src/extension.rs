@@ -212,6 +212,9 @@ pub struct CapitolExtension {
     /// Letters (S1.5), and `--mail-sample`: sample boxes to show offline.
     mail: ui::mail::MailPanel,
     mail_sample: Option<(capitol_core::mail::Mail, ui::mail::View)>,
+    /// Guilds (S4.4), and `--guild-sample`: a sample to show offline.
+    guild: ui::guild::GuildPanel,
+    guild_sample: Option<(capitol_core::guilds::Guilds, ui::guild::View)>,
     /// What a foreclosure kept for you (#141), and `--impound-sample`: an
     /// impound and a pack to show offline.
     impound: ui::impound::ImpoundPanel,
@@ -351,6 +354,8 @@ impl CapitolExtension {
             card_sample: None,
             mail: ui::mail::MailPanel::default(),
             mail_sample: None,
+            guild: ui::guild::GuildPanel::default(),
+            guild_sample: None,
             impound: ui::impound::ImpoundPanel::default(),
             impound_sample: None,
             station_panel_sample: None,
@@ -562,6 +567,18 @@ impl CapitolExtension {
         if let (Some(which), None) = (which, &self.session) {
             self.mail_sample = Some(ui::mail::sample(which));
             self.mail.open = true;
+        }
+        self
+    }
+
+    /// Offline, open the guild panel (S4.4) on a sample (`--guild-sample`):
+    /// your guild as its leader or an officer, the registry, or the form.
+    pub fn with_guild_sample(mut self, which: Option<&str>) -> Self {
+        if let (Some(which), None) = (which, &self.session) {
+            let (guilds, view, page, draft) = ui::guild::sample(which);
+            self.guild.open_on(page);
+            self.guild.draft = draft;
+            self.guild_sample = Some((guilds, view));
         }
         self
     }
@@ -1381,6 +1398,10 @@ impl PlayerExtension for CapitolExtension {
         if !self.at_login() && ctx.input.is_action_just_pressed("mail") {
             self.mail.toggle();
         }
+        // Guilds (S4.4): U
+        if !self.at_login() && ctx.input.is_action_just_pressed("guild") {
+            self.guild.toggle();
+        }
         if ctx.input.is_action_just_pressed("settings") {
             self.settings_panel.toggle();
         }
@@ -1494,6 +1515,12 @@ impl PlayerExtension for CapitolExtension {
                 data.insert("title".into(), title.into());
                 data.insert("body".into(), body.into());
                 ctx.fire_event("letter_note", data);
+            }
+            for (title, body) in session.take_guild_notes() {
+                let mut data = toml::Table::new();
+                data.insert("title".into(), title.into());
+                data.insert("body".into(), body.into());
+                ctx.fire_event("guild_note", data);
             }
             if let Some((item, strands)) = &self.trade_offer {
                 offer_preset(session, item, *strands, &mut self.trade_offered, now);
@@ -2078,7 +2105,10 @@ impl PlayerExtension for CapitolExtension {
                     market_open: self.market.open,
                     gazette_open: self.gazette.open,
                     chat_open: self.chat.open,
-                    chat_unread: [capitol_core::protocol::ws::Channel::Local, capitol_core::protocol::ws::Channel::Capitol].map(|c| session.talk().unread(c)).iter().sum(),
+                    chat_unread: {
+                        use capitol_core::protocol::ws::Channel;
+                        [Channel::Local, Channel::Capitol, Channel::Guild].map(|c| session.talk().unread(c)).iter().sum()
+                    },
                     gazette_news: session
                         .gazette()
                         .unread()
@@ -2226,7 +2256,8 @@ impl PlayerExtension for CapitolExtension {
                 // The inventory's rect is last frame's: it's drawn after.
                 let before = self.station.rect.or(self.inventory.rect);
                 let (clock, me) = (session.talk_time(now), session.state().me());
-                let view = ui::chat::View { now, clock, me, beside: self.crafting.rect, before, cards: true };
+                let guild = session.guilds().guild().map(|g| g.name.clone());
+                let view = ui::chat::View { now, clock, me, beside: self.crafting.rect, before, cards: true, guild };
                 let (log, chat) = session.talk_and_chat();
                 match self.chat.show(ctx, log, chat, &view) {
                     Some(ui::chat::Action::Say(channel)) => session.say(channel),
@@ -2434,6 +2465,35 @@ impl PlayerExtension for CapitolExtension {
                     }
                     Some(ui::mail::Action::Close) | None => {}
                 }
+                // Guilds (S4.4)
+                let hall = self.terrain.landmark(LandmarkKind::ExchangeHall);
+                let view = {
+                    let state = session.state();
+                    let me = state.local_player();
+                    ui::guild::View {
+                        me: state.me(),
+                        my_name: me.map(|p| p.name.clone()).unwrap_or_default(),
+                        strands: state.strands(),
+                        subscribed: state.subscription().is_some_and(|s| s.is_active_at(state.utc_now())),
+                        at_hall: match (hall, me) {
+                            (Some(hall), Some(me)) => rules::market::at_the_hall(hall, me.x, me.y),
+                            _ => false,
+                        },
+                        online: true,
+                        now: state.utc_now(),
+                    }
+                };
+                match self.guild.show(ctx, session.guilds_mut(), &view) {
+                    Some(ui::guild::Action::Card { id, name, citizen }) => {
+                        session.open_card(capitol_core::card::Who::Id(id), Some(capitol_core::card::Hint { name, citizen }))
+                    }
+                    Some(ui::guild::Action::ToHall) => {
+                        if let Some(hall) = hall {
+                            session.walk_to_hall(now, hall);
+                        }
+                    }
+                    Some(ui::guild::Action::Close) | None => {}
+                }
                 // A person's card (S0.3), over the Gazette when it's opened from it
                 let today = rules::day_number(
                     session.state().server_time_ms().unwrap_or_else(|| capitol_core::chrono::Utc::now().timestamp_millis()),
@@ -2455,7 +2515,7 @@ impl PlayerExtension for CapitolExtension {
                 // The settings panel takes the hint card's corner, and the
                 // Gazette and the letters the middle of the screen; the card
                 // waits behind them rather than showing through.
-                if self.settings_panel.open || self.gazette.open || self.mail.open || self.zone_card.is_open() || self.deeds.is_open() {
+                if self.settings_panel.open || self.gazette.open || self.mail.open || self.guild.open || self.zone_card.is_open() || self.deeds.is_open() {
                     self.hints.rect = None;
                 } else {
                     // The inventory's and the station's rects are last frame's: they're drawn after.
@@ -2792,7 +2852,7 @@ impl PlayerExtension for CapitolExtension {
             // The sample's clock started at 0 as the run did
             let clock = ctx.input(|i| i.time);
             let (me, before) = (Some(*me), self.inventory.rect);
-            let view = ui::chat::View { now: Instant::now(), clock, me, beside: self.crafting.rect, before, cards: false };
+            let view = ui::chat::View { now: Instant::now(), clock, me, beside: self.crafting.rect, before, cards: false, guild: Some("The Rope Walkers".into()) };
             if let Some(ui::chat::Action::Say(channel)) = self.chat.show(ctx, log, chat, &view) {
                 chat.send(channel);
             }
@@ -2924,6 +2984,9 @@ impl PlayerExtension for CapitolExtension {
         }
         if let Some((mail, view)) = &mut self.mail_sample {
             let _ = self.mail.show(ctx, mail, view);
+        }
+        if let Some((guilds, view)) = &mut self.guild_sample {
+            let _ = self.guild.show(ctx, guilds, view);
         }
         if let Some((cards, today)) = &mut self.card_sample {
             // Trade is drawn as it would be signed in; offline it asks no one

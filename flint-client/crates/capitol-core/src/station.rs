@@ -683,6 +683,7 @@ mod tests {
                     x: 1100.0,
                     y: 1030.0,
                     citizen: false,
+                    tag: None,
                 }],
             }));
             s.apply_rest(&RestResponse::Plots(ListPlotsResponse {

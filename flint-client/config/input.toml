@@ -90,6 +90,11 @@ bindings = [{ type = "key", code = "KeyG" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyL" }]
 
+# Guilds (S4.4): the guild panel
+[actions.guild]
+kind = "button"
+bindings = [{ type = "key", code = "KeyU" }]
+
 # The shortcut overlay (P8.3). `?` opens it too, read off the typed
 # character, so it's `?` on any layout. Binding Slash here as well would
 # fire on the same keypress and toggle the overlay twice.

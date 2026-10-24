@@ -54,6 +54,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("[G]", "The Gazette"),
             ("[Enter]", "Talk: Enter sends, Esc closes"),
             ("[L]", "Your letters"),
+            ("[U]", "Guilds"),
             ("[F10]", "Settings"),
             ("[F8]", "Point and walk, or over the shoulder"),
             ("[F7]", "Dev overlay"),

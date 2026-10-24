@@ -125,6 +125,10 @@ const BOARD_TAG: Tag = 160;
 /// withdrawing, taking and stopping, and the name a named offer is for.
 const WAGES_TAG: Tag = 170;
 
+/// The tag on the guilds' calls (S4.4): one at a time, your guild, the
+/// registry, one guild, a name to invite, and every action.
+const GUILD_TAG: Tag = 180;
+
 /// How often the directory and your stall are asked for again, while in the
 /// world: they change only when a merchant rents, stocks or sells out.
 const BAZAAR_REFRESH: Duration = Duration::from_secs(60);
@@ -254,6 +258,10 @@ pub struct Session {
     cards: capitol_core::card::Cards,
     /// Who you've muted (S1.4)
     mutes: capitol_core::mutes::Mutes,
+    /// Your guild, the registry and the calls for them (S4.4)
+    guilds: capitol_core::guilds::Guilds,
+    /// Guild notices to toast: a title and a line
+    guild_notes: Vec<(String, String)>,
     /// Talk (Commons S1.3): both channels, the input line, what's in flight.
     chat: capitol_core::chat::Chat,
     /// Your letters (S1.5), and whether the mailbox is open to look at them.
@@ -485,6 +493,8 @@ impl Session {
             gazette_asked: None,
             cards: Default::default(),
             mutes: Default::default(),
+            guilds: Default::default(),
+            guild_notes: Vec::new(),
             chat: capitol_core::chat::Chat::new(),
             mail: Default::default(),
             mail_open: false,
@@ -2001,6 +2011,64 @@ impl Session {
         self.mutes.refresh();
     }
 
+    /// Guilds (S4.4): your guild, the registry and what you do in them.
+    pub fn guilds(&self) -> &capitol_core::guilds::Guilds {
+        &self.guilds
+    }
+
+    pub fn guilds_mut(&mut self) -> &mut capitol_core::guilds::Guilds {
+        &mut self.guilds
+    }
+
+    /// Guild notices since last asked, as toasts: a title and a line.
+    pub fn take_guild_notes(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.guild_notes)
+    }
+
+    /// Walk to the Exchange hall's door, to found a guild there. Unlike
+    /// [`Self::visit_hall`], arriving opens nothing: the guild panel stays.
+    pub fn walk_to_hall(&mut self, now: Instant, hall: &Landmark) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        self.harvest.walked();
+        self.visit.walked();
+        self.approach.walked();
+        self.stall.walked();
+        self.hall.walked();
+        let [x, y] = capitol_core::hall::approach(hall);
+        self.walk(now, x, y);
+    }
+
+    fn tend_guilds(&mut self) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        use capitol_core::guilds::Ask;
+        let Some(ask) = self.guilds.wants() else { return };
+        let request = match &ask {
+            Ask::Mine => RestRequest::MyGuild,
+            Ask::Registry => RestRequest::Guilds,
+            Ask::Guild(id) => RestRequest::Guild { guild_id: *id },
+            Ask::Found(found) => RestRequest::FoundGuild(found.clone()),
+            Ask::Apply(id) => RestRequest::ApplyToGuild { guild_id: *id },
+            Ask::Find { name, .. } => RestRequest::PlayerCardByName { name: name.clone() },
+            Ask::Invite { guild_id, player_id } => RestRequest::InviteToGuild { guild_id: *guild_id, player_id: *player_id },
+            Ask::Decline { guild_id, player_id } => {
+                RestRequest::DeclineGuildInvite { guild_id: *guild_id, player_id: *player_id }
+            }
+            Ask::Leave(id) => RestRequest::LeaveGuild { guild_id: *id },
+            Ask::Expel { guild_id, player_id } => RestRequest::ExpelFromGuild { guild_id: *guild_id, player_id: *player_id },
+            Ask::SetRole { guild_id, player_id, role } => RestRequest::SetGuildRole {
+                guild_id: *guild_id,
+                player_id: *player_id,
+                request: capitol_core::protocol::rest::SetGuildRole { role: *role },
+            },
+        };
+        self.guilds.sent(ask);
+        self.net.rest(request, GUILD_TAG);
+    }
+
     fn tend_mutes(&mut self) {
         if self.auth.phase() == Phase::InWorld && self.mutes.wants() {
             self.mutes.sent();
@@ -2652,6 +2720,26 @@ impl Session {
                         self.cards.failed(e.status() == Some(404));
                     }
                 },
+                NetEvent::Rest(GUILD_TAG, result) => match result {
+                    Ok(RestResponse::MyGuild(mine)) => {
+                        let was = self.guilds.guild_id();
+                        self.guilds.answered(mine.clone());
+                        // Out of a guild, or into another: its talk goes with it
+                        if was.is_some() && self.guilds.guild_id() != was {
+                            self.talk.left_guild();
+                        }
+                    }
+                    Ok(RestResponse::Guilds(answer)) => self.guilds.listed(answer.guilds.clone()),
+                    Ok(RestResponse::Guild(guild)) => self.guilds.shown(guild.clone()),
+                    Ok(RestResponse::Card(card)) => self.guilds.found(card),
+                    Ok(other) => tracing::warn!("guilds: an answer it didn't ask for: {other:?}"),
+                    Err(e) => {
+                        let not_found = e.status() == Some(404);
+                        let why = refusal(e);
+                        tracing::info!("guilds: refused: {why}");
+                        self.guilds.failed(why, not_found);
+                    }
+                },
                 NetEvent::Rest(MUTES_TAG, result) => match result {
                     Ok(RestResponse::Mutes(answer)) => {
                         self.mutes.answered(answer.mutes.clone());
@@ -2730,6 +2818,7 @@ impl Session {
                     self.gazette.connected();
                     self.cards.connected();
                     self.mutes.connected();
+                    self.guilds.connected();
                     // What was in flight went down with the old socket
                     self.chat.connected();
                     self.mail.connected();
@@ -2856,6 +2945,11 @@ impl Session {
                     StateEvent::GazettePublished { day, headline, .. } => {
                         self.gazette.published(*day, headline)
                     }
+                    StateEvent::GuildChanged { .. } => self.guilds.changed(),
+                    StateEvent::GuildNotice { guild, kind, name, .. } => {
+                        self.guilds.changed();
+                        self.guild_notes.push(capitol_core::guilds::notice_words(*kind, guild, name));
+                    }
                     StateEvent::LetterArrived { name, citizen, first_line, .. } => {
                         self.mail.arrived();
                         self.letter_notes.push(capitol_core::mail::arrived_words(name, *citizen, first_line));
@@ -2967,6 +3061,7 @@ impl Session {
             self.tend_gazette();
             self.tend_card();
             self.tend_mutes();
+            self.tend_guilds();
             self.tend_mail();
             self.tend_board_walk(terrain);
             self.tend_board();
@@ -3077,6 +3172,8 @@ impl Session {
             self.chat = capitol_core::chat::Chat::new();
             self.mail.signed_out();
             self.letter_notes.clear();
+            self.guilds.signed_out();
+            self.guild_notes.clear();
             self.board.signed_out();
             self.board_walk = capitol_core::hall::Visit::default();
             self.wages.signed_out();

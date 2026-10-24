@@ -309,6 +309,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Catalog version {}", game.catalog.version);
     }
 
+    // Each guild member's tag, for the names over their heads (S4.4)
+    let guild_tags = engine::guilds::tags(&db_pool, None).await?;
+    game_state.write().await.guild_tags = guild_tags;
+
     // Load stations into game state
     let stations: Vec<Station> = sqlx::query_as(
         &format!("SELECT {} FROM stations", models::STATION_COLUMNS)

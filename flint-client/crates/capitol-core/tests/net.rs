@@ -291,6 +291,7 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
                     x,
                     y,
                     citizen: false,
+                    tag: None,
                 };
                 send(&mut socket, &ServerMessage::Positions { players: vec![me] }).await;
             }

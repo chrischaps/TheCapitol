@@ -1,5 +1,6 @@
 //! Talk (Commons S1.1, plan D1): a local line is heard within
-//! [`HEARD`] of whoever said it, and a Capitol line by everyone.
+//! [`HEARD`] of whoever said it, a Capitol line by everyone, and a guild
+//! line by the speaker's guild (S4.4).
 //!
 //! Nothing said is stored. The last [`CAPITOL_BACKLOG`] Capitol lines are
 //! kept here, in memory, for a socket that's just subscribed, and they're
@@ -27,6 +28,9 @@ use crate::rate_limit::{self, Key, RateLimiter};
 /// be overheard
 pub const WATCHER_LOCAL: &str = "Play here to talk to people nearby";
 
+/// Why someone in no guild can't say a guild line (S4.4)
+pub const NO_GUILD: &str = "Join a guild to talk to one";
+
 /// One line said, as each socket that hears it is sent it
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Line {
@@ -37,6 +41,9 @@ pub struct Line {
     pub text: String,
     pub x: f64,
     pub y: f64,
+    /// The speaker's guild, which alone hears a guild line (S4.4)
+    #[serde(skip)]
+    pub guild: Option<Uuid>,
 }
 
 impl Line {
@@ -63,8 +70,10 @@ pub struct Speaker {
     pub citizen: bool,
     pub x: f64,
     pub y: f64,
-    /// This socket holds the avatar (E0.8). A watcher may only say `capitol`.
+    /// This socket holds the avatar (E0.8). A watcher may not say `local`.
     pub holds_avatar: bool,
+    /// The guild they're in (S4.4), whose members alone hear a guild line
+    pub guild: Option<Uuid>,
 }
 
 /// The Capitol channel's last lines, each numbered, so a socket that took
@@ -104,6 +113,9 @@ impl Talk {
         if channel == Channel::Local && !speaker.holds_avatar {
             return Err(WATCHER_LOCAL.into());
         }
+        if channel == Channel::Guild && speaker.guild.is_none() {
+            return Err(NO_GUILD.into());
+        }
         limiter.check(Key::chat(speaker.account_id)).map_err(rate_limit::chat_message)?;
         let line = Line {
             from: speaker.player_id,
@@ -113,9 +125,11 @@ impl Talk {
             text,
             x: speaker.x,
             y: speaker.y,
+            guild: speaker.guild,
         };
         match channel {
-            Channel::Local => {
+            // Not kept: a guild's talk is for those on to hear it
+            Channel::Local | Channel::Guild => {
                 let _ = events.send(GameEvent::Said { seq: 0, line });
             }
             // Numbered and sent under the one lock, so the lines go out in
@@ -145,9 +159,11 @@ impl Talk {
 }
 
 /// Whether the socket of `listener`, standing in `cell` on the positions
-/// `seen`, hears `line`. Nothing from anyone in `muted` does. Capitol lines
-/// reach everyone else. A local line reaches only a socket that holds the
-/// avatar: the speaker's own, or one within [`HEARD`] of where it was said.
+/// `seen`, in `guild`, hears `line`. Nothing from anyone in `muted` does.
+/// Capitol lines reach everyone else, and a guild line every socket of its
+/// guild's members, watchers too. A local line reaches only a socket that
+/// holds the avatar: the speaker's own, or one within [`HEARD`] of where it
+/// was said.
 pub fn hears(
     line: &Line,
     listener: Uuid,
@@ -155,12 +171,14 @@ pub fn hears(
     seen: Option<&Positions>,
     cell: Option<Cell>,
     muted: &HashSet<Uuid>,
+    guild: Option<Uuid>,
 ) -> bool {
     if muted.contains(&line.from) {
         return false;
     }
     match line.channel {
         Channel::Capitol => true,
+        Channel::Guild => line.guild.is_some() && line.guild == guild,
         Channel::Local => {
             holds_avatar
                 && (line.from == listener
@@ -208,6 +226,7 @@ mod tests {
             x: p.x,
             y: p.y,
             holds_avatar: true,
+            guild: None,
         }
     }
 
@@ -226,7 +245,7 @@ mod tests {
 
     /// Whether `listener` hears `line` on `positions`, holding the avatar
     fn heard_by(line: &Line, listener: &PlayerState, positions: &Positions) -> bool {
-        hears(line, listener.id, true, Some(positions), positions.cell_of(listener.id), &HashSet::new())
+        hears(line, listener.id, true, Some(positions), positions.cell_of(listener.id), &HashSet::new(), None)
     }
 
     #[test]
@@ -234,7 +253,7 @@ mod tests {
         let ada = player("Ada", AT.0, AT.1);
         let near_by = player("Bram", AT.0 + 29.0, AT.1);
         let too_far = player("Cass", AT.0, AT.1 - 31.0);
-        let positions = Positions::of([&ada, &near_by, &too_far], &HashMap::new());
+        let positions = Positions::of([&ada, &near_by, &too_far], &HashMap::new(), &HashMap::new());
         let (events, mut rx) = broadcast::channel(16);
         Talk::new().say(&events, &unlimited(), speaker(&ada), Channel::Local, "Rope, anyone?").unwrap();
         let [(seq, line)] = said(&mut rx).try_into().unwrap();
@@ -243,7 +262,7 @@ mod tests {
         assert!(heard_by(&line, &near_by, &positions));
         assert!(!heard_by(&line, &too_far, &positions));
         assert!(
-            !hears(&line, near_by.id, false, Some(&positions), positions.cell_of(near_by.id), &HashSet::new()),
+            !hears(&line, near_by.id, false, Some(&positions), positions.cell_of(near_by.id), &HashSet::new(), None),
             "a watcher hears no local line"
         );
     }
@@ -256,27 +275,27 @@ mod tests {
         let ada = player("Ada", edge - 10.0, edge - 10.0);
         let over = player("Bram", edge + 10.0, edge + 10.0);
         let far = player("Cass", edge + 700.0, edge);
-        let positions = Positions::of([&ada, &over, &far], &HashMap::new());
+        let positions = Positions::of([&ada, &over, &far], &HashMap::new(), &HashMap::new());
         assert_ne!(positions.cell_of(ada.id), positions.cell_of(over.id));
         let (events, mut rx) = broadcast::channel(16);
         Talk::new().say(&events, &unlimited(), speaker(&ada), Channel::Local, "Over here").unwrap();
         let [(_, line)] = said(&mut rx).try_into().unwrap();
         assert!(heard_by(&line, &over, &positions), "28 units off, across the edge");
         assert!(!heard_by(&line, &far, &positions));
-        assert!(!hears(&line, Uuid::new_v4(), true, Some(&positions), None, &HashSet::new()), "nor one out of the world");
+        assert!(!hears(&line, Uuid::new_v4(), true, Some(&positions), None, &HashSet::new(), None), "nor one out of the world");
     }
 
     #[test]
     fn a_capitol_line_reaches_everyone() {
         let ada = player("Ada", AT.0, AT.1);
         let far = player("Bram", AT.0 + 4000.0, AT.1);
-        let positions = Positions::of([&ada, &far], &HashMap::new());
+        let positions = Positions::of([&ada, &far], &HashMap::new(), &HashMap::new());
         let (events, mut rx) = broadcast::channel(16);
         Talk::new().say(&events, &unlimited(), speaker(&ada), Channel::Capitol, "Planks at the hall").unwrap();
         let [(seq, line)] = said(&mut rx).try_into().unwrap();
         assert_eq!(seq, 1);
         assert!(heard_by(&line, &far, &positions));
-        assert!(hears(&line, far.id, false, None, None, &HashSet::new()), "a watcher with nobody in sight hears it too");
+        assert!(hears(&line, far.id, false, None, None, &HashSet::new(), None), "a watcher with nobody in sight hears it too");
     }
 
     #[test]
@@ -308,7 +327,7 @@ mod tests {
         let ada = player("Ada", AT.0, AT.1);
         let bram = player("Bram", AT.0 + 10.0, AT.1);
         let cass = player("Cass", AT.0, AT.1 + 10.0);
-        let positions = Positions::of([&ada, &bram, &cass], &HashMap::new());
+        let positions = Positions::of([&ada, &bram, &cass], &HashMap::new(), &HashMap::new());
         let bram_muted = HashSet::from([ada.id]);
         let talk = Talk::new();
         let (events, mut rx) = broadcast::channel(16);
@@ -317,7 +336,7 @@ mod tests {
         talk.say(&events, &unlimited(), speaker(&cass), Channel::Capitol, "Planks too").unwrap();
         let lines = said(&mut rx);
         let reaches = |line: &Line, who: &PlayerState, muted: &HashSet<Uuid>| {
-            hears(line, who.id, true, Some(&positions), positions.cell_of(who.id), muted)
+            hears(line, who.id, true, Some(&positions), positions.cell_of(who.id), muted, None)
         };
         let to_bram: Vec<&str> = lines.iter().filter(|(_, l)| reaches(l, &bram, &bram_muted)).map(|(_, l)| l.text.as_str()).collect();
         assert_eq!(to_bram, ["Planks too"]);
@@ -384,5 +403,45 @@ mod tests {
         Talk::new().say(&events, &unlimited(), speaker(&ada), Channel::Capitol, "Thanks").unwrap();
         let [(_, line)] = said(&mut rx).try_into().unwrap();
         assert!(!serde_json::to_string(&line.message()).unwrap().contains("citizen"), "a person's line leaves it out");
+    }
+
+    #[test]
+    fn a_guild_line_reaches_its_members_only_wherever_they_are() {
+        let weavers = Some(Uuid::new_v4());
+        let ada = player("Ada", AT.0, AT.1);
+        let far_member = player("Bram", AT.0 + 4000.0, AT.1);
+        let near_outsider = player("Cass", AT.0 + 5.0, AT.1);
+        let other_guild = player("Dot", AT.0 + 6.0, AT.1);
+        let positions = Positions::of([&ada, &far_member, &near_outsider, &other_guild], &HashMap::new(), &HashMap::new());
+        let (events, mut rx) = broadcast::channel(16);
+        let talk = Talk::new();
+        talk.say(&events, &unlimited(), Speaker { guild: weavers, ..speaker(&ada) }, Channel::Guild, "Hall at noon").unwrap();
+        let [(seq, line)] = said(&mut rx).try_into().unwrap();
+        assert_eq!(seq, 0, "not numbered: it's not the Capitol's");
+        let hears_in = |who: &PlayerState, avatar: bool, guild: Option<Uuid>| {
+            hears(&line, who.id, avatar, Some(&positions), positions.cell_of(who.id), &HashSet::new(), guild)
+        };
+        assert!(hears_in(&ada, true, weavers), "the speaker hears their own");
+        assert!(hears_in(&far_member, true, weavers), "a member across the world");
+        assert!(hears_in(&far_member, false, weavers), "a member watching");
+        assert!(!hears_in(&near_outsider, true, None), "not someone beside them in no guild");
+        assert!(!hears_in(&other_guild, true, Some(Uuid::new_v4())), "nor another guild's member");
+        let mut muted = HashSet::new();
+        muted.insert(ada.id);
+        assert!(!hears(&line, far_member.id, true, Some(&positions), None, &muted, weavers), "nor one who muted them");
+        assert!(talk.backlog(&HashSet::new()).1.is_empty(), "the Capitol's backlog doesn't keep it");
+        let json = serde_json::to_string(&line.message()).unwrap();
+        assert!(json.contains(r#""channel":"guild""#) && !json.contains(&weavers.unwrap().to_string()), "{json}");
+    }
+
+    #[test]
+    fn someone_in_no_guild_cant_say_a_guild_line() {
+        let ada = player("Ada", AT.0, AT.1);
+        let (events, mut rx) = broadcast::channel(16);
+        let refused = Talk::new().say(&events, &unlimited(), speaker(&ada), Channel::Guild, "Anyone?");
+        assert_eq!(refused, Err(NO_GUILD.into()));
+        assert!(said(&mut rx).is_empty());
+        let watcher = Speaker { holds_avatar: false, guild: Some(Uuid::new_v4()), ..speaker(&ada) };
+        Talk::new().say(&events, &unlimited(), watcher, Channel::Guild, "From afar").unwrap();
     }
 }

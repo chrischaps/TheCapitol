@@ -72,6 +72,7 @@ fn pos(id: Uuid, x: f64, y: f64) -> PlayerPosition {
         x,
         y,
         citizen: false,
+        tag: None,
     }
 }
 

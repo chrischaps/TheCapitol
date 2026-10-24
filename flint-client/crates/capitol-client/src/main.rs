@@ -168,6 +168,10 @@ struct Args {
     /// default), "letter", "write" or "sent"
     #[arg(long, value_name = "VIEW", num_args = 0..=1, default_missing_value = "in")]
     mail_sample: Option<String>,
+    /// Offline, open the guild panel (S4.4) on a sample: "yours" (the
+    /// default: your guild as its leader), "officer", "browse" or "found"
+    #[arg(long, value_name = "PAGE", num_args = 0..=1, default_missing_value = "yours")]
+    guild_sample: Option<String>,
     /// Offline, the Exchange hall as if you stood where the camera looks
     /// with goods in your market box: the gold mote, the header's hint and,
     /// in range, the prompt (E3.7)
@@ -409,6 +413,7 @@ fn main() -> Result<()> {
         .with_deeds_sample(args.deeds_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_card_sample(args.card_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_mail_sample(args.mail_sample.as_deref().filter(|_| args.offline.is_some()))
+        .with_guild_sample(args.guild_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_board_sample(args.board_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_impound_sample(args.impound_sample && args.offline.is_some())
         .with_chat_sample(args.chat_sample && args.offline.is_some())

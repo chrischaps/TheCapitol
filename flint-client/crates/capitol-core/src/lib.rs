@@ -72,6 +72,7 @@ pub mod mail;
 pub mod market;
 pub mod market_maker;
 pub mod motion;
+pub mod guilds;
 pub mod mutes;
 pub mod net;
 pub mod onboarding;

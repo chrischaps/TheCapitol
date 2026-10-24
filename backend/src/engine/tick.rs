@@ -73,6 +73,10 @@ pub struct GameState {
     /// [`GameState::refresh_catalog`] once they're loaded
     pub catalog: Arc<CatalogResponse>,
     pub crafting_operations: HashMap<Uuid, CraftingOperation>,
+    /// Each guild member's tag (S4.4), by player, for the names over their
+    /// heads: loaded at startup, and read again after each guild change
+    /// (`guilds::retag`)
+    pub guild_tags: HashMap<Uuid, String>,
     /// The last tick's positions, so the next can say who changed cell (#275)
     last_positions: Option<Arc<super::interest::Positions>>,
     pub command_queue: Vec<Command>,
@@ -154,6 +158,7 @@ impl GameState {
                 recipes: Vec::new(),
             }),
             crafting_operations: HashMap::new(),
+            guild_tags: HashMap::new(),
             last_positions: None,
             command_queue: Vec::new(),
             event_sender,
@@ -215,6 +220,7 @@ impl GameState {
             x: player.x,
             y: player.y,
             citizen: player.citizen,
+            tag: self.guild_tags.get(&player.id).cloned(),
         };
         self.players.insert(player.id, player);
         let _ = self.event_sender.send(GameEvent::PlayerJoined(position));
@@ -386,7 +392,7 @@ impl GameState {
 
     /// Every player's position, by interest cell, as `positions` sends them each tick (C0.4)
     pub fn positions(&self) -> super::interest::Positions {
-        super::interest::Positions::of(self.players.values(), &self.recipes)
+        super::interest::Positions::of(self.players.values(), &self.recipes, &self.guild_tags)
     }
 
     /// Tell `player_id`, and only them, why their trade `command` (its `ClientMessage` tag) was refused
