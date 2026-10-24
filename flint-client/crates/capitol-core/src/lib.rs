@@ -30,6 +30,8 @@
 //! - [`station`]: stations in the world: whether one is in reach.
 //! - [`steering`]: walking on a heading (controls T0.4): the movement input
 //!   turned into `steer`s, which [`motion::Motion::steer`] predicts.
+//! - [`pad`]: the pad over the shoulder (controls T2.1): the sticks' radial
+//!   deadzone, the look as a rate, and recentring behind the walk.
 //! - [`automation`]: a station working on its own (E4.4): where it
 //!   stands, a pause in plain words, and the form that sets it up.
 //! - [`wages`]: piece-rate wages (Commons S2.7): the Work page's offers,
@@ -77,6 +79,7 @@ pub mod guilds;
 pub mod mutes;
 pub mod net;
 pub mod onboarding;
+pub mod pad;
 pub mod paths;
 pub mod plot;
 pub mod poll;

@@ -225,6 +225,14 @@ impl SettingsPanel {
             theme::switch(ui, &mut k.invert_look_y)
         })
         .on_hover_text("Over the shoulder, moving the mouse up looks down");
+        theme::setting_row(ui, "Pad look", |ui| {
+            theme::level(ui, &mut k.pad_look_sensitivity, SENSITIVITY, |v| format!("{v:.2}×"))
+        })
+        .on_hover_text("How fast the right stick turns the view over the shoulder");
+        theme::setting_row(ui, "Invert pad look", |ui| {
+            theme::switch(ui, &mut k.invert_pad_y)
+        })
+        .on_hover_text("Over the shoulder, pushing the right stick up looks down");
         if let Some(played) = view.played {
             how_youve_played(ui, played);
         }

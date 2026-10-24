@@ -30,6 +30,10 @@ pub struct Shared {
     /// T1.3), radians round the point it looks at, 0 standing it south:
     /// what Direct mode's keys walk against. `None` until the rig says.
     pub view_yaw: Arc<Mutex<Option<f64>>>,
+    /// The pad's turn of the view this frame (`cap_pad_look`, T2.1), from
+    /// the look stick and the recentring. The extension sets it in
+    /// `pre_update`, over the shoulder only.
+    pub pad_look: Arc<Mutex<PadLook>>,
     /// Something wants the cursor free (`cap_wants_cursor`, T1.4): a panel,
     /// the login, Alt held, a station being placed, or Escape having let it
     /// go. The extension sets it at the end of `ui`; in Direct the camera
@@ -362,6 +366,20 @@ pub struct ZoneBanner {
     pub first: bool,
 }
 
+/// The pad's turn of the view this frame (T2.1), as `cap_pad_look` gives
+/// it. All zero in Click, at the login and with no pad.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PadLook {
+    /// Radians to add to the rig's yaw: right is negative.
+    pub yaw: f64,
+    /// Degrees to add to the rig's tilt: down is positive.
+    pub tilt: f64,
+    /// The share of the way to bring the tilt back to level (recentring).
+    pub level: f64,
+    /// The stick or the keys walk you this frame.
+    pub walking: bool,
+}
+
 /// What's in front of you over the shoulder (T1.5), as scripts see it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FocusMark {
@@ -681,6 +699,22 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         if let Ok(mut v) = view_yaw.lock() {
             *v = yaw.is_finite().then_some(yaw);
         }
+    });
+    // `cap_pad_look() -> #{ yaw, tilt, level, walking }`: the pad's turn of
+    // the view this frame over the shoulder (T2.1). `yaw` in radians to add
+    // to the rig's (right is negative), `tilt` in degrees to add to its tilt
+    // (down is positive), `level` the share of the way to bring the tilt
+    // back to level as it recentres, and `walking` whether the stick or the
+    // keys walk you, which lets go of a shot as the keys do.
+    let pad_look = shared.pad_look.clone();
+    engine.register_fn("cap_pad_look", move || -> rhai::Map {
+        let p = pad_look.lock().map(|p| *p).unwrap_or_default();
+        let mut m = rhai::Map::new();
+        m.insert("yaw".into(), p.yaw.into());
+        m.insert("tilt".into(), p.tilt.into());
+        m.insert("level".into(), p.level.into());
+        m.insert("walking".into(), p.walking.into());
+        m
     });
     // `cap_wants_cursor() -> bool`: something wants the cursor free (T1.4):
     // a panel, the login, Alt, a station being placed, or Escape. In Direct

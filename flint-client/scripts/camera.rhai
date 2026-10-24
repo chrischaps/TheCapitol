@@ -91,7 +91,8 @@
 // is_cursor_captured() disagrees. While it's captured the mouse turns the
 // view, directly, with no easing on the yaw, and tilts it within
 // tilt_low() to tilt_high() of the dial's pitch (cap_setting
-// "look_sensitivity" and "invert_look_y"). Nothing ever recentres it. The
+// "look_sensitivity" and "invert_look_y"). The pad's right stick turns it
+// as a rate (cap_pad_look, T2.1), and only the pad recentres it. The
 // dial rests at the shoulder and runs out to direct_far(), short of the
 // drift to the Capitol and the turn north up; switching back to Click
 // gives the street back and levels the tilt. H or Home is the shoulder,
@@ -560,7 +561,9 @@ fn steer(dt, you) {
     // further out the camera is, so a screen's width takes the same time.
     let fwd = action_axis("move_forward", "move_backward");
     let side = action_axis("move_right", "move_left");
-    if (fwd != 0.0 || side != 0.0) && direct && you != () {
+    // Over the shoulder the pad walks you too (T2.1)
+    let pad = cap_pad_look();
+    if (fwd != 0.0 || side != 0.0 || pad.walking) && direct && you != () {
         any = true;
     } else if fwd != 0.0 || side != 0.0 {
         any = true;
@@ -586,9 +589,10 @@ fn steer(dt, you) {
     let feel = sensitivity();
     let way = if cap_setting("invert_orbit") == true { -1.0 } else { 1.0 };
 
-    // Zoom: the wheel (up is in) and R/F.
+    // Zoom: the wheel (up is in), R/F, and the pad's triggers (T2.1) as
+    // far as they're pulled.
     let notches = action_value("zoom");
-    let keys = action_axis("zoom_out", "zoom_in");
+    let keys = pulled("zoom_out") - pulled("zoom_in");
     if notches != 0.0 || keys != 0.0 {
         any = true;
         this.zoomed = true;
@@ -610,6 +614,16 @@ fn steer(dt, you) {
             let up = if cap_setting("invert_look_y") == true { -1.0 } else { 1.0 };
             this.tilt = tilt_by(this.tilt, dy * up, look);
         }
+    }
+    // The pad's right stick turns it as a rate, captured or not, since a
+    // panel's cursor is the mouse's; and once it rests, walking ahead eases
+    // the view round behind you and the tilt back to level (T2.1). Rust
+    // reads the stick (cap_pad_look); this only adds it.
+    if direct && (pad.yaw != 0.0 || pad.tilt != 0.0) {
+        any = true;
+        if pad.level == 0.0 { this.turned = total_time(); }
+        this.yaw_to += pad.yaw;
+        this.tilt = (this.tilt + pad.tilt).max(tilt_low()).min(tilt_high()) * (1.0 - pad.level);
     }
 
     // Orbit: Q turns the view left, E right, and so does dragging right.
@@ -688,6 +702,13 @@ fn action_axis(plus, minus) {
     if is_action_pressed(plus) { v += 1.0; }
     if is_action_pressed(minus) { v -= 1.0; }
     v
+}
+
+// How far `action` is pulled, 0 to 1: 1 for a key, a trigger's travel past
+// a tenth (T2.1), so one resting a hair in doesn't creep the zoom.
+fn pulled(action) {
+    let v = action_value(action);
+    if v < 0.1 { 0.0 } else { v.min(1.0) }
 }
 
 // Frame `view` (from --view) at start: a rig framing or a fixed shot.

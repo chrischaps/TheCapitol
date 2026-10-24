@@ -250,6 +250,13 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 ### T2: The pad (`ct:T2-pad`)
 
 - **T2.1 The pad plays** (#325, M): bindings, the radial deadzone, throttle steps, look rate, recentring, Back.
+  *As built:* `capitol_core::pad` is pure: `stick` (the radial deadzone, 0.2, rescaled and cut to length 1), `walk`, `look` and `Recentre`. Direct's walk reads `walk_x`/`walk_y` (the keys at ±1 and the left stick, summed) through `pad::walk`, so the keys go the same way and `move_*` are Click's pan alone. The throttle steps stay `steering::throttle_of`'s (0.25 and 0.75), now of the rescaled deflection, so a raw push under 0.4 is neutral, under 0.8 half, and full past it. `pre_update` publishes the look as `Shared::pad_look` (`cap_pad_look()`: `yaw`, `tilt`, `level`, `walking`), and `camera.rhai` only adds it. Back (`back`, East) is `CapitolExtension::back`. `[controls]` gains `pad_look_sensitivity` and `invert_pad_y`, with Settings rows "Pad look" and "Invert pad look". `--offline-avatar` now also prints `[motion] walked D from where you stood, throttles [..]` on exit, for captures. Tests: `pad::tests` and `extension::pad_tests`, which load `config/input.toml` and drive slot 9. Decisions the plan didn't make:
+  - **The look curve is the square** of the rescaled deflection: half the push turns at a quarter of the rate. Full is `TURN_RATE` (2.4 rad/s, about 140°/s) and `TILT_RATE` (60°/s), times the pad sensitivity.
+  - **The stick looks with the cursor free too.** A panel's cursor is the mouse's, and the stick can't move it, so a panel open doesn't stop the view turning. The mouse still looks only while captured.
+  - **Recentring needs a walk.** The view eases round behind the walk (`RECENTRE_K` 0.6/s), and the tilt back to level, only while the walk is deflected and within 45° of forward, the look stick has rested 1.5 s, and the pad was the last device used. Standing still it never recentres, so a look round at a stall stays where you left it. Like any camera that follows the walk, a stick held 30° off forward walks a wide curve.
+  - **Back works in both modes**, in Esc's order: the shortcut overlay, a placing, the chat, then the top panel (`close_top_panel`). With nothing open it does nothing; it never frees the cursor as Esc does.
+  - **The triggers zoom as far as they're pulled** (`pulled` in `camera.rhai`, past a tenth). The keys read 1, as before. An input script can only press a trigger fully, so the half pull is tested on `InputState`, not captured (#513).
+  - **In Click the sticks do nothing.** The d-pad, Start, Select, the triggers and Back work there too, and South does nothing, as E does.
 - **T2.2 Prompts in the device you're holding** (#326, S).
 
 ### T3: Decide (`ct:T3-decide`)

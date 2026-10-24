@@ -9,9 +9,10 @@
 #   - Point and walk (Click): a click walks, gathers and opens, and the
 #     camera rig (scripts/camera.rhai) is laid out as in Cities: Skylines:
 #     WASD moves the view, Q/E orbit, R/F zoom.
-#   - Over the shoulder (Direct): the same move_* keys walk the way the
-#     camera faces (a steer, T1.3), the captured mouse looks (T1.4), and
-#     `interact` (E) acts on what's in front of you (T1.5). Q/E don't orbit.
+#   - Over the shoulder (Direct): the same keys, as walk_x and walk_y,
+#     walk the way the camera faces (a steer, T1.3), the captured mouse
+#     looks (T1.4), and `interact` (E) acts on what's in front of you
+#     (T1.5). Q/E don't orbit.
 #     Alt (`with_alt`) frees the cursor while held; Esc, which Rust reads,
 #     closes the top panel or frees it until a click on the world.
 #
@@ -22,6 +23,52 @@
 
 version = 1
 game_id = "capitol"
+
+# The pad (controls T2.1, plan D6) plays over the shoulder: the left stick
+# walks, the right stick looks, South acts, East backs out, the triggers
+# zoom, and the d-pad, Start and Select open the panels. Inside a panel you
+# use the mouse (#331).
+#
+# Over the shoulder (Direct, T1.3), the way to walk: the keys at ±1 and the
+# left stick, summed. The stick has no deadzone here: the client applies a
+# radial one (capitol_core::pad), so drift never steers, and cuts the sum
+# to length 1. Click mode reads move_* instead, to pan.
+[actions.walk_x]
+kind = "axis1d"
+bindings = [
+    { type = "key", code = "KeyD", scale = 1.0 },
+    { type = "key", code = "ArrowRight", scale = 1.0 },
+    { type = "key", code = "KeyA", scale = -1.0 },
+    { type = "key", code = "ArrowLeft", scale = -1.0 },
+    { type = "gamepad_axis", axis = "LeftStickX", deadzone = 0.0 },
+]
+
+# Up the stick is forward.
+[actions.walk_y]
+kind = "axis1d"
+bindings = [
+    { type = "key", code = "KeyW", scale = 1.0 },
+    { type = "key", code = "ArrowUp", scale = 1.0 },
+    { type = "key", code = "KeyS", scale = -1.0 },
+    { type = "key", code = "ArrowDown", scale = -1.0 },
+    { type = "gamepad_axis", axis = "LeftStickY", deadzone = 0.0 },
+]
+
+# The right stick turns the view over the shoulder, as a rate (the mouse
+# reads its own counts). Its radial deadzone is the client's too.
+[actions.look_x]
+kind = "axis1d"
+bindings = [{ type = "gamepad_axis", axis = "RightStickX", deadzone = 0.0 }]
+
+[actions.look_y]
+kind = "axis1d"
+bindings = [{ type = "gamepad_axis", axis = "RightStickY", deadzone = 0.0 }]
+
+# The pad's way out: closes the panel on top, or stops a placing. Esc does
+# the same on the keys, and over the shoulder frees the cursor too.
+[actions.back]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "East" }]
 
 [actions.move_forward]
 kind = "button"
@@ -47,12 +94,14 @@ bindings = [{ type = "key", code = "KeyQ" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyE" }]
 
+# The triggers zoom as far as they're pulled (camera.rhai reads the value).
 [actions.zoom_in]
 kind = "button"
 bindings = [
     { type = "key", code = "KeyR" },
     { type = "key", code = "Equal" },
     { type = "key", code = "NumpadAdd" },
+    { type = "gamepad_button", button = "RightTrigger2" },
 ]
 
 [actions.zoom_out]
@@ -61,6 +110,7 @@ bindings = [
     { type = "key", code = "KeyF" },
     { type = "key", code = "Minus" },
     { type = "key", code = "NumpadSubtract" },
+    { type = "gamepad_button", button = "LeftTrigger2" },
 ]
 
 # Wheel notches this frame; a touchpad's 50 px of scroll is one.
@@ -70,27 +120,31 @@ bindings = [{ type = "mouse_wheel", axis = "y", scale = 1.0 }]
 
 [actions.home]
 kind = "button"
-bindings = [{ type = "key", code = "KeyH" }, { type = "key", code = "Home" }]
+bindings = [
+    { type = "key", code = "KeyH" },
+    { type = "key", code = "Home" },
+    { type = "gamepad_button", button = "RightThumb" },
+]
 
 # The inventory panel (P5.4); the header's Inventory button does the same.
 [actions.inventory]
 kind = "button"
-bindings = [{ type = "key", code = "KeyI" }]
+bindings = [{ type = "key", code = "KeyI" }, { type = "gamepad_button", button = "DPadUp" }]
 
 # The crafting panel (P5.5); the header's Crafting button does the same.
 [actions.crafting]
 kind = "button"
-bindings = [{ type = "key", code = "KeyC" }]
+bindings = [{ type = "key", code = "KeyC" }, { type = "gamepad_button", button = "DPadLeft" }]
 
 # The exchange panel (P7.2); the header's Exchange button does the same.
 [actions.exchange]
 kind = "button"
-bindings = [{ type = "key", code = "KeyX" }]
+bindings = [{ type = "key", code = "KeyX" }, { type = "gamepad_button", button = "DPadDown" }]
 
 # The market panel (E3.5); the header's Market button does the same.
 [actions.market]
 kind = "button"
-bindings = [{ type = "key", code = "KeyM" }]
+bindings = [{ type = "key", code = "KeyM" }, { type = "gamepad_button", button = "DPadRight" }]
 
 # The Capitol Gazette (E3.9); the header's Gazette chip and a click on the
 # notice board in the Exchange hall's forecourt do the same.
@@ -113,12 +167,12 @@ bindings = [{ type = "key", code = "KeyU" }]
 # fire on the same keypress and toggle the overlay twice.
 [actions.help]
 kind = "button"
-bindings = [{ type = "key", code = "F1" }]
+bindings = [{ type = "key", code = "F1" }, { type = "gamepad_button", button = "Select" }]
 
 # The settings panel (P8.4); the header's Settings link does the same.
 [actions.settings]
 kind = "button"
-bindings = [{ type = "key", code = "F10" }]
+bindings = [{ type = "key", code = "F10" }, { type = "gamepad_button", button = "Start" }]
 
 # The dev overlay (D5.2): frame times, the net, the prediction, what the
 # store holds and the interest cell. F2 to F4 are the engine's, F8 the
@@ -163,10 +217,11 @@ bindings = [{ type = "key", code = "KeyO" }]
 # click on it would. Gather the node, open the station, see a player's card
 # (Shift-E asks them to trade), go to the hall, a stall, the notice board or
 # the Deeds Office. A captured left click does the same. E is orbit_right
-# too, which only Click mode reads, and Click mode ignores this.
+# too, which only Click mode reads, and Click mode ignores this. South on
+# the pad (T2.1).
 [actions.interact]
 kind = "button"
-bindings = [{ type = "key", code = "KeyE" }]
+bindings = [{ type = "key", code = "KeyE" }, { type = "gamepad_button", button = "South" }]
 
 # Trading (P7.3): accept the request you've been sent, or else ask the
 # player nearest you, walking closer if they're out of range. A shift-click

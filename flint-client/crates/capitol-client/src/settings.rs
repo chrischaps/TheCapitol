@@ -151,6 +151,11 @@ pub struct Controls {
     pub look_sensitivity: f32,
     /// Moving the mouse up looks down.
     pub invert_look_y: bool,
+    /// The pad's look stick over the shoulder, as a multiple of its turn
+    /// rate (T2.1, `capitol_core::pad::TURN_RATE`).
+    pub pad_look_sensitivity: f32,
+    /// Pushing the look stick up looks down.
+    pub invert_pad_y: bool,
 }
 
 impl Default for Controls {
@@ -159,6 +164,8 @@ impl Default for Controls {
             mode: ControlMode::Click,
             look_sensitivity: 1.0,
             invert_look_y: false,
+            pad_look_sensitivity: 1.0,
+            invert_pad_y: false,
         }
     }
 }
@@ -226,6 +233,7 @@ impl Settings {
         };
         self.camera.sensitivity = rate(self.camera.sensitivity);
         self.controls.look_sensitivity = rate(self.controls.look_sensitivity);
+        self.controls.pad_look_sensitivity = rate(self.controls.pad_look_sensitivity);
         self
     }
 
@@ -404,6 +412,8 @@ mod tests {
                 mode: ControlMode::Direct,
                 look_sensitivity: 0.5,
                 invert_look_y: true,
+                pad_look_sensitivity: 1.75,
+                invert_pad_y: true,
             },
         };
         assert_eq!(Settings::parse(&s.to_toml()), s);
@@ -428,9 +438,12 @@ invert_orbit = true
         let s = Settings::parse("[controls]
 mode = \"sideways\"
 look_sensitivity = 9.0
+pad_look_sensitivity = -1.0
 ");
         assert_eq!(s.controls.mode, ControlMode::Click);
         assert_eq!(s.controls.look_sensitivity, *SENSITIVITY.end());
+        assert_eq!(s.controls.pad_look_sensitivity, *SENSITIVITY.start());
+        assert!(!s.controls.invert_pad_y);
         let s = Settings::parse("[controls]
 mode = \"direct\"
 ");

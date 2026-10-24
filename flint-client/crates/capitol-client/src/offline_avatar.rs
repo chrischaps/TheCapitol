@@ -10,7 +10,10 @@
 //! follow point the camera rig takes up.
 //!
 //! On exit it prints `[motion] corrections N`, the snapshots that
-//! disagreed with the prediction: on flat ground that should be 0.
+//! disagreed with the prediction: on flat ground that should be 0. Then
+//! `[motion] walked D from where you stood, throttles [..]`: how far off
+//! you ended, in server units, and each throttle sent in turn, so a capture
+//! can show a stick's half-speed walk, or drift that never moved you (T2.1).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,6 +37,11 @@ struct Walking {
     state: GameState,
     motion: Motion,
     steering: Steering,
+    /// Where you were stood, and where you're drawn now.
+    start: (f64, f64),
+    at: (f64, f64),
+    /// Each throttle sent, when it changed.
+    throttles: Vec<u8>,
 }
 
 impl OfflineAvatar {
@@ -67,6 +75,9 @@ impl OfflineAvatar {
             state: GameState::new(),
             motion,
             steering: Steering::new(),
+            start: at,
+            at,
+            throttles: Vec::new(),
         });
     }
 
@@ -85,9 +96,18 @@ impl OfflineAvatar {
             w.server.send(now, ClientMessage::Move { x, y });
         }
         if let Some(message) = w.steering.drive(now, way, &mut w.motion) {
+            if let ClientMessage::Steer { throttle, .. } = message {
+                if w.throttles.last() != Some(&throttle) {
+                    w.throttles.push(throttle);
+                }
+            }
             w.server.send(now, message);
         }
-        Some((w.motion.sample(now), &w.state))
+        let poses = w.motion.sample(now);
+        if let Some(p) = poses.iter().find(|p| p.id == Uuid::from_u128(1)) {
+            w.at = (p.x, p.y);
+        }
+        Some((poses, &w.state))
     }
 
     /// Where a click's walk is going, in server units, for the ring.
@@ -100,6 +120,8 @@ impl Drop for OfflineAvatar {
     fn drop(&mut self) {
         if let Some(w) = &self.walking {
             eprintln!("[motion] corrections {}", w.motion.corrections());
+            let walked = (w.at.0 - w.start.0).hypot(w.at.1 - w.start.1);
+            eprintln!("[motion] walked {walked:.1} from where you stood, throttles {:?}", w.throttles);
         }
     }
 }

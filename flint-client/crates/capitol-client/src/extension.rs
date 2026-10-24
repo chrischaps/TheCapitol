@@ -20,7 +20,7 @@ use crate::entities::Players;
 use crate::juice_sample::JuiceSample;
 use crate::nodes::{self, Nodes};
 use crate::script_api::{
-    self, PlacementMark, PlotMark, Shared, TradeMark, UiAnchor, ZoneBanner,
+    self, PadLook, PlacementMark, PlotMark, Shared, TradeMark, UiAnchor, ZoneBanner,
 };
 use crate::session::Session;
 use crate::settings::{ControlMode, Controls, Graphics, SettingsFile};
@@ -147,6 +147,9 @@ pub struct CapitolExtension {
     /// `--offline-avatar` (controls T1.3): offline, you on the ground,
     /// walked by a loopback server, once the camera has settled.
     offline_avatar: Option<crate::offline_avatar::OfflineAvatar>,
+    /// The pad's look stick resting, for the view to ease round behind the
+    /// walk (T2.1).
+    recentre: capitol_core::pad::Recentre,
     /// `--citizen-sample` (C0.2): offline, people and citizens in a row
     /// where the camera looks, stood there once it's settled.
     citizen_sample: Option<Option<(capitol_core::state::GameState, Vec<capitol_core::motion::Pose>)>>,
@@ -325,6 +328,7 @@ impl CapitolExtension {
             building_sample: None,
             node_sample: false,
             offline_avatar: None,
+            recentre: capitol_core::pad::Recentre::new(),
             node_sampled: None,
             citizen_sample: None,
             citizen_strolls: false,
@@ -1623,6 +1627,53 @@ impl CapitolExtension {
         }
         false
     }
+
+    /// Back on the pad (T2.1, plan D6), in either mode: closes the shortcut
+    /// overlay, stops a placing, closes the chat, or else the panel on top,
+    /// as Esc does. With nothing open it does nothing: unlike Esc over the
+    /// shoulder, it never frees the cursor, which a pad has no use for.
+    fn back(&mut self) {
+        if self.shortcuts.open {
+            self.shortcuts.open = false;
+        } else if self.session.as_ref().is_some_and(|s| s.placing().is_some()) {
+            self.cancel_placing = true;
+        } else if self.chat.open {
+            self.chat.close();
+        } else {
+            self.close_top_panel();
+        }
+    }
+
+    /// The pad's look over the shoulder (T2.1), for `camera.rhai` through
+    /// `cap_pad_look`: the right stick as a turn rate at the settings' pad
+    /// sensitivity, and the view easing round behind the walk once the stick
+    /// has rested, with the pad the last thing used. `walk` is
+    /// [`walk_input`]'s. Zero, and the rest forgotten, in Click.
+    fn pad_look(&mut self, ctx: &ExtensionCtx, direct: bool, walk: (f64, f64)) {
+        use capitol_core::pad;
+        let look = if direct {
+            let dt = ctx.clock.delta_time.min(0.1);
+            let x = ctx.input.action_value("look_x") as f64;
+            let y = ctx.input.action_value("look_y") as f64;
+            let c = &self.settings.settings.controls;
+            let (yaw, tilt) = pad::look(x, y, dt, c.pad_look_sensitivity as f64, c.invert_pad_y);
+            let pad_only = ctx.input.last_device() == flint_runtime::InputDevice::Gamepad;
+            let looking = pad::stick(x, y) != (0.0, 0.0);
+            let ease = self.recentre.update(dt, pad_only, looking, walk);
+            PadLook {
+                yaw: yaw + ease.yaw,
+                tilt,
+                level: ease.level,
+                walking: walk != (0.0, 0.0),
+            }
+        } else {
+            self.recentre = pad::Recentre::new();
+            PadLook::default()
+        };
+        if let Ok(mut p) = self.shared.pad_look.lock() {
+            *p = look;
+        }
+    }
 }
 
 impl PlayerExtension for CapitolExtension {
@@ -1710,12 +1761,17 @@ impl PlayerExtension for CapitolExtension {
         self.chat_key |= !self.at_login() && ctx.input.is_action_just_pressed("chat");
         let station_key = !self.at_login() && ctx.input.is_action_just_pressed("station");
         let trade_key = !self.at_login() && ctx.input.is_action_just_pressed("trade");
-        // The movement keys walk you in Direct (T1.3); in Click they pan
-        // the view (camera.rhai), and the steer sees none.
-        let way = match self.control_mode() {
-            ControlMode::Direct if !self.at_login() => keys_way(ctx, &self.shared),
-            _ => (0.0, 0.0),
-        };
+        // Back (T2.1): the pad's way out of a panel, as Esc is the keys'
+        if !self.at_login() && ctx.input.is_action_just_pressed("back") {
+            self.back();
+        }
+        // The movement keys and the left stick walk you in Direct (T1.3,
+        // T2.1); in Click the keys pan the view (camera.rhai), and the
+        // steer sees none.
+        let direct = self.control_mode() == ControlMode::Direct && !self.at_login();
+        let stick = if direct { walk_input(ctx) } else { (0.0, 0.0) };
+        let way = keys_way(stick, &self.shared);
+        self.pad_look(ctx, direct, stick);
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
             session.steer(now, way);
@@ -3484,13 +3540,20 @@ fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Sound
     sound.apply(ctx, &cues);
 }
 
-/// The movement keys as the way to walk (Direct mode, T1.3), in server
-/// units: against the yaw the camera rig means to have (`cap_view_yaw`),
-/// two keys held no faster than one.
-fn keys_way(ctx: &ExtensionCtx, shared: &script_api::Shared) -> (f64, f64) {
-    let held = |action| if ctx.input.is_action_pressed(action) { 1.0 } else { 0.0 };
-    let forward = held("move_forward") - held("move_backward");
-    let right = held("move_right") - held("move_left");
+/// The walk over the shoulder (T1.3, T2.1): `(forward, right)` from the
+/// `walk_x`/`walk_y` actions, the keys and the left stick summed, past the
+/// stick's radial deadzone and cut to length 1 (`capitol_core::pad::walk`),
+/// so drift never steers and two keys held walk no faster than one. Pads
+/// read 0 while a text field has the keys (ADR 0110).
+fn walk_input(ctx: &ExtensionCtx) -> (f64, f64) {
+    let x = ctx.input.action_value("walk_x") as f64;
+    let y = ctx.input.action_value("walk_y") as f64;
+    capitol_core::pad::walk(x, y)
+}
+
+/// The walk as the way to go, in server units: against the yaw the camera
+/// rig means to have (`cap_view_yaw`), as long as the stick's deflection.
+fn keys_way((forward, right): (f64, f64), shared: &script_api::Shared) -> (f64, f64) {
     let yaw = shared.view_yaw.lock().ok().and_then(|y| *y).unwrap_or(0.0);
     capitol_core::steering::camera_way(forward, right, yaw)
 }
@@ -4301,5 +4364,114 @@ mod escape_tests {
         ext.inventory.open = true;
         assert!(!escape(&mut ext));
         assert!(ext.inventory.open);
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    //! T2.1: the pad's bindings in `config/input.toml`, on the input
+    //! script's slot (9), as the walk reads them; and Back.
+    use super::*;
+    use capitol_core::steering::{camera_way, throttle_of};
+    use flint_runtime::{InputConfig, InputState};
+    use std::path::Path;
+
+    const PAD: u32 = 9;
+
+    /// The engine's defaults with the game's config over them, as the
+    /// player loads them.
+    fn input() -> InputState {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/input.toml");
+        let mut input = InputState::new();
+        input.load_bindings(InputConfig::built_in_defaults()).unwrap();
+        input.merge_bindings(InputConfig::load_from_file(path).expect("input.toml loads")).unwrap();
+        input
+    }
+
+    /// The way the walk goes at yaw 0 (north up), and its throttle.
+    fn walk(input: &InputState) -> ((f64, f64), u8) {
+        let (forward, right) =
+            capitol_core::pad::walk(input.action_value("walk_x") as f64, input.action_value("walk_y") as f64);
+        let way = camera_way(forward, right, 0.0);
+        (way, throttle_of(way.0.hypot(way.1)))
+    }
+
+    #[test]
+    fn the_left_stick_walks_at_its_steps_and_drift_never_moves() {
+        let mut i = input();
+        i.process_gamepad_axis(PAD, "LeftStickX", 1.0);
+        let ((x, y), throttle) = walk(&i);
+        assert_eq!(throttle, 10);
+        assert!(x > 0.99 && y.abs() < 1e-9, "right walks east");
+        i.process_gamepad_axis(PAD, "LeftStickX", 0.5);
+        assert_eq!(walk(&i).1, 5, "half throttle");
+        i.process_gamepad_axis(PAD, "LeftStickX", 0.15);
+        assert_eq!(walk(&i), ((0.0, 0.0), 0), "drift of 0.15 doesn't move");
+        i.process_gamepad_axis(PAD, "LeftStickX", 0.0);
+        i.process_gamepad_axis(PAD, "LeftStickY", 1.0);
+        let ((x, y), _) = walk(&i);
+        assert!(y < -0.99 && x.abs() < 1e-9, "up walks the way the view faces, north here");
+        // Typing in a field holds the pads (#320's gate): no walk
+        i.hold_gamepads(true);
+        assert_eq!(walk(&i).1, 0);
+    }
+
+    #[test]
+    fn keys_and_the_stick_together_walk_no_faster_than_one() {
+        let mut i = input();
+        i.process_key_down(KeyCode::KeyW);
+        i.process_key_down(KeyCode::KeyD);
+        i.process_gamepad_axis(PAD, "LeftStickY", 1.0);
+        let ((x, y), throttle) = walk(&i);
+        assert_eq!(throttle, 10);
+        assert!((x.hypot(y) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_buttons_act_back_out_and_open_the_panels() {
+        for (button, action) in [
+            ("South", "interact"),
+            ("East", "back"),
+            ("Start", "settings"),
+            ("Select", "help"),
+            ("DPadUp", "inventory"),
+            ("DPadLeft", "crafting"),
+            ("DPadRight", "market"),
+            ("DPadDown", "exchange"),
+            ("RightThumb", "home"),
+        ] {
+            let mut i = input();
+            i.process_gamepad_button_down(PAD, button);
+            assert!(i.is_action_just_pressed(action), "{button} is {action}");
+        }
+        // The triggers zoom as far as they're pulled. Tested here, since an
+        // input script can only press one fully (#513)
+        let mut i = input();
+        i.process_gamepad_button_changed(PAD, "RightTrigger2", 0.6);
+        assert!((i.action_value("zoom_in") - 0.6).abs() < 1e-6);
+        assert_eq!(i.action_value("zoom_out"), 0.0);
+        // The right stick is the look, with no deadzone of its own
+        i.process_gamepad_axis(PAD, "RightStickX", 0.1);
+        assert!((i.action_value("look_x") - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn back_closes_the_top_panel_and_with_none_open_does_nothing() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let terrain = TerrainSource::offline(&path).expect("fixture");
+        let mut ext = CapitolExtension::new(Shared::default(), terrain, None);
+        ext.controls_pinned = Some(ControlMode::Direct);
+        ext.enter_direct();
+        ext.inventory.open = true;
+        ext.mail.open = true;
+        ext.back();
+        assert!(!ext.mail.open && ext.inventory.open, "the letters, over the inventory, first");
+        ext.back();
+        assert!(!ext.inventory.open, "East closes the inventory");
+        ext.back();
+        assert!(!ext.shared.cursor_let_go.load(Ordering::Relaxed), "a pad never lets the cursor go");
+        ext.shortcuts.open = true;
+        ext.back();
+        assert!(!ext.shortcuts.open);
     }
 }
