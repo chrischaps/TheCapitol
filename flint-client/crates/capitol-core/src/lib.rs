@@ -32,6 +32,8 @@
 //!   turned into `steer`s, which [`motion::Motion::steer`] predicts.
 //! - [`automation`]: a station working on its own (E4.4): where it
 //!   stands, a pause in plain words, and the form that sets it up.
+//! - [`wages`]: piece-rate wages (Commons S2.7): the Work page's offers,
+//!   the shift you're on, the hire form and its calls.
 //! - [`plot`]: what the plot panel offers for a plot: yours, someone
 //!   else's, or for sale at its zone's deed price.
 //! - [`signin`]: log in, or register, one event at a time.
@@ -84,6 +86,7 @@ pub mod steering;
 pub mod talk;
 pub mod terrain;
 pub mod trading;
+pub mod wages;
 pub mod zone_card;
 
 /// The wire types, shared with the backend.

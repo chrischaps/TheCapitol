@@ -1,7 +1,7 @@
-//! The notice board's two pages (Commons S2.3): *Wanted*, the city's
-//! commissions pinned to cork (`ui/board.rs`), and The Capitol Gazette
-//! (E3.9), the latest edition as a page of newsprint. Tabs at the top turn
-//! between them.
+//! The notice board's pages (Commons S2.3, S2.7): *Wanted*, the city's
+//! commissions pinned to cork (`ui/board.rs`), *Work*, the wage offers
+//! pinned beside them (`ui/work.rs`), and The Capitol Gazette (E3.9), the
+//! latest edition as a page of newsprint. Tabs at the top turn between them.
 //!
 //! G or the header's Gazette chip opens the Gazette's page; a click on the
 //! notice board in the Exchange hall's forecourt opens the board on Wanted,
@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 use super::board;
 use super::icons::ItemIcons;
+use super::work;
 use super::theme::{self, size};
 
 /// The open and close fade, in seconds, and how far it rises as it comes.
@@ -63,6 +64,8 @@ pub enum Action {
     Card(String),
     /// Something on the Wanted page (S2.3)
     Board(board::Action),
+    /// Something on the Work page (S2.7)
+    Work(work::Action),
 }
 
 /// The board's pages.
@@ -70,6 +73,8 @@ pub enum Action {
 pub enum Page {
     /// The commissions (S2.3)
     Wanted,
+    /// The wage offers (S2.7)
+    Work,
     #[default]
     Gazette,
 }
@@ -80,6 +85,14 @@ pub struct Wanted<'a> {
     pub board: &'a mut capitol_core::commissions::Board,
     pub view: board::View<'a>,
     pub icons: &'a mut ItemIcons,
+    /// The Work page's offers (S2.7). Without them, there's no Work tab.
+    pub work: Option<WorkPage<'a>>,
+}
+
+/// The Work page's offers and what it draws from (S2.7).
+pub struct WorkPage<'a> {
+    pub wages: &'a capitol_core::wages::Wages,
+    pub view: work::View<'a>,
 }
 
 /// The panel and the file that keeps what you've read.
@@ -130,6 +143,12 @@ impl GazettePanel {
     pub fn open_board(&mut self, news: bool) {
         self.open = true;
         self.page = if news { Page::Gazette } else { Page::Wanted };
+    }
+
+    /// Open on the Work page (S2.7): the header's chip while you work.
+    pub fn open_work(&mut self) {
+        self.open = true;
+        self.page = Page::Work;
     }
 
     /// Whether the Gazette's page is the one being read.
@@ -183,20 +202,27 @@ impl GazettePanel {
         if wanted.is_none() {
             self.page = Page::Gazette;
         }
+        let has_work = wanted.as_ref().is_some_and(|w| w.work.is_some());
+        if self.page == Page::Work && !has_work {
+            self.page = Page::Wanted;
+        }
         let area = egui::Area::new(Id::new("capitol_gazette"))
             .anchor(Align2::CENTER_TOP, [0.0, screen.top() + 14.0 - RISE * (1.0 - ease)])
             .interactable(self.open)
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
                 match (self.page, wanted.as_mut()) {
-                    (Page::Wanted, Some(w)) => {
+                    (Page::Wanted | Page::Work, Some(w)) => {
                         cork().show(ui, |ui| {
                             let flecks = ui.painter().add(egui::Shape::Noop);
                             ui.set_width(width - 40.0);
-                            tabs(ui, &mut self.page, &mut self.open, true);
+                            tabs(ui, &mut self.page, &mut self.open, true, has_work);
                             ui.add_space(8.0);
                             let room = (height - 150.0).max(120.0);
-                            action = board::page(ui, w.board, &w.view, w.icons, room).map(Action::Board);
+                            action = match (self.page, &w.work) {
+                                (Page::Work, Some(p)) => work::page(ui, p.wages, &p.view, w.icons, room).map(Action::Work),
+                                _ => board::page(ui, w.board, &w.view, w.icons, room).map(Action::Board),
+                            };
                             let rect = ui.min_rect().expand(14.0);
                             ui.painter().set(flecks, egui::Shape::Vec(theme::cork_flecks(rect)));
                         });
@@ -206,7 +232,7 @@ impl GazettePanel {
                             ui.set_width(width - 40.0);
                             ui.visuals_mut().override_text_color = Some(theme::INK);
                             if w.is_some() {
-                                tabs(ui, &mut self.page, &mut self.open, false);
+                                tabs(ui, &mut self.page, &mut self.open, false, has_work);
                                 ui.add_space(4.0);
                             }
                             action = page(ui, view, &mut self.open, height - 40.0 - if w.is_some() { 34.0 } else { 0.0 }, w.is_none());
@@ -219,12 +245,17 @@ impl GazettePanel {
     }
 }
 
-/// The board's tabs, *Wanted* and *The Gazette*, and the ×. `on_cork`:
-/// drawn over the Wanted page's cork, so the paper tabs stand out.
-fn tabs(ui: &mut egui::Ui, page: &mut Page, open: &mut bool, on_cork: bool) {
+/// The board's tabs, *Wanted*, *Work* (with `work`) and *The Gazette*, and
+/// the ×. `on_cork`: drawn over the cork, so the paper tabs stand out.
+fn tabs(ui: &mut egui::Ui, page: &mut Page, open: &mut bool, on_cork: bool, work: bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        for (p, title) in [(Page::Wanted, "Wanted"), (Page::Gazette, "The Gazette")] {
+        let pages: &[(Page, &str)] = if work {
+            &[(Page::Wanted, "Wanted"), (Page::Work, "Work"), (Page::Gazette, "The Gazette")]
+        } else {
+            &[(Page::Wanted, "Wanted"), (Page::Gazette, "The Gazette")]
+        };
+        for &(p, title) in pages {
             let on = *page == p;
             let (fill, edge, colour) = match (on, on_cork) {
                 (true, _) => (theme::PAPER, theme::INK, theme::INK),
@@ -946,7 +977,10 @@ mod tests {
         let catalog = capitol_core::catalog::Catalog::fallback();
         let (mut board, pack, me, now) = board::sample("", &catalog);
         let mut icons = ItemIcons::load(std::path::Path::new(ItemIcons::DIR));
-        for page in [Page::Wanted, Page::Gazette] {
+        let wages = work::sample(me, now);
+        panel.open_work();
+        assert_eq!((panel.open, panel.page), (true, Page::Work));
+        for page in [Page::Wanted, Page::Work, Page::Gazette] {
             panel.page = page;
             let ctx = theme::test_context();
             for _ in 0..3 {
@@ -965,7 +999,11 @@ mod tests {
                         walking: false,
                         online: true,
                     };
-                    let wanted = Wanted { board: &mut board, view, icons: &mut icons };
+                    let work = WorkPage {
+                        wages: &wages,
+                        view: work::View { me: Some(me), at: None, now, catalog: &catalog, walking: false, online: true },
+                    };
+                    let wanted = Wanted { board: &mut board, view, icons: &mut icons, work: Some(work) };
                     assert_eq!(panel.show(ctx, &View { reader: &reader, online: true }, Some(wanted)), None);
                 });
             }

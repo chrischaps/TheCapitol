@@ -22,14 +22,21 @@
 //! spends it. Before the Deeds Office has been looked in at, a line says
 //! the deed waits there instead (D8; `capitol_core::deeds::offer`).
 //!
+//! On a plot of yours, *Hire a gatherer* opens the hire form (Commons S2.7,
+//! `ui::hire`): piece-rate work gathering one of the resources that grow
+//! on it, with your offers there over the form.
+//!
 //! The panel is edged in gold, the colour of what's yours (plan §1), and
 //! the claimed plot's gold edge in the world answers it.
 
+use super::hire;
 use super::theme::{self, size, DIM, ENOUGH, GOLD, SHORT, TEXT};
 use capitol_core::deeds::DeedOffer;
 use capitol_core::plot::{words, Offer};
 use capitol_core::protocol::rest::PlotInfo;
+use capitol_core::protocol::rules::wages::Work;
 use capitol_core::protocol::rules::Zone;
+use capitol_core::wages::{self as wg, Wages};
 use egui::{Align2, Id, RichText};
 
 /// The panel's width inside its frame: React's 280 less the padding.
@@ -40,7 +47,7 @@ const FADE: f32 = 0.18;
 const RISE: f32 = 12.0;
 
 /// What the panel asks for this frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Claim(uuid::Uuid),
     /// Claim it with the deed the road in earned (#448).
@@ -49,6 +56,8 @@ pub enum Action {
     PayTax(uuid::Uuid, i64),
     /// Open the zone card on this zone (#444)
     AboutZone(String),
+    /// Something on the hire form (S2.7)
+    Wages(hire::Act),
     Close,
 }
 
@@ -67,6 +76,19 @@ pub struct View<'a> {
     pub refused: Option<&'a str>,
     /// What the road in's deed offers here (#448).
     pub deed: DeedOffer,
+    /// Hiring gatherers here, on a plot of yours (S2.7). `None`: no hiring.
+    pub hire: Option<Hire<'a>>,
+}
+
+/// What the hire form on a plot of yours draws from.
+pub struct Hire<'a> {
+    pub wages: &'a Wages,
+    pub me: Option<uuid::Uuid>,
+    /// The resources that grow on the lot, (id, name)
+    pub resources: Vec<(String, String)>,
+    pub catalog: &'a capitol_core::catalog::Catalog,
+    pub now: capitol_core::chrono::DateTime<capitol_core::chrono::Utc>,
+    pub online: bool,
 }
 
 /// What the panel keeps between frames.
@@ -76,6 +98,9 @@ pub struct PlotPanel {
     last: Option<PlotInfo>,
     /// "Claim with your deed" was clicked once on this plot: it asks again.
     confirm: Option<uuid::Uuid>,
+    /// The hire form is open, and what's written in it, for the plot it's for.
+    hiring: bool,
+    hire: Option<wg::Draft>,
     /// Where the panel was drawn this frame, for the controls hint to keep
     /// clear of. `None` while it's closed.
     pub rect: Option<egui::Rect>,
@@ -109,8 +134,30 @@ impl PlotPanel {
             .interactable(open)
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
+                // With the hire form open it can outgrow the screen: then
+                // it scrolls under the header strip's gap
+                let hiring = self.hiring && view.hire.is_some() && view.offer == Offer::Yours;
+                let room = (ui.ctx().available_rect().height() - 20.0 - 12.0 - 30.0).max(160.0);
                 theme::panel_edged(GOLD)
-                    .show(ui, |ui| body(ui, plot, view, &mut self.confirm))
+                    .show(ui, |ui| {
+                        let mut inner = |ui: &mut egui::Ui| {
+                            let mut action = body(ui, plot, view, &mut self.confirm);
+                            if let (Some(h), Offer::Yours) = (&view.hire, &view.offer) {
+                                if let Some(a) = hire_section(ui, plot, h, view.strands, &mut self.hiring, &mut self.hire) {
+                                    action = Some(a);
+                                }
+                            }
+                            action
+                        };
+                        if hiring {
+                            theme::scrolled(ui, "capitol_plot_scroll", room, |ui| {
+                                ui.set_width(WIDTH);
+                                inner(ui)
+                            })
+                        } else {
+                            inner(ui)
+                        }
+                    })
                     .inner
             });
         self.rect = open.then_some(area.response.rect);
@@ -216,6 +263,56 @@ fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View, confirm: &mut Option<uu
         theme::error_box(ui, why);
     }
     action
+}
+
+/// *Hire a gatherer*, and the form under it once opened: work gathering
+/// what grows on this plot of yours.
+fn hire_section(
+    ui: &mut egui::Ui,
+    plot: &PlotInfo,
+    h: &Hire,
+    strands: Option<i64>,
+    open: &mut bool,
+    draft: &mut Option<wg::Draft>,
+) -> Option<Action> {
+    let offers = h.wages.mine_at(h.me, plot.id).len();
+    section(ui);
+    ui.horizontal(|ui| {
+        let label = match (*open, offers) {
+            (true, _) => "Hide the hiring".to_owned(),
+            (false, 0) => "Hire a gatherer…".to_owned(),
+            (false, n) => format!("Hire a gatherer · {n} offered"),
+        };
+        if theme::link(ui, &label, size::SMALL)
+            .on_hover_text("Pay someone by the unit to gather here. What they gather goes to your market box")
+            .clicked()
+        {
+            *open = !*open;
+        }
+    });
+    if !*open {
+        return None;
+    }
+    ui.add_space(6.0);
+    let fresh = || {
+        let work = Work::Gather { plot_id: plot.id, resource: h.resources.first().map(|r| r.0.clone()).unwrap_or_default() };
+        let rate = wg::rate_for(&work, h.catalog);
+        wg::Draft::new(work, rate)
+    };
+    let d = match draft {
+        Some(d) if wg::place_of(&d.work) == plot.id => d,
+        slot => slot.insert(fresh()),
+    };
+    let view = hire::View {
+        wages: h.wages,
+        me: h.me,
+        strands,
+        catalog: h.catalog,
+        now: h.now,
+        online: h.online,
+        accent: GOLD,
+    };
+    hire::show(ui, plot.id, d, &h.resources, &view).map(Action::Wages)
 }
 
 /// The deed cost, your balance under it, and the Claim button.
@@ -474,6 +571,7 @@ mod tests {
             paying: false,
             refused: None,
             deed: DeedOffer::None,
+            hire: None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.expect("drawn");
@@ -499,6 +597,7 @@ mod tests {
             paying: false,
             refused: None,
             deed: DeedOffer::None,
+            hire: None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.unwrap();
@@ -523,6 +622,7 @@ mod tests {
             paying: false,
             refused: None,
             deed: DeedOffer::None,
+            hire: None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.unwrap();
@@ -549,6 +649,7 @@ mod tests {
             paying: false,
             refused: None,
             deed: DeedOffer::Claim,
+            hire: None,
         };
         let ctx = theme::test_context();
         let mut panel = PlotPanel::default();
@@ -600,6 +701,7 @@ mod tests {
             paying: false,
             refused: None,
             deed: DeedOffer::None,
+            hire: None,
         };
         assert_eq!(run(&view, None), (None, None));
     }
@@ -613,5 +715,48 @@ mod tests {
         assert_eq!(weekly_tax(&p), Some(10));
         p.owner_id = None;
         assert_eq!(weekly_tax(&p), None, "nobody's to tax");
+    }
+
+    /// A plot of yours offers gathering work on what grows there (S2.7),
+    /// and the form opened still fits a 720-high screen.
+    #[test]
+    fn a_plot_of_yours_hires_gatherers() {
+        let me = Uuid::from_u128(1);
+        let p = plot(Some(me));
+        let catalog = capitol_core::catalog::Catalog::fallback();
+        let wages = Wages::default();
+        let view = View {
+            plot: Some(&p),
+            offer: Offer::Yours,
+            strands: Some(900),
+            claiming: false,
+            paying: false,
+            refused: None,
+            deed: DeedOffer::None,
+            hire: Some(Hire {
+                wages: &wages,
+                me: Some(me),
+                resources: vec![("grass".into(), "Wild Grass".into())],
+                catalog: &catalog,
+                now: capitol_core::chrono::Utc::now(),
+                online: true,
+            }),
+        };
+        let ctx = theme::test_context();
+        let mut panel = PlotPanel { hiring: true, ..Default::default() };
+        for _ in 0..8 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                theme::install(ctx);
+                assert_eq!(panel.show(ctx, &view, None), None);
+            });
+        }
+        let draft = panel.hire.as_ref().expect("the form");
+        assert_eq!(draft.work, Work::Gather { plot_id: p.id, resource: "grass".into() });
+        let rect = panel.rect.expect("drawn");
+        assert!(rect.top() >= 0.0, "{rect:?}");
     }
 }

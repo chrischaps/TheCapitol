@@ -26,6 +26,11 @@
 //!   crafting station (P6.3).
 //! - [`automation`]: the station panel's Automation tab, for its owner
 //!   (E4.4).
+//! - [`hire`]: offering piece-rate work at a station or on a lot of yours,
+//!   and your offers there (Commons S2.7): the station panel's Hire tab and
+//!   the plot panel's.
+//! - [`work`]: the notice board's Work page (S2.7): the wage offers, each a
+//!   card on the cork, and Take.
 //! - [`containers`]: `--containers`, any container no panel shows, as grids.
 //! - [`sample`]: a panel showing the theme's parts, for reviewing the theme
 //!   against the React client (`--ui-sample`).
@@ -55,6 +60,7 @@ pub mod dev_overlay;
 pub mod exchange;
 pub mod gazette;
 pub mod hints;
+pub mod hire;
 pub mod hud;
 pub mod icons;
 pub mod impound;
@@ -73,6 +79,7 @@ pub mod slots;
 pub mod station;
 pub mod theme;
 pub mod trade;
+pub mod work;
 pub mod zone_card;
 
 use crate::script_api::Shared;

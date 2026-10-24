@@ -25,6 +25,13 @@
 //!   tab beside Craft (`ui::automation`), set to make one recipe from the
 //!   box, a count of times or forever. The header says when it's running
 //!   or paused, for anyone who opens it.
+//! - **Hire (Commons S2.7)**, for the owner of a crafting station: a third
+//!   tab (`ui::hire`), to offer piece-rate work at one of its recipes, and
+//!   your offers there with who's working them, Stop and Take it down.
+//! - **On a shift** at someone else's station, the panel opens on their
+//!   recipe and keeps to it. The box is theirs, so it can't be dragged
+//!   from and Fill and Clear are gone; the line under the recipe says the
+//!   work goes into their box and what you're paid for each.
 //! - **Return to inventory**, for the owner: a recycling bin in gold
 //!   (`theme::recycle_bin`, #488). The server puts the whole kit back in
 //!   your inventory (#88), and what's in the box with it (#489): your things
@@ -40,13 +47,17 @@
 
 use super::automation::{self, Ask};
 use super::crafting::{blocked_box, craft_label, needs, picker, preview, under_way, Fill};
+use super::hire;
 use super::icons::ItemIcons;
 use super::slots::{Move, Slot, SlotGrid};
 use super::theme::{self, size, EMBER, STATION};
 use capitol_core::automation::{Draft, Status};
+use capitol_core::chrono::{DateTime, Utc};
 use capitol_core::craft::{self, Check, Phase};
 use capitol_core::protocol::rules::quality;
-use capitol_core::protocol::rest::{RecipeInfo, SlotItem};
+use capitol_core::protocol::rules::wages::Work;
+use capitol_core::protocol::rest::{RecipeInfo, SlotItem, WageOffer, WageShift};
+use capitol_core::wages::{self as wg, Wages};
 use capitol_core::state::{Activity, GameState};
 use capitol_core::station;
 use egui::{Align2, Id};
@@ -103,6 +114,8 @@ pub enum Action {
     /// Set the station to make this on its own, and start it (E4.4).
     StartAutomation { station_id: Uuid, draft: Draft },
     StopAutomation(Uuid),
+    /// Something on the Hire tab, or Stop on your shift (S2.7)
+    Wages(hire::Act),
 }
 
 /// The right-hand column's two tabs at a station of yours.
@@ -111,6 +124,8 @@ pub enum Tab {
     #[default]
     Craft,
     Automation,
+    /// Piece-rate work offered here (S2.7)
+    Hire,
 }
 
 /// The tool slot's stand-in container id: a drop onto it is an install.
@@ -131,8 +146,12 @@ pub struct StationPanel {
     pub tab: Tab,
     /// The Automation tab's form.
     draft: Draft,
+    /// The Hire tab's form, for the station it was written at.
+    hire: Option<wg::Draft>,
     /// The footer's height as last drawn, so the columns know their room.
     footer_height: Option<f32>,
+    /// The recipe of the shift you're on here, if you are (S2.7).
+    shift_recipe: Option<String>,
     /// Where the panel was drawn this frame, if it was, so the hint card
     /// can keep clear of it.
     pub rect: Option<egui::Rect>,
@@ -148,6 +167,21 @@ pub struct View<'a> {
     pub beside: Option<egui::Rect>,
     /// Why the last automation command was refused, if it was just now.
     pub automation_refused: Option<&'a str>,
+    /// The offers and your shift (S2.7). `None`: no Hire tab, no shift.
+    pub wages: Option<&'a Wages>,
+    /// The server's clock, for how long an offer runs.
+    pub now: DateTime<Utc>,
+    /// Signed in. Offline it's a sample, and nothing is sent.
+    pub online: bool,
+}
+
+impl View<'_> {
+    /// The shift you're on at the open station, if you are: the offer and
+    /// the shift.
+    pub fn shift_here(&self) -> Option<(&WageOffer, &WageShift)> {
+        let open = self.state.open_station()?.station_id;
+        self.wages?.working().filter(|(o, _)| matches!(&o.work, Work::Craft { station_id, .. } if *station_id == open))
+    }
 }
 
 impl StationPanel {
@@ -155,6 +189,10 @@ impl StationPanel {
     /// station's box makes.
     pub fn recipe<'a>(&self, state: &'a GameState) -> Option<&'a RecipeInfo> {
         let open = state.open_station()?;
+        // On a shift, the employer's recipe and no other (S2.7)
+        if let Some(id) = &self.shift_recipe {
+            return station::recipes_at(state.recipes(), &open.station_type).find(|r| &r.id == id);
+        }
         let here = || station::recipes_at(state.recipes(), &open.station_type);
         match &self.picked {
             Some(id) => here().find(|r| &r.id == id),
@@ -188,6 +226,10 @@ impl StationPanel {
             _ => None,
         };
         self.bar.update(crafting, dt);
+        self.shift_recipe = view.shift_here().and_then(|(o, _)| match &o.work {
+            Work::Craft { recipe_id, .. } => Some(recipe_id.clone()),
+            Work::Gather { .. } => None,
+        });
         let open = view.state.open_station().map(|o| o.station_id);
         if open != self.showing {
             self.showing = open;
@@ -282,6 +324,8 @@ impl StationPanel {
             let t = ui.input(|i| i.time) as f32;
             ui.ctx().request_repaint();
             Some(("Running", STATION.gamma_multiply(0.4 + 0.12 * (t * 2.4).sin())))
+        } else if view.shift_here().is_some() {
+            Some(("On shift", theme::GOLD.gamma_multiply(0.35)))
         } else if matches!(status, Status::Paused(_)) {
             Some(("Paused", EMBER.gamma_multiply(0.35)))
         } else if storage {
@@ -295,7 +339,8 @@ impl StationPanel {
         // The box, open to drags only while nothing is out, and at a
         // crafting station, the recipe's column: side by side or stacked.
         // Each scrolls in the room the header and the footer leave.
-        let idle = *view.phase == Phase::Idle && !running;
+        // On a shift the box is the employer's: nothing to drag (S2.7)
+        let idle = *view.phase == Phase::Idle && !running && view.shift_here().is_none();
         let footer = self.footer_height.unwrap_or(FOOTER);
         let room = |ui: &egui::Ui| (tallest - (ui.cursor().top() - start) - footer).max(LEAST_ROOM);
         let mut put = |a: Option<Action>| {
@@ -322,7 +367,7 @@ impl StationPanel {
                 ui.vertical(|ui| {
                     ui.set_width(WIDTH);
                     let top = ui.cursor().top();
-                    let tab = self.tabs(ui, state);
+                    let tab = self.tabs(ui, view);
                     let room = (room - (ui.cursor().top() - top)).max(LEAST_ROOM);
                     theme::scrolled(ui, "capitol_station_work", room, |ui| {
                         ui.set_width(WIDTH);
@@ -332,7 +377,7 @@ impl StationPanel {
             });
         } else {
             // The tabs stay put over the box; the box and the work scroll.
-            let tab = self.tabs(ui, state);
+            let tab = self.tabs(ui, view);
             let room = room(ui);
             theme::scrolled(ui, "capitol_station_stack", room, |ui| {
                 ui.set_width(WIDTH);
@@ -352,18 +397,25 @@ impl StationPanel {
         action
     }
 
-    /// The Craft and Automation tabs, at a crafting station of yours, and
-    /// the tab to show: always Craft at someone else's.
-    fn tabs(&mut self, ui: &mut egui::Ui, state: &GameState) -> Tab {
-        if !mine(state) {
+    /// The Craft, Automation and Hire tabs, at a crafting station of yours,
+    /// and the tab to show: always Craft at someone else's.
+    fn tabs(&mut self, ui: &mut egui::Ui, view: &View) -> Tab {
+        if !mine(view.state) {
             return Tab::Craft;
         }
+        if view.wages.is_none() && self.tab == Tab::Hire {
+            self.tab = Tab::Craft;
+        }
         ui.horizontal(|ui| {
-            theme::segmented(
-                ui,
-                &mut self.tab,
-                &[(Tab::Craft, "Craft"), (Tab::Automation, "Automation")],
-            );
+            if view.wages.is_some() {
+                theme::segmented(
+                    ui,
+                    &mut self.tab,
+                    &[(Tab::Craft, "Craft"), (Tab::Automation, "Automation"), (Tab::Hire, "Hire")],
+                );
+            } else {
+                theme::segmented(ui, &mut self.tab, &[(Tab::Craft, "Craft"), (Tab::Automation, "Automation")]);
+            }
         });
         ui.add_space(6.0);
         self.tab
@@ -381,6 +433,7 @@ impl StationPanel {
         match tab {
             Tab::Craft => self.crafting(ui, view, crafting),
             Tab::Automation => self.automation(ui, icons, view),
+            Tab::Hire => self.hire(ui, view),
         }
     }
 
@@ -424,7 +477,15 @@ impl StationPanel {
             });
             return None;
         }
-        self.picker(ui, state, &open.station_type);
+        let shift = view.shift_here();
+        if shift.is_none() {
+            self.picker(ui, state, &open.station_type);
+        } else if let Some(recipe) = self.recipe(state) {
+            ui.horizontal(|ui| {
+                ui.label(theme::dim("Working on:"));
+                ui.label(theme::text(&recipe.name));
+            });
+        }
         ui.add_space(6.0);
 
         let check = self.check(state);
@@ -437,6 +498,33 @@ impl StationPanel {
             ui.add_space(4.0);
         }
         let idle = *view.phase == Phase::Idle;
+        if let Some((offer, shift)) = shift {
+            // Their box, their inputs: what's made goes to them (S2.7)
+            ui.add_space(2.0);
+            theme::well().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    theme::text(format!("What you make goes into {}'s box", offer.employer_name)).size(size::SMALL),
+                );
+                ui.label(
+                    theme::dim(format!(
+                        "You're paid {} Strands each as it's made: {} so far this shift, {} of {} in all",
+                        offer.rate,
+                        offer.rate.saturating_mul(shift.made as i64),
+                        offer.made,
+                        offer.cap
+                    ))
+                    .size(size::LABEL),
+                );
+                if theme::link(ui, "Stop the shift", size::LABEL)
+                    .on_hover_text("End your shift. What you made is paid already")
+                    .clicked()
+                    && view.online
+                {
+                    action = Some(Action::Wages(hire::Act::Ask(wg::Ask::Stop(offer.id))));
+                }
+            });
+        } else {
         ui.horizontal(|ui| {
             ui.add_enabled_ui(idle, |ui| {
                 let fill = match (&check, state.inventory(), state.station_container()) {
@@ -472,6 +560,7 @@ impl StationPanel {
         ui.vertical_centered(|ui| {
             ui.label(theme::dim("What's made here waits in the station's box").size(size::LABEL));
         });
+        }
 
         if let Some(check) = &check {
             if let Some(blocked) = &check.blocked {
@@ -524,6 +613,41 @@ impl StationPanel {
             }),
             Ask::Stop => Some(Action::StopAutomation(station_id)),
         }
+    }
+
+    /// The Hire tab, at a station of yours (S2.7): your offers here, and
+    /// the form for one at any of its recipes.
+    fn hire(&mut self, ui: &mut egui::Ui, view: &View) -> Option<Action> {
+        let wages = view.wages?;
+        let open = view.state.open_station()?;
+        let station_id = open.station_id;
+        let choices: Vec<(String, String)> = station::recipes_at(view.state.recipes(), &open.station_type)
+            .map(|r| (r.id.clone(), r.name.clone()))
+            .collect();
+        // The recipe the box is set for, as the Craft tab picks it
+        let set = self.recipe(view.state).map(|r| r.id.clone());
+        let fresh = || {
+            let work = Work::Craft {
+                station_id,
+                recipe_id: set.or_else(|| choices.first().map(|c| c.0.clone())).unwrap_or_default(),
+            };
+            let rate = wg::rate_for(&work, view.state.catalog());
+            wg::Draft::new(work, rate)
+        };
+        let draft = match &mut self.hire {
+            Some(d) if wg::place_of(&d.work) == station_id => d,
+            slot => slot.insert(fresh()),
+        };
+        let hire_view = hire::View {
+            wages,
+            me: view.state.me(),
+            strands: view.state.strands(),
+            catalog: view.state.catalog(),
+            now: view.now,
+            online: view.online,
+            accent: STATION,
+        };
+        hire::show(ui, station_id, draft, &choices, &hire_view).map(Action::Wages)
     }
 
     /// The station's recipes, narrowed by what's in its box (#490).
@@ -866,6 +990,101 @@ pub fn chest_of_yours(state: &mut GameState) {
     empty_the_box(state);
 }
 
+/// `--station-panel-sample hire` and `shift` (S2.7): the offers on the
+/// Work page. `hire`: one of yours at [`sample`]'s workbench, with Brin on
+/// it. `shift`: one of Ada's at her workbench ([`at_adas_bench`]), with you
+/// on it.
+pub fn sample_wages(which: &str) -> Wages {
+    use capitol_core::protocol::rest::WagesResponse;
+    use capitol_core::protocol::rules::{court, wages::OfferStatus};
+    let now = Utc::now();
+    let hours = capitol_core::chrono::Duration::hours;
+    let shift = |worker: u128, name: &str, made: i32| WageShift {
+        id: Uuid::from_u128(0x5393),
+        offer_id: Uuid::from_u128(0x393),
+        worker_id: Uuid::from_u128(worker),
+        worker_name: name.into(),
+        worker_citizen: false,
+        started_at: now - hours(1),
+        ended_at: None,
+        made,
+        end: None,
+    };
+    let (employer, name, station, worker) = match which {
+        "shift" => (0xada_u128, "Ada Reeder", ADAS_BENCH, shift(0xca9, "You", 3)),
+        _ => (0xca9, "You", 0x235, shift(0xb21, "Brin", 7)),
+    };
+    let offer = WageOffer {
+        id: Uuid::from_u128(0x393),
+        employer_id: Uuid::from_u128(employer),
+        employer_name: name.into(),
+        employer_citizen: false,
+        worker_id: None,
+        worker_name: None,
+        work: Work::Craft { station_id: Uuid::from_u128(station), recipe_id: "tool_handle".into() },
+        x: 0.0,
+        y: 0.0,
+        rate: 4,
+        cap: 40,
+        made: 19,
+        escrow_strands: 4 * 21,
+        fee: court::court_fee(160),
+        posted_at: now - hours(5),
+        ends_at: now + hours(67),
+        status: OfferStatus::Open,
+        shift: Some(worker.clone()),
+    };
+    let mut wages = Wages::default();
+    wages.connected();
+    if let Some(ask) = wages.wants() {
+        wages.sent(ask);
+    }
+    let mine = (which == "shift").then_some(worker);
+    wages.listed(WagesResponse { offers: vec![offer], shift: mine });
+    wages
+}
+
+/// Ada's workbench, beside [`sample`]'s.
+const ADAS_BENCH: u128 = 0xada0;
+
+/// [`sample`] at Ada's workbench instead, where you're on a shift: its box
+/// holds the same sticks and rope, hers.
+pub fn at_adas_bench(state: &mut GameState) {
+    use capitol_core::net::RestResponse;
+    use capitol_core::protocol::rest::StationContainerResponse;
+    use capitol_core::protocol::ws::ServerMessage;
+    const ME: Uuid = Uuid::from_u128(0xca9);
+    let (bench, boxed) = (Uuid::from_u128(ADAS_BENCH), Uuid::from_u128(0xada1));
+    state.apply_ws(&ServerMessage::StationPlaced {
+        station_id: bench,
+        station_type: "workbench".into(),
+        name: "Workbench".into(),
+        owner_id: Uuid::from_u128(0xada),
+        x: 20.0,
+        y: 0.0,
+        container_id: boxed,
+        quality: 70,
+    });
+    state.apply_ws(&ServerMessage::StationOpened {
+        player_id: ME,
+        station_id: bench,
+        station_type: "workbench".into(),
+        name: "Workbench".into(),
+        container_id: boxed,
+    });
+    let catalog = capitol_core::catalog::Catalog::fallback();
+    let item = |n: u128, slot, kind: &str, quality, quantity| {
+        SlotItem::new(Uuid::from_u128(n), kind.into(), catalog.item_name(kind), quality, quantity, slot)
+    };
+    state.apply_rest(&RestResponse::StationContainer(StationContainerResponse {
+        id: boxed,
+        container_type: "station_inventory".into(),
+        slot_count: 16,
+        layout_columns: 4,
+        slots: vec![item(20, 0, "sticks", 66, 14), item(21, 1, "rope", 61, 7), item(22, 4, "tool_handle", 63, 3)],
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,6 +1092,16 @@ mod tests {
     /// Draws the panel for a few frames on a `screen` of points, beside an
     /// inventory at `beside`, and returns where it went.
     fn run(panel: &mut StationPanel, state: &GameState, screen: egui::Vec2, beside: Option<egui::Rect>) -> egui::Rect {
+        run_with(panel, state, None, screen, beside)
+    }
+
+    fn run_with(
+        panel: &mut StationPanel,
+        state: &GameState,
+        wages: Option<&Wages>,
+        screen: egui::Vec2,
+        beside: Option<egui::Rect>,
+    ) -> egui::Rect {
         let ctx = theme::test_context();
         let mut icons = ItemIcons::load(std::path::Path::new("no/icons/needed"));
         let view = View {
@@ -881,6 +1110,9 @@ mod tests {
             refused: None,
             beside,
             automation_refused: None,
+            wages,
+            now: Utc::now(),
+            online: true,
         };
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
@@ -964,6 +1196,49 @@ mod tests {
         assert!((beside.width() - columns).abs() < 1.5, "{beside:?} against {columns}");
         // Nothing scrolls: the Craft tab is taller than the small screen.
         assert!(beside.height() > SMALL.y, "{beside:?}");
+    }
+
+    /// The Hire tab (S2.7) fits the small screen beside the inventory, with
+    /// a running offer over the form.
+    #[test]
+    fn the_hire_tab_fits_beside_the_inventory() {
+        let state = sample();
+        let wages = sample_wages("hire");
+        assert_eq!(wages.mine_at(state.me(), Uuid::from_u128(0x235)).len(), 1);
+        for beside in [None, Some(small_inventory())] {
+            // Opening sets the tab, so turn to Hire after, as a click would
+            let mut panel = craft_tab();
+            run_with(&mut panel, &state, Some(&wages), SMALL, beside);
+            panel.tab = Tab::Hire;
+            let drawn = run_with(&mut panel, &state, Some(&wages), SMALL, beside);
+            on_screen(drawn, SMALL);
+            assert_eq!(panel.tab, Tab::Hire);
+            let draft = panel.hire.as_ref().expect("the form");
+            assert!(matches!(&draft.work, Work::Craft { station_id, .. } if station_id.as_u128() == 0x235));
+        }
+        // No wages to hand (offline, no sample): no Hire tab
+        let mut panel = craft_tab();
+        run(&mut panel, &state, SMALL, None);
+        panel.tab = Tab::Hire;
+        run(&mut panel, &state, SMALL, None);
+        assert_eq!(panel.tab, Tab::Craft);
+    }
+
+    /// On a shift at Ada's bench, the panel keeps to her recipe.
+    #[test]
+    fn on_a_shift_the_panel_keeps_to_the_employers_recipe() {
+        let mut state = sample();
+        at_adas_bench(&mut state);
+        let wages = sample_wages("shift");
+        let mut panel = StationPanel::default();
+        let drawn = run_with(&mut panel, &state, Some(&wages), SMALL, Some(small_inventory()));
+        on_screen(drawn, SMALL);
+        assert_eq!(panel.recipe(&state).map(|r| r.id.as_str()), Some("tool_handle"));
+        assert_eq!(panel.tab, Tab::Craft, "not yours: no other tab");
+        // Off the shift, the box chooses again
+        let mut panel = StationPanel::default();
+        run_with(&mut panel, &state, None, SMALL, None);
+        assert_eq!(panel.shift_recipe, None);
     }
 
     #[test]

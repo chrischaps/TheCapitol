@@ -37,7 +37,7 @@ use std::collections::HashMap;
 
 use capitol_protocol::rest::{
     CatalogResponse, ClaimedPlot, Commission, PauseReason, PlotInfo, RecipeInfo, ResourceNodeInfo,
-    StationInfo, Subscription, SubscriptionStatus, ZoneFactsResponse, FreeLotsResponse, PRODUCTION_LOG_LEN,
+    StationInfo, Subscription, SubscriptionStatus, WageOffer, WageShift, ZoneFactsResponse, FreeLotsResponse, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::Fees;
@@ -370,6 +370,19 @@ pub enum StateEvent {
         quantity: i32,
         delivered: i32,
     },
+    /// A wage offer went up, was taken or worked, or came down
+    /// (`wage_offered`, `wage_updated`, `wage_closed`, Commons S2.6): its
+    /// `status` says which. The Work page's store keeps them (`wages::Wages`,
+    /// S2.7).
+    WageBoard(WageOffer),
+    /// To the employer: someone took your offer (`wage_taken`)
+    WageTaken { offer_id: Uuid, shift: WageShift },
+    /// To both sides: a shift ended, having made `shift.made` and been paid
+    /// `paid` (`wage_shift_ended`)
+    WageShiftEnded { offer_id: Uuid, shift: WageShift, paid: i64 },
+    /// To the worker: units made on your shift and paid for (`wage_paid`).
+    /// `made` is the offer's total so far, of `cap`.
+    WagePaid { offer_id: Uuid, item_type: String, paid: i64, made: i32, cap: i32 },
     /// A bazaar answer changed [`GameState::bazaar`]: the directory, a shop
     /// seen at its stall, or yours.
     BazaarUpdated,
@@ -996,14 +1009,24 @@ impl GameState {
                 name: name.clone(),
                 citizen: *citizen,
             }),
-            // Commons S2.6: wages. The board's Work page, hiring and working,
-            // and their toasts are S2.7's (#393); until then they change nothing.
-            M::WageOffered { .. }
-            | M::WageUpdated { .. }
-            | M::WageClosed { .. }
-            | M::WageTaken { .. }
-            | M::WageShiftEnded { .. }
-            | M::WagePaid { .. } => {}
+            // Commons S2.6: wages, to everyone. The Work page's store keeps
+            // them (`wages::Wages`, S2.7).
+            M::WageOffered { offer } | M::WageUpdated { offer } | M::WageClosed { offer } => {
+                out.push(StateEvent::WageBoard(offer.clone()))
+            }
+            M::WageTaken { offer_id, shift } => {
+                out.push(StateEvent::WageTaken { offer_id: *offer_id, shift: shift.clone() })
+            }
+            M::WageShiftEnded { offer_id, shift, paid } => {
+                out.push(StateEvent::WageShiftEnded { offer_id: *offer_id, shift: shift.clone(), paid: *paid })
+            }
+            M::WagePaid { offer_id, item_type, paid, made, cap, .. } => out.push(StateEvent::WagePaid {
+                offer_id: *offer_id,
+                item_type: item_type.clone(),
+                paid: *paid,
+                made: *made,
+                cap: *cap,
+            }),
             // E3.10: to the merchant. The store takes the sale off your
             // listing, or closes your shop.
             M::BazaarSale { stall_id, item_type, buyer_name, buyer_citizen, units, paid, .. } => {
@@ -1412,6 +1435,10 @@ impl GameState {
             | R::Delivered(_)
             | R::Claim(_)
             | R::Claims(_)
+            | R::Wages(_)
+            | R::WageOffer(_)
+            | R::Shift(_)
+            | R::ShiftEnded(_)
             | R::CreatedApiKey(_)
             | R::ApiKeys(_)
             | R::Citizen(_)

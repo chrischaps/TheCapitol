@@ -92,6 +92,8 @@ struct BoardSample {
     now: capitol_core::chrono::DateTime<capitol_core::chrono::Utc>,
     catalog: capitol_core::catalog::Catalog,
     reader: capitol_core::gazette::Reader,
+    /// The Work page's offers (S2.7)
+    wages: capitol_core::wages::Wages,
 }
 
 
@@ -213,6 +215,8 @@ pub struct CapitolExtension {
     impound_sample: Option<(capitol_core::state::Container, capitol_core::state::Container)>,
     /// `--station-panel-sample`: a workbench of yours open, offline (#235).
     station_panel_sample: Option<capitol_core::state::GameState>,
+    /// Its offers, for the Hire tab and a shift (S2.7)
+    station_panel_wages: Option<capitol_core::wages::Wages>,
     /// Its tab, set once the panel has opened (opening picks its own).
     station_panel_tab: Option<ui::station::Tab>,
     /// The Exchange hall (E3.7), and `--hall-sample`: offline, goods waiting
@@ -346,6 +350,7 @@ impl CapitolExtension {
             impound: ui::impound::ImpoundPanel::default(),
             impound_sample: None,
             station_panel_sample: None,
+            station_panel_wages: None,
             station_panel_tab: None,
             hall: world::hall::HallLayer::default(),
             hall_sample: false,
@@ -610,15 +615,19 @@ impl CapitolExtension {
 
     /// Offline, open the notice board's Wanted page (S2.3) on sample
     /// commissions (`--board-sample`): "list" (the default), "post" or
-    /// "deliver" for a form, or "glint" to leave it closed, so the board in
-    /// the forecourt shows that your pack could fill some.
+    /// "deliver" for a form, "work" for the Work page's wage offers (S2.7),
+    /// or "glint" to leave it closed, so the board in the forecourt shows
+    /// that your pack could fill some.
     pub fn with_board_sample(mut self, which: Option<&str>) -> Self {
         if let (Some(which), None) = (which, &self.session) {
             let catalog = capitol_core::catalog::Catalog::fallback();
             let (board, pack, me, now) = ui::board::sample(which, &catalog);
-            self.board_sample = Some(BoardSample { board, pack, me, now, catalog, reader: ui::gazette::sample() });
-            if which != "glint" {
-                self.gazette.open_board(false);
+            let wages = ui::work::sample(me, now);
+            self.board_sample = Some(BoardSample { board, pack, me, now, catalog, reader: ui::gazette::sample(), wages });
+            match which {
+                "glint" => {}
+                "work" => self.gazette.open_work(),
+                _ => self.gazette.open_board(false),
             }
         }
         self
@@ -672,7 +681,9 @@ impl CapitolExtension {
 
     /// Offline, open the station panel on a sample workbench, on `tab`
     /// (`craft` or `automation`; `empty`, craft with the box empty, or
-    /// `chest`, an empty chest of yours, for the recycling bin, #488),
+    /// `chest`, an empty chest of yours, for the recycling bin, #488;
+    /// `hire`, the Hire tab with an offer of yours worked, or `shift`, on a
+    /// shift at Ada's workbench, S2.7),
     /// with the inventory and crafting panels open beside it
     /// (`--station-panel-sample`, #235).
     pub fn with_station_panel_sample(mut self, tab: Option<&str>) -> Self {
@@ -681,11 +692,14 @@ impl CapitolExtension {
             match tab {
                 "empty" => ui::station::empty_the_box(&mut state),
                 "chest" => ui::station::chest_of_yours(&mut state),
+                "shift" => ui::station::at_adas_bench(&mut state),
                 _ => {}
             }
             self.station_panel_sample = Some(state);
+            self.station_panel_wages = Some(ui::station::sample_wages(tab));
             self.station_panel_tab = Some(match tab {
                 "automation" => ui::station::Tab::Automation,
+                "hire" => ui::station::Tab::Hire,
                 _ => ui::station::Tab::Craft,
             });
             self.inventory.open = true;
@@ -2035,6 +2049,7 @@ impl PlayerExtension for CapitolExtension {
                     help_open: self.shortcuts.open,
                     road_in: self.hints.hidden(),
                     shown_lot: self.shown_chip.clone(),
+                    working: session.wages().working().map(|(o, s)| capitol_core::wages::chip_words(o, s)),
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
                     hall_hint: self.hall_hint,
@@ -2062,6 +2077,13 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if let (true, Some(shown)) = (clicks.shown_lot, &self.shown_lot) {
                     session.move_to(Instant::now(), shown.x, shown.y);
+                }
+                if clicks.work {
+                    self.gazette.open_work();
+                }
+                if let (true, Some(shift)) = (clicks.stop_work, session.wages().shift()) {
+                    let ask = capitol_core::wages::Ask::Stop(shift.offer_id);
+                    session.wage_act(ask);
                 }
                 if clicks.exchange {
                     self.exchange.toggle();
@@ -2320,6 +2342,17 @@ impl PlayerExtension for CapitolExtension {
                             online: true,
                         },
                         icons: &mut self.icons,
+                        work: Some(ui::gazette::WorkPage {
+                            wages: session.wages(),
+                            view: ui::work::View {
+                                me: state.me(),
+                                at: state.local_player().map(|me| [me.x, me.y]),
+                                now: state.utc_now(),
+                                catalog: state.catalog(),
+                                walking: session.walking_to_work(),
+                                online: true,
+                            },
+                        }),
                     };
                     let view = ui::gazette::View { reader: session.gazette(), online: true };
                     self.gazette.show(ctx, &view, Some(wanted))
@@ -2335,6 +2368,11 @@ impl PlayerExtension for CapitolExtension {
                         session.board_act(now, hall, ask)
                     }
                     Some(ui::gazette::Action::Board(ui::board::Action::Card(id))) => {
+                        session.open_card(capitol_core::card::Who::Id(id), None)
+                    }
+                    Some(ui::gazette::Action::Work(ui::work::Action::Take(id))) => session.take_work(now, id),
+                    Some(ui::gazette::Action::Work(ui::work::Action::Act(ask))) => session.wage_act(ask),
+                    Some(ui::gazette::Action::Work(ui::work::Action::Card(id))) => {
                         session.open_card(capitol_core::card::Who::Id(id), None)
                     }
                     None => {}
@@ -2411,6 +2449,21 @@ impl PlayerExtension for CapitolExtension {
                     deed: picked.map_or(capitol_core::deeds::DeedOffer::None, |p| {
                         capitol_core::deeds::offer(p, state.tutorial())
                     }),
+                    // Gathering work on a plot of yours (S2.7)
+                    hire: picked.filter(|p| p.owner_id.is_some() && p.owner_id == state.me()).map(|p| ui::plot::Hire {
+                        wages: session.wages(),
+                        me: state.me(),
+                        resources: capitol_core::wages::resources_on(&p.bounds, state.nodes().values())
+                            .into_iter()
+                            .map(|id| {
+                                let name = state.catalog().resource_type(&id).map_or_else(|| id.replace('_', " "), |r| r.name.clone());
+                                (id, name)
+                            })
+                            .collect(),
+                        catalog: state.catalog(),
+                        now: state.utc_now(),
+                        online: true,
+                    }),
                 };
                 let beside = self.chat.rect.filter(|_| self.chat.open).or(self.crafting.rect);
                 match self.plot_panel.show(ctx, &view, beside) {
@@ -2424,6 +2477,8 @@ impl PlayerExtension for CapitolExtension {
                             session.tutorial_seen(step);
                         }
                     }
+                    Some(ui::plot::Action::Wages(ui::hire::Act::Ask(ask))) => session.wage_act(ask),
+                    Some(ui::plot::Action::Wages(ui::hire::Act::LookUp(draft))) => session.wages_mut().look_up(&draft),
                     Some(ui::plot::Action::Close) => session.close_plot(),
                     None => {}
                 }
@@ -2455,6 +2510,9 @@ impl PlayerExtension for CapitolExtension {
                         .or_else(|| session.move_refused(now)),
                     beside: self.inventory.rect,
                     automation_refused: session.automation_refused(now),
+                    wages: Some(session.wages()),
+                    now: session.state().utc_now(),
+                    online: true,
                 };
                 match self
                     .station
@@ -2481,6 +2539,8 @@ impl PlayerExtension for CapitolExtension {
                         session.start_automation(station_id, &draft)
                     }
                     Some(StationAction::StopAutomation(id)) => session.stop_automation(id),
+                    Some(StationAction::Wages(ui::hire::Act::Ask(ask))) => session.wage_act(ask),
+                    Some(StationAction::Wages(ui::hire::Act::LookUp(draft))) => session.wages_mut().look_up(&draft),
                     None => {}
                 }
                 let state = session.state();
@@ -2633,6 +2693,38 @@ impl PlayerExtension for CapitolExtension {
             }
         }
         if let Some(state) = &self.station_panel_sample {
+            // On a shift, the header's chip says so (S2.7). Drawn first, as
+            // online, so the panels are placed under it
+            if let Some((o, sh)) = self.station_panel_wages.as_ref().and_then(|w| w.working()) {
+                let view = HeaderView {
+                    zone: None,
+                    strands: Some(148),
+                    who: "You",
+                    patron: None,
+                    connection: None,
+                    down: false,
+                    inventory_open: true,
+                    crafting_open: true,
+                    exchange_open: false,
+                    market_open: false,
+                    gazette_open: false,
+                    gazette_news: None,
+                    chat_open: false,
+                    chat_unread: 0,
+                    mail_open: false,
+                    mail_unread: 0,
+                    help_open: false,
+                    settings_open: false,
+                    inventory_pulse: 0.0,
+                    hall_hint: None,
+                    impound: None,
+                    impound_open: false,
+                    road_in: None,
+                    shown_lot: None,
+                    working: Some(capitol_core::wages::chip_words(o, sh)),
+                };
+                ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
+            }
             let phase = capitol_core::craft::Phase::Idle;
             let view = ui::crafting::View { state, phase: &phase, refused: None };
             self.crafting.show(ctx, &mut self.icons, &view, 0.0);
@@ -2643,11 +2735,15 @@ impl PlayerExtension for CapitolExtension {
                 refused: None,
                 beside: self.inventory.rect,
                 automation_refused: None,
+                wages: self.station_panel_wages.as_ref(),
+                now: capitol_core::chrono::Utc::now(),
+                online: false,
             };
             self.station.show(ctx, &mut self.icons, &view, 0.0);
             if let Some(tab) = self.station_panel_tab.take() {
                 self.station.tab = tab;
             }
+
             self.inventory.show(ctx, &mut self.icons, state.catalog(), state.inventory(), None, 0.0);
         }
         if let Some((log, chat, me, state, hints)) = &mut self.chat_sample {
@@ -2692,6 +2788,7 @@ impl PlayerExtension for CapitolExtension {
                     impound_open: false,
                     road_in: Some(hidden),
                     shown_lot: None,
+                    working: None,
                 };
                 ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
             }
@@ -2719,6 +2816,17 @@ impl PlayerExtension for CapitolExtension {
                     online: false,
                 },
                 icons: &mut self.icons,
+                work: Some(ui::gazette::WorkPage {
+                    wages: &s.wages,
+                    view: ui::work::View {
+                        me: Some(s.me),
+                        at: Some([capitol_core::protocol::rules::CENTER_X, capitol_core::protocol::rules::CENTER_Y + 400.0]),
+                        now: s.now,
+                        catalog: &s.catalog,
+                        walking: false,
+                        online: false,
+                    },
+                }),
             };
             self.gazette.reading(&mut s.reader);
             if let Some(ui::gazette::Action::Turn(by)) =
@@ -2770,6 +2878,7 @@ impl PlayerExtension for CapitolExtension {
                     impound_open: false,
                     road_in: None,
                     shown_lot: Some(lot.clone()),
+                    working: None,
                 };
                 ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
             }

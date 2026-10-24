@@ -204,6 +204,17 @@ pub enum RestRequest {
     /// `GET /commissions/claims`: your standing claims
     MyClaims,
 
+    /// `GET /wages?mine=&status=`: the board's Work page, and your shift (S2.6)
+    Wages(WagesQuery),
+    /// `POST /wages`: offer work at a station or on a lot of yours
+    OfferWages(OfferWages),
+    /// `DELETE /wages/{id}`: take your offer down
+    WithdrawWages { offer_id: Uuid },
+    /// `POST /wages/{id}/take`: start a shift on an offer
+    TakeWages { offer_id: Uuid },
+    /// `DELETE /wages/{id}/shift`: stop the shift on an offer, as its worker or employer
+    StopShift { offer_id: Uuid },
+
     /// `GET /bazaar`: the directory of shops (E3.10)
     Bazaar,
     /// `GET /bazaar/mine`
@@ -329,6 +340,14 @@ pub enum RestResponse {
     Claim(ClaimResponse),
     /// Your standing claims
     Claims(ClaimsResponse),
+    /// The open wage offers, and your shift (S2.6)
+    Wages(WagesResponse),
+    /// A wage offer as made, or as withdrawn
+    WageOffer(WageOffer),
+    /// Your shift, as taken
+    Shift(WageShift),
+    /// What a stopped shift came to
+    ShiftEnded(ShiftEnded),
     /// A station's automation as configured, started or stopped
     Automation {
         station_id: Uuid,
@@ -426,6 +445,8 @@ impl RestRequest {
             | PostCommission(_)
             | DeliverCommission { .. }
             | ClaimCommission { .. }
+            | OfferWages(_)
+            | TakeWages { .. }
             | CollectMarketBox(_)
             | CollectImpound(_)
             | StartAutomation { .. }
@@ -449,7 +470,9 @@ impl RestRequest {
             | Unmute { .. }
             | DropLetter { .. }
             | CancelCommission { .. }
-            | ReleaseClaim { .. } => Method::DELETE,
+            | ReleaseClaim { .. }
+            | WithdrawWages { .. }
+            | StopShift { .. } => Method::DELETE,
             ApiKeys
             | Health
             | Terrain { .. }
@@ -486,6 +509,7 @@ impl RestRequest {
             | Gazette { .. }
             | Commissions(_)
             | MyClaims
+            | Wages(_)
             | Bazaar
             | MyStall
             | Shop { .. }
@@ -574,6 +598,10 @@ impl RestRequest {
             ClaimCommission { commission_id, .. } | ReleaseClaim { commission_id } => {
                 format!("/commissions/{commission_id}/claim")
             }
+            Wages(_) | OfferWages(_) => "/wages".into(),
+            WithdrawWages { offer_id } => format!("/wages/{offer_id}"),
+            TakeWages { offer_id } => format!("/wages/{offer_id}/take"),
+            StopShift { offer_id } => format!("/wages/{offer_id}/shift"),
             Bazaar => "/bazaar".into(),
             MyStall => "/bazaar/mine".into(),
             Shop { stall_id } => format!("/bazaar/stalls/{stall_id}"),
@@ -619,6 +647,8 @@ impl RestRequest {
             PostCommission(b) => req.json(b),
             DeliverCommission { request, .. } => req.json(request),
             ClaimCommission { request, .. } => req.json(request),
+            Wages(q) => req.query(q),
+            OfferWages(b) => req.json(b),
             ConfigureAutomation { request, .. } => req.json(request),
             RentStall { request, .. } => req.json(request),
             Stock(b) => req.json(b),
@@ -717,6 +747,10 @@ impl RestRequest {
             Q::DeliverCommission { .. } => A::Delivered(de(body)?),
             Q::ClaimCommission { .. } | Q::ReleaseClaim { .. } => A::Claim(de(body)?),
             Q::MyClaims => A::Claims(de(body)?),
+            Q::Wages(_) => A::Wages(de(body)?),
+            Q::OfferWages(_) | Q::WithdrawWages { .. } => A::WageOffer(de(body)?),
+            Q::TakeWages { .. } => A::Shift(de(body)?),
+            Q::StopShift { .. } => A::ShiftEnded(de(body)?),
             Q::ConfigureAutomation { station_id, .. }
             | Q::StartAutomation { station_id }
             | Q::StopAutomation { station_id } => A::Automation {
@@ -943,6 +977,21 @@ mod tests {
             ),
             (RestRequest::ReleaseClaim { commission_id: id }, "DELETE", format!("/commissions/{id}/claim")),
             (RestRequest::MyClaims, "GET", "/commissions/claims".into()),
+            (RestRequest::Wages(Default::default()), "GET", "/wages".into()),
+            (
+                RestRequest::OfferWages(OfferWages {
+                    work: capitol_protocol::rules::wages::Work::Gather { plot_id: id, resource: "grass".into() },
+                    rate: 2,
+                    cap: 10,
+                    term_days: 1,
+                    worker_id: None,
+                }),
+                "POST",
+                "/wages".into(),
+            ),
+            (RestRequest::WithdrawWages { offer_id: id }, "DELETE", format!("/wages/{id}")),
+            (RestRequest::TakeWages { offer_id: id }, "POST", format!("/wages/{id}/take")),
+            (RestRequest::StopShift { offer_id: id }, "DELETE", format!("/wages/{id}/shift")),
             (
                 RestRequest::PlayerCardByName { name: "Ada Reeder/2?é".into() },
                 "GET",

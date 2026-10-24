@@ -161,6 +161,10 @@ pub struct HeaderView<'a> {
     /// isn't pointing to it: its chip, with how far and an arrow that
     /// points the way ([`bearing`]). `None` hides it.
     pub shown_lot: Option<ShownLot>,
+    /// You're on a shift (Commons S2.7): its chip's words, "Working for
+    /// Ada: 12 of 40, 48 Strands" (`capitol_core::wages::chip_words`), with
+    /// Stop. `None` hides it.
+    pub working: Option<String>,
 }
 
 /// A lot the Deeds Office marked on the ground, as its header chip says it.
@@ -193,6 +197,10 @@ pub struct HeaderClicks {
     pub road_in: bool,
     /// The shown lot's chip: walk there.
     pub shown_lot: bool,
+    /// The shift's chip: open the board's Work page.
+    pub work: bool,
+    /// The shift chip's Stop.
+    pub stop_work: bool,
     pub help: bool,
     pub settings: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
@@ -268,6 +276,9 @@ pub fn header(
                     }
                     if let Some(lot) = &view.shown_lot {
                         clicks.shown_lot = shown_lot_chip(ui, lot).clicked();
+                    }
+                    if let Some(words) = &view.working {
+                        (clicks.work, clicks.stop_work) = work_chip(ui, words);
                     }
                     if let Some(stacks) = view.impound.filter(|n| *n > 0) {
                         clicks.impound = impound_chip(ui, stacks, view.impound_open).clicked();
@@ -400,6 +411,35 @@ fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
         .interact(egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Your market box holds goods. Collect them at the Exchange hall: click to walk there")
+}
+
+/// The shift you're on (Commons S2.7): a gold chip, as the hall's, with
+/// whose work it is and what it's come to, and Stop at its end. A click on
+/// the words opens the board's Work page. (work, stop) clicked.
+fn work_chip(ui: &mut egui::Ui, words: &str) -> (bool, bool) {
+    let mut stop = false;
+    let shown = theme::chip(theme::GOLD_DIM, theme::GOLD_WASH).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // Right to left: Stop sits at the chip's end
+            stop = ui
+                .add(
+                    egui::Label::new(RichText::new("Stop").size(size::SMALL).color(theme::GOLD).underline())
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("End your shift. What you made is paid already")
+                .clicked();
+            ui.label(RichText::new(words).font(theme::strong(size::SMALL)).color(theme::GOLD_LIGHT));
+        });
+    });
+    let work = shown
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Your shift: each one you make goes into their box and is paid as it's made. Click for the Work page")
+        .clicked();
+    (work && !stop, stop)
 }
 
 /// A lot the Deeds Office showed you (#448): a gold chip, as the hall's,

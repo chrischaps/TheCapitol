@@ -256,7 +256,7 @@ fn test_for(message: &M) -> fn() {
         | M::WageClosed { .. }
         | M::WageTaken { .. }
         | M::WageShiftEnded { .. }
-        | M::WagePaid { .. } => wages_wait_for_the_work_page,
+        | M::WagePaid { .. } => wages_reach_the_work_page,
     }
 }
 
@@ -1516,16 +1516,24 @@ fn a_letter_is_reported() {
     );
 }
 
-/// Wages' messages (Commons S2.6) parse and change nothing until the Work
-/// page reads them (S2.7, #393)
+/// Wages' messages (Commons S2.6) become events for the Work page's store
+/// (S2.7, #393)
 #[test]
-fn wages_wait_for_the_work_page() {
+fn wages_reach_the_work_page() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/tests/fixtures/server");
     let mut state = connected();
     for name in ["wage_offered", "wage_updated", "wage_closed", "wage_taken", "wage_shift_ended", "wage_paid"] {
         let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).expect("the fixture");
         let message: M = serde_json::from_str(&json).expect("it parses");
-        assert_eq!(state.apply_ws(&message), vec![], "{name}");
+        let events = state.apply_ws(&message);
+        let fits = match (&message, events.as_slice()) {
+            (M::WageOffered { offer } | M::WageUpdated { offer } | M::WageClosed { offer }, [StateEvent::WageBoard(o)]) => o == offer,
+            (M::WageTaken { offer_id, .. }, [StateEvent::WageTaken { offer_id: o, .. }]) => o == offer_id,
+            (M::WageShiftEnded { paid, .. }, [StateEvent::WageShiftEnded { paid: p, .. }]) => p == paid,
+            (M::WagePaid { made, .. }, [StateEvent::WagePaid { made: m, .. }]) => m == made,
+            _ => false,
+        };
+        assert!(fits, "{name}: {events:?}");
     }
 }
 

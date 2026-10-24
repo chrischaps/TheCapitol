@@ -34,12 +34,12 @@ use super::slots;
 use super::theme::{self, size};
 
 /// Two columns of cards from this wide.
-const TWO_COLUMNS: f32 = 560.0;
+pub(super) const TWO_COLUMNS: f32 = 560.0;
 /// The gap between cards, and the room over each for its pin.
-const GAP: f32 = 12.0;
-const PIN: f32 = 5.0;
+pub(super) const GAP: f32 = 12.0;
+pub(super) const PIN: f32 = 5.0;
 /// A card's icon.
-const ICON: f32 = 28.0;
+pub(super) const ICON: f32 = 28.0;
 /// Where a form's button was drawn this frame, kept in egui's memory for
 /// the tests to click.
 const GO: &str = "capitol_board_go";
@@ -684,7 +684,7 @@ fn stack_chip(ui: &mut egui::Ui, icons: &mut ItemIcons, s: &SlotItem, min_qualit
 }
 
 /// A card of paper on the cork; yours edged in gold.
-fn paper_card(mine: bool) -> egui::Frame {
+pub(super) fn paper_card(mine: bool) -> egui::Frame {
     let edge = if mine { theme::GOLD } else { theme::PAPER_EDGE };
     egui::Frame::none()
         .fill(theme::PAPER)
@@ -695,7 +695,7 @@ fn paper_card(mine: bool) -> egui::Frame {
 }
 
 /// A narrow slip of paper for the page's news.
-fn slip(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn slip(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
         .fill(theme::PAPER)
         .stroke(Stroke::new(1.0_f32, theme::PAPER_EDGE))
@@ -705,7 +705,7 @@ fn slip(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// A filter or a grade: a little paper tag, darker when it's chosen.
-fn tag(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
+pub(super) fn tag(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
     let (fill, ink_colour) = if on { (theme::PAPER, theme::INK) } else { (theme::PAPER_DEEP.gamma_multiply(0.75), theme::INK_DIM) };
     let inner = egui::Frame::none()
         .fill(fill)
@@ -722,7 +722,7 @@ fn tag(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
 /// A small button lettered on a slip of paper. One that can't be pressed
 /// is lettered faintly but still says why on hover, which egui's disabled
 /// widgets don't.
-fn note_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
+pub(super) fn note_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     ui.scope(|ui| {
         theme::paper_widgets(ui);
         let label = RichText::new(text).font(theme::strong(size::SMALL));
@@ -741,7 +741,7 @@ fn note_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
 
 /// A person's name on a card: underlined under the pointer, and a click
 /// opens their card (S0.3). Whether it was clicked.
-fn name_link(ui: &mut egui::Ui, name: &str) -> bool {
+pub(super) fn name_link(ui: &mut egui::Ui, name: &str) -> bool {
     let r = ui.add(egui::Label::new(RichText::new(name).font(theme::strong(size::SMALL)).color(theme::INK)).sense(Sense::click()));
     if r.hovered() {
         ui.painter().hline(r.rect.x_range(), r.rect.bottom() - 1.0, Stroke::new(1.0_f32, theme::INK_RULE));
@@ -753,24 +753,24 @@ fn first_item(catalog: &Catalog) -> String {
     catalog.item_types().first().map_or_else(|| "plank".to_owned(), |t| t.id.clone())
 }
 
-fn kicker(text: &str) -> RichText {
+pub(super) fn kicker(text: &str) -> RichText {
     RichText::new(text).font(theme::display(size::HEADING)).color(theme::INK).extra_letter_spacing(1.5)
 }
 
-fn rule(ui: &mut egui::Ui) {
+pub(super) fn rule(ui: &mut egui::Ui) {
     theme::rule_in(ui, theme::INK_RULE.gamma_multiply(0.6));
 }
 
-fn ink(text: &str, size: f32) -> RichText {
+pub(super) fn ink(text: &str, size: f32) -> RichText {
     RichText::new(text).font(theme::body(size)).color(theme::INK)
 }
 
-fn ink_dim(text: &str, size: f32) -> RichText {
+pub(super) fn ink_dim(text: &str, size: f32) -> RichText {
     RichText::new(text).font(theme::body(size)).color(theme::INK_DIM)
 }
 
 /// Words straight on the cork, in the paper's colour.
-fn on_cork(text: &str) -> RichText {
+pub(super) fn on_cork(text: &str) -> RichText {
     RichText::new(text).font(theme::body(size::BODY)).color(theme::PAPER)
 }
 

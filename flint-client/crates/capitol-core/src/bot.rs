@@ -1876,6 +1876,21 @@ impl Bot {
         }
     }
 
+    /// Offers piece-rate work at a station or on a lot of ours (Commons
+    /// S2.6) and returns the offer as made. From anywhere.
+    pub fn offer_wages(
+        &mut self,
+        offer: capitol_protocol::rest::OfferWages,
+    ) -> Result<capitol_protocol::rest::WageOffer, BotError> {
+        match self.call("offering wages", RestRequest::OfferWages(offer))? {
+            RestResponse::WageOffer(offer) => {
+                self.log(format!("offered {} units at {} each", offer.cap, offer.rate));
+                Ok(offer)
+            }
+            other => Err(unexpected("offering wages", &other)),
+        }
+    }
+
     /// Every open commission on the hall's board (S2.1), newest first. From
     /// anywhere.
     pub fn commissions(&mut self) -> Result<Vec<capitol_protocol::rest::Commission>, BotError> {

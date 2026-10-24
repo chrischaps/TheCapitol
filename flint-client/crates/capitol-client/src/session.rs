@@ -120,6 +120,10 @@ const TUTORIAL_TAG: Tag = 150;
 /// posting, delivering, claiming and the rest, one at a time.
 const BOARD_TAG: Tag = 160;
 
+/// The tag on wages' calls (Commons S2.7): the Work page's offers, offering,
+/// withdrawing, taking and stopping, and the name a named offer is for.
+const WAGES_TAG: Tag = 170;
+
 /// How often the directory and your stall are asked for again, while in the
 /// world: they change only when a merchant rents, stocks or sells out.
 const BAZAAR_REFRESH: Duration = Duration::from_secs(60);
@@ -257,6 +261,16 @@ pub struct Session {
     /// post or deliver there.
     board: capitol_core::commissions::Board,
     board_walk: capitol_core::hall::Visit,
+    /// Wages (S2.7): the Work page's offers, your shift, and a walk to the
+    /// work you're taking.
+    wages: capitol_core::wages::Wages,
+    work_walk: capitol_core::wages::Walk,
+    /// A station whose shift was just taken, to open once the store knows
+    /// it, and until when to wait for that.
+    open_after_take: Option<(Uuid, Instant)>,
+    /// The station of the shift you're on, while you're on one, so it can
+    /// close when the shift ends: it's no longer yours to use.
+    shift_station: Option<Uuid>,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -471,6 +485,10 @@ impl Session {
             letter_notes: Vec::new(),
             board: Default::default(),
             board_walk: capitol_core::hall::Visit::default(),
+            wages: Default::default(),
+            work_walk: Default::default(),
+            open_after_take: None,
+            shift_station: None,
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -546,6 +564,7 @@ impl Session {
         self.approach.walked();
         self.hall.walked();
         self.board_walk.walked();
+        self.work_walk.walked();
         self.stall.walked();
         self.walk(now, x, y);
     }
@@ -563,6 +582,7 @@ impl Session {
         self.approach.walked();
         self.hall.walked();
         self.board_walk.walked();
+        self.work_walk.walked();
         self.stall.walked();
         self.route.stop();
         if let Some((x, y)) = self.motion.stop(now) {
@@ -669,6 +689,7 @@ impl Session {
         self.approach.walked();
         self.hall.walked();
         self.board_walk.walked();
+        self.work_walk.walked();
         self.stall.walked();
         if let Some(step) = self.visit.click(station, &self.state, now) {
             self.station_step(now, step);
@@ -725,6 +746,7 @@ impl Session {
         self.approach.walked();
         self.hall.walked();
         self.board_walk.walked();
+        self.work_walk.walked();
         match self.stall.click(streets, stall, at) {
             capitol_core::bazaar::Step::Open => true,
             capitol_core::bazaar::Step::WalkTo { x, y } => {
@@ -1741,6 +1763,139 @@ impl Session {
         }
     }
 
+    /// Wages (S2.7): the Work page's offers and your shift.
+    pub fn wages(&self) -> &capitol_core::wages::Wages {
+        &self.wages
+    }
+
+    pub fn wages_mut(&mut self) -> &mut capitol_core::wages::Wages {
+        &mut self.wages
+    }
+
+    /// Offer work, take an offer down, or stop a shift: from anywhere. A
+    /// take goes through [`Self::take_work`], which walks you there first.
+    pub fn wage_act(&mut self, ask: capitol_core::wages::Ask) {
+        if self.auth.phase() == Phase::InWorld {
+            self.wages.queue(ask);
+        }
+    }
+
+    /// Take the offer `offer_id`: at once if you're at the work, or once a
+    /// walk there comes within reach. Walking anywhere else on the way
+    /// drops it. Taken at a station, the station opens on its recipe.
+    pub fn take_work(&mut self, now: Instant, offer_id: Uuid) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        let (Some(offer), Some(me)) = (self.wages.offer(offer_id), self.state.local_player()) else {
+            return;
+        };
+        let (to, at) = ([offer.x, offer.y], [me.x, me.y]);
+        self.harvest.walked();
+        self.visit.walked();
+        self.approach.walked();
+        self.hall.walked();
+        self.board_walk.walked();
+        self.stall.walked();
+        let ask = capitol_core::wages::Ask::Take(offer_id);
+        match self.work_walk.click(to, at) {
+            capitol_core::wages::Step::Here => self.wages.queue(ask),
+            capitol_core::wages::Step::WalkTo { x, y } => {
+                self.wages.hold(ask);
+                self.walk(now, x, y);
+            }
+        }
+    }
+
+    /// Whether you're walking to work you're taking.
+    pub fn walking_to_work(&self) -> bool {
+        self.wages.held().is_some() && self.work_walk.walking()
+    }
+
+    /// Each frame: a walk to the work arrives, or was abandoned.
+    fn tend_work_walk(&mut self) {
+        if self.wages.held().is_none() {
+            return;
+        }
+        match self.state.local_player().map(|me| [me.x, me.y]) {
+            Some(at) if self.work_walk.arrived(at) => self.wages.release(),
+            _ if !self.work_walk.walking() => self.wages.drop_held(),
+            _ => {}
+        }
+    }
+
+    fn tend_wages(&mut self, now: Instant) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        use capitol_core::wages::Ask;
+        if let Some(ask) = self.wages.wants() {
+            let request = match &ask {
+                Ask::List => RestRequest::Wages(Default::default()),
+                Ask::Offer(offer) => RestRequest::OfferWages(offer.clone()),
+                Ask::Withdraw(id) => RestRequest::WithdrawWages { offer_id: *id },
+                Ask::Take(id) => RestRequest::TakeWages { offer_id: *id },
+                Ask::Stop(id) => RestRequest::StopShift { offer_id: *id },
+                Ask::Lookup(name) => RestRequest::PlayerCardByName { name: name.clone() },
+            };
+            self.wages.sent(ask);
+            self.net.rest(request, WAGES_TAG);
+        }
+        // A shift just taken at a station: open it, so its panel shows the
+        // work. One far from where you were may not be in the store yet.
+        if let Some(shift) = self.wages.take_started() {
+            let at = self.wages.offer(shift.offer_id).map(|o| o.work.clone());
+            if let Some(capitol_core::protocol::rules::wages::Work::Craft { station_id, .. }) = at {
+                self.open_after_take = Some((station_id, now + Duration::from_secs(30)));
+                self.poller.request(Fetch::NearbyStations);
+            }
+        }
+        if let Some((station_id, until)) = self.open_after_take {
+            if self.state.station(station_id).is_some() {
+                self.open_after_take = None;
+                self.open_station(now, station_id);
+            } else if now >= until {
+                self.open_after_take = None;
+            }
+        }
+        // However the shift ended (the cap, Stop, away, the term), the
+        // employer's station closes: its box can't be read any more, and
+        // left open it would show what it held at the last craft
+        let working = self.wages.working().and_then(|(o, _)| match &o.work {
+            capitol_core::protocol::rules::wages::Work::Craft { station_id, .. } => Some(*station_id),
+            capitol_core::protocol::rules::wages::Work::Gather { .. } => None,
+        });
+        if let Some(ended) = self.shift_station.filter(|_| self.wages.shift().is_none()) {
+            let open = self.state.open_station_info().map(|s| (s.id, s.owner_id));
+            if open.is_some_and(|(id, owner)| id == ended && Some(owner) != self.state.me()) {
+                self.close_station();
+            }
+        }
+        self.shift_station = working.or(self.shift_station.filter(|_| self.wages.shift().is_some()));
+    }
+
+    /// Turns a take of your offer, or a shift's end, into a toast.
+    fn note_wages(&mut self, change: &StateEvent) {
+        use capitol_core::wages as wg;
+        let me = self.state.me();
+        let (title, body) = match change {
+            StateEvent::WageTaken { offer_id, shift } => {
+                let work = self
+                    .wages
+                    .offer(*offer_id)
+                    .map_or_else(|| "the work you offered".to_owned(), |o| wg::work_words(&o.work, self.state.catalog()));
+                wg::taken_words(shift, &work)
+            }
+            StateEvent::WageShiftEnded { offer_id, shift, paid } => {
+                self.wages.shift_ended(*offer_id, shift);
+                wg::ended_words(Some(shift.worker_id) == me, shift, *paid)
+            }
+            _ => return,
+        };
+        tracing::info!("wages: {title}: {body}");
+        self.market_notes.push(TradeNote::new(title, body));
+    }
+
     /// Turns a claim's notice into a toast, and asks for your claims again.
     fn note_claim(&mut self, change: &StateEvent) {
         use capitol_core::commissions as cm;
@@ -1964,6 +2119,7 @@ impl Session {
         self.visit.walked();
         self.hall.walked();
         self.board_walk.walked();
+        self.work_walk.walked();
         self.stall.walked();
         self.trade_step(now, step);
         self.note_approach();
@@ -2418,6 +2574,27 @@ impl Session {
                         self.board.failed(why);
                     }
                 },
+                NetEvent::Rest(WAGES_TAG, result) => match result {
+                    Ok(RestResponse::Wages(answer)) => self.wages.listed(answer.clone()),
+                    Ok(RestResponse::WageOffer(offer)) => self.wages.offered(offer.clone(), self.state.me()),
+                    Ok(RestResponse::Shift(shift)) => {
+                        tracing::info!("wages: took {}", shift.offer_id);
+                        self.wages.took(shift.clone());
+                        if let Some(offer) = self.wages.offer(shift.offer_id) {
+                            let work = capitol_core::wages::work_words(&offer.work, self.state.catalog());
+                            let (title, body) = capitol_core::wages::started_words(offer, &work);
+                            self.market_notes.push(TradeNote::new(title, body));
+                        }
+                    }
+                    Ok(RestResponse::ShiftEnded(ended)) => self.wages.stopped(ended.clone()),
+                    Ok(RestResponse::Card(card)) => self.wages.card(card.clone()),
+                    Ok(other) => tracing::warn!("wages: an answer it didn't ask for: {other:?}"),
+                    Err(e) => {
+                        let why = refusal(e);
+                        tracing::info!("wages: refused: {why}");
+                        self.wages.failed(why, e.status() == Some(404));
+                    }
+                },
                 NetEvent::Rest(CARD_TAG, result) => match result {
                     Ok(RestResponse::Card(card)) => self.cards.answered(card.clone()),
                     Ok(_) => self.cards.failed(false),
@@ -2510,6 +2687,7 @@ impl Session {
                     self.chat.connected();
                     self.mail.connected();
                     self.board.connected();
+                    self.wages.connected();
                 }
             }
             let trade_before = self.state.trade().clone();
@@ -2613,6 +2791,9 @@ impl Session {
                         self.note_commission(change)
                     }
                     StateEvent::Board(commission) => self.board.apply(commission.clone()),
+                    StateEvent::WageBoard(offer) => self.wages.apply(offer.clone(), self.state.me()),
+                    StateEvent::WagePaid { offer_id, made, .. } => self.wages.paid(*offer_id, *made),
+                    StateEvent::WageTaken { .. } | StateEvent::WageShiftEnded { .. } => self.note_wages(change),
                     StateEvent::CommissionClaimed { .. } | StateEvent::ClaimDueSoon { .. } | StateEvent::ClaimLapsed { .. } => {
                         self.note_claim(change)
                     }
@@ -2733,6 +2914,8 @@ impl Session {
             self.tend_mail();
             self.tend_board_walk(terrain);
             self.tend_board();
+            self.tend_work_walk();
+            self.tend_wages(now);
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -2839,6 +3022,10 @@ impl Session {
             self.letter_notes.clear();
             self.board.signed_out();
             self.board_walk = capitol_core::hall::Visit::default();
+            self.wages.signed_out();
+            self.work_walk = Default::default();
+            self.open_after_take = None;
+            self.shift_station = None;
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();
@@ -3625,6 +3812,125 @@ mod tests {
             .expect("the poster heard the delivery");
         poster.fetch_market_box().expect("the box");
         assert_eq!(poster.count(capitol_core::catalog::container_type::MARKET_BOX, "fiber"), 3);
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Wages end to end (S2.7): a bot claims an urban lot, puts a workbench
+    /// on it with six sticks and three rope in its box, and offers three tool
+    /// handles at 3 Strands each. The session, signed in as a second account,
+    /// sees the offer on the Work page, takes it (walking there first), and
+    /// crafts three handles at the bench. They land in the bench's box, the
+    /// worker is paid 3 × the rate, and the shift ends at the cap. Needs a
+    /// backend with `DEV_GRANTS=on`, for the bot's kit, wood and Strands.
+    #[test]
+    #[ignore = "needs the local stack, with DEV_GRANTS=on"]
+    fn a_wage_offer_is_taken_and_worked() {
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::net::NetConfig;
+        use capitol_core::protocol::rest::{GrantItem, GrantRequest, OfferWages};
+        use capitol_core::protocol::rules::wages::Work;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100_000_000;
+
+        // The employer: a kit, the inputs and Strands from a grant, a lot, a bench
+        let mut ada = Bot::sign_in(NetConfig::with_base_url(&server), &Account::numbered(&format!("hire{stamp}"), 1))
+            .expect("the employer signed in");
+        let item = |item_type: &str, quantity| GrantItem { item_type: item_type.into(), quantity, quality: 60 };
+        ada.grant(GrantRequest { strands: 5000, items: vec![item("workbench_kit", 1), item("sticks", 6), item("rope", 3)] })
+            .expect("the grant (DEV_GRANTS=on?)");
+        ada.go_to_exchange().expect("at the hall");
+        ada.collect_market_box().expect("collected the grant");
+        let near = ada.position();
+        let plot = ada.unclaimed_plots("urban", near).expect("plots").into_iter().next().expect("a free urban lot");
+        let plot = ada.claim_plot(plot.id).expect("claimed");
+        let kit = ada
+            .state()
+            .inventory()
+            .and_then(|inv| inv.items().find(|i| i.item_type == "workbench_kit").map(|i| i.item_id))
+            .expect("the kit");
+        let mut bench = None;
+        for (x, y) in capitol_core::sim::lot::spots(&plot, &[]).into_iter().take(8) {
+            if ada.walk_to(x, y).is_err() {
+                continue;
+            }
+            if let Ok(placed) = ada.place_station("workbench", kit, x, y) {
+                bench = Some(placed);
+                break;
+            }
+        }
+        let bench = bench.expect("a workbench on the lot");
+        let boxed = bench.container_id.expect("the bench's box");
+        for (n, kind) in ["sticks", "rope"].into_iter().enumerate() {
+            let id = ada
+                .state()
+                .inventory()
+                .and_then(|inv| inv.items().find(|i| i.item_type == kind).map(|i| i.item_id))
+                .expect("the inputs");
+            ada.move_item(id, boxed, n as i32).expect("into the bench's box");
+        }
+        let offer = ada
+            .offer_wages(OfferWages {
+                work: Work::Craft { station_id: bench.id, recipe_id: "tool_handle".into() },
+                rate: 3,
+                cap: 3,
+                term_days: 1,
+                worker_id: None,
+            })
+            .expect("offered");
+
+        // The worker, through the session
+        let worker = Account::numbered(&format!("work{stamp}"), 1);
+        drop(Bot::sign_in(NetConfig::with_base_url(&server), &worker).expect("the worker registered"));
+        let dir = std::env::temp_dir().join(format!("capitol-wages-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let mut terrain = TerrainSource::online(&server);
+        session.log_in(&worker.email, &worker.password);
+        let mut wait = |session: &mut Session, what: &str, secs: u64, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(secs);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the Work page", 60, &|s| s.wages().offer(offer.id).is_some() && s.state().strands().is_some());
+        let before = session.state().strands().unwrap();
+
+        // Take: the walk there, the shift, and the bench opening on its recipe
+        session.take_work(Instant::now(), offer.id);
+        assert!(session.walking_to_work() || session.wages().busy());
+        wait(&mut session, "the walk and the shift", 240, &|s| s.wages().working().is_some());
+        wait(&mut session, "the bench open", 60, &|s| {
+            s.state().open_station().is_some_and(|o| o.station_id == bench.id) && s.state().station_container().is_some()
+        });
+        assert_eq!(session.wages().refused(), None);
+
+        // Three handles, one at a time
+        for n in 1..=3 {
+            session.craft_at_station(Instant::now(), "tool_handle");
+            wait(&mut session, "a handle", 60, &|s| {
+                s.wages().shift().is_none_or(|sh| sh.made >= n) && *s.crafting().phase() == capitol_core::craft::Phase::Idle
+            });
+        }
+        wait(&mut session, "the shift's end at the cap", 30, &|s| s.wages().shift().is_none());
+        wait(&mut session, "the pay", 30, &|s| s.state().strands() == Some(before + 9));
+        assert!(session.wages().offer(offer.id).is_none(), "filled, so off the page");
+        wait(&mut session, "the bench closed at the shift's end", 30, &|s| s.state().open_station().is_none());
+
+        // The employer heard it taken and ended
+        ada.until("the shift's end", Duration::from_secs(20), |_, events| {
+            events.iter().any(|e| matches!(e, StateEvent::WageShiftEnded { shift, .. } if shift.made == 3))
+        })
+        .expect("the employer heard the shift end");
+        // The three handles are in the bench's box, the employer's
+        ada.collect_from_station(bench.id, "tool_handle").expect("the handles collected");
+        assert_eq!(ada.count(capitol_core::catalog::container_type::PLAYER_INVENTORY, "tool_handle"), 3);
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }
