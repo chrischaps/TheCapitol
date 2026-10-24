@@ -541,6 +541,7 @@ mod tests {
             leader: who(ME, "Wren"),
             members,
             waiting: Vec::new(),
+            treasury: None,
         }
     }
 

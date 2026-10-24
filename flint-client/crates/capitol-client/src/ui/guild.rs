@@ -771,6 +771,8 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
             invite(GuildInviteKind::Apply, who(7, "Dot Fenwick", false), who(7, "Dot Fenwick", false), "The Rope Walkers", "ROPE", rope),
             invite(GuildInviteKind::Invite, who(8, "Tam Ivers", true), who(1, "Wren Hollis", false), "The Rope Walkers", "ROPE", rope),
         ],
+        // The treasury's page comes with #508
+        treasury: None,
     };
     let mut guilds = Guilds::default();
     let summary = |n: u128, name: &str, tag: &str, members: u32, leader: Correspondent| GuildSummary {

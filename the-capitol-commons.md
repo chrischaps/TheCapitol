@@ -287,7 +287,7 @@ Weekly, from records the city already keeps.
   - **Names over heads** carry `[TAG]` after the name, smaller and in the dim ink (`labels::GuildTag`, `hud.rhai`). The tag is part of the name's box when names clash.
   - `guild_notice` toasts in verdigris (`guild_note`).
   - Offline: `--guild-sample yours|officer|browse|found`, and `--citizen-sample` puts tags on three of its row.
-  - **Not built, because S4.2 and S4.3 aren't done yet** (#508): the treasury, its book, dues and debt, the withdrawal limit, deposit and withdraw, the hall, and its sign over the door.
+  - **Not built** (#508): the treasury, its book, dues and debt, the withdrawal limit, deposit and withdraw, the hall, and its sign over the door. S4.2 landed while S4.4 was being built, so its `GuildDetail.treasury` is on the wire but not drawn yet. The hall waits on S4.3.
 - **S4.5 Citizens join guilds** (#401, S).
 
 ## 7. Dependency graph and estimate
