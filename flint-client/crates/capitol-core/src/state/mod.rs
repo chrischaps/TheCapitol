@@ -380,9 +380,9 @@ pub enum StateEvent {
     /// To both sides: a shift ended, having made `shift.made` and been paid
     /// `paid` (`wage_shift_ended`)
     WageShiftEnded { offer_id: Uuid, shift: WageShift, paid: i64 },
-    /// To the worker: units made on your shift and paid for (`wage_paid`).
+    /// To the worker: `units` made on your shift and paid for (`wage_paid`).
     /// `made` is the offer's total so far, of `cap`.
-    WagePaid { offer_id: Uuid, item_type: String, paid: i64, made: i32, cap: i32 },
+    WagePaid { offer_id: Uuid, item_type: String, units: i32, paid: i64, made: i32, cap: i32 },
     /// A bazaar answer changed [`GameState::bazaar`]: the directory, a shop
     /// seen at its stall, or yours.
     BazaarUpdated,
@@ -1020,9 +1020,10 @@ impl GameState {
             M::WageShiftEnded { offer_id, shift, paid } => {
                 out.push(StateEvent::WageShiftEnded { offer_id: *offer_id, shift: shift.clone(), paid: *paid })
             }
-            M::WagePaid { offer_id, item_type, paid, made, cap, .. } => out.push(StateEvent::WagePaid {
+            M::WagePaid { offer_id, item_type, units, paid, made, cap } => out.push(StateEvent::WagePaid {
                 offer_id: *offer_id,
                 item_type: item_type.clone(),
+                units: units.count() as i32,
                 paid: *paid,
                 made: *made,
                 cap: *cap,

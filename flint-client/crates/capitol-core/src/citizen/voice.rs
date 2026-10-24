@@ -223,6 +223,8 @@ pub fn occasion(occasion: Occasion, moment: &Moment) -> String {
         Occasion::Sale => format!("{who} has just bought from your stall at the bazaar, and is standing near. Thank them."),
         Occasion::Answer => format!("{who} said this, naming you:\n\n{heard}\n\nAnswer them."),
         Occasion::Letter => format!("{who} wrote you a letter:\n\n{heard}\n\nWrite your reply."),
+        Occasion::Hired => format!("You have just taken the piece-rate work {who} offered, and are starting the shift. Say so."),
+        Occasion::ShiftDone => format!("Your shift working for {who} has just ended, and you've been paid for what you made. Say so."),
     };
     match moment.time_of_day {
         Some(t) => format!("It is {}. {what}", remote::clock(t)),

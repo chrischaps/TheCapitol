@@ -1,7 +1,8 @@
 //! A town's worth of situations, made up (C3.3): every role's work, sell,
 //! buy, bid, stall and free-time questions over a spread of holdings, books
 //! and temperaments, and the hall's board's since S2.5: a commission for
-//! what it makes, and a post for what it needs. A fresh live town asks only work and bank questions
+//! what it makes, and a post for what it needs. Since S2.8, work offered
+//! at its trade, at a spread of rates. A fresh live town asks only work and bank questions
 //! (#294), so this is what a new layer is measured on until the logs hold
 //! the rest. `capitol-town corpus` writes it as a rules-only citizen's log.
 
@@ -9,12 +10,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use capitol_protocol::rules::court;
+use capitol_protocol::rules::wages::Work;
 use uuid::Uuid;
 
 use super::log::{self, Fate, Log};
 use super::{Cascade, Choice, Held, Mind, Place, Question, Quote, Situation, Temperament, When, Who};
 use crate::catalog::Catalog;
 use crate::sim::plan::Holdings;
+use crate::sim::wage::{self, Hire};
 use crate::sim::{Role, Wanted, LOT, MIX};
 
 /// The name the corpus's citizen logs under.
@@ -141,9 +144,46 @@ fn round(r: u32) -> Vec<Situation> {
                 let pass = menu.len() - 1;
                 out.push(s(question, menu, pass));
             }
+            // Work offered at its trade (S2.8), at a rate round its books
+            if let Some(work) = own_work(&catalog, role) {
+                let job = wage::job(&catalog, &work).expect("a job the catalog knows");
+                let menu = role.wage_menu(&Hire { job, left: 40, tooled: true }).expect("its own trade's work");
+                let rate = last.map_or(2, |l| (l * (1 + (n % 3) as i64) / 2).max(1));
+                let books = |item: &str| super::rules::worth_in(&market, item);
+                let question = Question::Wage {
+                    id: Uuid::from_u128(u128::from(n) << 8 | 0xff),
+                    employer: "Ada Reeder".into(),
+                    work: wage::words(&catalog, &work),
+                    rate,
+                    left: 40,
+                    ends: 24.0,
+                    pays: wage::pays(&catalog, &work, rate).unwrap_or(0),
+                    earns: wage::earns(role, &catalog, books),
+                };
+                out.push(s(question, menu, 1));
+            }
         }
     }
     out
+}
+
+/// Work at `role`'s own trade, as an employer would offer it: a craft at
+/// the first station it works at, or a gather of its good. `None` for a
+/// role that does neither.
+fn own_work(catalog: &Catalog, role: Role) -> Option<Work> {
+    let item = *role.answers().first()?;
+    if let Some(&station) = role.crafts_at().first() {
+        let recipe = catalog.recipes().iter().find(|r| r.required_station_type.as_deref() == Some(station))?;
+        return Some(Work::Craft {
+            station_id: Uuid::nil(),
+            recipe_id: recipe.id.clone(),
+        });
+    }
+    let resource = catalog.resource_types().iter().find(|r| r.yields_item == item)?;
+    Some(Work::Gather {
+        plot_id: Uuid::nil(),
+        resource: resource.id.clone(),
+    })
 }
 
 /// Writes `situations` to `path` as a rules-only citizen's log, each

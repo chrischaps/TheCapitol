@@ -363,7 +363,25 @@ pub fn question(q: &Question) -> String {
                 String::new()
             };
             format!(
-                "A commission on the hall's board wants {wanted} {item} {grade}, at {price} Strands each, due in {due:.0}                  hours.{yours} Claim some, deliver some now, or leave it?"
+                "A commission on the hall's board wants {wanted} {item} {grade}, at {price} Strands each, due in {due:.0} hours.{yours} Claim some, deliver some now, or leave it?"
+            )
+        }
+        Question::Wage {
+            employer,
+            work,
+            rate,
+            left,
+            ends,
+            pays,
+            earns,
+            ..
+        } => {
+            let own = match earns {
+                Some(e) => format!("Your own trade earns about {e} Strands a game hour at today's prices."),
+                None => "Today's prices can't say what your own trade earns an hour.".into(),
+            };
+            format!(
+                "{employer} offers piece-rate work: {work}, at {rate} Strands a unit, up to {left} more, for the next {ends:.0} game hours. Working steadily it pays about {pays} Strands a game hour, paid for each unit as it's made, from escrow. {own} Take the work, or leave it?"
             )
         }
     }
@@ -400,6 +418,7 @@ pub fn label(c: &Choice) -> String {
         Choice::Deliver { .. } => "deliver".into(),
         Choice::Pass => "pass".into(),
         Choice::Post { item, .. } => format!("post for {item}"),
+        Choice::TakeWork => "take the work".into(),
     }
 }
 
@@ -506,10 +525,11 @@ pub fn entry(c: &Choice) -> String {
             quantity,
             due,
         } => format!(
-            "Post a commission on the hall's board for {} {item} of grade {grade} or better, at {} Strands each,              due in {due} days, with the whole price down and the court's fee on top",
+            "Post a commission on the hall's board for {} {item} of grade {grade} or better, at {} Strands each, due in {due} days, with the whole price down and the court's fee on top",
             count(quantity),
             range(price)
         ),
+        Choice::TakeWork => "Take the work: walk there and work the shift through your working hours, paid for each unit as it's made".into(),
     }
 }
 

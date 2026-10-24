@@ -15,13 +15,15 @@
 //! (#295). A town's merchants (C1.6, [`merchant`]) earn a float and make a
 //! market. And every citizen walks the road in, the tutorial, and claims
 //! its deed at the end of it (#450, [`road_in`]). They answer and post
-//! commissions on the hall's board too (Commons S2.5, [`board`]).
+//! commissions on the hall's board too (Commons S2.5, [`board`]), and take
+//! work for a wage in their working hours (S2.8, [`wages`]).
 
 mod board;
 mod idle;
 mod merchant;
 mod people;
 pub mod road_in;
+mod wages;
 
 pub use road_in::walk_the_road;
 
@@ -249,6 +251,13 @@ pub(crate) fn live(
         citizen.merchant = Some(merchant::Merchant::new(seed));
     }
     let ended = citizen.work(None, Some(town));
+    // A shift it's on ends with its session, paid for what it made, rather
+    // than holding the work from others until the server sees it gone
+    if ended.is_ok() {
+        if let Err(e) = citizen.end_shift("signed_off") {
+            town.health(|h| h.failed(format!("stopping its shift: {e}")));
+        }
+    }
     // What the day's last steps did: its walk home, and its deed
     citizen.journal();
     town.record(std::mem::take(&mut citizen.entries), citizen.mind.take_rulings());
@@ -322,6 +331,7 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::MakeMarket { .. }, Some(Action::Trade(Trade::MakeMarket)))
         | (Choice::Road { .. }, Some(Action::Road(_)))
         | (Choice::Claim { .. } | Choice::Deliver { .. }, Some(Action::Board(_)))
+        | (Choice::TakeWork, Some(Action::Wage(_)))
         | (Choice::Post { .. }, Some(Action::Trade(Trade::Post { .. })))
         | (Choice::Rest | Choice::Hall, None) => true,
         (Choice::Keep | Choice::Gather { .. } | Choice::Pass, _) => return Fate::Passed,
@@ -390,6 +400,9 @@ struct SimBot {
     /// The hall's board as it last read it, and its part in it (S2.5). Only
     /// a citizen reads it.
     board: board::Board,
+    /// The work offered as it last read it, and its shift (S2.8). Only a
+    /// citizen works for a wage.
+    wages: wages::Wages,
 }
 
 /// What a bot does next.
@@ -403,6 +416,8 @@ enum Action {
     Road(capitol_protocol::tutorial::Step),
     /// A claim, or a delivery, at the hall's board (S2.5).
     Board(board::BoardAct),
+    /// Work taken for a wage, or a unit of its shift (S2.8).
+    Wage(wages::WageAct),
 }
 
 impl SimBot {
@@ -441,6 +456,7 @@ impl SimBot {
             road: None,
             on_road: false,
             board: board::Board::new(),
+            wages: wages::Wages::new(),
         }
     }
 
@@ -520,13 +536,18 @@ impl SimBot {
             let catalog = self.bot.state().catalog().clone();
             // What it owes on the board shapes its work (S2.5)
             self.read_board()?;
+            self.read_wages()?;
             let holdings = self.holdings();
             // The round's decisions, whose outcomes are logged after it (C3.1)
             let mark = self.mind.mark();
             // A promise first, then the board, before the road or a trade
             let board = if self.people { self.choose_board(&holdings) } else { None };
-            // What to work on, then whether to trade first (C1.3)
+            // Then work for a wage (S2.8): its shift, or work it takes
+            let wage = if board.is_none() { self.choose_wage(&holdings, phase) } else { None };
+            // What to work on, then whether to trade first (C1.3). On a
+            // shift, the employer's work is its work
             let errand = match self.role.errands(&catalog, &holdings) {
+                _ if wage.is_some() => Ok(None),
                 Ok(errands) if errands.is_empty() => Ok(None),
                 Ok(errands) => Ok(Some(self.choose_errand(&catalog, &holdings, errands))),
                 Err(stuck) => Err(stuck),
@@ -534,7 +555,7 @@ impl SimBot {
             // The road in first, while a step on it is open (#450): by day and
             // at market hours, and in the night's work what needs no walk
             let road = match &errand {
-                _ if self.road.is_none() || board.is_some() => None,
+                _ if self.road.is_none() || board.is_some() || wage.is_some() => None,
                 Ok(errand) => self.choose_road(&holdings, errand.as_ref()),
                 Err(_) => self.choose_road(&holdings, None),
             };
@@ -549,12 +570,13 @@ impl SimBot {
             // it carries on with after.
             let step = errand.map(|e| e.map(|e| e.step));
             let errand_label = step.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.label(&catalog));
-            let action = match (board, road, step, trade) {
+            let action = match (board, wage, road, step, trade) {
                 (Some(act), ..) => Ok(Some(Action::Board(act))),
-                (None, Some(lesson), _, _) => Ok(Some(Action::Road(lesson))),
-                (None, None, _, Some(trade)) => Ok(Some(Action::Trade(trade))),
+                (None, Some(act), ..) => Ok(Some(Action::Wage(act))),
+                (None, None, Some(lesson), _, _) => Ok(Some(Action::Road(lesson))),
+                (None, None, None, _, Some(trade)) => Ok(Some(Action::Trade(trade))),
                 _ if phase == Some(Phase::Market) => Ok(Some(Action::Market)),
-                (None, None, step, None) => step.map(|s| s.map(Action::Step)),
+                (None, None, None, step, None) => step.map(|s| s.map(Action::Step)),
             };
             match action {
                 Ok(Some(action)) => {
@@ -570,6 +592,7 @@ impl SimBot {
                         Action::Market => self.keep_market(town),
                         Action::Road(lesson) => self.walk_road(*lesson),
                         Action::Board(act) => self.board_act(act),
+                        Action::Wage(act) => self.wage_act(act),
                     };
                     if errand_label.is_some() {
                         self.doing = errand_label;
@@ -671,6 +694,7 @@ impl SimBot {
             }
             Action::Road(step) => format!("the road in: {}", road_in::does(*step)),
             Action::Board(act) => act.label(),
+            Action::Wage(act) => act.label(),
         }
     }
 
@@ -704,6 +728,12 @@ impl SimBot {
     /// from where it stands.
     fn go_home(&mut self, town: &Tether) -> Result<(), BotError> {
         town.health(|h| h.doing(Standing::Working, "going home"));
+        // The end of its day ends a shift it's on (S2.8)
+        match self.end_shift("day") {
+            Ok(()) => {}
+            Err(e) if e.is_final() => return Err(e),
+            Err(e) => town.health(|h| h.failed(format!("stopping its shift: {e}"))),
+        }
         self.at_market = false;
         self.spot = None;
         self.night_shift = true;
@@ -968,8 +998,12 @@ impl SimBot {
                 StateEvent::ExtractionCompleted { item, .. } if item.quantity == 0 => {
                     self.entries.push(Entry::Missed { item: item.item_type, at })
                 }
+                // What it makes on a shift is the employer's, not a day's
+                // work of its own (S2.8)
                 StateEvent::ExtractionCompleted { item, .. } => {
-                    self.board.made(&item.item_type, item.quantity);
+                    if !self.wages.on_shift() {
+                        self.board.made(&item.item_type, item.quantity);
+                    }
                     self.entries.push(Entry::Made {
                         item: item.item_type,
                         quantity: item.quantity,
@@ -979,7 +1013,9 @@ impl SimBot {
                     })
                 }
                 StateEvent::CraftingCompleted { item } => {
-                    self.board.made(&item.item_type, item.quantity);
+                    if !self.wages.on_shift() {
+                        self.board.made(&item.item_type, item.quantity);
+                    }
                     self.entries.push(Entry::Made {
                         item: item.item_type,
                         quantity: item.quantity,
@@ -1021,6 +1057,21 @@ impl SimBot {
                             item: item_type,
                             quantity: quantity - delivered,
                         });
+                    }
+                }
+                // Wages (S2.8): the board's offers, its pay, and a shift's end
+                StateEvent::WageBoard(offer) => self.wages.update(offer),
+                StateEvent::WagePaid {
+                    item_type, units, paid, ..
+                } => self.entries.push(Entry::Earned {
+                    item: item_type,
+                    units,
+                    paid,
+                }),
+                StateEvent::WageShiftEnded { offer_id, shift, .. } => {
+                    if Some(shift.worker_id) == self.bot.state().me() {
+                        let why = shift.end.map_or("ended", |e| e.as_str());
+                        self.shift_ended(offer_id, why, shift.made);
                     }
                 }
                 StateEvent::ToolBroke { item_type, .. } => {

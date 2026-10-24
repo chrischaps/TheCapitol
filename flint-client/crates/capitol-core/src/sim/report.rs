@@ -78,6 +78,14 @@ pub enum Entry {
     Expired { item: String, refunded: i64 },
     /// A claim of the bot's ran out `quantity` short: a breach.
     Lapsed { item: String, quantity: i32 },
+    /// It took piece-rate work (Commons S2.8): `work` in a few words.
+    TookWork { work: String },
+    /// `units` of `item` made on its shift went to the employer, and paid
+    /// `paid` from the offer's escrow.
+    Earned { item: String, units: i32, paid: i64 },
+    /// A shift of its ended, `why` in a word (`cap`, `day`, `employer`),
+    /// with `made` units made on it.
+    ShiftEnded { why: String, made: i32 },
 }
 
 /// One bot's run, as the report needs it.
@@ -119,6 +127,7 @@ impl BotRun {
                 } => expected -= price * *quantity as i64 + fee,
                 Entry::Delivered { paid, .. } => expected += paid,
                 Entry::Expired { refunded, .. } => expected += refunded,
+                Entry::Earned { paid, .. } => expected += paid,
                 _ => {}
             }
         }
@@ -228,6 +237,38 @@ impl Court {
     }
 }
 
+/// What citizens earned working for others (Commons S2.8), every bot
+/// together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Wages {
+    /// Shifts taken
+    pub shifts: usize,
+    /// Units made on them, and what they were paid
+    pub units: i64,
+    pub earned: i64,
+    /// Shifts ended, by why
+    pub ended: BTreeMap<String, usize>,
+}
+
+impl Wages {
+    /// Whether anyone worked for a wage.
+    pub fn busy(&self) -> bool {
+        *self != Wages::default()
+    }
+
+    fn count(&mut self, entry: &Entry) {
+        match entry {
+            Entry::TookWork { .. } => self.shifts += 1,
+            Entry::Earned { units, paid, .. } => {
+                self.units += *units as i64;
+                self.earned += paid;
+            }
+            Entry::ShiftEnded { why, .. } => *self.ended.entry(why.clone()).or_insert(0) += 1,
+            _ => {}
+        }
+    }
+}
+
 /// Time spent under one step label.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeLine {
@@ -266,6 +307,8 @@ pub struct Report {
     pub makers: Option<(i64, i64)>,
     /// What went through the hall's board (S2.5)
     pub court: Court,
+    /// What citizens earned working for others (S2.8)
+    pub wages: Wages,
 }
 
 /// What a market maker's [`BotRun::role`] says.
@@ -287,10 +330,12 @@ impl Report {
         let mut sales: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
         let mut fees = 0;
         let mut court = Court::default();
+        let mut wages = Wages::default();
         for run in runs {
             *roles.entry(run.role.clone()).or_insert(0) += 1;
             for entry in &run.entries {
                 court.count(entry);
+                wages.count(entry);
                 match entry {
                     Entry::Made {
                         item,
@@ -354,6 +399,8 @@ impl Report {
                     | Entry::Filled { .. }
                     | Entry::Expired { .. }
                     | Entry::Lapsed { .. } => {}
+                    // Counted by the wages
+                    Entry::TookWork { .. } | Entry::Earned { .. } | Entry::ShiftEnded { .. } => {}
                 }
             }
         }
@@ -431,6 +478,7 @@ impl Report {
                 .map(|r| (r.strands_start, r.strands_end))
                 .reduce(|a, b| (a.0 + b.0, a.1 + b.1)),
             court,
+            wages,
         }
     }
 
@@ -636,6 +684,17 @@ impl Report {
                 c.paid
             );
         }
+        if self.wages.busy() {
+            let w = &self.wages;
+            let ended: Vec<String> = w.ended.iter().map(|(why, n)| format!("{n} {}", ended_words(why))).collect();
+            let ended = if ended.is_empty() { "none yet".to_string() } else { ended.join(", ") };
+            let _ = writeln!(md, "\n## Wages\n");
+            let _ = writeln!(
+                md,
+                "- Shifts taken: {}; ended: {ended}\n- Units made for employers: {}, paid {} Strands from their escrow",
+                w.shifts, w.units, w.earned
+            );
+        }
         let _ = writeln!(md, "\n## Where the time went\n");
         let _ = writeln!(md, "| Step | Bot-hours | Steps | Failed |");
         let _ = writeln!(md, "|---|---:|---:|---:|");
@@ -731,6 +790,19 @@ fn percentile(units: &[(i32, i32)], q: f64) -> i32 {
         }
     }
     units.last().map_or(0, |(q, _)| *q)
+}
+
+/// Why a shift ended, as the wages section says it: `at the cap`.
+fn ended_words(why: &str) -> String {
+    match why {
+        "cap" => "at the cap".into(),
+        "term" => "at the offer's end".into(),
+        "day" => "at the end of a day".into(),
+        "employer" => "by the employer".into(),
+        "failed" => "when the work failed".into(),
+        "worker" => "by the worker".into(),
+        why => why.replace('_', " "),
+    }
 }
 
 #[cfg(test)]
@@ -1013,5 +1085,41 @@ mod tests {
         assert!(md.contains("126 put in by these posters, 72 paid out"), "{md}");
         // A run with nothing on the board says nothing of it
         assert!(!Report::build(&[], 1.0, 1.0, 60.0).sections().contains("hall's board"));
+    }
+
+    #[test]
+    fn wages_are_counted_and_their_pay_is_no_tax() {
+        let took = || Entry::TookWork {
+            work: "craft plank at a sawbench".into(),
+        };
+        let earned = || Entry::Earned {
+            item: "plank".into(),
+            units: 3,
+            paid: 6,
+        };
+        let worker = BotRun {
+            name: "Percy".into(),
+            role: "crafter (planks)".into(),
+            entries: vec![
+                took(),
+                earned(),
+                earned(),
+                Entry::ShiftEnded { why: "day".into(), made: 6 },
+                took(),
+                Entry::ShiftEnded { why: "cap".into(), made: 0 },
+            ],
+            strands_start: 100,
+            strands_end: 112,
+            error: None,
+        };
+        assert_eq!(worker.tax(), 0);
+        let report = Report::build(&[worker], 1.0, 1.0, 60.0);
+        let w = &report.wages;
+        assert_eq!((w.shifts, w.units, w.earned), (2, 6, 12));
+        let md = report.sections();
+        assert!(md.contains("## Wages"), "{md}");
+        assert!(md.contains("Shifts taken: 2; ended: 1 at the cap, 1 at the end of a day"), "{md}");
+        assert!(md.contains("Units made for employers: 6, paid 12 Strands"), "{md}");
+        assert!(!Report::build(&[], 1.0, 1.0, 60.0).sections().contains("## Wages"));
     }
 }

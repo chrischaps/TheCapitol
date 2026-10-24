@@ -7,6 +7,8 @@
 //!   what it holds. Pure.
 //! - [`report`]: the numbers, as markdown and CSV. Pure.
 //! - [`run`]: the swarm itself, one thread a bot.
+//! - [`wage`]: work offered, what it pays and what a role's own trade earns
+//!   (Commons S2.8). Pure.
 //!
 //! Every bot plays as a player would, with no help from the server: it walks,
 //! extracts, crafts at its own stations, buys a deed with fiber it deposited,
@@ -29,6 +31,7 @@ pub mod lot;
 pub mod plan;
 pub mod report;
 pub mod run;
+pub mod wage;
 
 use std::fmt;
 
@@ -38,6 +41,7 @@ use capitol_protocol::rules::court;
 
 use crate::catalog::Catalog;
 use crate::citizen::decide::{Choice, Span};
+use wage::{Hire, Job};
 
 /// An entry on a citizen's work menu: the goal it's for (none for banking)
 /// and the step it starts with.
@@ -540,6 +544,38 @@ impl Role {
                 Choice::Pass,
             ]
         })
+    }
+
+    /// The stations whose work the role does for a wage (S2.8): those its
+    /// own trade crafts at. A gatherer and a merchant craft at none.
+    pub fn crafts_at(&self) -> &'static [&'static str] {
+        match self {
+            Role::Crafter(Craft::Planks) => &["sawbench"],
+            Role::Crafter(Craft::Ingots) => &["forge", "kiln"],
+            Role::Crafter(Craft::Tools) => &["workbench", "anvil"],
+            Role::Builder => &["kiln"],
+            Role::Gatherer(_) | Role::Merchant => &[],
+        }
+    }
+
+    /// Whether the role does `job` (S2.8): a crafter (or a builder) a craft
+    /// at a station its trade works at, anyone a craft by hand of what it
+    /// [`answers`](Self::answers) for (a fiber gatherer's rope), and a
+    /// gatherer the gathering of its own good.
+    pub fn does(&self, job: &Job) -> bool {
+        match *job {
+            Job::Craft { station: Some(station), .. } => self.crafts_at().contains(&station),
+            Job::Craft { station: None, makes } => self.answers().contains(&makes),
+            Job::Gather { yields } => matches!(self, Role::Gatherer(_)) && self.answers().contains(&yields),
+        }
+    }
+
+    /// The menu for work offered (S2.8), if there's a question to ask: the
+    /// role does the work, some is left of it, and it holds the tool the
+    /// work needs. Take the work, or pass. When to ask (its working hours,
+    /// owing nothing, once a day per employer) is the citizen's to say.
+    pub fn wage_menu(&self, hire: &Hire) -> Option<Vec<Choice>> {
+        (self.does(&hire.job) && hire.left > 0 && hire.tooled).then(|| vec![Choice::TakeWork, Choice::Pass])
     }
 
     /// The role as a roster names it (C1.1): `gatherer-fiber`, `builder`.
@@ -1067,6 +1103,41 @@ mod tests {
         assert!(more + court::court_fee(more) > 100 - FLOOR);
         let broke = Holdings { strands: 20, ..h };
         assert_eq!(planks.post_menu(&broke, "log", 10, 0), None);
+    }
+
+    #[test]
+    fn every_role_takes_the_work_its_own_trade_does() {
+        let take = Some(vec![Choice::TakeWork, Choice::Pass]);
+        let hire = |job| Hire { job, left: 40, tooled: true };
+        let at = |station| Job::Craft { station: Some(station), makes: "x" };
+        let planks = Role::Crafter(Craft::Planks);
+        let tools = Role::Crafter(Craft::Tools);
+        let wood = Role::Gatherer(Gather::Wood);
+        // A crafter at the stations its trade works at
+        assert_eq!(planks.wage_menu(&hire(at("sawbench"))), take);
+        assert_eq!(tools.wage_menu(&hire(at("workbench"))), take);
+        assert_eq!(tools.wage_menu(&hire(at("anvil"))), take);
+        assert_eq!(Role::Crafter(Craft::Ingots).wage_menu(&hire(at("forge"))), take);
+        assert_eq!(Role::Builder.wage_menu(&hire(at("kiln"))), take);
+        // Not at another's, and a gatherer at none
+        assert_eq!(planks.wage_menu(&hire(at("workbench"))), None);
+        assert_eq!(wood.wage_menu(&hire(at("sawbench"))), None);
+        // A gatherer gathers its own good, and nobody else gathers
+        assert_eq!(wood.wage_menu(&hire(Job::Gather { yields: "log" })), take);
+        assert_eq!(wood.wage_menu(&hire(Job::Gather { yields: "fiber" })), None);
+        assert_eq!(Role::Gatherer(Gather::Fiber).wage_menu(&hire(Job::Gather { yields: "fiber" })), take);
+        assert_eq!(planks.wage_menu(&hire(Job::Gather { yields: "log" })), None);
+        // By hand: what it answers for, a fiber gatherer's rope
+        let rope = Job::Craft { station: None, makes: "rope" };
+        assert_eq!(Role::Gatherer(Gather::Fiber).wage_menu(&hire(rope)), take);
+        assert_eq!(planks.wage_menu(&hire(rope)), None);
+        // Nothing left of it, or no tool for it: no question
+        assert_eq!(planks.wage_menu(&Hire { left: 0, ..hire(at("sawbench")) }), None);
+        assert_eq!(wood.wage_menu(&Hire { tooled: false, ..hire(Job::Gather { yields: "log" }) }), None);
+        // A merchant works for nobody: it earns its float
+        for job in [at("sawbench"), at("kiln"), Job::Gather { yields: "fiber" }] {
+            assert_eq!(Role::Merchant.wage_menu(&hire(job)), None);
+        }
     }
 
     #[test]

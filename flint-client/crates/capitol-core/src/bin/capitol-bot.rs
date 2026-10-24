@@ -13,10 +13,13 @@
 //! capitol-bot --prefix newcomer --tutorial      # walk the road in and claim its deed (#450)
 //! capitol-bot --prefix poster --grant 2000 --commission log:20:9 --commission iron_ore:10:30:B
 //!                                               # a person posting on the hall's board (S2.5)
+//! capitol-bot --prefix boss --hire workbench:tool_handle:6:20 --hire sawbench:plank:2:30
+//!                                               # a person hiring at benches of their own (S2.8)
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
 
+use std::collections::HashSet;
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,8 +27,9 @@ use std::time::{Duration, Instant};
 use capitol_core::bot::{Account, Bot, BotError, TradeOffer};
 use capitol_core::market_maker::{self, Maker, MakerConfig};
 use capitol_core::net::NetConfig;
-use capitol_core::protocol::rest::{GrantRequest, PostCommission};
+use capitol_core::protocol::rest::{GrantItem, GrantRequest, OfferWages, PostCommission};
 use capitol_core::protocol::rules::market::grade_floor;
+use capitol_core::protocol::rules::wages::{OfferStatus, Work};
 use capitol_core::protocol::tutorial;
 use capitol_core::state::StateEvent;
 use capitol_core::sim::run::{self as sim, SimConfig};
@@ -96,6 +100,17 @@ FLAGS:
                         due in 3 days. Repeat it for more. Then stay, printing
                         each claim, delivery, lapse and expiry, until every
                         one is filled or --seconds is up
+    --hire <station:recipe:rate:cap>
+                        Hire at a station of your own as a person (Commons
+                        S2.8): a grant of the station's kit, the recipe's
+                        inputs for cap units and the escrow, a lot in the
+                        urban ring near the hall, the station on it with the
+                        inputs in its box, and an offer of cap units of the
+                        recipe at rate Strands each, for a day. Repeat it for
+                        more stations on the same lot. Then stay, printing
+                        each take, the work as it's made and each shift's
+                        end, until every offer is done or --seconds is up.
+                        Only a server with DEV_GRANTS=on gives the grant
     --grant <strands>   Top up with this many Strands first, as a grant. Only
                         a server with DEV_GRANTS=on gives one
     --sim <bots>        Run the economy sim: this many bots, each with a role
@@ -146,7 +161,17 @@ struct Options {
     fund: bool,
     tutorial: bool,
     commissions: Vec<PostCommission>,
+    hires: Vec<Hire>,
     grant: Option<i64>,
+}
+
+/// Work offered from the command line (`--hire`): `cap` units of `recipe`
+/// at a station of type `station`, at `rate` Strands each.
+struct Hire {
+    station: String,
+    recipe: String,
+    rate: i64,
+    cap: i32,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -178,6 +203,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         fund: false,
         tutorial: false,
         commissions: Vec::new(),
+        hires: Vec::new(),
         grant: None,
     };
     let mut maker = MakerConfig::default();
@@ -287,6 +313,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             }
             "--tutorial" => options.tutorial = true,
             "--commission" => options.commissions.push(commission(&value()?)?),
+            "--hire" => options.hires.push(hire(&value()?)?),
             "--grant" => options.grant = Some(number(&flag, &value()?)?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
@@ -365,6 +392,19 @@ fn commission(value: &str) -> Result<PostCommission, String> {
     })
 }
 
+/// `workbench:tool_handle:6:20`, as `--hire` takes it.
+fn hire(value: &str) -> Result<Hire, String> {
+    let [station, recipe, rate, cap] = value.split(':').collect::<Vec<_>>()[..] else {
+        return Err(format!("--hire: {value:?} isn't station:recipe:rate:cap"));
+    };
+    Ok(Hire {
+        station: station.to_string(),
+        recipe: recipe.to_string(),
+        rate: number("--hire", rate)?,
+        cap: number("--hire", cap)?,
+    })
+}
+
 fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
     value
         .parse()
@@ -400,6 +440,9 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     }
     if !options.commissions.is_empty() {
         return post_commissions(&mut bot, &options.commissions, deadline);
+    }
+    if !options.hires.is_empty() {
+        return hire_at(&mut bot, &options.hires, deadline);
     }
     // These loops can start over, so they carry on through a dropped
     // connection or a server restart (C0.6).
@@ -500,6 +543,116 @@ fn post_commissions(bot: &mut Bot, commissions: &[PostCommission], deadline: Opt
         }
     }
     bot.log(if open == 0 { "every commission is filled or done".to_string() } else { format!("{open} still open") });
+    Ok(())
+}
+
+/// Hires at stations of its own, as a person would (S2.8): a grant of the
+/// kits, the inputs and the escrow, a lot near the hall, each station on it
+/// stocked with its recipe's inputs, and an offer at each. Then prints what
+/// comes of them until every offer is done or `deadline`.
+fn hire_at(bot: &mut Bot, hires: &[Hire], deadline: Option<Instant>) -> Result<(), BotError> {
+    let catalog = bot.state().catalog().clone();
+    let mut items: Vec<GrantItem> = Vec::new();
+    let mut strands = 1000;
+    let mut recipes = Vec::new();
+    for h in hires {
+        let recipe = catalog
+            .recipes()
+            .iter()
+            .find(|r| r.id == h.recipe)
+            .cloned()
+            .ok_or_else(|| BotError::Failed(format!("no recipe {}", h.recipe)))?;
+        let kit = catalog
+            .kit_for_station(&h.station)
+            .ok_or_else(|| BotError::Failed(format!("no kit places a {}", h.station)))?;
+        items.push(GrantItem { item_type: kit.to_string(), quantity: 1, quality: 60 });
+        let made = recipe.outputs.first().map_or(1, |o| o.quantity_min.max(1));
+        let crafts = (h.cap + made - 1) / made;
+        for input in &recipe.inputs {
+            items.push(GrantItem { item_type: input.item_type.clone(), quantity: input.quantity * crafts, quality: 60 });
+        }
+        strands += h.rate * h.cap as i64 * 2;
+        recipes.push(recipe);
+    }
+    let granted = bot.grant(GrantRequest { strands, items })?;
+    bot.log(format!("granted {} Strands, the kits and the inputs", granted.strands));
+    bot.go_to_exchange()?;
+    bot.collect_market_box()?;
+    let near = bot.position();
+    let plot = bot
+        .unclaimed_plots("urban", near)?
+        .into_iter()
+        .find(|p| capitol_core::sim::lot::takes(p, hires.len() as i32))
+        .ok_or_else(|| BotError::Failed(format!("no free urban lot near the hall takes {} stations", hires.len())))?;
+    let plot = bot.claim_plot(plot.id)?;
+    bot.log(format!("claimed {}", plot.id));
+    bot.record();
+    let mut open: HashSet<uuid::Uuid> = HashSet::new();
+    let mut placed: Vec<(f64, f64)> = Vec::new();
+    for (h, recipe) in hires.iter().zip(&recipes) {
+        let kit = catalog.kit_for_station(&h.station).unwrap_or_default();
+        let held = |bot: &Bot, kind: &str| -> Vec<uuid::Uuid> {
+            bot.state().inventory().map_or(Vec::new(), |inv| inv.items().filter(|i| i.item_type == kind).map(|i| i.item_id).collect())
+        };
+        let kit_id = *held(bot, kit).first().ok_or_else(|| BotError::Failed(format!("no {kit} in the pack")))?;
+        let mut station = None;
+        for (x, y) in capitol_core::sim::lot::spots(&plot, &placed).into_iter().take(8) {
+            if bot.walk_to(x, y).is_err() {
+                continue;
+            }
+            if let Ok(s) = bot.place_station(&h.station, kit_id, x, y) {
+                station = Some(s);
+                break;
+            }
+        }
+        let station = station.ok_or_else(|| BotError::Failed(format!("nowhere on the lot for a {}", h.station)))?;
+        placed.push((station.x, station.y));
+        let boxed = station.container_id.ok_or_else(|| BotError::Failed(format!("the {} has no box", h.station)))?;
+        let mut slot = 0;
+        for input in &recipe.inputs {
+            for id in held(bot, &input.item_type) {
+                bot.move_item(id, boxed, slot)?;
+                slot += 1;
+            }
+        }
+        let offer = bot.offer_wages(OfferWages {
+            work: Work::Craft { station_id: station.id, recipe_id: h.recipe.clone() },
+            rate: h.rate,
+            cap: h.cap,
+            term_days: 1,
+            worker_id: None,
+        })?;
+        bot.log(format!("offered {} {} at the {} for {} Strands each", h.cap, recipe.name, h.station, h.rate));
+        open.insert(offer.id);
+    }
+    let started = Instant::now();
+    while !open.is_empty() && deadline.is_none_or(|d| Instant::now() < d) {
+        bot.idle(Duration::from_secs(1))?;
+        let at = started.elapsed().as_secs();
+        for change in bot.take_journal() {
+            let line = match change {
+                StateEvent::WageTaken { shift, .. } => {
+                    format!("+{at}s {}{} took the work", shift.worker_name, mark(shift.worker_citizen))
+                }
+                StateEvent::WageBoard(offer) if open.contains(&offer.id) => {
+                    if offer.status != OfferStatus::Open {
+                        open.remove(&offer.id);
+                    }
+                    let by = offer.shift.as_ref().map_or(String::new(), |s| format!(" by {}", s.worker_name));
+                    format!("+{at}s {} of {} made{by}; {:?}", offer.made, offer.cap, offer.status)
+                }
+                StateEvent::WageShiftEnded { shift, paid, .. } => format!(
+                    "+{at}s {}'s shift ended, {}: {} made, {paid} Strands",
+                    shift.worker_name,
+                    shift.end.map_or("ended", |e| e.words()),
+                    shift.made
+                ),
+                _ => continue,
+            };
+            bot.log(line);
+        }
+    }
+    bot.log(if open.is_empty() { "every offer is done".to_string() } else { format!("{} still open", open.len()) });
     Ok(())
 }
 

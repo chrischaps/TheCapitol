@@ -181,6 +181,12 @@ impl Board {
             .filter_map(|c| self.commissions.iter().find(|m| m.id == c.commission_id).map(|m| (c, m)))
     }
 
+    /// Whether a claim of its own still wants anything (S2.8: it takes no
+    /// work for a wage while it does).
+    pub(super) fn owing_any(&self) -> bool {
+        self.owing().next().is_some()
+    }
+
     /// Whether a claim of its own still wants `item`.
     pub(super) fn owes(&self, item: &str) -> bool {
         self.owing().any(|(_, m)| m.item_type == item)
@@ -279,7 +285,11 @@ impl SimBot {
                 return Some(act);
             }
         }
-        // Then the board: what it answers, the best paid first
+        // Then the board: what it answers, the best paid first. Not on a
+        // shift, which keeps it from its own trade (S2.8)
+        if self.wages.on_shift() {
+            return None;
+        }
         let again = self.wall(ASK_AGAIN);
         self.board.passed.retain(|_, at| at.elapsed() < again);
         let mine: HashSet<Uuid> = self.board.claims.iter().filter(|c| c.status == ClaimStatus::Open).map(|c| c.commission_id).collect();

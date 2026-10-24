@@ -234,6 +234,23 @@ pub enum Question {
         price: i64,
         due: f64,
     },
+    /// Whether to take piece-rate work someone offers (Commons S2.8):
+    /// `work` (`craft plank at a sawbench`, `gather grass`) for `employer`,
+    /// at `rate` Strands a unit, `left` units to its cap, its term ending in
+    /// `ends` game hours. `pays` is what the work pays a game hour at that
+    /// rate, and `earns` what the citizen's own trade earns a game hour at
+    /// the books, both at the bench or the node; `None` when the books
+    /// can't say.
+    Wage {
+        id: Uuid,
+        employer: String,
+        work: String,
+        rate: i64,
+        left: i32,
+        ends: f64,
+        pays: i64,
+        earns: Option<i64>,
+    },
 }
 
 impl Question {
@@ -250,6 +267,7 @@ impl Question {
             Question::Ask => "ask".into(),
             Question::Road { .. } => "road".into(),
             Question::Commission { id, .. } => format!("commission {id}"),
+            Question::Wage { id, .. } => format!("wage {id}"),
         }
     }
 }
@@ -395,6 +413,10 @@ pub enum Choice {
         quantity: Span<i32>,
         due: i64,
     },
+    /// Take the work offered (S2.8): walk there and work the shift, paid for
+    /// each unit as it's made, until the cap, the end of its day, or the
+    /// employer stops it. On the menu beside [`Pass`](Self::Pass).
+    TakeWork,
 }
 
 impl Choice {

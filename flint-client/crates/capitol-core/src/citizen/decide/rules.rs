@@ -54,6 +54,12 @@
 //! Passing is a steady [`PASS`]. A crafter posts a commission for an input
 //! its bids haven't filled, at the bid's price and a premium
 //! ([`premium`]: less for the thrifty), the more readily the less thrifty.
+//!
+//! Wages (Commons S2.8, [`wage`]): work offered for its trade is taken when
+//! it pays a game hour at least what the citizen's own trade earns at the
+//! books, by its [`wage_margin`]: more for the thrifty, and for the bold,
+//! who'd sooner their own trade; less for the careful, since a wage is a
+//! sure thing. With nothing at the books to go by, the careful take it.
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Temperament, Verdict};
 use crate::sim::{BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
@@ -199,7 +205,10 @@ impl Decider for RulesDecider {
                     (0.65 + 0.25 * t.sociability as f64, d)
                 }
                 Choice::Road { .. } => (ROAD, Decision::plain(i)),
-                Choice::Claim { .. } | Choice::Deliver { .. } | Choice::Pass => commission(s, i, choice),
+                Choice::Claim { .. } | Choice::Deliver { .. } => commission(s, i, choice),
+                // Passing is a steady PASS, on the board and a wage alike
+                Choice::Pass => (PASS, Decision::plain(i)),
+                Choice::TakeWork => wage(s, i),
                 Choice::Post { price, quantity, .. } => {
                     // At its bid's price and a premium, for what it would bid for
                     let bid = price.min as f64;
@@ -384,16 +393,14 @@ pub(crate) fn premium(t: &Temperament) -> f64 {
 ///   better.
 /// - **Claim** a commission whose price beats the last trade by its
 ///   [`margin`]. With no trade to go by, the bold take a chance on it.
-/// - **Pass** otherwise: a steady [`PASS`].
+/// - **Pass** otherwise: a steady [`PASS`] (in [`RulesDecider`]'s pick).
 ///
 /// Each takes as many as its span allows: the menu caps a claim at a day's
 /// work and a delivery at what it holds.
 fn commission(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
     let Question::Commission { item, claimed, price, .. } = &s.question else {
-        // A commission's answers on another question's menu fit nothing,
-        // but passing is always safe
-        let u = if matches!(choice, Choice::Pass) { PASS } else { 0.0 };
-        return (u, Decision::plain(i));
+        // A commission's answers on another question's menu fit nothing
+        return (0.0, Decision::plain(i));
     };
     let t = &s.who.temperament;
     let worth = worth(s, item);
@@ -418,6 +425,31 @@ fn commission(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
         }
         _ => (PASS, Decision::plain(i)),
     }
+}
+
+/// What a citizen wants a wage to pay a game hour, over what its own trade
+/// earns, before it works for someone else: as much, more for the thrifty
+/// and the bold, less for the careful.
+pub(crate) fn wage_margin(t: &Temperament) -> f64 {
+    1.0 + 0.3 * (t.thrift as f64 - 0.5) + 0.3 * (t.risk as f64 - 0.5)
+}
+
+/// Work offered for its trade (S2.8): taken when it `pays` a game hour at
+/// least what the citizen's own trade `earns` there by its
+/// [`wage_margin`], or when its trade earns nothing at the books. With no
+/// books to go by, the careful take it and the bold pass.
+fn wage(s: &Situation, i: usize) -> (f64, Decision) {
+    let Question::Wage { pays, earns, .. } = &s.question else {
+        return (0.0, Decision::plain(i));
+    };
+    let t = &s.who.temperament;
+    let u = match earns {
+        Some(e) if *e <= 0 => SURE,
+        Some(e) if *pays as f64 >= *e as f64 * wage_margin(t) => SURE,
+        Some(_) => 0.2,
+        None => 0.35 + 0.5 * (1.0 - t.risk as f64),
+    };
+    (u, Decision::plain(i))
 }
 
 #[cfg(test)]
@@ -986,6 +1018,44 @@ mod tests {
         // The thriftiest offer a Strand over, for fewer, and still post
         let (d, _) = post(with(|t| t.thrift = 1.0));
         assert_eq!(d, Decision { pick: 0, price: Some(11), quantity: Some(5) });
+    }
+
+    fn wage(pays: i64, earns: Option<i64>, t: Temperament) -> Situation {
+        let q = Question::Wage {
+            id: uuid::Uuid::nil(),
+            employer: "Ada Reeder".into(),
+            work: "craft plank at a sawbench".into(),
+            rate: 2,
+            left: 40,
+            ends: 20.0,
+            pays,
+            earns,
+        };
+        situation(q, vec![Choice::TakeWork, Choice::Pass], t)
+    }
+
+    #[test]
+    fn work_is_taken_when_it_pays_what_its_own_trade_earns() {
+        let middling = Temperament::default();
+        let pick = |pays, earns, t| decide(&wage(pays, earns, t)).0.pick;
+        // As much as its own trade, an hour: a sure thing is as good
+        assert_eq!(pick(3600, Some(3600), middling), 0);
+        assert_eq!(pick(3500, Some(3600), middling), 1);
+        let (_, confidence) = decide(&wage(3600, Some(3600), middling));
+        assert!(confidence >= super::super::RULES_THRESHOLD, "{confidence}");
+        // The thrifty and the bold want more to leave their own trade
+        assert_eq!(pick(3600, Some(3600), with(|t| t.thrift = 1.0)), 1);
+        assert_eq!(pick(4200, Some(3600), with(|t| t.thrift = 1.0)), 0);
+        assert_eq!(pick(3600, Some(3600), with(|t| t.risk = 1.0)), 1);
+        // The careful take a little less
+        assert_eq!(pick(3200, Some(3600), with(|t| t.risk = 0.0)), 0);
+        // Its own trade earns nothing at the books: any wage beats it
+        assert_eq!(pick(10, Some(0), with(|t| t.thrift = 1.0)), 0);
+        assert_eq!(pick(10, Some(-50), middling), 0);
+        // Nothing to go by: the careful take it, the bold pass
+        assert_eq!(pick(100, None, with(|t| t.risk = 0.0)), 0);
+        assert_eq!(pick(100, None, middling), 0);
+        assert_eq!(pick(100, None, with(|t| t.risk = 1.0)), 1);
     }
 
     #[test]

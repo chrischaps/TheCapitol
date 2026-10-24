@@ -1052,6 +1052,17 @@ impl Bot {
     /// Walks to `node`, extracts it, and waits for the yield to show up in
     /// the inventory and the refetches to [`settle`](Self::settle).
     pub fn extract(&mut self, node: &ResourceNodeInfo) -> Result<Yield, BotError> {
+        self.extract_into(node, true)
+    }
+
+    /// As [`extract`](Self::extract), on a wage shift (Commons S2.6): the
+    /// yield goes to the employer's market box, not ours, so nothing waits
+    /// for it in the inventory.
+    pub fn extract_on_shift(&mut self, node: &ResourceNodeInfo) -> Result<Yield, BotError> {
+        self.extract_into(node, false)
+    }
+
+    fn extract_into(&mut self, node: &ResourceNodeInfo, ours: bool) -> Result<Yield, BotError> {
         self.walk_to(node.x, node.y)?;
         self.send(ClientMessage::Extract {
             node_id: node.id.to_string(),
@@ -1100,7 +1111,9 @@ impl Bot {
                 _ => None,
             })
             .ok_or_else(|| BotError::Failed("the extraction was cancelled".into()))?;
-        self.wait_for_items(container_type::PLAYER_INVENTORY, &item)?;
+        if ours {
+            self.wait_for_items(container_type::PLAYER_INVENTORY, &item)?;
+        }
         self.settle()?;
         Ok(item)
     }
@@ -1891,6 +1904,80 @@ impl Bot {
         }
     }
 
+    /// Every open wage offer, newest first, and the shift we're working if
+    /// we are (Commons S2.6). From anywhere.
+    pub fn wages(&mut self) -> Result<capitol_protocol::rest::WagesResponse, BotError> {
+        let query = capitol_protocol::rest::WagesQuery::default();
+        match self.call("reading the work offered", RestRequest::Wages(query))? {
+            RestResponse::Wages(wages) => Ok(wages),
+            other => Err(unexpected("reading the work offered", &other)),
+        }
+    }
+
+    /// Takes the work on `offer_id`: our shift on it starts (S2.6). From
+    /// anywhere; the work is done where it is.
+    pub fn take_wages(&mut self, offer_id: Uuid) -> Result<capitol_protocol::rest::WageShift, BotError> {
+        match self.call("taking work", RestRequest::TakeWages { offer_id })? {
+            RestResponse::Shift(shift) => {
+                self.log(format!("took the work on offer {offer_id}"));
+                Ok(shift)
+            }
+            other => Err(unexpected("taking work", &other)),
+        }
+    }
+
+    /// Stops the shift on `offer_id`, ours as its worker or its employer:
+    /// what was made is paid (S2.6).
+    pub fn stop_shift(&mut self, offer_id: Uuid) -> Result<capitol_protocol::rest::ShiftEnded, BotError> {
+        match self.call("stopping a shift", RestRequest::StopShift { offer_id })? {
+            RestResponse::ShiftEnded(ended) => {
+                self.log(format!("stopped the shift on offer {offer_id}: {} made", ended.shift.made));
+                Ok(ended)
+            }
+            other => Err(unexpected("stopping a shift", &other)),
+        }
+    }
+
+    /// Crafts `recipe_id` at `station_id` on a wage shift (S2.6): from what's
+    /// in the station's box, whoever put it there, and into it, the
+    /// employer's. Stand within the station's reach. Nothing comes to us but
+    /// the pay, so nothing is collected.
+    pub fn craft_on_shift(&mut self, station_id: Uuid, recipe_id: &str) -> Result<Yield, BotError> {
+        let recipe = self
+            .state
+            .recipe(recipe_id)
+            .cloned()
+            .ok_or_else(|| BotError::Failed(format!("no recipe {recipe_id}")))?;
+        // No inputs named: the server takes them from the box in slot order
+        self.send(ClientMessage::CraftAtStation {
+            station_id: station_id.to_string(),
+            recipe_id: recipe.id.clone(),
+            input_item_ids: Vec::new(),
+        });
+        let timeout = Duration::from_millis(recipe.duration_ticks.max(0) as u64 * rules::TICK_MS)
+            + START_TIMEOUT
+            + REFETCH_TIMEOUT;
+        let seen = self.until(&format!("crafting {} on a shift", recipe.name), timeout, |_, seen| {
+            seen.iter().any(|e| {
+                matches!(
+                    e,
+                    StateEvent::CraftingCompleted { .. } | StateEvent::CraftingFailed { .. } | StateEvent::CraftingCancelled
+                )
+            })
+        })?;
+        let item = seen
+            .into_iter()
+            .find_map(|e| match e {
+                StateEvent::CraftingCompleted { item } => Some(Ok(item)),
+                StateEvent::CraftingFailed { reason } => Some(Err(BotError::Failed(reason))),
+                StateEvent::CraftingCancelled => Some(Err(BotError::Failed("the craft was cancelled".into()))),
+                _ => None,
+            })
+            .expect("until stopped on one of these")?;
+        self.settle()?;
+        Ok(item)
+    }
+
     /// Every open commission on the hall's board (S2.1), newest first. From
     /// anywhere.
     pub fn commissions(&mut self) -> Result<Vec<capitol_protocol::rest::Commission>, BotError> {
@@ -2462,6 +2549,11 @@ fn journaled(change: &StateEvent) -> bool {
             | StateEvent::CommissionDelivered { .. }
             | StateEvent::CommissionExpired { .. }
             | StateEvent::ClaimLapsed { .. }
+            // Wages (S2.8): the board's offers, a take, pay and a shift's end
+            | StateEvent::WageBoard(_)
+            | StateEvent::WageTaken { .. }
+            | StateEvent::WagePaid { .. }
+            | StateEvent::WageShiftEnded { .. }
     ) || matches!(
         change,
         StateEvent::Market(m) if matches!(**m, MarketEvent::OrderPlaced(_) | MarketEvent::OrderFilled { .. })

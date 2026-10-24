@@ -178,7 +178,11 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("PUT", "stations", [_, "automation"])
         | ("POST", "stations", [_, "automation", "start" | "stop"])
         // Reading a letter of your own: a citizen does it on the road in (#450)
-        | ("POST", "letters", [_, "read"]) => Some(ApiKeyScope::Play),
+        | ("POST", "letters", [_, "read"])
+        // Working for a wage: a citizen takes the work and stops its shift
+        // on its key (Commons S2.8). Offering work stays a person's
+        | ("POST", "wages", [_, "take"])
+        | ("DELETE", "wages", [_, "shift"]) => Some(ApiKeyScope::Play),
         ("POST", "exchange", ["deposit" | "withdraw"])
         | ("POST", "market", ["orders"] | ["box", "collect"])
         | ("DELETE", "market", ["orders", _])
@@ -409,6 +413,12 @@ mod tests {
         assert_eq!(rest(Method::DELETE, "/commissions/abc/claim"), Some(Trade));
         assert_eq!(rest(Method::DELETE, "/commissions/abc"), Some(Trade));
         assert_eq!(rest(Method::POST, "/commissions/abc"), None);
+        // Working for a wage is play; offering it isn't on a key (S2.8)
+        assert_eq!(rest(Method::GET, "/wages"), Some(Read));
+        assert_eq!(rest(Method::POST, "/wages/abc/take"), Some(Play));
+        assert_eq!(rest(Method::DELETE, "/wages/abc/shift"), Some(Play));
+        assert_eq!(rest(Method::POST, "/wages"), None);
+        assert_eq!(rest(Method::DELETE, "/wages/abc"), None);
     }
 
     #[test]

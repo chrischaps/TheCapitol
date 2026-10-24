@@ -46,10 +46,14 @@ pub enum Occasion {
     Answer,
     /// A letter came (S1.5): the reply, with postage paid.
     Letter,
+    /// It took work someone offered, and is starting the shift (S2.8).
+    Hired,
+    /// A shift it worked for someone ended (S2.8).
+    ShiftDone,
 }
 
 impl Occasion {
-    pub const ALL: [Occasion; 8] = [
+    pub const ALL: [Occasion; 10] = [
         Occasion::Greeting,
         Occasion::Opening,
         Occasion::Accepting,
@@ -58,6 +62,8 @@ impl Occasion {
         Occasion::Sale,
         Occasion::Answer,
         Occasion::Letter,
+        Occasion::Hired,
+        Occasion::ShiftDone,
     ];
 }
 
@@ -386,6 +392,40 @@ pub fn lines(occasion: Occasion, band: Band) -> &'static [&'static str] {
             "I read it twice! Come and find me at the market.",
             "Thank you, thank you. Letters are rare in this city.",
             "So good to hear from you, {name}. Write again soon.",
+        ],
+        (Hired, Reserved) => &["I'll take it.", "Right. To work.", "Fair pay. I'm on it.", "Done, {name}.", "Show me the bench.", "Work's work."],
+        (Hired, Even) => &[
+            "Glad of the work, {name}.",
+            "I'll make a start, then.",
+            "Thanks for the work. I'll do it right.",
+            "Happy to help, {name}.",
+            "A fair rate. Count me in.",
+            "Right, let's get going.",
+        ],
+        (Hired, Warm) => &[
+            "Glad of the work, {name}! I'll do you proud.",
+            "Oh, thank you! I'll start straight away.",
+            "{hello}, {name}! Happy to lend a hand.",
+            "Lovely! Nothing like honest work.",
+            "Thank you for thinking of me, {name}.",
+            "Count me in! Many hands, as they say.",
+        ],
+        (ShiftDone, Reserved) => &["That's me done.", "Done for now.", "All yours, {name}.", "Paid up. Good.", "That'll do.", "Finished."],
+        (ShiftDone, Even) => &[
+            "That's my shift done, {name}.",
+            "All done. Thanks for the work.",
+            "Good work today, I think.",
+            "That's me finished. Fair pay, that.",
+            "Done. Call on me again, {name}.",
+            "Off I go. Thank you.",
+        ],
+        (ShiftDone, Warm) => &[
+            "All done, {name}! Thank you for having me.",
+            "That's my shift! I enjoyed that.",
+            "Finished! Do call on me again.",
+            "A good day's work, {name}. Thank you!",
+            "Done and paid. Lovely doing business!",
+            "That's me off. Take care, {name}!",
         ],
     }
 }
