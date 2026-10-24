@@ -529,9 +529,11 @@ mod tests {
     /// each deletes the planned rows it lists by id (a `'id',` line), if any,
     /// and inserts its own (a `('id', 'type', x, y, quality)` line), from
     /// `print_node_replan`, or from `print_new_nodes` for one that only adds.
-    const REPLAN_MIGRATIONS: [&str; 1] = [
+    const REPLAN_MIGRATIONS: [&str; 2] = [
         // Arrival's commons round the spawn (#443): only adds
         include_str!("../../migrations/post-content/20261222_001_arrival_commons.sql"),
+        // The wilds on a spacing grid of their own (#340)
+        include_str!("../../migrations/post-content/20261223_001_wilds_own_grid_nodes.sql"),
     ];
 
     /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every

@@ -27,7 +27,9 @@
 //! **The wilds** ([`PLACED_BY_THE_LAND`]) are placed after every other zone,
 //! from the land: each resource where its habitat in `content/wilds.toml`
 //! says, on ground a walker can reach (W6, #199; see [`wilds`]). Placing them
-//! last leaves the other zones' nodes, ids and all, as E2.3 planned them.
+//! last leaves the other zones' nodes, ids and all, as E2.3 planned them. On
+//! a spacing grid of their own, and [`MIN_GAP`] past the rural edge, nothing
+//! the other zones plan moves them either (#340).
 //!
 //! **Arrival's commons** ([`arrival`], #443) is placed last of all: the
 //! trees, branches, outcrops and grass the road in's first chapter gathers,
@@ -245,8 +247,24 @@ pub fn plan_with(
             }
         }
     }
+    // The wilds keep their own spacing grid, with `existing` in it, and start
+    // [`MIN_GAP`] past the rural edge (`wilds::Land::from`), so nothing the
+    // other zones planned can turn a wild spot down: a change to the rural
+    // ring moves no wild node (#340). Only a node planned past the frame's
+    // rural edge is in their grid, and on the default world there's none: the
+    // zones plan on the protocol's rings until a grown world's follow its
+    // frame (#465).
     let wild: Vec<&SpawnTable> = order.iter().copied().filter(|t| t.grows_wild()).collect();
-    wilds::plan(&wild_land, &ground, &wild, &mut taken, seed, land, &mut seeds);
+    let mut wild_taken = PointGrid::new(MIN_GAP);
+    let past = seeds.iter().map(|s| (s.x, s.y)).filter(|&p| wild_land.past_the_rural_edge(p));
+    for p in existing.iter().copied().chain(past) {
+        wild_taken.insert(p);
+    }
+    let first_wild = seeds.len();
+    wilds::plan(&wild_land, &ground, &wild, &mut wild_taken, seed, land, &mut seeds);
+    for s in &seeds[first_wild..] {
+        taken.insert((s.x, s.y));
+    }
     // Arrival's commons round the spawn (#443), last of all
     arrival::plan(&ground, &order, terrain.land.frame.spawn(), &mut taken, seed, &dry, &mut seeds);
     seeds
@@ -814,6 +832,35 @@ mod tests {
         let without: Vec<SpawnTable> = tables.iter().cloned().map(|t| SpawnTable { habitat: None, ..t }).collect();
         let tame = plan(&small_world(), &without, &[], 1);
         assert_eq!(&tame[..first_wild], &seeds[..first_wild]);
+    }
+
+    /// A change to the rural ring's plan moves no wild node (#340): before,
+    /// a rural node by the edge that turned down one wild spot changed every
+    /// draw after it in that resource's stream. On the default world, with
+    /// its seed, half again the rural nodes moved 11272 of its 14133 wild
+    /// ones; some seeds miss the edge and move none.
+    #[test]
+    fn a_change_to_the_rural_ring_moves_no_wild_node() {
+        let seed = crate::models::WorldGenParams::default().seed;
+        let wild = |tables: &[SpawnTable]| -> Vec<NodeSeed> {
+            let all = plan(TerrainConfig::default_world(), tables, &[], seed);
+            all.into_iter().filter(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).collect()
+        };
+        let tables = content_tables();
+        let rural = Zone::Rural.as_str();
+        let busier: Vec<SpawnTable> = tables
+            .iter()
+            .cloned()
+            .map(|mut t| {
+                for s in t.spawns.iter_mut().filter(|s| s.zone == rural) {
+                    s.density *= 1.5;
+                }
+                t
+            })
+            .collect();
+        let before = wild(&tables);
+        assert!(before.len() > 1000, "{} wild nodes", before.len());
+        assert_eq!(wild(&busier), before);
     }
 
     /// A regenerate plans the planned types only (`replan`): the same plan,

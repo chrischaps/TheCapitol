@@ -155,7 +155,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
     - 30 from the wild water (clay 18)
     - 30 inside the world's edge
     - 12 from every other node
-  - **The wilds are placed last,** after every other zone, so E2.3's 944 nodes and their ids are unchanged.
+  - **The wilds are placed last,** after every other zone, so E2.3's 944 nodes and their ids are unchanged. Since #340 they also keep a spacing grid of their own and start `MIN_GAP` past the rural edge, so nothing the other zones plan moves them either.
   - **Counts.** The default world gets 8264 wild nodes, D5's densities over the 67.7 km² of the wilds: trees 4064, branches 2032, stone 1355, veins 542 and clay 271. Clay's wilderness density (4/km², floor 53) is new in `resources.toml`.
   - **Uneven ore.** The veins go where the ranges are high, so some massifs have far more than others. On the default world the western one has very few. Chris judges whether every range should have ore.
 - **As built (#225): all six.** Chris approved the rest of WD8 on 2026-10-19. The economy plan's D5 has the content, under "The wilds' yields".

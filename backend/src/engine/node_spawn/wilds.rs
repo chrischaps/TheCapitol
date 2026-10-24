@@ -18,7 +18,7 @@
 //!
 //! On top of [`Ground::open`] (roads and trails, lots, parks), every wild node
 //! is [`MOVE_CLEAR`] from the wild water (clay [`BANK_CLEAR`]) and from the
-//! world's edge, on ground no steeper than `ground::CLIFF_SLOPE`, and on
+//! world's edge, [`MIN_GAP`] past the rural edge ([`Land::from`]), on ground no steeper than `ground::CLIFF_SLOPE`, and on
 //! ground a walker can reach from the rural edge ([`Land::reached`]).
 //!
 //! **Quality.** A wild node's base quality is drawn from its spawn row's floor
@@ -257,6 +257,19 @@ impl<'a> Land<'a> {
         }
     }
 
+    /// The radius the wilds' nodes start at: [`MIN_GAP`] past the rural edge,
+    /// so they keep their gap from the rural nodes without looking at them
+    /// (#340).
+    pub fn from(&self) -> f64 {
+        self.frame().rural_edge() + MIN_GAP
+    }
+
+    /// Whether `at` is past the rural edge, where the wilds' nodes look at
+    /// what's already there.
+    pub fn past_the_rural_edge(&self, at: (f64, f64)) -> bool {
+        self.radius(at.0, at.1) >= self.frame().rural_edge()
+    }
+
     /// Whether a walker from the rural edge can reach the cell `at` is in.
     pub fn reached(&self, at: (f64, f64)) -> bool {
         self.cell_at(at).is_some_and(|k| self.cells[k].reached)
@@ -385,7 +398,7 @@ impl Placing<'_, '_> {
         let r = self.land.radius(at.0, at.1);
         let land = &self.land.terrain.land;
         let water = if bank { BANK_CLEAR } else { MOVE_CLEAR };
-        let fits = r <= frame.world_edge() - MOVE_CLEAR
+        let fits = (self.land.from()..=frame.world_edge() - MOVE_CLEAR).contains(&r)
             && frame.zone_at(at.0, at.1) == Zone::Wilderness
             && self.land.reached(at)
             && self.ground.open(at, MOVE_CLEAR, false)
@@ -412,7 +425,7 @@ impl Placing<'_, '_> {
         let frame = self.land.frame();
         let r = self.land.radius(at.0, at.1);
         let land = &self.land.terrain.land;
-        let fits = r <= frame.world_edge() - MOVE_CLEAR
+        let fits = (self.land.from()..=frame.world_edge() - MOVE_CLEAR).contains(&r)
             && frame.zone_at(at.0, at.1) == Zone::Wilderness
             && frame.zone_at(bank.0, bank.1) == Zone::Wilderness
             && (at.0 - bank.0).stable_hypot(at.1 - bank.1) <= EXTRACTION_RANGE
