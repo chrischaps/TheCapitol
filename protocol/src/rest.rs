@@ -893,6 +893,103 @@ pub struct GuildDetail {
     /// sees them
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting: Vec<GuildInvite>,
+    /// The treasury and its dues (S4.2): only its members see them
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub treasury: Option<GuildTreasury>,
+}
+
+/// A guild's treasury as its members see it (S4.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildTreasury {
+    pub strands: i64,
+    /// Dues it couldn't pay, waiting for deposits
+    pub owed: i64,
+    /// A week's dues at its size now ([`rules::guild::weekly_dues`])
+    pub weekly_dues: i64,
+    /// The debt that dissolves it, at its size now
+    pub dissolves_at: i64,
+    /// What an officer may withdraw in a rolling week. The leader has no limit.
+    pub withdrawal_limit: i64,
+    /// What you've withdrawn in the week now, if you're an officer
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub withdrawn_this_week: i64,
+}
+
+/// `POST /guilds/{id}/deposit` and `/withdraw`, and `PUT /guilds/{id}/limit`
+/// (S4.2): Strands into or out of the treasury, or an officer's weekly limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildStrands {
+    pub strands: i64,
+    /// What a withdrawal is for, kept in the books
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// What moved a treasury (S4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum GuildEntryKind {
+    /// A member put Strands in
+    Deposit,
+    /// An officer or the leader took Strands out
+    Withdrawal,
+    /// An hour's dues, or dues owed paid off: a sink
+    Dues,
+    /// A roster change's fee: a sink
+    Fee,
+    /// A member's share as the guild closed
+    Share,
+}
+
+impl GuildEntryKind {
+    /// The column's value, and the wire's.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GuildEntryKind::Deposit => "deposit",
+            GuildEntryKind::Withdrawal => "withdrawal",
+            GuildEntryKind::Dues => "dues",
+            GuildEntryKind::Fee => "fee",
+            GuildEntryKind::Share => "share",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<GuildEntryKind> {
+        match s {
+            "deposit" => Some(GuildEntryKind::Deposit),
+            "withdrawal" => Some(GuildEntryKind::Withdrawal),
+            "dues" => Some(GuildEntryKind::Dues),
+            "fee" => Some(GuildEntryKind::Fee),
+            "share" => Some(GuildEntryKind::Share),
+            _ => None,
+        }
+    }
+}
+
+/// One move of a treasury's Strands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildEntry {
+    pub at: DateTime<Utc>,
+    pub kind: GuildEntryKind,
+    /// What the treasury gained, negative for what it lost
+    pub strands: i64,
+    /// The treasury after
+    pub treasury: i64,
+    /// Who put it in, took it out, or made the roster change. None for dues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<Correspondent>,
+    pub note: String,
+}
+
+/// `GET /guilds/{id}/books` (S4.2): a treasury's moves, newest first, to
+/// its members.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildBooks {
+    pub entries: Vec<GuildEntry>,
 }
 
 /// `GET /player/guild` (S4.1), and the answer to every guild action: your
@@ -2177,6 +2274,10 @@ pub struct Commission {
 }
 
 fn is_zero(n: &i32) -> bool {
+    *n == 0
+}
+
+fn is_zero_i64(n: &i64) -> bool {
     *n == 0
 }
 

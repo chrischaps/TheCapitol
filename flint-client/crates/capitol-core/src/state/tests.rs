@@ -249,7 +249,9 @@ fn test_for(message: &M) -> fn() {
         M::CommissionClaimed { .. } | M::ClaimDueSoon { .. } | M::ClaimLapsed { .. } => claim_notices_are_reported,
         M::CommissionDelivered { .. } => commission_notices_are_reported,
         M::CommissionExpired { .. } => commission_notices_are_reported,
-        M::GuildChanged { .. } | M::GuildNotice { .. } => guild_messages_are_reported,
+        M::GuildChanged { .. } | M::GuildNotice { .. } | M::GuildDues { .. } | M::GuildDissolved { .. } => {
+            guild_messages_are_reported
+        }
         M::Tutorial { .. } | M::TutorialStep { .. } => the_road_in_follows_the_server,
         M::WageOffered { .. }
         | M::WageUpdated { .. }
@@ -276,7 +278,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 80, "one fixture per ServerMessage variant");
+    assert_eq!(count, 82, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1611,6 +1613,17 @@ fn guild_messages_are_reported() {
             name: "Brin".into(),
             citizen: true,
         }]
+    );
+    // The treasury's dues (S4.2)
+    let dues = M::GuildDues { guild_id, guild: "The Rope Walkers".into(), tag: "ROPE".into(), owed: 130, dissolves_at: 260 };
+    assert_eq!(
+        state.apply_ws(&dues),
+        vec![StateEvent::GuildDues { guild_id, guild: "The Rope Walkers".into(), owed: 130, dissolves_at: 260 }]
+    );
+    let gone = M::GuildDissolved { guild_id, guild: "The Rope Walkers".into(), tag: "ROPE".into(), owed: 260, share: 12 };
+    assert_eq!(
+        state.apply_ws(&gone),
+        vec![StateEvent::GuildDissolved { guild_id, guild: "The Rope Walkers".into(), owed: 260, share: 12 }]
     );
 }
 

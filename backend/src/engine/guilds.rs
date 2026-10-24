@@ -8,8 +8,23 @@
 //! the last, which disbands the guild. Officers expel members, the leader
 //! officers too, and only the leader sets roles and hands on the lead.
 //!
-//! Each change to the roster costs [`guild::ROSTER_FEE`] from whoever makes
-//! it (a `guild_fee`, a sink), until S4.2's treasury pays. Leaving is free.
+//! Each change to the roster costs [`guild::ROSTER_FEE`] (a `guild_fee`, a
+//! sink): from the treasury when it has a Strand, else from whoever makes the
+//! change. Leaving is free.
+//!
+//! **The treasury** (S4.2) is held for the guild, outside every balance, and
+//! counted in the ledger's held Strands ([`held`]). Any member deposits, from
+//! anywhere; an officer withdraws up to the weekly limit the leader sets, the
+//! leader without one. Every move is a `guild_ledger` row its members read
+//! ([`books`]). [`collect_dues`] charges the week's dues
+//! ([`guild::weekly_dues`]) hourly with the property tax, in carried
+//! fractions through [`charge_hour`]. What the treasury can't pay is debt,
+//! paid off first as Strands come in. Officers hear as the debt passes each
+//! week, and at four weeks' worth the guild is dissolved: the treasury pays
+//! the debt, what's left is shared among the members by tenure, and the
+//! roster is cleared ([`close`]). Dues and fees leave the holding for no
+//! one, so they're written only in the treasury's books, and the ledger reads
+//! them back as `held_flows` ([`held_flows`]).
 //!
 //! A leader whose subscription has lapsed keeps the guild but can't invite.
 //! After [`guild::LEAD_LAPSE_DAYS`] lapsed, [`pass_lapsed_leads`] gives the
@@ -34,9 +49,11 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::currency::{announce_balances, subtract_strands_in, TransactionType};
+use super::currency::{add_strands_in, announce_balances, balances_of, subtract_strands_in, TransactionType};
 use super::notices;
+use super::property_tax::charge_hour;
 use super::GameEvent;
+use capitol_protocol::rest::{GuildBooks, GuildEntry, GuildEntryKind, GuildTreasury};
 
 /// Why something asked of a guild was refused.
 #[derive(Debug)]
@@ -70,6 +87,14 @@ pub enum GuildError {
     AlreadyWaiting,
     /// A leader with members left must hand on the lead first
     LeaderLeaving,
+    /// A deposit, withdrawal or limit that isn't a number of Strands
+    Strands,
+    /// You haven't the Strands to deposit
+    Short,
+    /// The treasury holds only so many
+    TreasuryShort(i64),
+    /// Over an officer's weekly limit: what's left of it
+    OverLimit(i64),
     Db(sqlx::Error),
 }
 
@@ -96,6 +121,10 @@ impl GuildError {
             GuildError::NoInvite => "There's no such invitation or application".into(),
             GuildError::AlreadyWaiting => "That's asked already, and waiting".into(),
             GuildError::LeaderLeaving => "Hand on the lead before you leave".into(),
+            GuildError::Strands => "Name a number of Strands".into(),
+            GuildError::Short => "You haven't that many Strands".into(),
+            GuildError::TreasuryShort(has) => format!("The treasury holds only {has} Strands"),
+            GuildError::OverLimit(left) => format!("That's over your weekly limit: {left} Strands left of it"),
             GuildError::Db(e) => format!("Database error: {e}"),
         }
     }
@@ -115,8 +144,9 @@ pub struct Told {
     pub changed: Vec<Uuid>,
     /// Each queued notice: who for, its id and the message to send live
     pub notices: Vec<(Uuid, Uuid, ServerMessage)>,
-    /// Who paid a fee, to be told their balance
-    pub paid: Option<Uuid>,
+    /// Whose balance changed, to be told it: who paid a fee, deposited,
+    /// withdrew or was given a share
+    pub paid: Vec<Uuid>,
 }
 
 impl Told {
@@ -129,14 +159,8 @@ impl Told {
         for (player_id, notice_id, message) in self.notices {
             let _ = events.send(GameEvent::BazaarNotice { player_id, notice_id, message });
         }
-        if let Some(payer) = self.paid {
-            let balance: Result<i64, _> = sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1")
-                .bind(payer)
-                .fetch_one(db)
-                .await;
-            if let Ok(balance) = balance {
-                announce_balances(events, [(payer, balance)]);
-            }
+        if let Ok(balances) = balances_of(db, &self.paid).await {
+            announce_balances(events, balances);
         }
     }
 }
@@ -200,7 +224,7 @@ pub async fn found(
     .map_err(|e| fee_error(e, GuildError::Founding))?;
     join(&mut tx, id, founder, GuildRole::Leader, now).await?;
     tx.commit().await?;
-    Ok((id, Told { guild_id: id, changed: vec![founder], notices: Vec::new(), paid: Some(founder) }))
+    Ok((id, Told { guild_id: id, changed: vec![founder], notices: Vec::new(), paid: vec![founder] }))
 }
 
 /// `actor`, an officer or the leader of `guild_id`, invites `player`. If
@@ -228,11 +252,11 @@ pub async fn invite(db: &PgPool, actor: Uuid, guild_id: Uuid, player: Uuid, now:
     }
     match waiting(&mut tx, guild_id, player).await? {
         Some(GuildInviteKind::Apply) => {
-            charge(&mut tx, actor, guild_id, &format!("{} joins {}", them.name, held.name)).await?;
+            let paid = charge(&mut tx, actor, guild_id, &format!("{} joins {}", them.name, held.name), now).await?;
             join(&mut tx, guild_id, player, GuildRole::Member, now).await?;
             let changed = members_of(&mut tx, guild_id).await?;
             tx.commit().await?;
-            Ok(Told { guild_id, changed, notices: Vec::new(), paid: Some(actor) })
+            Ok(Told { guild_id, changed, notices: Vec::new(), paid })
         }
         Some(GuildInviteKind::Invite) => Err(GuildError::AlreadyWaiting),
         None => {
@@ -241,7 +265,7 @@ pub async fn invite(db: &PgPool, actor: Uuid, guild_id: Uuid, player: Uuid, now:
             let notice = notify(&mut tx, player, guild_id, &held, GuildNoticeKind::Invited, &by).await?;
             let changed = officers_of(&mut tx, guild_id).await?;
             tx.commit().await?;
-            Ok(Told { guild_id, changed, notices: vec![notice], paid: None })
+            Ok(Told { guild_id, changed, notices: vec![notice], paid: Vec::new() })
         }
     }
 }
@@ -257,11 +281,11 @@ pub async fn apply(db: &PgPool, player: Uuid, guild_id: Uuid, now: DateTime<Utc>
     let me = correspondent(&mut tx, player).await?.ok_or(GuildError::NoOne)?;
     match waiting(&mut tx, guild_id, player).await? {
         Some(GuildInviteKind::Invite) => {
-            charge(&mut tx, player, guild_id, &format!("Joining {}", held.name)).await?;
+            let paid = charge(&mut tx, player, guild_id, &format!("Joining {}", held.name), now).await?;
             join(&mut tx, guild_id, player, GuildRole::Member, now).await?;
             let changed = members_of(&mut tx, guild_id).await?;
             tx.commit().await?;
-            Ok(Told { guild_id, changed, notices: Vec::new(), paid: Some(player) })
+            Ok(Told { guild_id, changed, notices: Vec::new(), paid })
         }
         Some(GuildInviteKind::Apply) => Err(GuildError::AlreadyWaiting),
         None => {
@@ -274,7 +298,7 @@ pub async fn apply(db: &PgPool, player: Uuid, guild_id: Uuid, now: DateTime<Utc>
             tx.commit().await?;
             let mut changed = officers;
             changed.push(player);
-            Ok(Told { guild_id, changed, notices, paid: None })
+            Ok(Told { guild_id, changed, notices, paid: Vec::new() })
         }
     }
 }
@@ -301,46 +325,43 @@ pub async fn withdraw(db: &PgPool, actor: Uuid, guild_id: Uuid, player: Uuid) ->
     let mut changed = officers_of(&mut tx, guild_id).await?;
     changed.push(player);
     tx.commit().await?;
-    Ok(Told { guild_id, changed, notices: Vec::new(), paid: None })
+    Ok(Told { guild_id, changed, notices: Vec::new(), paid: Vec::new() })
 }
 
 /// `player` leaves their guild, `guild_id`, for nothing. A leader can leave
-/// only as the last member, and the guild is disbanded.
+/// only as the last member, and the guild is disbanded: its treasury pays
+/// what it owes, and what's left is theirs.
 pub async fn leave(db: &PgPool, player: Uuid, guild_id: Uuid, now: DateTime<Utc>) -> Result<Told, GuildError> {
+    let now = now.trunc_subsecs(6);
     let mut tx = db.begin().await?;
     if guild_of(&mut tx, player).await? != Some(guild_id) {
         return Err(GuildError::NotInAGuild);
     }
-    hold(&mut tx, guild_id).await?;
+    let held = hold(&mut tx, guild_id).await?;
     let role = role_in(&mut tx, guild_id, player).await?.ok_or(GuildError::NotInAGuild)?;
     let others: Vec<Uuid> = members_of(&mut tx, guild_id).await?.into_iter().filter(|m| *m != player).collect();
     if role == GuildRole::Leader && !others.is_empty() {
         return Err(GuildError::LeaderLeaving);
     }
+    if others.is_empty() {
+        let told = close(&mut tx, guild_id, &held, Closing::Disbanded, now).await?;
+        tx.commit().await?;
+        return Ok(told);
+    }
     sqlx::query("DELETE FROM guild_members WHERE player_id = $1")
         .bind(player)
         .execute(&mut *tx)
         .await?;
-    if others.is_empty() {
-        sqlx::query("UPDATE guilds SET status = 'disbanded', disbanded_at = $2 WHERE id = $1")
-            .bind(guild_id)
-            .bind(now)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM guild_invites WHERE guild_id = $1")
-            .bind(guild_id)
-            .execute(&mut *tx)
-            .await?;
-    }
     tx.commit().await?;
     let mut changed = others;
     changed.push(player);
-    Ok(Told { guild_id, changed, notices: Vec::new(), paid: None })
+    Ok(Told { guild_id, changed, notices: Vec::new(), paid: Vec::new() })
 }
 
 /// `actor` expels `player` from `guild_id`: an officer a member, the leader
 /// an officer or a member.
-pub async fn expel(db: &PgPool, actor: Uuid, guild_id: Uuid, player: Uuid) -> Result<Told, GuildError> {
+pub async fn expel(db: &PgPool, actor: Uuid, guild_id: Uuid, player: Uuid, now: DateTime<Utc>) -> Result<Told, GuildError> {
+    let now = now.trunc_subsecs(6);
     let mut tx = db.begin().await?;
     let held = hold(&mut tx, guild_id).await?;
     let role = role_in(&mut tx, guild_id, actor).await?.ok_or(GuildError::NotAllowed("You aren't in this guild"))?;
@@ -355,7 +376,7 @@ pub async fn expel(db: &PgPool, actor: Uuid, guild_id: Uuid, player: Uuid) -> Re
         }));
     }
     let them = correspondent(&mut tx, player).await?.ok_or(GuildError::NoOne)?;
-    charge(&mut tx, actor, guild_id, &format!("{} expelled from {}", them.name, held.name)).await?;
+    let paid = charge(&mut tx, actor, guild_id, &format!("{} expelled from {}", them.name, held.name), now).await?;
     sqlx::query("DELETE FROM guild_members WHERE player_id = $1")
         .bind(player)
         .execute(&mut *tx)
@@ -365,7 +386,7 @@ pub async fn expel(db: &PgPool, actor: Uuid, guild_id: Uuid, player: Uuid) -> Re
     let mut changed = members_of(&mut tx, guild_id).await?;
     changed.push(player);
     tx.commit().await?;
-    Ok(Told { guild_id, changed, notices: vec![notice], paid: Some(actor) })
+    Ok(Told { guild_id, changed, notices: vec![notice], paid })
 }
 
 /// The leader `actor` makes `player` an officer or a member, or hands them
@@ -388,21 +409,22 @@ pub async fn set_role(
     }
     let theirs = role_in(&mut tx, guild_id, player).await?.ok_or(GuildError::NotAMember)?;
     if theirs == to {
-        return Ok(Told { guild_id, changed: Vec::new(), notices: Vec::new(), paid: None });
+        return Ok(Told { guild_id, changed: Vec::new(), notices: Vec::new(), paid: Vec::new() });
     }
     let them = correspondent(&mut tx, player).await?.ok_or(GuildError::NoOne)?;
     let mut notices = Vec::new();
+    let paid;
     if to == GuildRole::Leader {
         let subscription = subscription_of(&mut tx, player).await?.ok_or(GuildError::NoOne)?;
         if !subscription.is_active_at(now) {
             return Err(GuildError::Unsubscribed("The lead goes only to someone with a subscription".into()));
         }
-        charge(&mut tx, actor, guild_id, &format!("The lead of {} to {}", held.name, them.name)).await?;
+        paid = charge(&mut tx, actor, guild_id, &format!("The lead of {} to {}", held.name, them.name), now).await?;
         hand_on(&mut tx, guild_id, actor, player, now).await?;
         let by = correspondent(&mut tx, actor).await?.ok_or(GuildError::NoOne)?;
         notices.push(notify(&mut tx, player, guild_id, &held, GuildNoticeKind::Lead, &by).await?);
     } else {
-        charge(&mut tx, actor, guild_id, &format!("{} made {} in {}", them.name, to.as_str(), held.name)).await?;
+        paid = charge(&mut tx, actor, guild_id, &format!("{} made {} in {}", them.name, to.as_str(), held.name), now).await?;
         sqlx::query("UPDATE guild_members SET role = $2 WHERE player_id = $1")
             .bind(player)
             .bind(to.as_str())
@@ -411,7 +433,7 @@ pub async fn set_role(
     }
     let changed = members_of(&mut tx, guild_id).await?;
     tx.commit().await?;
-    Ok(Told { guild_id, changed, notices, paid: Some(actor) })
+    Ok(Told { guild_id, changed, notices, paid })
 }
 
 /// Pass the lead of every guild whose leader has been lapsed
@@ -481,7 +503,374 @@ async fn pass_lead(db: &PgPool, guild_id: Uuid, now: DateTime<Utc>) -> Result<Op
     let changed = members_of(&mut tx, guild_id).await?;
     tx.commit().await?;
     tracing::info!("The lead of {} passed to {next}: its leader {leader} lapsed", held.name);
-    Ok(Some(Told { guild_id, changed, notices: vec![notice], paid: None }))
+    Ok(Some(Told { guild_id, changed, notices: vec![notice], paid: Vec::new() }))
+}
+
+/// `player`, a member of `guild_id`, puts `strands` of their own into its
+/// treasury, from anywhere.
+pub async fn deposit(db: &PgPool, player: Uuid, guild_id: Uuid, strands: i64, now: DateTime<Utc>) -> Result<Told, GuildError> {
+    if strands <= 0 {
+        return Err(GuildError::Strands);
+    }
+    let now = now.trunc_subsecs(6);
+    let mut tx = db.begin().await?;
+    let held = hold(&mut tx, guild_id).await?;
+    if role_in(&mut tx, guild_id, player).await?.is_none() {
+        return Err(GuildError::NotInAGuild);
+    }
+    subtract_strands_in(
+        &mut tx,
+        player,
+        strands,
+        TransactionType::GuildDeposit,
+        Some(&format!("Into the treasury of {}", held.name)),
+        Some(guild_id),
+    )
+    .await
+    .map_err(|e| fee_error(e, GuildError::Short))?;
+    let after = move_treasury(&mut tx, guild_id, strands).await?;
+    book(&mut tx, guild_id, Some(player), GuildEntryKind::Deposit, strands, after, "", now).await?;
+    let changed = members_of(&mut tx, guild_id).await?;
+    tx.commit().await?;
+    Ok(Told { guild_id, changed, notices: Vec::new(), paid: vec![player] })
+}
+
+/// `actor` takes `strands` out of `guild_id`'s treasury for themselves: the
+/// leader as they like, an officer within the leader's limit over a rolling
+/// week ([`guild::WITHDRAWAL_WINDOW_DAYS`]). `note` says what for.
+pub async fn withdraw_strands(
+    db: &PgPool,
+    actor: Uuid,
+    guild_id: Uuid,
+    strands: i64,
+    note: &str,
+    now: DateTime<Utc>,
+) -> Result<Told, GuildError> {
+    if strands <= 0 {
+        return Err(GuildError::Strands);
+    }
+    let note = capitol_protocol::rules::talk::clean(note).unwrap_or_default();
+    let now = now.trunc_subsecs(6);
+    let mut tx = db.begin().await?;
+    let held = hold(&mut tx, guild_id).await?;
+    let role = role_in(&mut tx, guild_id, actor).await?.ok_or(GuildError::NotInAGuild)?;
+    if !role.may_withdraw() {
+        return Err(GuildError::NotAllowed("Only an officer or the leader can draw on the treasury"));
+    }
+    let treasury = treasury_of(&mut tx, guild_id).await?;
+    if treasury < strands {
+        return Err(GuildError::TreasuryShort(treasury));
+    }
+    if role == GuildRole::Officer {
+        let left = limit_of(&mut tx, guild_id).await? - withdrawn_in_week(&mut tx, guild_id, actor, now).await?;
+        if strands > left {
+            return Err(GuildError::OverLimit(left.max(0)));
+        }
+    }
+    let after = move_treasury(&mut tx, guild_id, -strands).await?;
+    book(&mut tx, guild_id, Some(actor), GuildEntryKind::Withdrawal, -strands, after, &note, now).await?;
+    add_strands_in(
+        &mut tx,
+        actor,
+        strands,
+        TransactionType::GuildWithdrawal,
+        Some(&format!("From the treasury of {}", held.name)),
+        Some(guild_id),
+    )
+    .await
+    .map_err(|e| GuildError::Db(sqlx::Error::Protocol(e)))?;
+    let changed = members_of(&mut tx, guild_id).await?;
+    tx.commit().await?;
+    Ok(Told { guild_id, changed, notices: Vec::new(), paid: vec![actor] })
+}
+
+/// The leader `actor` sets what each officer of `guild_id` may withdraw in a
+/// rolling week.
+pub async fn set_limit(db: &PgPool, actor: Uuid, guild_id: Uuid, strands: i64) -> Result<Told, GuildError> {
+    if strands < 0 {
+        return Err(GuildError::Strands);
+    }
+    let mut tx = db.begin().await?;
+    hold(&mut tx, guild_id).await?;
+    let role = role_in(&mut tx, guild_id, actor).await?.ok_or(GuildError::NotInAGuild)?;
+    if role != GuildRole::Leader {
+        return Err(GuildError::NotAllowed("Only the leader sets the officers' limit"));
+    }
+    sqlx::query("UPDATE guilds SET withdrawal_limit = $2 WHERE id = $1")
+        .bind(guild_id)
+        .bind(strands)
+        .execute(&mut *tx)
+        .await?;
+    let changed = officers_of(&mut tx, guild_id).await?;
+    tx.commit().await?;
+    Ok(Told { guild_id, changed, notices: Vec::new(), paid: Vec::new() })
+}
+
+/// `guild_id`'s treasury's moves, newest first, for `viewer`, who must be a
+/// member. The latest [`BOOKS_SHOWN`].
+pub async fn books(db: &PgPool, guild_id: Uuid, viewer: Uuid) -> Result<GuildBooks, GuildError> {
+    let mut conn = db.acquire().await?;
+    if guild_of(&mut conn, viewer).await? != Some(guild_id) {
+        return Err(GuildError::NotInAGuild);
+    }
+    type Row = (DateTime<Utc>, String, i64, i64, Option<Uuid>, Option<String>, Option<bool>, String);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT l.occurred_at, l.kind, l.amount, l.treasury_after, p.id, p.name, a.kind = 'citizen', l.note
+         FROM guild_ledger l
+         LEFT JOIN players p ON p.id = l.player_id LEFT JOIN accounts a ON a.id = p.account_id
+         WHERE l.guild_id = $1
+         ORDER BY l.id DESC
+         LIMIT $2",
+    )
+    .bind(guild_id)
+    .bind(BOOKS_SHOWN)
+    .fetch_all(&mut *conn)
+    .await?;
+    let entries = rows
+        .into_iter()
+        .filter_map(|(at, kind, strands, treasury, id, name, citizen, note)| {
+            Some(GuildEntry {
+                at,
+                kind: GuildEntryKind::parse(&kind)?,
+                strands,
+                treasury,
+                by: id.zip(name).map(|(id, name)| Correspondent {
+                    id,
+                    name,
+                    citizen: citizen.unwrap_or(false),
+                    office: false,
+                }),
+                note,
+            })
+        })
+        .collect();
+    Ok(GuildBooks { entries })
+}
+
+/// How many of a treasury's moves [`books`] shows.
+pub const BOOKS_SHOWN: i64 = 200;
+
+/// An hour's dues for every guild standing, from its treasury, at `now`:
+/// what it can't pay is debt, paid off first as Strands come in. Its
+/// officers hear as the debt passes each week of dues, and at four weeks'
+/// the guild is dissolved. Run hourly with the property tax. Errors are
+/// logged, and that guild waits for the next hour.
+pub async fn collect_dues(db: &PgPool, now: DateTime<Utc>) -> Vec<Told> {
+    let due: Vec<Uuid> = match sqlx::query_scalar("SELECT id FROM guilds WHERE status = 'active' ORDER BY founded_at, id")
+        .fetch_all(db)
+        .await
+    {
+        Ok(due) => due,
+        Err(e) => {
+            tracing::error!("Failed to find the guilds for their dues: {:?}", e);
+            return Vec::new();
+        }
+    };
+    let mut told = Vec::new();
+    for guild_id in due {
+        match dues_hour(db, guild_id, now).await {
+            Ok(Some(t)) => told.push(t),
+            Ok(None) => {}
+            Err(GuildError::NoGuild) => {}
+            Err(e) => tracing::error!("Failed to charge guild {guild_id} its dues: {:?}", e),
+        }
+    }
+    told
+}
+
+/// One guild's hour of dues: [`collect_dues`].
+async fn dues_hour(db: &PgPool, guild_id: Uuid, now: DateTime<Utc>) -> Result<Option<Told>, GuildError> {
+    let now = now.trunc_subsecs(6);
+    let mut tx = db.begin().await?;
+    let held = hold(&mut tx, guild_id).await?;
+    let (treasury, carry, owed): (i64, i32, i64) =
+        sqlx::query_as("SELECT treasury, dues_carry, dues_owed FROM guilds WHERE id = $1")
+            .bind(guild_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let members = members_of(&mut tx, guild_id).await?.len() as u32;
+    let (due, carry) = charge_hour(guild::weekly_dues(members), carry);
+    let pay = treasury.min(owed + due);
+    let owed_after = owed + due - pay;
+    let after: i64 = sqlx::query_scalar(
+        "UPDATE guilds SET treasury = treasury - $2, dues_carry = $3, dues_owed = $4 WHERE id = $1 RETURNING treasury",
+    )
+    .bind(guild_id)
+    .bind(pay)
+    .bind(carry)
+    .bind(owed_after)
+    .fetch_one(&mut *tx)
+    .await?;
+    if pay > 0 {
+        let note = if pay > due { format!("Dues, and {} owed", pay - due) } else { "Dues".into() };
+        book(&mut tx, guild_id, None, GuildEntryKind::Dues, -pay, after, &note, now).await?;
+    }
+    let told = if owed_after >= guild::dissolves_at(members) {
+        tracing::warn!("{} is dissolved, owing {owed_after} Strands of dues", held.name);
+        Some(close(&mut tx, guild_id, &held, Closing::Dissolved, now).await?)
+    } else if guild::debt_warning_due(owed, owed_after, members) {
+        let message = ServerMessage::GuildDues {
+            guild_id,
+            guild: held.name.clone(),
+            tag: held.tag.clone(),
+            owed: owed_after,
+            dissolves_at: guild::dissolves_at(members),
+        };
+        let officers = officers_of(&mut tx, guild_id).await?;
+        let mut notices = Vec::new();
+        for officer in &officers {
+            let id = notices::queue(&mut *tx, *officer, &guild_id.to_string(), &message).await?;
+            notices.push((*officer, id, message.clone()));
+        }
+        Some(Told { guild_id, changed: officers, notices, paid: Vec::new() })
+    } else {
+        None
+    };
+    tx.commit().await?;
+    Ok(told)
+}
+
+/// Why a guild closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closing {
+    /// Its last member left
+    Disbanded,
+    /// Four weeks of dues unpaid
+    Dissolved,
+}
+
+/// Closes `guild_id`, held in `conn`'s transaction: its treasury pays the
+/// dues it owes, what's left is shared among its members by tenure
+/// ([`guild::share_by_tenure`]), the longest-serving first on a tie, and its
+/// roster and invitations are cleared. On a dissolution each member hears
+/// what they were given (`guild_dissolved`), queued for anyone away.
+async fn close(
+    conn: &mut PgConnection,
+    guild_id: Uuid,
+    held: &Held,
+    closing: Closing,
+    now: DateTime<Utc>,
+) -> Result<Told, GuildError> {
+    // S4.3 (#399) forecloses the guild's hall deeds here, the way a plot is,
+    // and the refund less the debt goes into the treasury first
+    let (treasury, owed): (i64, i64) = sqlx::query_as("SELECT treasury, dues_owed FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let pay = treasury.min(owed);
+    let mut after = treasury;
+    if pay > 0 {
+        after = move_treasury(conn, guild_id, -pay).await?;
+        book(conn, guild_id, None, GuildEntryKind::Dues, -pay, after, "Dues owed, as it closed", now).await?;
+    }
+    let tenure: Vec<(Uuid, DateTime<Utc>)> =
+        sqlx::query_as("SELECT player_id, joined_at FROM guild_members WHERE guild_id = $1 ORDER BY joined_at, player_id")
+            .bind(guild_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    let members: Vec<Uuid> = tenure.iter().map(|(m, _)| *m).collect();
+    let tenures: Vec<i64> = tenure.iter().map(|(_, joined)| (now - *joined).num_seconds()).collect();
+    let shares = guild::share_by_tenure(after, &tenures);
+    let mut paid = Vec::new();
+    for (member, share) in members.iter().zip(&shares) {
+        if *share <= 0 {
+            continue;
+        }
+        after = move_treasury(conn, guild_id, -share).await?;
+        book(conn, guild_id, Some(*member), GuildEntryKind::Share, -share, after, "A share as it closed", now).await?;
+        add_strands_in(
+            conn,
+            *member,
+            *share,
+            TransactionType::GuildWithdrawal,
+            Some(&format!("A share of {}'s treasury, as it closed", held.name)),
+            Some(guild_id),
+        )
+        .await
+        .map_err(|e| GuildError::Db(sqlx::Error::Protocol(e)))?;
+        paid.push(*member);
+    }
+    let mut notices = Vec::new();
+    if closing == Closing::Dissolved {
+        for (member, share) in members.iter().zip(&shares) {
+            let message = ServerMessage::GuildDissolved {
+                guild_id,
+                guild: held.name.clone(),
+                tag: held.tag.clone(),
+                owed,
+                share: *share,
+            };
+            let id = notices::queue(&mut *conn, *member, &guild_id.to_string(), &message).await?;
+            notices.push((*member, id, message));
+        }
+    }
+    sqlx::query("DELETE FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM guild_invites WHERE guild_id = $1")
+        .bind(guild_id)
+        .execute(&mut *conn)
+        .await?;
+    let status = match closing {
+        Closing::Disbanded => "disbanded",
+        Closing::Dissolved => "dissolved",
+    };
+    sqlx::query("UPDATE guilds SET status = $2, disbanded_at = $3, dues_owed = dues_owed - $4 WHERE id = $1")
+        .bind(guild_id)
+        .bind(status)
+        .bind(now)
+        .bind(pay)
+        .execute(&mut *conn)
+        .await?;
+    Ok(Told { guild_id, changed: members, notices, paid })
+}
+
+/// Every guild's treasury: Strands held for guilds, outside every balance,
+/// for the ledger's [`held_strands`](super::ledger::held_strands).
+pub(crate) async fn held(conn: &mut PgConnection) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COALESCE(SUM(treasury), 0)::BIGINT FROM guilds")
+        .fetch_one(conn)
+        .await
+}
+
+/// What's left the treasuries for no one, ever, by transaction type: dues
+/// (`guild_dues`) and roster fees (`guild_fee`), negative, for the ledger's
+/// `held_flows`.
+pub(crate) async fn held_flows(conn: &mut PgConnection) -> Result<std::collections::BTreeMap<String, i64>, sqlx::Error> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT kind, SUM(amount)::BIGINT FROM guild_ledger WHERE kind IN ('dues', 'fee') GROUP BY kind",
+    )
+    .fetch_all(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(kind, sum)| {
+            let kind = if kind == "dues" { TransactionType::GuildDues } else { TransactionType::GuildFee };
+            (kind.as_str().to_string(), sum)
+        })
+        .collect())
+}
+
+/// What `guild_id`'s officers may each withdraw in a rolling week.
+async fn limit_of(conn: &mut PgConnection, guild_id: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT withdrawal_limit FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_one(conn)
+        .await
+}
+
+/// What `player` has withdrawn from `guild_id` in the week to `now`.
+async fn withdrawn_in_week(conn: &mut PgConnection, guild_id: Uuid, player: Uuid, now: DateTime<Utc>) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(-SUM(amount), 0)::BIGINT FROM guild_ledger
+         WHERE guild_id = $1 AND player_id = $2 AND kind = 'withdrawal' AND occurred_at > $3",
+    )
+    .bind(guild_id)
+    .bind(player)
+    .bind(now - Duration::days(guild::WITHDRAWAL_WINDOW_DAYS))
+    .fetch_one(conn)
+    .await
 }
 
 /// Every guild standing, the largest first.
@@ -512,6 +901,11 @@ pub async fn list(db: &PgPool) -> Result<Vec<GuildSummary>, sqlx::Error> {
 /// The guild `guild_id` as `viewer` sees it: who's waiting only for its
 /// officers and leader.
 pub async fn detail(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>) -> Result<GuildDetail, GuildError> {
+    detail_at(db, guild_id, viewer, Utc::now()).await
+}
+
+/// [`detail`] as of `now`, for the week an officer's withdrawals count in.
+async fn detail_at(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>, now: DateTime<Utc>) -> Result<GuildDetail, GuildError> {
     let mut conn = db.acquire().await?;
     type Row = (String, String, String, DateTime<Utc>, Uuid, String, bool, Uuid, String, bool);
     let row: Option<Row> = sqlx::query_as(
@@ -551,6 +945,31 @@ pub async fn detail(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>) -> Result
         .collect();
     let sees_waiting = viewer.is_some_and(|v| members.iter().any(|m| m.id == v && m.role.may_invite()));
     let waiting = if sees_waiting { invites(&mut conn, "i.guild_id", guild_id).await? } else { Vec::new() };
+    let member = viewer.and_then(|v| members.iter().find(|m| m.id == v));
+    let treasury = match member {
+        Some(m) => {
+            let (strands, owed, withdrawal_limit): (i64, i64, i64) =
+                sqlx::query_as("SELECT treasury, dues_owed, withdrawal_limit FROM guilds WHERE id = $1")
+                    .bind(guild_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let withdrawn_this_week = if m.role == GuildRole::Officer {
+                withdrawn_in_week(&mut conn, guild_id, m.id, now).await?
+            } else {
+                0
+            };
+            let size = members.len() as u32;
+            Some(GuildTreasury {
+                strands,
+                owed,
+                weekly_dues: guild::weekly_dues(size),
+                dissolves_at: guild::dissolves_at(size),
+                withdrawal_limit,
+                withdrawn_this_week,
+            })
+        }
+        None => None,
+    };
     Ok(GuildDetail {
         id: guild_id,
         name,
@@ -561,6 +980,7 @@ pub async fn detail(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>) -> Result
         leader: Correspondent { id: l, name: l_name, citizen: l_citizen, office: false },
         members,
         waiting,
+        treasury,
     })
 }
 
@@ -728,12 +1148,70 @@ async fn invites(conn: &mut PgConnection, column: &str, id: Uuid) -> Result<Vec<
         .collect())
 }
 
-/// Takes [`guild::ROSTER_FEE`] from `payer` for a change to `guild_id`'s roster.
-async fn charge(conn: &mut PgConnection, payer: Uuid, guild_id: Uuid, what: &str) -> Result<(), GuildError> {
-    subtract_strands_in(conn, payer, guild::ROSTER_FEE, TransactionType::GuildFee, Some(what), Some(guild_id))
+/// Takes [`guild::ROSTER_FEE`] for a change to `guild_id`'s roster, which
+/// `actor` makes: from the treasury if it has it, else from them. Whose
+/// balance it changed: theirs, or no one's.
+async fn charge(
+    conn: &mut PgConnection,
+    actor: Uuid,
+    guild_id: Uuid,
+    what: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<Uuid>, GuildError> {
+    if treasury_of(conn, guild_id).await? >= guild::ROSTER_FEE {
+        let after = move_treasury(conn, guild_id, -guild::ROSTER_FEE).await?;
+        book(conn, guild_id, Some(actor), GuildEntryKind::Fee, -guild::ROSTER_FEE, after, what, now).await?;
+        return Ok(Vec::new());
+    }
+    subtract_strands_in(conn, actor, guild::ROSTER_FEE, TransactionType::GuildFee, Some(what), Some(guild_id))
         .await
-        .map(|_| ())
-        .map_err(|e| fee_error(e, GuildError::RosterFee))
+        .map_err(|e| fee_error(e, GuildError::RosterFee))?;
+    Ok(vec![actor])
+}
+
+/// The Strands in `guild_id`'s treasury.
+async fn treasury_of(conn: &mut PgConnection, guild_id: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT treasury FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_one(conn)
+        .await
+}
+
+/// Moves `guild_id`'s treasury by `strands`, and returns it after.
+async fn move_treasury(conn: &mut PgConnection, guild_id: Uuid, strands: i64) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("UPDATE guilds SET treasury = treasury + $2 WHERE id = $1 RETURNING treasury")
+        .bind(guild_id)
+        .bind(strands)
+        .fetch_one(conn)
+        .await
+}
+
+/// Writes a move of `guild_id`'s treasury in its books.
+#[allow(clippy::too_many_arguments)]
+async fn book(
+    conn: &mut PgConnection,
+    guild_id: Uuid,
+    by: Option<Uuid>,
+    kind: GuildEntryKind,
+    strands: i64,
+    after: i64,
+    note: &str,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO guild_ledger (guild_id, player_id, kind, amount, treasury_after, note, occurred_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(guild_id)
+    .bind(by)
+    .bind(kind.as_str())
+    .bind(strands)
+    .bind(after)
+    .bind(note)
+    .bind(now)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// Queues `to` a notice of `kind` about `held`, done by `who`.
@@ -894,7 +1372,7 @@ mod tests {
         let total = strands_accounted(&db).await;
 
         let (id, told) = found(&db, ada, "  The Rope   Walkers ", "rope", "We make rope.", at(0)).await.unwrap();
-        assert_eq!((told.changed, told.paid), (vec![ada], Some(ada)));
+        assert_eq!((told.changed, told.paid), (vec![ada], vec![ada]));
         assert!(matches!(found(&db, bea, "Bea's Own", "BEA", "", at(0)).await, Err(GuildError::Founding)));
 
         assert_eq!(balances_of(&db, [ada]).await[&ada], 100);
@@ -968,7 +1446,7 @@ mod tests {
 
         // Bea is invited, and hears of it while away
         let told = invite(&db, ada, ropers, bea, at(1)).await.unwrap();
-        assert_eq!((told.paid, told.changed.clone()), (None, vec![ada]), "an invitation costs nothing");
+        assert_eq!((told.paid, told.changed.clone()), (Vec::new(), vec![ada]), "an invitation costs nothing");
         let waiting = notices::take_all(&db, bea, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap();
         assert!(matches!(&waiting[..], [ServerMessage::GuildNotice { kind: GuildNoticeKind::Invited, who, tag, .. }] if *who == ada && tag == "ROPE"));
         assert!(matches!(invite(&db, ada, ropers, bea, at(1)).await, Err(GuildError::AlreadyWaiting)));
@@ -978,7 +1456,7 @@ mod tests {
 
         // She accepts by applying, and pays the roster's Strand
         let told = apply(&db, bea, ropers, at(2)).await.unwrap();
-        assert_eq!((told.paid, told.changed), (Some(bea), vec![ada, bea]));
+        assert_eq!((told.paid, told.changed), (vec![bea], vec![ada, bea]));
         assert_eq!(balances_of(&db, [bea]).await[&bea], 10 - guild::ROSTER_FEE);
 
         // Brin applies; the leader hears, and inviting him takes him in
@@ -1015,20 +1493,20 @@ mod tests {
 
         // A member can't invite, expel or set roles
         assert!(matches!(invite(&db, cy, ropers, eve, at(5)).await, Err(GuildError::NotAllowed(_))));
-        assert!(matches!(expel(&db, cy, ropers, dee).await, Err(GuildError::NotAllowed(_))));
+        assert!(matches!(expel(&db, cy, ropers, dee, at(6)).await, Err(GuildError::NotAllowed(_))));
         assert!(matches!(set_role(&db, cy, ropers, dee, GuildRole::Officer, at(5)).await, Err(GuildError::NotAllowed(_))));
 
         // The leader makes Bea an officer, for a Strand
         let before = balances_of(&db, [ada]).await[&ada];
         set_role(&db, ada, ropers, bea, GuildRole::Officer, at(5)).await.unwrap();
         assert_eq!(balances_of(&db, [ada]).await[&ada], before - guild::ROSTER_FEE);
-        assert!(set_role(&db, ada, ropers, bea, GuildRole::Officer, at(5)).await.unwrap().paid.is_none(), "no change, no fee");
+        assert!(set_role(&db, ada, ropers, bea, GuildRole::Officer, at(5)).await.unwrap().paid.is_empty(), "no change, no fee");
 
         // An officer invites and expels members, but not officers or the leader, nor sets roles
         invite(&db, bea, ropers, eve, at(5)).await.unwrap();
         assert!(matches!(set_role(&db, bea, ropers, cy, GuildRole::Officer, at(5)).await, Err(GuildError::NotAllowed(_))));
-        assert!(matches!(expel(&db, bea, ropers, ada).await, Err(GuildError::NotAllowed(_))));
-        let told = expel(&db, bea, ropers, dee).await.unwrap();
+        assert!(matches!(expel(&db, bea, ropers, ada, at(6)).await, Err(GuildError::NotAllowed(_))));
+        let told = expel(&db, bea, ropers, dee, at(6)).await.unwrap();
         assert!(told.changed.contains(&dee), "the expelled hear it too");
         assert!(matches!(&told.notices[..], [(to, _, ServerMessage::GuildNotice { kind: GuildNoticeKind::Expelled, .. })] if *to == dee));
         assert_eq!(role(&db, ropers, dee).await, None);
@@ -1039,8 +1517,8 @@ mod tests {
 
         // The leader expels an officer, after a promotion
         set_role(&db, ada, ropers, cy, GuildRole::Officer, at(6)).await.unwrap();
-        assert!(matches!(expel(&db, bea, ropers, cy).await, Err(GuildError::NotAllowed(m)) if m.contains("leader")));
-        expel(&db, ada, ropers, cy).await.unwrap();
+        assert!(matches!(expel(&db, bea, ropers, cy, at(6)).await, Err(GuildError::NotAllowed(m)) if m.contains("leader")));
+        expel(&db, ada, ropers, cy, at(6)).await.unwrap();
 
         // The lead goes only to a subscriber; then Ada is an officer
         take_in(&db, ropers, ada, dee, 7).await;
@@ -1089,6 +1567,300 @@ mod tests {
         let told = pass_lapsed_leads(&db, at(10 + 28 + 28)).await;
         assert_eq!(told.len(), 1);
         assert_eq!(role(&db, ropers, ada).await, Some(GuildRole::Leader));
+    }
+
+    /// `hours` of dues from `from`, an hour apart
+    async fn dues_for(db: &PgPool, from: DateTime<Utc>, hours: i64) -> Vec<Told> {
+        let mut told = Vec::new();
+        for h in 0..hours {
+            told.extend(collect_dues(db, from + Duration::hours(h)).await);
+        }
+        told
+    }
+
+    /// `guild_id`'s treasury and what it owes
+    async fn treasury(db: &PgPool, guild_id: Uuid) -> (i64, i64) {
+        sqlx::query_as("SELECT treasury, dues_owed FROM guilds WHERE id = $1")
+            .bind(guild_id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_week_of_dues_costs_exactly_fifty_and_five_a_member(db: PgPool) {
+        let ada = subscriber(&db, "Ada", 5000, 30).await;
+        let bea = player(&db, "Bea", 10).await;
+        let cy = player(&db, "Cy", 10).await;
+        let ropers = rope_walkers(&db, ada).await;
+        take_in(&db, ropers, ada, bea, 0).await;
+        take_in(&db, ropers, ada, cy, 0).await;
+        let told = deposit(&db, ada, ropers, 1000, at(1)).await.unwrap();
+        assert_eq!((told.paid, told.changed.len()), (vec![ada], 3));
+        let before = balances_of(&db, [ada, bea, cy]).await;
+        let total = strands_accounted(&db).await;
+
+        // An hour charges a Strand of 65 now and then, carrying the rest
+        assert!(dues_for(&db, at(1), 2).await.is_empty(), "nothing to tell");
+        assert_eq!(treasury(&db, ropers).await, (1000, 0), "65/168 of a Strand twice is less than one");
+        dues_for(&db, at(1) + Duration::hours(2), 166).await;
+        assert_eq!(treasury(&db, ropers).await, (1000 - guild::weekly_dues(3), 0), "a week is exactly 65");
+        dues_for(&db, at(8), 168).await;
+        assert_eq!(treasury(&db, ropers).await.0, 1000 - 2 * guild::weekly_dues(3));
+        // Sunk from the holding, written in its books, the members untouched
+        assert_eq!(strands_accounted(&db).await, total);
+        assert_eq!(balances_of(&db, [ada, bea, cy]).await, before);
+        let entries = books(&db, ropers, cy).await.unwrap().entries;
+        let dues: Vec<&GuildEntry> = entries.iter().filter(|e| e.kind == GuildEntryKind::Dues).collect();
+        assert_eq!(dues.len(), 130);
+        assert!(dues.iter().all(|e| e.strands == -1 && e.by.is_none()));
+        let outsider = player(&db, "Outsider", 0).await;
+        assert!(matches!(books(&db, ropers, outsider).await, Err(GuildError::NotInAGuild)), "only members read them");
+        let flows = held_flows(&mut db.acquire().await.unwrap()).await.unwrap();
+        assert_eq!(flows["guild_dues"], -130);
+        let seen = detail(&db, ropers, Some(bea)).await.unwrap().treasury.unwrap();
+        assert_eq!((seen.strands, seen.weekly_dues, seen.dissolves_at), (870, 65, 260));
+        assert!(detail(&db, ropers, None).await.unwrap().treasury.is_none(), "only members see it");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn officers_withdraw_within_the_leaders_weekly_limit(db: PgPool) {
+        let ada = subscriber(&db, "Ada", 5000, 30).await;
+        let bea = player(&db, "Bea", 10).await;
+        let cy = player(&db, "Cy", 301).await;
+        let start = balances_of(&db, [ada, bea, cy]).await;
+        let ropers = rope_walkers(&db, ada).await;
+        take_in(&db, ropers, ada, bea, 0).await;
+        take_in(&db, ropers, ada, cy, 0).await;
+        set_role(&db, ada, ropers, bea, GuildRole::Officer, at(0)).await.unwrap();
+        let total = strands_accounted(&db).await;
+
+        // Any member deposits, no more than they have
+        assert!(matches!(deposit(&db, cy, ropers, 301, at(1)).await, Err(GuildError::Short)));
+        assert!(matches!(deposit(&db, cy, ropers, 0, at(1)).await, Err(GuildError::Strands)));
+        deposit(&db, cy, ropers, 300, at(1)).await.unwrap();
+        deposit(&db, ada, ropers, 700, at(1)).await.unwrap();
+
+        // An officer's limit starts at nothing, and only the leader sets it
+        assert!(matches!(withdraw_strands(&db, bea, ropers, 1, "", at(1)).await, Err(GuildError::OverLimit(0))));
+        assert!(matches!(set_limit(&db, bea, ropers, 100).await, Err(GuildError::NotAllowed(_))));
+        set_limit(&db, ada, ropers, 100).await.unwrap();
+        let told = withdraw_strands(&db, bea, ropers, 60, "Rope for the west road", at(1)).await.unwrap();
+        assert_eq!(told.paid, vec![bea]);
+        assert!(matches!(withdraw_strands(&db, bea, ropers, 50, "", at(2)).await, Err(GuildError::OverLimit(40))));
+        withdraw_strands(&db, bea, ropers, 40, "", at(2)).await.unwrap();
+        let seen = detail_at(&db, ropers, Some(bea), at(2)).await.unwrap().treasury.unwrap();
+        assert_eq!((seen.strands, seen.withdrawal_limit, seen.withdrawn_this_week), (900, 100, 100));
+        // A member can't at all; the leader has no limit, only the treasury's
+        assert!(matches!(withdraw_strands(&db, cy, ropers, 1, "", at(2)).await, Err(GuildError::NotAllowed(_))));
+        assert!(matches!(withdraw_strands(&db, ada, ropers, 901, "", at(2)).await, Err(GuildError::TreasuryShort(900))));
+        withdraw_strands(&db, ada, ropers, 500, "", at(2)).await.unwrap();
+        // The week rolls on from each draw: day 2's 40 still counts on day 8
+        assert!(matches!(withdraw_strands(&db, bea, ropers, 61, "", at(8)).await, Err(GuildError::OverLimit(60))));
+        withdraw_strands(&db, bea, ropers, 100, "", at(9)).await.unwrap();
+
+        let entries = books(&db, ropers, cy).await.unwrap().entries;
+        assert!(entries.iter().all(|e| e.kind != GuildEntryKind::Fee), "the roster changed before it had a Strand");
+        let draw = entries.iter().find(|e| e.note == "Rope for the west road").unwrap();
+        assert_eq!((draw.kind, draw.strands, draw.by.as_ref().map(|b| b.id)), (GuildEntryKind::Withdrawal, -60, Some(bea)));
+        assert_eq!(treasury(&db, ropers).await.0, 1000 - 60 - 40 - 500 - 100);
+        assert_eq!(entries[0].treasury, 300, "the newest first, with the treasury after");
+        assert_eq!(strands_accounted(&db).await, total, "held, not sunk");
+        assert_audited(&db, &start).await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_treasury_pays_the_roster_fee_when_it_can(db: PgPool) {
+        let ada = subscriber(&db, "Ada", 5000, 30).await;
+        let bea = player(&db, "Bea", 0).await;
+        let cy = player(&db, "Cy", 0).await;
+        let ropers = rope_walkers(&db, ada).await;
+        // Empty, so Bea can't join with no Strand of her own
+        invite(&db, ada, ropers, bea, at(0)).await.unwrap();
+        assert!(matches!(apply(&db, bea, ropers, at(0)).await, Err(GuildError::RosterFee)));
+        deposit(&db, ada, ropers, 2, at(0)).await.unwrap();
+        let told = apply(&db, bea, ropers, at(0)).await.unwrap();
+        assert!(told.paid.is_empty(), "the treasury paid");
+        let told = set_role(&db, ada, ropers, bea, GuildRole::Officer, at(0)).await.unwrap();
+        assert!(told.paid.is_empty());
+        // Spent, it falls to whoever makes the change
+        let before = balances_of(&db, [ada]).await[&ada];
+        apply(&db, cy, ropers, at(0)).await.unwrap();
+        assert_eq!(invite(&db, ada, ropers, cy, at(0)).await.unwrap().paid, vec![ada]);
+        assert_eq!(balances_of(&db, [ada]).await[&ada], before - guild::ROSTER_FEE);
+        let entries = books(&db, ropers, bea).await.unwrap().entries;
+        assert_eq!(entries.iter().filter(|e| e.kind == GuildEntryKind::Fee).count(), 2);
+        assert_eq!(held_flows(&mut db.acquire().await.unwrap()).await.unwrap()["guild_fee"], -2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn four_weeks_of_debt_warn_the_officers_then_dissolve_the_guild(db: PgPool) {
+        let ada = subscriber(&db, "Ada", 5000, 60).await;
+        let bea = player(&db, "Bea", 10).await;
+        let cy = player(&db, "Cy", 20).await;
+        let start = balances_of(&db, [ada, bea, cy]).await;
+        let ropers = rope_walkers(&db, ada).await;
+        take_in(&db, ropers, ada, bea, 0).await;
+        take_in(&db, ropers, ada, cy, 0).await;
+        set_role(&db, ada, ropers, bea, GuildRole::Officer, at(0)).await.unwrap();
+        // 30 in, against the first week's 65: 35 owed
+        deposit(&db, cy, ropers, 10, at(0)).await.unwrap();
+        deposit(&db, ada, ropers, 20, at(0)).await.unwrap();
+        let total = strands_accounted(&db).await;
+
+        let told = dues_for(&db, at(1), 168).await;
+        assert_eq!(treasury(&db, ropers).await, (0, 35));
+        assert!(told.is_empty(), "under a week owed");
+        // Passing a week of debt warns the leader and the officer, queued for them
+        let told = dues_for(&db, at(8), 168).await;
+        assert_eq!(treasury(&db, ropers).await, (0, 100));
+        assert_eq!(told.len(), 1);
+        // Ada and Bea joined in the same moment, so in either order
+        let mut changed = told[0].changed.clone();
+        changed.sort();
+        let mut officers = vec![ada, bea];
+        officers.sort();
+        assert_eq!(changed, officers);
+        assert!(matches!(&told[0].notices[..], [(_, _, ServerMessage::GuildDues { owed: 65, dissolves_at: 260, .. }), _]));
+        let rate = capitol_protocol::tunables::PROPERTY_TAX_RATE;
+        let dues_notices = |waiting: Vec<ServerMessage>| -> Vec<ServerMessage> {
+            waiting.into_iter().filter(|m| matches!(m, ServerMessage::GuildDues { .. })).collect()
+        };
+        let waiting = dues_notices(notices::take_all(&db, bea, rate).await.unwrap());
+        assert!(matches!(&waiting[..], [ServerMessage::GuildDues { tag, .. }] if tag == "ROPE"));
+        assert!(dues_notices(notices::take_all(&db, cy, rate).await.unwrap()).is_empty(), "a member isn't warned");
+
+        // A deposit pays the debt first, in the next hour
+        deposit(&db, cy, ropers, 5, at(15)).await.unwrap();
+        dues_for(&db, at(15), 1).await;
+        assert_eq!(treasury(&db, ropers).await, (0, 95));
+        // Two more weeks warned, then at 260 it's dissolved
+        let told = dues_for(&db, at(15) + Duration::hours(1), 168 * 3).await;
+        let kinds: Vec<&str> = told.iter().flat_map(|t| t.notices.iter().map(|(_, _, m)| m.type_name())).collect();
+        assert_eq!(kinds, ["guild_dues", "guild_dues", "guild_dues", "guild_dues", "guild_dissolved", "guild_dissolved", "guild_dissolved"]);
+        assert_eq!(treasury(&db, ropers).await, (0, guild::dissolves_at(3)));
+        let status: String = sqlx::query_scalar("SELECT status FROM guilds WHERE id = $1").bind(ropers).fetch_one(&db).await.unwrap();
+        assert_eq!(status, "dissolved");
+        assert!(mine(&db, cy).await.unwrap().guild.is_none(), "the roster's cleared");
+        assert!(collect_dues(&db, at(40)).await.is_empty(), "and no more dues");
+        // Its name is free, and nothing was made or lost
+        found(&db, ada, "The Rope Walkers", "ROPE", "", at(41)).await.unwrap();
+        assert_eq!(strands_accounted(&db).await, total - guild::FOUNDING_FEE);
+        assert_audited(&db, &start).await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_closing_guild_pays_its_debt_and_shares_the_rest_by_tenure(db: PgPool) {
+        let ada = subscriber(&db, "Ada", 5000, 30).await;
+        let bea = player(&db, "Bea", 0).await;
+        let cy = player(&db, "Cy", 0).await;
+        let start = balances_of(&db, [ada, bea, cy]).await;
+        let ropers = rope_walkers(&db, ada).await;
+        deposit(&db, ada, ropers, 1000, at(0)).await.unwrap();
+        // As of day 6, Ada has served 6 days, Bea 4 and Cy 2; the treasury
+        // paid both their roster fees
+        take_in(&db, ropers, ada, bea, 2).await;
+        take_in(&db, ropers, ada, cy, 4).await;
+        // As S4.3's foreclosed hall would leave it: 98 owed
+        sqlx::query("UPDATE guilds SET dues_owed = 98 WHERE id = $1").bind(ropers).execute(&db).await.unwrap();
+        let before = balances_of(&db, [ada, bea, cy]).await;
+        let total = strands_accounted(&db).await;
+
+        let mut tx = db.begin().await.unwrap();
+        let held = hold(&mut tx, ropers).await.unwrap();
+        let told = close(&mut tx, ropers, &held, Closing::Dissolved, at(6)).await.unwrap();
+        tx.commit().await.unwrap();
+        // 900 left, shared 6:4:2
+        let after = balances_of(&db, [ada, bea, cy]).await;
+        assert_eq!((after[&ada] - before[&ada], after[&bea], after[&cy]), (450, 300, 150));
+        assert_eq!(told.paid, vec![ada, bea, cy]);
+        assert!(matches!(&told.notices[..], [(_, _, ServerMessage::GuildDissolved { owed: 98, share: 450, .. }), _, _]));
+        assert_eq!(treasury(&db, ropers).await, (0, 0));
+        assert_eq!(strands_accounted(&db).await, total, "the debt is a sink the books keep, the rest shared");
+        assert_audited(&db, &start).await;
+
+        // A leader alone who leaves takes what's left, less what's owed
+        let dee = subscriber(&db, "Dee", 1000, 30).await;
+        let alone = found(&db, dee, "Alone", "ALONE", "", at(6)).await.unwrap().0;
+        deposit(&db, dee, alone, 300, at(6)).await.unwrap();
+        sqlx::query("UPDATE guilds SET dues_owed = 7 WHERE id = $1").bind(alone).execute(&db).await.unwrap();
+        let told = leave(&db, dee, alone, at(7)).await.unwrap();
+        assert_eq!((told.paid, told.notices.len()), (vec![dee], 0));
+        assert_eq!(balances_of(&db, [dee]).await[&dee], 1000 - guild::FOUNDING_FEE - 7);
+    }
+
+    /// A seeded month of a guild's life: members come and go, deposit and
+    /// draw, the dues run hourly, the roster fees fall on the treasury or the
+    /// actor, and at the end it's dissolved. Every Strand is accounted for
+    /// after each day, every balance is its trail, and the ledger shows no
+    /// drift.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_seeded_month_of_a_guild_conserves_every_strand(db: PgPool) {
+        use crate::engine::ledger;
+        use capitol_protocol::ledger::reconcile;
+
+        let ada = subscriber(&db, "Ada", 3000, 60).await;
+        let mut people = vec![ada];
+        for name in ["Bea", "Cy", "Dee", "Eve"] {
+            people.push(player(&db, name, 400).await);
+        }
+        let start = balances_of(&db, people.clone()).await;
+        let ropers = rope_walkers(&db, ada).await;
+        let books_start = ledger::books(&db).await.unwrap();
+        // A roster fee a player pays is a sink from their balance, which the
+        // harness doesn't add back, so it's counted beside
+        let total = strands_accounted(&db).await - fees_paid(&db).await;
+
+        // SplitMix64, so the month is the same every run
+        let mut seed = 0x5eed_0398_u64;
+        let mut next = move |n: u64| {
+            seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            (z ^ (z >> 31)) % n
+        };
+        set_limit(&db, ada, ropers, 80).await.unwrap();
+        let (mut joined, mut drawn) = (0, 0);
+        for day in 0..30 {
+            let now = at(day);
+            let who = people[next(people.len() as u64) as usize];
+            match next(5) {
+                0 | 1 => {
+                    let _ = invite(&db, ada, ropers, who, now).await;
+                    joined += usize::from(apply(&db, who, ropers, now).await.is_ok());
+                }
+                2 if who != ada => {
+                    let _ = leave(&db, who, ropers, now).await;
+                }
+                3 if who != ada => {
+                    let _ = set_role(&db, ada, ropers, who, GuildRole::Officer, now).await;
+                }
+                _ => {}
+            }
+            let _ = deposit(&db, who, ropers, next(120) as i64 + 1, now).await;
+            drawn += usize::from(withdraw_strands(&db, who, ropers, next(60) as i64 + 1, "", now).await.is_ok());
+            dues_for(&db, now, 24).await;
+            assert_eq!(strands_accounted(&db).await - fees_paid(&db).await, total, "day {day}");
+        }
+        assert!(joined > 0 && drawn > 0, "the month did something: {joined} joined, {drawn} draws");
+        // Then more owed than it holds, past four weeks: it's dissolved
+        sqlx::query("UPDATE guilds SET dues_owed = treasury + 400 WHERE id = $1").bind(ropers).execute(&db).await.unwrap();
+        let told = collect_dues(&db, at(30)).await;
+        assert!(told.iter().any(|t| t.notices.iter().any(|(_, _, m)| matches!(m, ServerMessage::GuildDissolved { .. }))));
+        assert!(held_flows(&mut db.acquire().await.unwrap()).await.unwrap()["guild_dues"] < 0, "dues were paid");
+        assert_eq!(strands_accounted(&db).await - fees_paid(&db).await, total);
+        assert_audited(&db, &start).await;
+        let books_end = ledger::books(&db).await.unwrap();
+        let books = reconcile(&books_start, &books_end);
+        assert!(books.strands.holds(), "{:#?}", books.strands);
+        assert_eq!(books_end.escrow_strands, 0, "nothing's held for a guild that's gone");
     }
 
     #[sqlx::test(migrations = "./migrations")]

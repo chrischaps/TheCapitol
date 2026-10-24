@@ -85,6 +85,8 @@ const SERVER_TYPES: &[&str] = &[
     "claim_lapsed",
     "guild_changed",
     "guild_notice",
+    "guild_dues",
+    "guild_dissolved",
     "wage_offered",
     "wage_updated",
     "wage_closed",

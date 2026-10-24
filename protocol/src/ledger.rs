@@ -42,9 +42,16 @@ pub struct Ledger {
     pub accounts: Vec<AccountBooks>,
     /// Strands held for someone, outside every balance: open buy orders'
     /// escrow, and since S0.2 the court's (commissions and wage offers) and
-    /// later the guilds' treasuries. The backend's `ledger::held_strands`
+    /// the guilds' treasuries (S4.2). The backend's `ledger::held_strands`
     /// is the one sum.
     pub escrow_strands: i64,
+    /// Strands that left a holding for no one, by transaction type, ever: a
+    /// guild's dues and roster fees out of its treasury (S4.2). They're sinks
+    /// no account's trail can carry, so the holding's own books write them
+    /// (`guild_ledger`), negative as an account's sink is. A ledger from
+    /// before reads with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub held_flows: BTreeMap<String, i64>,
     /// Every unit in the world, by item type: inventories, boxes, stalls,
     /// escrow, impounds
     pub units: BTreeMap<String, i64>,
@@ -469,6 +476,15 @@ fn strand_books(start: &Ledger, end: &Ledger) -> StrandBooks {
             accounts.push((account.name.clone(), over));
         }
     }
+    // What left a holding for no one: in the world's flows, and out of escrow
+    let mut held_out = 0;
+    for (kind, sum) in &end.held_flows {
+        let moved = sum - start.held_flows.get(kind).copied().unwrap_or(0);
+        held_out += moved;
+        if moved != 0 {
+            *flows.entry(kind.clone()).or_insert(0) += moved;
+        }
+    }
     let now: std::collections::HashSet<Uuid> = end.accounts.iter().map(|a| a.player_id).collect();
     let gone: Vec<(String, i64)> = start
         .accounts
@@ -481,8 +497,9 @@ fn strand_books(start: &Ledger, end: &Ledger) -> StrandBooks {
     let (faucets, sinks, transfers, other) =
         (sum_of(StrandFlow::Faucet), sum_of(StrandFlow::Sink), sum_of(StrandFlow::Transfer), sum_of(StrandFlow::Other));
     let (start_total, end_total) = (total(start), total(end));
-    // Escrow fills from buyers and empties to sellers and back to buyers
-    let escrow_drift = (end.escrow_strands - start.escrow_strands) + sum_of(StrandFlow::Escrow);
+    // Escrow fills from buyers and empties to sellers and back to buyers,
+    // and a treasury's dues leave it for no one
+    let escrow_drift = (end.escrow_strands - start.escrow_strands) + sum_of(StrandFlow::Escrow) - held_out;
     StrandBooks {
         start_total,
         end_total,
@@ -707,6 +724,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            held_flows: BTreeMap::new(),
             load: Load::default(),
         }
     }
@@ -784,6 +802,27 @@ mod tests {
         let books = reconcile(&start, &end).strands;
         assert!(books.holds(), "{books:?}");
         assert_eq!((books.sinks, books.transfers, books.escrow_drift), (-6, 0, 0));
+    }
+
+    /// A guild's treasury (S4.2): a member's deposit goes in, an officer's
+    /// draw comes out, and the week's dues and a roster fee leave it for no
+    /// one, written in the treasury's own books.
+    #[test]
+    fn a_treasurys_dues_are_sinks_from_the_holding() {
+        let start = ledger(vec![account(1, "Ada Reeder", 500, &[])], 0);
+        let mut end = ledger(
+            vec![account(1, "Ada Reeder", 500 - 200 + 40, &[("guild_deposit", -200), ("guild_withdrawal", 40)])],
+            200 - 40 - 55 - 1,
+        );
+        end.held_flows = [("guild_dues".to_string(), -55), ("guild_fee".to_string(), -1)].into();
+        let books = reconcile(&start, &end).strands;
+        assert!(books.holds(), "{books:?}");
+        assert_eq!((books.sinks, books.escrow_drift), (-56, 0));
+        assert_eq!(books.flows["guild_dues"], -55);
+        // Dues taken with nothing written are drift, in the world and in escrow
+        end.held_flows.clear();
+        let books = reconcile(&start, &end).strands;
+        assert_eq!((books.drift, books.escrow_drift), (-56, -56));
     }
 
     #[test]

@@ -55,7 +55,10 @@
 //! `fixtures/rest/my_guild.json` is `GET /player/guild` (S4.1) as a guild's
 //! leader sees it: a citizen among the members, a citizen's application and
 //! an officer's invitation waiting; `guilds.json` is `GET /guilds`, and
-//! `found_guild.json` is `POST /guilds`, a charter in paragraphs.
+//! `found_guild.json` is `POST /guilds`, a charter in paragraphs. Since S4.2
+//! the leader sees the treasury too, and `guild_books.json` is
+//! `GET /guilds/{id}/books`: dues, an officer's withdrawal, a roster fee the
+//! treasury paid and a citizen's deposit, newest first.
 //! `fixtures/rest/wages.json` is `GET /wages?mine=true` (S2.6): a citizen on
 //! a shift gathering on a named offer, and an open forge;
 //! `offer_wages.json` is `POST /wages`, and `shift_ended.json` is
@@ -513,7 +516,7 @@ fn claims_round_trip_marking_only_the_citizen() {
 
 #[test]
 fn a_guild_round_trips_as_its_leader_sees_it() {
-    use capitol_protocol::rest::{FoundGuild, GuildInviteKind, GuildsResponse, MyGuild};
+    use capitol_protocol::rest::{FoundGuild, GuildBooks, GuildEntryKind, GuildInviteKind, GuildsResponse, MyGuild};
     use capitol_protocol::rules::guild::{self, GuildRole};
     let json = fixture("my_guild.json");
     let mine: MyGuild = serde_json::from_str(&json).unwrap();
@@ -527,7 +530,23 @@ fn a_guild_round_trips_as_its_leader_sees_it() {
     let kinds: Vec<GuildInviteKind> = guild.waiting.iter().map(|w| w.kind).collect();
     assert_eq!(kinds, [GuildInviteKind::Apply, GuildInviteKind::Invite]);
     assert_eq!(guild.waiting[0].by, guild.waiting[0].player, "an application is its own asking");
+    let treasury = guild.treasury.as_ref().expect("a member sees the treasury");
+    assert_eq!(treasury.weekly_dues, guild::weekly_dues(guild.members.len() as u32));
+    assert_eq!(treasury.dissolves_at, guild::dissolves_at(guild.members.len() as u32));
     assert_eq!(serde_json::to_string(&mine).unwrap(), json);
+
+    let json = fixture("guild_books.json");
+    let books: GuildBooks = serde_json::from_str(&json).unwrap();
+    assert!(books.entries.windows(2).all(|w| w[0].at >= w[1].at), "newest first");
+    // Each entry's treasury is the one before it moved by its Strands
+    assert!(books.entries.windows(2).all(|w| w[1].treasury + w[0].strands == w[0].treasury));
+    let kinds: Vec<GuildEntryKind> = books.entries.iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, [GuildEntryKind::Dues, GuildEntryKind::Withdrawal, GuildEntryKind::Fee, GuildEntryKind::Deposit]);
+    assert!(books.entries[0].by.is_none(), "dues are no one's");
+    for kind in kinds {
+        assert_eq!(GuildEntryKind::parse(kind.as_str()), Some(kind));
+    }
+    assert_eq!(serde_json::to_string(&books).unwrap(), json);
 
     let json = fixture("guilds.json");
     let guilds: GuildsResponse = serde_json::from_str(&json).unwrap();

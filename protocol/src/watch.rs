@@ -603,6 +603,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            held_flows: Default::default(),
             load: Load::default(),
         };
         // Ada paid 3 in tax, and 2 Strands and a stone came from nowhere

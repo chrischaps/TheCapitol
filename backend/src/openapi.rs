@@ -34,7 +34,8 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rules::court::{ClaimStatus, CommissionStatus};
 use capitol_protocol::rest::{
-    FoundGuild, GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary, GuildsResponse, MyGuild, SetGuildRole,
+    FoundGuild, GuildBooks, GuildDetail, GuildEntry, GuildEntryKind, GuildInvite, GuildInviteKind, GuildMember, GuildStrands,
+    GuildSummary, GuildTreasury, GuildsResponse, MyGuild, SetGuildRole,
 };
 use capitol_protocol::rules::guild::GuildRole;
 use capitol_protocol::rest::{OfferWages, ShiftEnded, WageOffer, WageShift, WagesResponse};
@@ -146,6 +147,10 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::guilds::leave,
         crate::routes::guilds::expel,
         crate::routes::guilds::set_role,
+        crate::routes::guilds::deposit,
+        crate::routes::guilds::withdraw_strands,
+        crate::routes::guilds::set_limit,
+        crate::routes::guilds::books,
         crate::routes::player::get_guild,
         // Wages
         crate::routes::wages::offer,
@@ -255,6 +260,11 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         // Guilds
         FoundGuild,
         GuildDetail,
+        GuildTreasury,
+        GuildStrands,
+        GuildEntry,
+        GuildEntryKind,
+        GuildBooks,
         GuildInvite,
         GuildInviteKind,
         GuildMember,

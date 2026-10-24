@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
-use capitol_protocol::rest::{FoundGuild, GuildDetail, GuildsResponse, MyGuild, SetGuildRole};
+use capitol_protocol::rest::{FoundGuild, GuildBooks, GuildDetail, GuildStrands, GuildsResponse, MyGuild, SetGuildRole};
 use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
@@ -35,6 +35,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/{id}/leave", post(leave))
         .route("/{id}/invites/{player_id}", post(invite).delete(withdraw))
         .route("/{id}/members/{player_id}", put(set_role).delete(expel))
+        .route("/{id}/deposit", post(deposit))
+        .route("/{id}/withdraw", post(withdraw_strands))
+        .route("/{id}/limit", put(set_limit))
+        .route("/{id}/books", get(books))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -238,7 +242,7 @@ pub async fn expel(
     Path((id, player_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<MyGuild>, AppError> {
     let actor = player_of(&state.db, auth_user.account_id).await?;
-    let told = guilds::expel(&state.db, actor, id, player_id).await.map_err(refused)?;
+    let told = guilds::expel(&state.db, actor, id, player_id, Utc::now()).await.map_err(refused)?;
     answer(&state, actor, told).await
 }
 
@@ -270,6 +274,107 @@ pub async fn set_role(
     let actor = player_of(&state.db, auth_user.account_id).await?;
     let told = guilds::set_role(&state.db, actor, id, player_id, req.role, Utc::now()).await.map_err(refused)?;
     answer(&state, actor, told).await
+}
+
+/// Put Strands of yours into your guild's treasury, from anywhere
+#[utoipa::path(
+    post,
+    path = "/guilds/{id}/deposit",
+    params(("id" = Uuid, Path, description = "Your guild")),
+    request_body = GuildStrands,
+    responses(
+        (status = 200, description = "Deposited", body = MyGuild),
+        (status = 400, description = "Not a number of Strands, or more than you have"),
+        (status = 404, description = "You aren't in that guild")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Guilds"
+)]
+pub async fn deposit(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GuildStrands>,
+) -> Result<Json<MyGuild>, AppError> {
+    let player = player_of(&state.db, auth_user.account_id).await?;
+    let told = guilds::deposit(&state.db, player, id, req.strands, Utc::now()).await.map_err(refused)?;
+    answer(&state, player, told).await
+}
+
+/// Take Strands out of your guild's treasury: the leader as they like, an
+/// officer within the leader's weekly limit
+#[utoipa::path(
+    post,
+    path = "/guilds/{id}/withdraw",
+    params(("id" = Uuid, Path, description = "Your guild")),
+    request_body = GuildStrands,
+    responses(
+        (status = 200, description = "Withdrawn", body = MyGuild),
+        (status = 400, description = "Not a number of Strands, more than the treasury holds, or over your limit"),
+        (status = 403, description = "A member can't draw on the treasury"),
+        (status = 404, description = "You aren't in that guild")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Guilds"
+)]
+pub async fn withdraw_strands(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GuildStrands>,
+) -> Result<Json<MyGuild>, AppError> {
+    let actor = player_of(&state.db, auth_user.account_id).await?;
+    let told = guilds::withdraw_strands(&state.db, actor, id, req.strands, &req.note, Utc::now())
+        .await
+        .map_err(refused)?;
+    answer(&state, actor, told).await
+}
+
+/// As the leader: what each officer may withdraw in a rolling week
+#[utoipa::path(
+    put,
+    path = "/guilds/{id}/limit",
+    params(("id" = Uuid, Path, description = "Your guild")),
+    request_body = GuildStrands,
+    responses(
+        (status = 200, description = "Set", body = MyGuild),
+        (status = 400, description = "Not a number of Strands"),
+        (status = 403, description = "Not the leader"),
+        (status = 404, description = "You aren't in that guild")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Guilds"
+)]
+pub async fn set_limit(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GuildStrands>,
+) -> Result<Json<MyGuild>, AppError> {
+    let actor = player_of(&state.db, auth_user.account_id).await?;
+    let told = guilds::set_limit(&state.db, actor, id, req.strands).await.map_err(refused)?;
+    answer(&state, actor, told).await
+}
+
+/// Your guild's books: every move of its treasury, newest first
+#[utoipa::path(
+    get,
+    path = "/guilds/{id}/books",
+    params(("id" = Uuid, Path, description = "Your guild")),
+    responses(
+        (status = 200, description = "The books", body = GuildBooks),
+        (status = 404, description = "You aren't in that guild")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Guilds"
+)]
+pub async fn books(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<GuildBooks>, AppError> {
+    let player = player_of(&state.db, auth_user.account_id).await?;
+    Ok(Json(guilds::books(&state.db, id, player).await.map_err(refused)?))
 }
 
 /// Tell what `told` says, then answer `player` with their guild now.

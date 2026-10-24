@@ -294,6 +294,12 @@ pub enum StateEvent {
         /// `who` is a citizen (C0.1)
         citizen: bool,
     },
+    /// Your guild's debt for dues passed another week (`guild_dues`, S4.2),
+    /// to its officers and leader: at `dissolves_at` it's dissolved.
+    GuildDues { guild_id: Uuid, guild: String, owed: i64, dissolves_at: i64 },
+    /// Your guild was dissolved for its dues (`guild_dissolved`, S4.2), and
+    /// `share` of its treasury came to you.
+    GuildDissolved { guild_id: Uuid, guild: String, owed: i64, share: i64 },
     /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). Flint
     /// toasts it (E3.11).
     BazaarSale {
@@ -1008,6 +1014,18 @@ impl GameState {
                 who: *who,
                 name: name.clone(),
                 citizen: *citizen,
+            }),
+            M::GuildDues { guild_id, guild, owed, dissolves_at, .. } => out.push(StateEvent::GuildDues {
+                guild_id: *guild_id,
+                guild: guild.clone(),
+                owed: *owed,
+                dissolves_at: *dissolves_at,
+            }),
+            M::GuildDissolved { guild_id, guild, owed, share, .. } => out.push(StateEvent::GuildDissolved {
+                guild_id: *guild_id,
+                guild: guild.clone(),
+                owed: *owed,
+                share: *share,
             }),
             // Commons S2.6: wages, to everyone. The Work page's store keeps
             // them (`wages::Wages`, S2.7).

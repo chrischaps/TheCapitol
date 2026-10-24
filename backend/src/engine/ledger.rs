@@ -252,6 +252,7 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
     .fetch_all(&mut *tx)
     .await?;
     let escrow_strands = held_strands(&mut tx).await?;
+    let held_flows = super::guilds::held_flows(&mut tx).await?;
     let grants = super::deed_grants::books(&mut tx).await?;
     tx.commit().await?;
 
@@ -280,6 +281,7 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
         units_settled,
         crafts,
         grants,
+        held_flows,
         load: Default::default(),
     })
 }
@@ -293,12 +295,12 @@ fn tick_period(scale: f64) -> Duration {
 /// `escrow_strands`, which its escrow flows explain (S0.2). Each table that
 /// holds Strands adds its sum here, or the ledger reports its holdings as
 /// drift: the market's buy orders, the court's commissions and wage offers,
-/// and later the guilds' treasuries (S4.2).
+/// and the guilds' treasuries (S4.2).
 pub(crate) async fn held_strands(conn: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
     let market: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(escrow_strands), 0)::BIGINT FROM market_orders")
         .fetch_one(&mut *conn)
         .await?;
-    Ok(market + court_held(conn).await?)
+    Ok(market + court_held(conn).await? + super::guilds::held(conn).await?)
 }
 
 /// Strands the Contract Court holds: what's unspent of open commissions'

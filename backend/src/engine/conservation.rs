@@ -33,15 +33,17 @@ pub(crate) async fn strands_accounted(db: &PgPool) -> i64 {
     balances + held_strands(&mut conn).await.unwrap() + fees_kept(db).await
 }
 
-/// The fees each flow's own rows say it kept: the market's listing fees and
-/// the court's on commissions (S2.1) and on wage offers (S2.6). A flow with
-/// a fee adds its sum here, so a fee charged twice, or a fee with no row,
-/// shows as Strands made or lost.
+/// The fees each flow's own rows say it kept: the market's listing fees,
+/// the court's on commissions (S2.1) and on wage offers (S2.6), and the dues
+/// and roster fees the guilds' treasuries paid (S4.2). A flow with a fee
+/// adds its sum here, so a fee charged twice, or a fee with no row, shows as
+/// Strands made or lost.
 async fn fees_kept(db: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT (SELECT COALESCE(SUM(fee), 0) FROM market_orders)::BIGINT
               + (SELECT COALESCE(SUM(fee), 0) FROM commissions)::BIGINT
-              + (SELECT COALESCE(SUM(fee), 0) FROM wage_offers)::BIGINT",
+              + (SELECT COALESCE(SUM(fee), 0) FROM wage_offers)::BIGINT
+              - (SELECT COALESCE(SUM(amount), 0) FROM guild_ledger WHERE kind IN ('dues', 'fee'))::BIGINT",
     )
     .fetch_one(db)
     .await

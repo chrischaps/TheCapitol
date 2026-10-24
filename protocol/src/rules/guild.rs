@@ -11,6 +11,13 @@
 //!   the leader officers too; only the leader sets roles and hands on the lead.
 //! - A leader whose subscription lapses keeps the guild but can't invite.
 //!   After [`LEAD_LAPSE_DAYS`] the lead passes on (`engine::guilds`).
+//! - The treasury (S4.2): any member deposits, an officer withdraws up to the
+//!   weekly limit the leader sets, the leader without one. It pays the roster's
+//!   fee when it can, and the week's dues, [`weekly_dues`], a Strand at a time
+//!   through the hours. What it can't pay is debt; officers hear as the debt
+//!   passes each week ([`debt_warning_due`]), and at [`dissolves_at`] the
+//!   guild is dissolved, what's left shared among the members by tenure
+//!   ([`share_by_tenure`]).
 //!
 //! The server checks exactly these, so a client's buttons are its answers.
 
@@ -25,6 +32,15 @@ pub const ROSTER_FEE: i64 = 1;
 /// How long a leader's subscription may stay lapsed before the lead passes
 /// on: four weeks, real time, as subscriptions run.
 pub const LEAD_LAPSE_DAYS: i64 = 28;
+/// A guild's dues a week, in Strands: this, plus [`DUES_PER_MEMBER`] for
+/// each member. A sink, the GDD's second recurring one after property tax.
+pub const DUES_BASE: i64 = 50;
+pub const DUES_PER_MEMBER: i64 = 5;
+/// Weeks of dues a guild may owe before it's dissolved.
+pub const DISSOLVE_AFTER_WEEKS: i64 = 4;
+/// The days an officer's withdrawals count against the leader's limit: a
+/// rolling week, real time.
+pub const WITHDRAWAL_WINDOW_DAYS: i64 = 7;
 /// The shortest and longest name, in characters.
 pub const NAME_MIN: usize = 3;
 pub const NAME_MAX: usize = 40;
@@ -132,6 +148,49 @@ pub fn clean_charter(charter: &str) -> Result<String, NameError> {
     }
 }
 
+/// A week's dues for a guild of `members`.
+pub fn weekly_dues(members: u32) -> i64 {
+    DUES_BASE + DUES_PER_MEMBER * i64::from(members)
+}
+
+/// The debt at which a guild of `members` is dissolved: four weeks' dues.
+pub fn dissolves_at(members: u32) -> i64 {
+    weekly_dues(members) * DISSOLVE_AFTER_WEEKS
+}
+
+/// Whether debt going from `before` to `after` passed a whole week of a
+/// guild of `members`' dues, short of dissolving it: its officers hear.
+pub fn debt_warning_due(before: i64, after: i64, members: u32) -> bool {
+    let weekly = weekly_dues(members);
+    after > before
+        && after < dissolves_at(members)
+        && (1..DISSOLVE_AFTER_WEEKS).any(|k| before < k * weekly && after >= k * weekly)
+}
+
+/// `strands` shared among members who've served `tenures` (in any unit,
+/// each counted as at least 1), in proportion, in whole Strands. The
+/// Strands a fair share leaves over go one each to the largest remainders,
+/// the earlier first on a tie, so the shares add up to `strands` exactly.
+pub fn share_by_tenure(strands: i64, tenures: &[i64]) -> Vec<i64> {
+    if strands <= 0 || tenures.is_empty() {
+        return vec![0; tenures.len()];
+    }
+    let tenures: Vec<i128> = tenures.iter().map(|t| i128::from((*t).max(1))).collect();
+    let total: i128 = tenures.iter().sum();
+    let mut shares: Vec<i64> = tenures.iter().map(|t| (i128::from(strands) * t / total) as i64).collect();
+    let mut left = strands - shares.iter().sum::<i64>();
+    let mut by_remainder: Vec<usize> = (0..tenures.len()).collect();
+    by_remainder.sort_by_key(|&i| std::cmp::Reverse(i128::from(strands) * tenures[i] % total));
+    for i in by_remainder {
+        if left == 0 {
+            break;
+        }
+        shares[i] += 1;
+        left -= 1;
+    }
+    shares
+}
+
 /// A place in a guild, highest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
@@ -185,6 +244,12 @@ impl GuildRole {
     pub fn may_set_roles(self) -> bool {
         self == GuildRole::Leader
     }
+
+    /// May draw on the treasury: an officer up to the leader's weekly limit,
+    /// the leader without one.
+    pub fn may_withdraw(self) -> bool {
+        self != GuildRole::Member
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +296,40 @@ mod tests {
     }
 
     #[test]
+    fn dues_are_fifty_and_five_a_member_and_four_weeks_dissolve() {
+        assert_eq!(weekly_dues(0), 50);
+        assert_eq!(weekly_dues(6), 80);
+        assert_eq!(dissolves_at(6), 320);
+    }
+
+    #[test]
+    fn officers_hear_as_the_debt_passes_each_week() {
+        // 80 a week for six
+        assert!(!debt_warning_due(0, 1, 6));
+        assert!(!debt_warning_due(78, 79, 6));
+        assert!(debt_warning_due(79, 80, 6), "a week");
+        assert!(!debt_warning_due(80, 81, 6));
+        assert!(debt_warning_due(159, 160, 6) && debt_warning_due(239, 240, 6));
+        assert!(!debt_warning_due(319, 320, 6), "four weeks dissolve, not warn");
+        assert!(!debt_warning_due(90, 80, 6), "paid down");
+    }
+
+    #[test]
+    fn the_rest_is_shared_by_tenure_to_the_strand() {
+        assert_eq!(share_by_tenure(100, &[3, 1]), vec![75, 25]);
+        // 10 over 3 equal: 3 each and one over, to the first
+        assert_eq!(share_by_tenure(10, &[5, 5, 5]), vec![4, 3, 3]);
+        // The largest remainder takes the Strand left
+        assert_eq!(share_by_tenure(10, &[1, 2]), vec![3, 7]);
+        assert_eq!(share_by_tenure(7, &[0, 0]), vec![4, 3], "a tenure counts as at least 1");
+        assert_eq!(share_by_tenure(0, &[3, 1]), vec![0, 0]);
+        assert!(share_by_tenure(5, &[]).is_empty());
+        for (strands, tenures) in [(999, vec![86_400, 3_600, 1]), (i64::MAX / 4, vec![i64::MAX / 2, 7])] {
+            assert_eq!(share_by_tenure(strands, &tenures).iter().sum::<i64>(), strands);
+        }
+    }
+
+    #[test]
     fn each_role_has_its_rights() {
         use GuildRole::*;
         assert!(Leader.may_invite() && Officer.may_invite() && !Member.may_invite());
@@ -238,6 +337,7 @@ mod tests {
         assert!(Officer.may_expel(Member) && !Officer.may_expel(Officer) && !Officer.may_expel(Leader));
         assert!(!Member.may_expel(Member));
         assert!(Leader.may_set_roles() && !Officer.may_set_roles() && !Member.may_set_roles());
+        assert!(Leader.may_withdraw() && Officer.may_withdraw() && !Member.may_withdraw());
         for role in [Leader, Officer, Member] {
             assert_eq!(GuildRole::parse(role.as_str()), Some(role));
         }

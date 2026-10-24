@@ -962,9 +962,16 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                     let _timed = Loop::Tax.timed();
                     tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
                     let report = super::property_tax::process_property_taxes(&db, rate).await;
-                    let mut game = game_state.write().await;
-                    let game = &mut *game;
-                    super::property_tax::announce(report, &mut game.stations, &game.event_sender);
+                    let events = {
+                        let mut game = game_state.write().await;
+                        let game = &mut *game;
+                        super::property_tax::announce(report, &mut game.stations, &game.event_sender);
+                        game.event_sender.clone()
+                    };
+                    // S4.2: the guilds' dues, from their treasuries, the same hour
+                    for told in super::guilds::collect_dues(&db, chrono::Utc::now()).await {
+                        told.send(&db, &events).await;
+                    }
                 }
                 .instrument(tracing::info_span!("loop.tax")),
             );

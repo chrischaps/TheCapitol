@@ -770,6 +770,29 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         citizen: bool,
     },
+    // Commons S4.2: the treasury's dues
+    /// To a guild's officers and leader: its debt for dues has passed
+    /// another week. At `dissolves_at` it's dissolved. One sent while you
+    /// were away is sent as you come back.
+    #[serde(rename = "guild_dues")]
+    GuildDues {
+        guild_id: Uuid,
+        guild: String,
+        tag: String,
+        owed: i64,
+        dissolves_at: i64,
+    },
+    /// To each member: the guild was dissolved for `owed` in unpaid dues
+    /// (or closed as its last member left, with `owed` 0), and `share` of
+    /// what its treasury held is yours. Sent as you come back if you were away.
+    #[serde(rename = "guild_dissolved")]
+    GuildDissolved {
+        guild_id: Uuid,
+        guild: String,
+        tag: String,
+        owed: i64,
+        share: i64,
+    },
     // Commons S2.6: wages (D7). The first three go to everyone, so the
     // board's Work page stays live.
     /// A wage offer went up
@@ -917,6 +940,8 @@ impl ServerMessage {
             ServerMessage::ClaimLapsed { .. } => "claim_lapsed",
             ServerMessage::GuildChanged { .. } => "guild_changed",
             ServerMessage::GuildNotice { .. } => "guild_notice",
+            ServerMessage::GuildDues { .. } => "guild_dues",
+            ServerMessage::GuildDissolved { .. } => "guild_dissolved",
             ServerMessage::WageOffered { .. } => "wage_offered",
             ServerMessage::WageUpdated { .. } => "wage_updated",
             ServerMessage::WageClosed { .. } => "wage_closed",
