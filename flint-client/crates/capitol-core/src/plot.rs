@@ -77,6 +77,7 @@ mod tests {
 
     fn plot(deed_cost: Option<i32>, owner: Option<Uuid>) -> PlotInfo {
         PlotInfo {
+            guild: None,
             id: Uuid::from_u128(9),
             zone_id: "urban".into(),
             world_x: 0.0,

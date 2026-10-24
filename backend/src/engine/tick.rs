@@ -974,8 +974,14 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                         super::property_tax::announce(report, &mut game.stations, &game.event_sender);
                         game.event_sender.clone()
                     };
-                    // S4.2: the guilds' dues, from their treasuries, the same hour
-                    for told in super::guilds::collect_dues(&db, chrono::Utc::now()).await {
+                    // S4.2: the guilds' dues, from their treasuries, the same
+                    // hour. A guild dissolved for them gives up its hall (S4.3)
+                    for mut told in super::guilds::collect_dues(&db, chrono::Utc::now()).await {
+                        if !told.halls.is_empty() {
+                            let mut game = game_state.write().await;
+                            let game = &mut *game;
+                            told.release_halls(&mut game.stations, &game.event_sender);
+                        }
                         told.send(&db, &events).await;
                     }
                 }

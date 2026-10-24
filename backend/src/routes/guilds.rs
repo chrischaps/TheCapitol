@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
-use capitol_protocol::rest::{FoundGuild, GuildBooks, GuildDetail, GuildStrands, GuildsResponse, MyGuild, SetGuildRole};
+use capitol_protocol::rest::{ClaimHall, FoundGuild, GuildBooks, GuildDetail, GuildStrands, GuildsResponse, MyGuild, SetGuildRole};
 use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/{id}/withdraw", post(withdraw_strands))
         .route("/{id}/limit", put(set_limit))
         .route("/{id}/books", get(books))
+        .route("/{id}/hall", post(claim_hall))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -377,6 +378,36 @@ pub async fn books(
     Ok(Json(guilds::books(&state.db, id, player).await.map_err(refused)?))
 }
 
+/// Claim a guild-district lot as your guild's hall, at the Exchange hall,
+/// from its treasury: the leader alone (S4.3)
+#[utoipa::path(
+    post,
+    path = "/guilds/{id}/hall",
+    params(("id" = Uuid, Path, description = "Your guild")),
+    request_body = ClaimHall,
+    responses(
+        (status = 200, description = "The hall is the guild's", body = MyGuild),
+        (status = 400, description = "Away from the Exchange, not a guild-district lot, or the treasury is short"),
+        (status = 403, description = "Only the leader claims a hall"),
+        (status = 404, description = "No such guild or lot"),
+        (status = 409, description = "The guild holds a hall already, or someone holds the lot")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Guilds"
+)]
+pub async fn claim_hall(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ClaimHall>,
+) -> Result<Json<MyGuild>, AppError> {
+    let leader = player_of(&state.db, auth_user.account_id).await?;
+    at_the_exchange(&state.game, &state.db, leader, "claim a hall").await?;
+    let tunables = state.tunables.get();
+    let told = guilds::claim_hall(&state.db, leader, id, req.plot_id, &tunables, Utc::now()).await.map_err(refused)?;
+    answer(&state, leader, told).await
+}
+
 /// Tell what `told` says, then answer `player` with their guild now.
 async fn answer(state: &AppState, player: Uuid, told: Told) -> Result<Json<MyGuild>, AppError> {
     tell(state, told).await;
@@ -385,26 +416,36 @@ async fn answer(state: &AppState, player: Uuid, told: Told) -> Result<Json<MyGui
 
 /// Sends a committed change's `guild_changed`, its notices and the payer's
 /// balance ([`Told::send`]), once the tags over their heads are read again
-/// (S4.4).
-async fn tell(state: &AppState, told: Told) {
+/// (S4.4). A hall given up as the guild closed (S4.3) comes off the game first.
+async fn tell(state: &AppState, mut told: Told) {
     // Their tags first, so the names over their heads change with the news
     guilds::retag(&state.db, &state.game, &told.changed).await;
-    let events = state.game.read().await.event_sender.clone();
+    let events = {
+        let mut game = state.game.write().await;
+        let game = &mut *game;
+        told.release_halls(&mut game.stations, &game.event_sender);
+        game.event_sender.clone()
+    };
     told.send(&state.db, &events).await;
 }
 
 /// What the registry refused, as the API says it.
 fn refused(e: GuildError) -> AppError {
     match e {
-        GuildError::NoGuild | GuildError::NoOne | GuildError::NotAMember | GuildError::NotInAGuild | GuildError::NoInvite => {
-            AppError::NotFound(e.message())
-        }
+        GuildError::NoGuild
+        | GuildError::NoOne
+        | GuildError::NotAMember
+        | GuildError::NotInAGuild
+        | GuildError::NoInvite
+        | GuildError::NoLot => AppError::NotFound(e.message()),
         GuildError::Unsubscribed(_) | GuildError::NotAllowed(_) => AppError::Forbidden(e.message()),
         GuildError::NameTaken
         | GuildError::TagTaken
         | GuildError::InAGuild
         | GuildError::TheyreInAGuild
-        | GuildError::AlreadyWaiting => AppError::Conflict(e.message()),
+        | GuildError::AlreadyWaiting
+        | GuildError::HasAHall
+        | GuildError::LotTaken => AppError::Conflict(e.message()),
         GuildError::Db(e) => AppError::Database(e),
         e => AppError::BadRequest(e.message()),
     }

@@ -759,6 +759,7 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
         created_at: at(39),
     };
     let rope_detail = GuildDetail {
+        hall: None,
         id: rope,
         name: "The Rope Walkers".into(),
         tag: "ROPE".into(),

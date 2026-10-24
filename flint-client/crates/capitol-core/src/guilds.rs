@@ -532,6 +532,7 @@ mod tests {
 
     fn rope(members: Vec<GuildMember>) -> GuildDetail {
         GuildDetail {
+            hall: None,
             id: ROPE,
             name: "The Rope Walkers".into(),
             tag: "ROPE".into(),

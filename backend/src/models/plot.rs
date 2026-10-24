@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-pub use capitol_protocol::rest::{Bounds, PlotInfo, PlotPermissions, UpdatePermissionsRequest};
+pub use capitol_protocol::rest::{Bounds, PlotGuild, PlotInfo, PlotPermissions, UpdatePermissionsRequest};
 
 /// Plot from the database
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -129,6 +129,10 @@ pub struct PlotWithJoins {
     pub owner_name: Option<String>,
     /// The owner is a citizen (C0.1)
     pub owner_citizen: bool,
+    /// The guild whose hall it is, joined from `guilds` (S4.3)
+    pub guild_id: Option<Uuid>,
+    pub guild_name: Option<String>,
+    pub guild_tag: Option<String>,
     /// [`STATION_CAPACITY`]
     pub station_capacity: i32,
     /// Its building's room (V3.1, #473), `None` for a guild hall's
@@ -159,6 +163,10 @@ impl PlotWithJoins {
             owner_id: self.owner_id,
             owner_name: self.owner_name.clone(),
             owner_citizen: self.owner_citizen,
+            guild: match (self.guild_id, &self.guild_name, &self.guild_tag) {
+                (Some(id), Some(name), Some(tag)) => Some(PlotGuild { id, name: name.clone(), tag: tag.clone() }),
+                _ => None,
+            },
             claimed_at: self.claimed_at,
             assessed_value: self.assessed_value,
             tax_owed: self.tax_owed as i64,

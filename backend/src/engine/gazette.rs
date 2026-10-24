@@ -180,6 +180,8 @@ pub enum DeedEvent {
     /// Claimed with the road in's deed grant (#440): a settler, not a buyer
     Granted,
     Foreclosed,
+    /// Claimed by a guild as its hall (S4.3), its leader signing
+    Hall(Uuid),
 }
 
 /// Note a deed claimed or foreclosed. Call it in the transaction that does it.
@@ -190,16 +192,18 @@ pub async fn record_deed(
     kind: DeedEvent,
     player_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let kind = match kind {
-        DeedEvent::Claimed => "claimed",
-        DeedEvent::Granted => "granted",
-        DeedEvent::Foreclosed => "foreclosed",
+    let (kind, guild_id) = match kind {
+        DeedEvent::Claimed => ("claimed", None),
+        DeedEvent::Granted => ("granted", None),
+        DeedEvent::Foreclosed => ("foreclosed", None),
+        DeedEvent::Hall(guild_id) => ("hall", Some(guild_id)),
     };
-    sqlx::query("INSERT INTO deed_events (plot_id, zone_id, kind, player_id) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO deed_events (plot_id, zone_id, kind, player_id, guild_id) VALUES ($1, $2, $3, $4, $5)")
         .bind(plot_id)
         .bind(zone_id)
         .bind(kind)
         .bind(player_id)
+        .bind(guild_id)
         .execute(conn)
         .await?;
     Ok(())
@@ -257,6 +261,8 @@ pub struct DayRecords {
     pub stalls: Vec<StallTrade>,
     /// Who settled with the road in's deed (#448), in the order they did
     pub settlers: Vec<Settler>,
+    /// The guilds that took a hall (S4.3), in the order they did
+    pub halls: Vec<String>,
     /// The day on the hall's board (S2.4)
     pub board: Board,
 }
@@ -408,9 +414,10 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     let mut claimed_by_people = 0;
     for (zone, kind, citizen, n) in deed_rows {
         let entry = deeds.entry(zone).or_default();
-        // A grant's claim is a claim in the land column (#440)
+        // A grant's claim is a claim in the land column (#440), and so is a
+        // guild's hall (S4.3)
         match kind.as_str() {
-            "claimed" | "granted" => {
+            "claimed" | "granted" | "hall" => {
                 entry.0 += n;
                 if !citizen {
                     claimed_by_people += n;
@@ -440,6 +447,16 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
          LEFT JOIN accounts a ON a.id = p.account_id
          JOIN plots pl ON pl.id = d.plot_id
          WHERE d.kind = 'granted' AND d.at >= $1 AND d.at < $2
+         ORDER BY d.at, d.id",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+
+    let halls: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM deed_events d JOIN guilds g ON g.id = d.guild_id
+         WHERE d.kind = 'hall' AND d.at >= $1 AND d.at < $2
          ORDER BY d.at, d.id",
     )
     .bind(start)
@@ -489,6 +506,7 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
                 y: y as f64,
             })
             .collect(),
+        halls,
         work: work
             .into_iter()
             .map(|(player_id, name, named, citizen, item_type, item_name, quantity)| Work {
@@ -833,6 +851,7 @@ pub fn compose(records: &DayRecords) -> Gazette {
         producers_story.push_str(&made_share(s, made.first()));
     }
     deeds_story.push_str(&settled(&records.settlers));
+    deeds_story.push_str(&halls_taken(&records.halls));
 
     // The front page: the biggest story the day has
     let big_move = movers.first().filter(|m| m.change_pct.abs() >= FRONT_PAGE_MOVE);
@@ -1340,6 +1359,17 @@ fn settled(settlers: &[Settler]) -> String {
     format!(" Settled, with the deed the road in earns: {}{tail}.", homes.join("; "))
 }
 
+/// The guilds that took a hall (S4.3), by name: " The Weavers' Guild took a
+/// hall in the guild district." or " The Ore Guild, The Ropewalk and The
+/// Weavers' Guild took halls in the guild district."
+fn halls_taken(guilds: &[String]) -> String {
+    match guilds {
+        [] => String::new(),
+        [one] => format!(" {one} took a hall in the guild district."),
+        [rest @ .., last] => format!(" {} and {last} took halls in the guild district.", rest.join(", ")),
+    }
+}
+
 /// "a farm out to the south-west", "a house on a street to the north",
 /// "a yard north-east of the tower"
 fn home_of(s: &Settler) -> String {
@@ -1585,6 +1615,7 @@ mod tests {
             }),
             deeds: vec![("rural".into(), 3, 0), ("suburban".into(), 1, 1)],
             claimed_by_people: 3,
+            halls: Vec::new(),
             work: vec![
                 work(1, Some("Ada"), "Plant Fiber", 300),
                 work(1, Some("Ada"), "Rope", 40),
@@ -1734,6 +1765,32 @@ mod tests {
         let crowd = DayRecords { settlers: vec![records.settlers[0].clone(); 6], ..records.clone() };
         assert!(compose(&crowd).deeds_story.ends_with("; and two more."), "{}", compose(&crowd).deeds_story);
         assert!(!compose(&DayRecords { day: DAY, ..Default::default() }).deeds_story.contains("Settled"));
+    }
+
+    /// A guild's hall makes the land column (S4.3), by the guild's name
+    #[test]
+    fn halls_are_named_by_their_guild() {
+        let records = DayRecords {
+            day: DAY,
+            deeds: vec![("guild_district".into(), 1, 0)],
+            claimed_by_people: 1,
+            halls: vec!["The Weavers' Guild".into()],
+            ..Default::default()
+        };
+        let g = compose(&records);
+        assert!(g.deeds_story.ends_with(" The Weavers' Guild took a hall in the guild district."), "{}", g.deeds_story);
+        let three = DayRecords {
+            halls: vec!["The Ore Guild".into(), "The Ropewalk".into(), "The Weavers' Guild".into()],
+            ..records
+        };
+        assert!(
+            compose(&three)
+                .deeds_story
+                .ends_with(" The Ore Guild, The Ropewalk and The Weavers' Guild took halls in the guild district."),
+            "{}",
+            compose(&three).deeds_story
+        );
+        assert!(!compose(&DayRecords { day: DAY, ..Default::default() }).deeds_story.contains("guild district"));
     }
 
     /// The hall's board makes a column (S2.4): what's wanted by the Strands

@@ -244,6 +244,7 @@ enum Start {
 /// next tick must send, in order.
 fn plot_claimed(owner_id: Uuid) -> M {
     M::PlotClaimed {
+        guild: None,
         terrain_id: "sub_2_0_3_L_4".into(),
         owner_id,
         claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),

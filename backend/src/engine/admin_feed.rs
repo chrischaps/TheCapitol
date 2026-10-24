@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn the_tap_takes_fills_deeds_the_gazette_and_warnings_only() {
         let ada = Uuid::from_u128(1);
-        let feed = tap(&GameEvent::PlotClaimed { terrain_id: "farm_3".into(), owner_id: ada, claimed_at: chrono::Utc::now() });
+        let feed = tap(&GameEvent::PlotClaimed { terrain_id: "farm_3".into(), owner_id: ada, claimed_at: chrono::Utc::now(), guild: None });
         assert_eq!(feed, Some(Feed::Deed { terrain_id: "farm_3".into(), change: DeedChange::Claimed, owner_id: Some(ada) }));
         let gazette = tap(&GameEvent::GazettePublished { day: 4, number: 5, headline: "Rope at a record".into() });
         assert_eq!(gazette.map(|f| f.type_name()), Some("gazette"));

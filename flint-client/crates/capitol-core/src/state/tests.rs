@@ -113,6 +113,7 @@ fn containers() -> R {
 
 fn plot(owner: Option<Uuid>) -> PlotInfo {
     PlotInfo {
+        guild: None,
         id: PLOT,
         zone_id: "urban".into(),
         world_x: 9500.0,
@@ -1678,12 +1679,14 @@ fn terrain_updated_is_reported() {
 fn plot_claimed_is_reported() {
     let mut state = connected();
     let claimed = ClaimedPlot {
+        guild: None,
         terrain_id: "sub_2_0_3_L_4".into(),
         owner_id: OTHER,
         claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),
     };
     assert_eq!(
         state.apply_ws(&M::PlotClaimed {
+            guild: None,
             terrain_id: claimed.terrain_id.clone(),
             owner_id: claimed.owner_id,
             claimed_at: claimed.claimed_at,
@@ -1697,6 +1700,7 @@ fn plot_claimed_is_reported() {
 fn claimed_lots_are_the_list_then_kept_by_ws() {
     let mut state = connected();
     let lot = |id: &str, owner_id| ClaimedPlot {
+        guild: None,
         terrain_id: id.into(),
         owner_id,
         claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),

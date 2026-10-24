@@ -17,6 +17,11 @@
 //! player's impound (#141). Then it's released the same way a forced terrain
 //! commit releases one, and the deed is refunded, less the debt.
 //!
+//! A guild's hall (S4.3) is taxed the same, from its guild's treasury
+//! (`guilds::hall_tax_hour`), its officers warned, and its refund on
+//! foreclosure going back into the treasury. Its leader, the owner, can't pay
+//! its debt with [`pay_tax_debt`]: a deposit into the treasury does.
+//!
 //! Each hour also counts towards its owners' standing (S3.1): an owner taxed
 //! and owing nothing on any plot adds an hour to their run, and 168 in a row
 //! are a week in good standing (`engine::standing::tax_hour`).
@@ -121,6 +126,20 @@ pub struct Foreclosure {
     pub lost: Vec<ItemCount>,
     /// The queued `plot_foreclosed` notice (#138), if there's a lot to name
     pub notice_id: Option<Uuid>,
+    /// A guild's hall (S4.3): the guild, whose treasury the refund went
+    /// into, and its other officers, who hear too. The owner is its leader.
+    pub guild: Option<Uuid>,
+    pub officers: Vec<OfficerTold>,
+}
+
+/// A hall's officer told of its foreclosure (S4.3): their queued notice, and
+/// what of theirs from its stations found no room in their inventory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OfficerTold {
+    pub officer: Uuid,
+    pub notice_id: Uuid,
+    pub impounded: Vec<ItemCount>,
+    pub lost: Vec<ItemCount>,
 }
 
 /// What an hour's tax run did that the game and the clients need to hear.
@@ -140,8 +159,9 @@ pub async fn process_property_taxes(db: &PgPool, rate: f64) -> TaxReport {
     let mut report = TaxReport::default();
 
     // Get all owned plots with their owners
-    let owned_plots: Vec<(Uuid, Uuid, i32, i32, i32, Option<String>)> = match sqlx::query_as(
-        "SELECT id, owner_id, assessed_value, tax_owed, tax_carry, terrain_id FROM plots WHERE owner_id IS NOT NULL",
+    type Row = (Uuid, Uuid, i32, i32, i32, Option<String>, Option<Uuid>);
+    let owned_plots: Vec<Row> = match sqlx::query_as(
+        "SELECT id, owner_id, assessed_value, tax_owed, tax_carry, terrain_id, guild_id FROM plots WHERE owner_id IS NOT NULL",
     )
     .fetch_all(db)
     .await
@@ -162,9 +182,30 @@ pub async fn process_property_taxes(db: &PgPool, rate: f64) -> TaxReport {
     // Each owner taxed this hour, and whether they owe on any plot after it (S3.1)
     let mut owing: HashMap<Uuid, bool> = HashMap::new();
 
-    for (plot_id, owner_id, assessed_value, tax_owed, carry, terrain_id) in owned_plots {
+    for (plot_id, owner_id, assessed_value, tax_owed, carry, terrain_id, guild_id) in owned_plots {
         let weekly = weekly_tax(assessed_value, rate);
         if weekly <= 0 {
+            continue;
+        }
+        // A guild's hall is taxed from its treasury (S4.3), and counts
+        // nothing towards its leader's standing
+        if let Some(guild_id) = guild_id {
+            match super::guilds::hall_tax_hour(db, plot_id, guild_id, rate, chrono::Utc::now()).await {
+                Ok(hour) => {
+                    report.notices.extend(hour.notices);
+                    if hour.forecloses {
+                        match foreclose(db, plot_id, rate).await {
+                            Ok(Some(f)) => {
+                                tracing::warn!("{} lost its hall {} for {} strands unpaid tax", guild_id, plot_id, f.tax_owed);
+                                report.foreclosures.push(f);
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("Failed to foreclose hall {}: {}", plot_id, e),
+                        }
+                    }
+                }
+                Err(e) => tracing::error!("Failed to tax hall {}: {}", plot_id, e.message()),
+            }
             continue;
         }
 
@@ -352,16 +393,30 @@ async fn collect_debt(db: &PgPool, plot_id: Uuid, owner_id: Uuid) -> i64 {
 /// once the row is locked, the plot is no longer owned or owes less.
 pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<Foreclosure>, String> {
     let mut tx = db.begin().await.map_err(|e| e.to_string())?;
-    let row: Option<(Option<Uuid>, i32, i32, Option<String>, String, bool)> = sqlx::query_as(
-        "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id, granted FROM plots WHERE id = $1 FOR UPDATE",
+    // A hall's guild is locked before its plot, as every write to both
+    // locks them (S4.3)
+    let hall: Option<Uuid> = sqlx::query_scalar("SELECT guild_id FROM plots WHERE id = $1")
+        .bind(plot_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .flatten();
+    if let Some(guild_id) = hall {
+        super::guilds::lock(&mut tx, guild_id).await.map_err(|e| e.to_string())?;
+    }
+    let row: Option<(Option<Uuid>, i32, i32, Option<String>, String, bool, Option<Uuid>)> = sqlx::query_as(
+        "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id, granted, guild_id FROM plots WHERE id = $1 FOR UPDATE",
     )
     .bind(plot_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id, zone_id, granted)) = row else {
+    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id, zone_id, granted, guild)) = row else {
         return Ok(None);
     };
+    if guild != hall {
+        return Ok(None); // claimed or released since: the next hour sees it
+    }
     let tax_owed = tax_owed as i64;
     if tax_owed <= 0 || weekly_tax(assessed_value, rate) <= 0 || tax_owed < foreclosure_threshold(assessed_value, rate) {
         return Ok(None);
@@ -382,7 +437,14 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<F
     // nothing: free land never becomes Strands (#440, plan D5). The grant
     // stays spent.
     let refund = if granted { 0 } else { (assessed_value as i64 - tax_owed).max(0) };
-    let balance = if refund > 0 {
+    // A hall's refund goes into its guild's treasury (S4.3)
+    if let Some(guild_id) = guild {
+        let note = format!("The hall foreclosed for {tax_owed} Strands of unpaid tax: its deed refunded less the debt");
+        super::guilds::refund_hall(&mut tx, guild_id, refund, &note, chrono::Utc::now())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let balance = if refund > 0 && guild.is_none() {
         add_strands_in(
             &mut tx,
             owner_id,
@@ -399,6 +461,8 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<F
             .await
             .map_err(|e| e.to_string())?
     };
+    // A hall's officers hear it with its leader, the owner
+    let mut officers = Vec::new();
     let notice_id = match &terrain_id {
         Some(terrain_id) => {
             let message = ServerMessage::PlotForeclosed {
@@ -408,6 +472,23 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<F
                 impounded: impounded.clone(),
                 lost: lost.clone(),
             };
+            if let Some(guild_id) = guild {
+                for officer in super::guilds::officers(&mut tx, guild_id).await.map_err(|e| e.to_string())? {
+                    if officer != owner_id {
+                        // Each hears what of theirs found no room
+                        let (impounded, lost) = (returned.impounded_for(officer), returned.lost_for(officer));
+                        let theirs = ServerMessage::PlotForeclosed {
+                            terrain_id: terrain_id.clone(),
+                            tax_owed,
+                            refund,
+                            impounded: impounded.clone(),
+                            lost: lost.clone(),
+                        };
+                        let notice_id = notices::queue(&mut *tx, officer, terrain_id, &theirs).await.map_err(|e| e.to_string())?;
+                        officers.push(OfficerTold { officer, notice_id, impounded, lost });
+                    }
+                }
+            }
             Some(notices::queue(&mut *tx, owner_id, terrain_id, &message).await.map_err(|e| e.to_string())?)
         }
         None => None,
@@ -425,6 +506,8 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<F
         impounded,
         lost,
         notice_id,
+        guild,
+        officers,
     }))
 }
 
@@ -454,6 +537,17 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
             let _ = events.send(GameEvent::InventoryUpdated { player_id, container_id, slots: Vec::new() });
         }
         if let Some(terrain_id) = f.terrain_id {
+            for o in f.officers {
+                let _ = events.send(GameEvent::PlotForeclosed {
+                    owner_id: o.officer,
+                    terrain_id: terrain_id.clone(),
+                    tax_owed: f.tax_owed,
+                    refund: f.refund,
+                    impounded: o.impounded,
+                    lost: o.lost,
+                    notice_id: Some(o.notice_id),
+                });
+            }
             let _ = events.send(GameEvent::PlotForeclosed {
                 owner_id: f.owner_id,
                 terrain_id: terrain_id.clone(),
@@ -530,14 +624,19 @@ pub async fn pay_tax_debt(
 ) -> Result<(i64, i64), AppError> {
     let mut tx = db.begin().await?;
     // The plot before the player, as the hourly run locks them
-    let row: Option<(Option<Uuid>, i32)> =
-        sqlx::query_as("SELECT owner_id, tax_owed FROM plots WHERE id = $1 FOR UPDATE")
+    let row: Option<(Option<Uuid>, i32, Option<Uuid>)> =
+        sqlx::query_as("SELECT owner_id, tax_owed, guild_id FROM plots WHERE id = $1 FOR UPDATE")
             .bind(plot_id)
             .fetch_optional(&mut *tx)
             .await?;
-    let (owner_id, tax_owed) = row.ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
+    let (owner_id, tax_owed, guild) = row.ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
     if owner_id != Some(player_id) {
         return Err(AppError::Forbidden("You don't own this plot".into()));
+    }
+    // One way in for a hall's tax: its treasury pays the debt first, the
+    // hour Strands come in (S4.3)
+    if guild.is_some() {
+        return Err(AppError::BadRequest("A hall's tax comes from its guild's treasury: deposit into that".into()));
     }
     let payment = amount.unwrap_or(tax_owed as i64).min(tax_owed as i64);
     if tax_owed <= 0 {

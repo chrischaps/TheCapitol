@@ -165,6 +165,7 @@ mod tests {
 
     fn plot(zone: &str, owner: Option<Uuid>) -> PlotInfo {
         PlotInfo {
+            guild: None,
             id: Uuid::from_u128(9),
             zone_id: zone.into(),
             world_x: 0.0,

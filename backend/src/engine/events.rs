@@ -209,6 +209,8 @@ pub enum GameEvent {
         terrain_id: String,
         owner_id: Uuid,
         claimed_at: DateTime<Utc>,
+        /// The guild whose hall it now is (S4.3)
+        guild: Option<capitol_protocol::rest::PlotGuild>,
     },
     PlotReleased {
         terrain_id: String,

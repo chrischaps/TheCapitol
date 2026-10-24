@@ -2,8 +2,14 @@
 //! container, and who may gather the grass on a lot.
 //!
 //! The grass follows the same plot setting as the stations: a node on an
-//! owned lot is the owner's unless its `station_use_level` is public
+//! owned lot is the owner's unless its `station_use_level` opens it
 //! ([`may_gather`], #102).
+//!
+//! A `station_use_level` of `public` admits anyone, and `guild` (S4.3) the
+//! members of the plot's guild, if it's a guild's hall, or of its owner's
+//! guild ([`admits`]). Membership is read at each use, so leaving a guild
+//! closes its plots to you at once. `friends` admits no one beyond the
+//! owners: there are no friends yet.
 //!
 //! A player's own containers (inventory) carry `owner_id`. Station containers
 //! don't: they carry `station_id`, and access follows the station. The owner
@@ -94,23 +100,37 @@ pub struct StationAccess {
     pub plot_owner: Option<Uuid>,
     /// The plot's `station_use_level`, if it stands on one.
     pub station_use_level: Option<String>,
+    /// The player is in the plot's guild, or its owner's (S4.3)
+    pub in_guild: bool,
     /// Player-to-station distance, in world units.
     pub distance: f64,
     pub interaction_range: f64,
 }
 
-/// Does a plot's `station_use_level` open what stands on it to everyone?
-/// "friends" and "guild" admit no one beyond the owners until those systems
-/// exist (#80).
-fn open_to_all(station_use_level: Option<&str>) -> bool {
-    matches!(station_use_level.and_then(PermissionLevel::from_str), Some(PermissionLevel::Public))
+/// Does a plot's `station_use_level` open what stands on it to someone who
+/// isn't its owner? `public` to anyone, and `guild` to someone `in_guild`:
+/// in the plot's guild, or its owner's (S4.3). `friends`, `owner` and
+/// anything else admit no one more.
+pub fn admits(station_use_level: Option<&str>, in_guild: bool) -> bool {
+    match station_use_level.and_then(PermissionLevel::from_str) {
+        Some(PermissionLevel::Public) => true,
+        Some(PermissionLevel::Guild) => in_guild,
+        Some(PermissionLevel::Friends | PermissionLevel::Owner) | None => false,
+    }
 }
+
+/// SQL for [`StationAccess::in_guild`] over `plots p`: whether the player
+/// `$2` is in the plot's guild, or in its owner's.
+const IN_GUILD: &str = "EXISTS (SELECT 1 FROM guild_members me
+            WHERE me.player_id = $2
+              AND (me.guild_id = p.guild_id
+                   OR me.guild_id = (SELECT o.guild_id FROM guild_members o WHERE o.player_id = p.owner_id)))";
 
 /// May `player_id` use a station container? Pure, so it can be tested without a database.
 pub fn station_access(player_id: Uuid, s: &StationAccess) -> Result<(), AccessError> {
     let permitted = s.station_owner == player_id
         || s.plot_owner == Some(player_id)
-        || open_to_all(s.station_use_level.as_deref());
+        || admits(s.station_use_level.as_deref(), s.in_guild);
     if !permitted {
         return Err(AccessError::Forbidden);
     }
@@ -185,22 +205,23 @@ async fn load_station_access(
     station_id: Uuid,
     at: Option<(f64, f64)>,
 ) -> Result<StationAccess, AccessError> {
-    let row: Option<(Uuid, f32, f32, f32, Option<Uuid>, Option<String>, f64, f64)> =
-        sqlx::query_as(
-            "SELECT s.owner_id, s.position_x, s.position_y, st.interaction_range,
-                    p.owner_id, pp.station_use_level, pl.position_x, pl.position_y
-             FROM stations s
-             JOIN station_types st ON st.id = s.station_type
-             JOIN players pl ON pl.id = $2
-             LEFT JOIN plots p ON p.id = s.plot_id
-             LEFT JOIN plot_permissions pp ON pp.plot_id = s.plot_id
-             WHERE s.id = $1",
-        )
-        .bind(station_id)
-        .bind(player_id)
-        .fetch_optional(db)
-        .await?;
-    let Some((station_owner, sx, sy, range, plot_owner, station_use_level, px, py)) = row else {
+    type Row = (Uuid, f32, f32, f32, Option<Uuid>, Option<String>, f64, f64, bool);
+    let row: Option<Row> = sqlx::query_as(&format!(
+        "SELECT s.owner_id, s.position_x, s.position_y, st.interaction_range,
+                p.owner_id, pp.station_use_level, pl.position_x, pl.position_y,
+                COALESCE({IN_GUILD}, FALSE)
+         FROM stations s
+         JOIN station_types st ON st.id = s.station_type
+         JOIN players pl ON pl.id = $2
+         LEFT JOIN plots p ON p.id = s.plot_id
+         LEFT JOIN plot_permissions pp ON pp.plot_id = s.plot_id
+         WHERE s.id = $1"
+    ))
+    .bind(station_id)
+    .bind(player_id)
+    .fetch_optional(db)
+    .await?;
+    let Some((station_owner, sx, sy, range, plot_owner, station_use_level, px, py, in_guild)) = row else {
         return Err(AccessError::StationNotFound);
     };
 
@@ -210,6 +231,7 @@ async fn load_station_access(
         station_owner,
         plot_owner,
         station_use_level,
+        in_guild,
         distance: (dx * dx + dy * dy).sqrt(),
         interaction_range: range as f64,
     })
@@ -379,11 +401,12 @@ struct ItemWithStationOwner {
 /// May `player_id` gather a node on a lot owned by `plot_owner`, whose
 /// `station_use_level` is `level`? Grass on a lot belongs to the lot (#102):
 /// a node on an unowned lot, or on none, is anyone's, and one on an owned lot
-/// is its owner's, or anyone's if the owner opened the plot to the public. It
+/// is its owner's, or whoever the owner opened the plot to ([`admits`]):
+/// anyone, or the guild's members, `in_guild` being whether they're one. It
 /// shares `station_use_level` with stations, so one setting means the same for
 /// a plot's chests and its grass. Pure, so it can be tested without a database.
-pub fn may_gather(player_id: Uuid, plot_owner: Option<Uuid>, level: Option<&str>) -> bool {
-    plot_owner.is_none_or(|owner| owner == player_id || open_to_all(level))
+pub fn may_gather(player_id: Uuid, plot_owner: Option<Uuid>, level: Option<&str>, in_guild: bool) -> bool {
+    plot_owner.is_none_or(|owner| owner == player_id || admits(level, in_guild))
 }
 
 /// Why `player_id` may not gather `node_id` because of whose lot it stands on,
@@ -429,23 +452,26 @@ pub async fn gathering_terms(
         return Ok(Ok(Some(work)));
     }
 
-    let row: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT p.owner_id, pp.station_use_level, pl.name
+    let row: Option<(Uuid, Option<String>, Option<String>, Option<String>, bool)> = sqlx::query_as(&format!(
+        "SELECT p.owner_id, pp.station_use_level, pl.name, g.name, COALESCE({IN_GUILD}, FALSE)
          FROM plots p
          LEFT JOIN plot_permissions pp ON pp.plot_id = p.id
          LEFT JOIN players pl ON pl.id = p.owner_id
-         WHERE p.terrain_id = $1 AND p.owner_id IS NOT NULL",
-    )
+         LEFT JOIN guilds g ON g.id = p.guild_id
+         WHERE p.terrain_id = $1 AND p.owner_id IS NOT NULL"
+    ))
     .bind(&lot)
+    .bind(player_id)
     .fetch_optional(db)
     .await?;
-    let Some((owner, level, owner_name)) = row else {
+    let Some((owner, level, owner_name, guild, in_guild)) = row else {
         return Ok(Ok(None));
     };
-    if may_gather(player_id, Some(owner), level.as_deref()) {
+    if may_gather(player_id, Some(owner), level.as_deref(), in_guild) {
         return Ok(Ok(None));
     }
-    let whose = owner_name.map_or_else(|| "someone else's".to_string(), |name| format!("{name}'s"));
+    // A hall's is the guild's, not its leader's (S4.3)
+    let whose = guild.or(owner_name).map_or_else(|| "someone else's".to_string(), |name| format!("{name}'s"));
     Ok(Err(format!("This {resource} grows on {whose} lot")))
 }
 
@@ -530,6 +556,7 @@ mod tests {
             station_owner: owner,
             plot_owner: Some(owner),
             station_use_level: Some("owner".into()),
+            in_guild: false,
             distance: 10.0,
             interaction_range: 50.0,
         }
@@ -563,12 +590,28 @@ mod tests {
     }
 
     #[test]
-    fn friends_and_guild_levels_admit_no_one_yet() {
+    fn friends_and_unknown_levels_admit_no_one() {
         let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
-        for level in ["friends", "guild", "bogus"] {
-            let s = StationAccess { station_use_level: Some(level.into()), ..chest(them) };
-            assert!(matches!(station_access(me, &s), Err(AccessError::Forbidden)), "{level}");
+        for level in ["friends", "bogus"] {
+            for in_guild in [false, true] {
+                let s = StationAccess { station_use_level: Some(level.into()), in_guild, ..chest(them) };
+                assert!(matches!(station_access(me, &s), Err(AccessError::Forbidden)), "{level}");
+            }
         }
+    }
+
+    /// #80's owner-only fallback is gone (S4.3): the guild level admits the
+    /// guild's members, and only them
+    #[test]
+    fn the_guild_level_admits_the_guilds_members() {
+        let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
+        let guild = StationAccess { station_use_level: Some("guild".into()), ..chest(them) };
+        assert!(station_access(me, &StationAccess { in_guild: true, ..guild.clone() }).is_ok());
+        assert!(matches!(station_access(me, &guild), Err(AccessError::Forbidden)), "not a member");
+        let owner_only = StationAccess { in_guild: true, ..chest(them) };
+        assert!(matches!(station_access(me, &owner_only), Err(AccessError::Forbidden)), "a member, on an owner-only plot");
+        assert!(admits(Some("public"), false) && admits(Some("guild"), true));
+        assert!(!admits(Some("guild"), false) && !admits(Some("owner"), true) && !admits(None, true));
     }
 
     #[test]
@@ -616,24 +659,31 @@ mod tests {
     #[test]
     fn grass_off_any_owned_lot_is_anyones() {
         let me = Uuid::new_v4();
-        assert!(may_gather(me, None, None), "on no lot, or an unclaimed one");
+        assert!(may_gather(me, None, None, false), "on no lot, or an unclaimed one");
     }
 
     #[test]
     fn grass_on_an_owned_lot_is_the_owners() {
         let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
-        assert!(may_gather(me, Some(me), Some("owner")));
-        assert!(!may_gather(me, Some(them), Some("owner")));
+        assert!(may_gather(me, Some(me), Some("owner"), false));
+        assert!(!may_gather(me, Some(them), Some("owner"), true));
         for level in ["friends", "guild", "bogus"] {
-            assert!(!may_gather(me, Some(them), Some(level)), "{level}");
+            assert!(!may_gather(me, Some(them), Some(level), false), "{level}");
         }
-        assert!(!may_gather(me, Some(them), None), "no permissions row");
+        assert!(!may_gather(me, Some(them), None, true), "no permissions row");
     }
 
     #[test]
     fn a_public_lot_shares_its_grass() {
         let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
-        assert!(may_gather(me, Some(them), Some("public")));
+        assert!(may_gather(me, Some(them), Some("public"), false));
+    }
+
+    #[test]
+    fn a_guild_lot_shares_its_grass_with_the_guild() {
+        let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(may_gather(me, Some(them), Some("guild"), true));
+        assert!(!may_gather(me, Some(them), Some("guild"), false));
     }
 
     #[test]
@@ -876,6 +926,104 @@ mod db_tests {
             check_station_access(&db, guest, Uuid::new_v4(), HERE).await,
             Err(AccessError::StationNotFound)
         ));
+    }
+
+    /// A guild led by `leader` with `members` in it, as rows (S4.3)
+    async fn guild(db: &PgPool, leader: Uuid, members: &[Uuid]) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO guilds (id, name, tag, charter, founded_at, founder_id, leader_id, leader_since)
+             VALUES ($1, $2, 'TEST', '', NOW(), $3, $3, NOW())",
+        )
+        .bind(id)
+        .bind(format!("Guild {id}"))
+        .bind(leader)
+        .execute(db)
+        .await
+        .unwrap();
+        for (i, player) in std::iter::once(&leader).chain(members).enumerate() {
+            sqlx::query("INSERT INTO guild_members (player_id, guild_id, role, joined_at) VALUES ($1, $2, $3, NOW())")
+                .bind(player)
+                .bind(id)
+                .bind(if i == 0 { "leader" } else { "member" })
+                .execute(db)
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    /// The guild level (S4.3) opens a plot's stations, their boxes and its
+    /// grass to its owner's guild, not to anyone else, and leaving the guild
+    /// closes them at once. A guild's hall opens to the hall's guild.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_guild_plot_opens_to_the_guild_alone(db: PgPool) {
+        let (owner, _) = player(&db, "owner").await;
+        let (member, _) = player(&db, "member").await;
+        let (outsider, _) = player(&db, "outsider").await;
+        let (station, chest) = chest_on_plot(&db, owner, "guild").await;
+        let rope = guild(&db, owner, &[member]).await;
+        let forbidden = |r: Result<(), AccessError>| matches!(r, Err(AccessError::Forbidden));
+
+        assert!(check_station_access(&db, member, station, HERE).await.is_ok());
+        assert!(check_container_access(&db, member, chest, HERE).await.is_ok(), "deposit and withdraw");
+        assert!(forbidden(check_station_access(&db, outsider, station, HERE).await.map(|_| ())));
+        assert!(forbidden(check_container_access(&db, outsider, chest, HERE).await.map(|_| ())));
+
+        // Out of the guild, out of its plots, at once
+        sqlx::query("DELETE FROM guild_members WHERE player_id = $1").bind(member).execute(&db).await.unwrap();
+        assert!(forbidden(check_station_access(&db, member, station, HERE).await.map(|_| ())));
+
+        // A hall is the guild's: its members are in, whoever the owner is
+        let (other_leader, _) = player(&db, "other").await;
+        sqlx::query("UPDATE plots SET guild_id = $1, owner_id = $2 WHERE id = (SELECT plot_id FROM stations WHERE id = $3)")
+            .bind(rope)
+            .bind(other_leader)
+            .bind(station)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO guild_members (player_id, guild_id, role, joined_at) VALUES ($1, $2, 'member', NOW())")
+            .bind(outsider)
+            .bind(rope)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(check_station_access(&db, outsider, station, HERE).await.is_ok(), "a member of the hall's guild");
+        assert!(forbidden(check_station_access(&db, member, station, HERE).await.map(|_| ())));
+    }
+
+    /// A guild-level lot's grass is its guild's to gather (S4.3)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_guild_lot_shares_its_grass_with_the_guild(db: PgPool) {
+        let (owner, _) = player(&db, "owner").await;
+        let (member, _) = player(&db, "member").await;
+        let (outsider, _) = player(&db, "outsider").await;
+        let (game, on_lot, _) = game_with_a_lot();
+        let plot: Uuid = sqlx::query_scalar(
+            "INSERT INTO plots (zone_id, grid_x, grid_y, world_x, world_y, bounds_min_x,
+                                bounds_min_y, bounds_max_x, bounds_max_y, size_category, terrain_id, owner_id)
+             VALUES ((SELECT id FROM zones LIMIT 1), 9998, 9998, 0, 0, -10, -10, 10, 10, 'small', 'test_lot', $1)
+             RETURNING id",
+        )
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO plot_permissions (plot_id, station_use_level) VALUES ($1, 'guild')")
+            .bind(plot)
+            .execute(&db)
+            .await
+            .unwrap();
+        guild(&db, owner, &[member]).await;
+
+        assert_eq!(gathering_refusal(&db, &game, member, on_lot).await.unwrap(), None);
+        assert_eq!(
+            gathering_refusal(&db, &game, outsider, on_lot).await.unwrap().as_deref(),
+            Some("This grass grows on owner's lot")
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

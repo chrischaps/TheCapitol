@@ -1137,11 +1137,13 @@ impl GameState {
                 terrain_id,
                 owner_id,
                 claimed_at,
+                guild,
             } => {
                 let lot = ClaimedPlot {
                     terrain_id: terrain_id.clone(),
                     owner_id: *owner_id,
                     claimed_at: *claimed_at,
+                    guild: guild.clone(),
                 };
                 self.claimed.insert(terrain_id.clone(), lot.clone());
                 self.claimed_version += 1;

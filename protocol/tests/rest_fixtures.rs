@@ -554,6 +554,8 @@ fn a_guild_round_trips_as_its_leader_sees_it() {
     let treasury = guild.treasury.as_ref().expect("a member sees the treasury");
     assert_eq!(treasury.weekly_dues, guild::weekly_dues(guild.members.len() as u32));
     assert_eq!(treasury.dissolves_at, guild::dissolves_at(guild.members.len() as u32));
+    let hall = guild.hall.as_ref().expect("its hall (S4.3)");
+    assert_eq!((hall.terrain_id.as_deref(), hall.tax_owed), (Some("guild_hall_3"), 12));
     assert_eq!(serde_json::to_string(&mine).unwrap(), json);
 
     let json = fixture("guild_books.json");
@@ -562,8 +564,11 @@ fn a_guild_round_trips_as_its_leader_sees_it() {
     // Each entry's treasury is the one before it moved by its Strands
     assert!(books.entries.windows(2).all(|w| w[1].treasury + w[0].strands == w[0].treasury));
     let kinds: Vec<GuildEntryKind> = books.entries.iter().map(|e| e.kind).collect();
-    assert_eq!(kinds, [GuildEntryKind::Dues, GuildEntryKind::Withdrawal, GuildEntryKind::Fee, GuildEntryKind::Deposit]);
-    assert!(books.entries[0].by.is_none(), "dues are no one's");
+    assert_eq!(
+        kinds,
+        [GuildEntryKind::Tax, GuildEntryKind::Dues, GuildEntryKind::Withdrawal, GuildEntryKind::Fee, GuildEntryKind::Deposit]
+    );
+    assert!(books.entries[0].by.is_none() && books.entries[1].by.is_none(), "the hall's tax and dues are no one's");
     for kind in kinds {
         assert_eq!(GuildEntryKind::parse(kind.as_str()), Some(kind));
     }

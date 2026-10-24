@@ -797,6 +797,7 @@ mod tests {
     fn lot(n: u128, zone: &str, owner: Option<Uuid>, claimed: i64) -> PlotInfo {
         use capitol_protocol::rest::Bounds;
         PlotInfo {
+            guild: None,
             id: Uuid::from_u128(n),
             zone_id: zone.into(),
             world_x: 60.0,

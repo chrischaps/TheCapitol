@@ -298,6 +298,7 @@ mod tests {
         let min = |a: [f64; 4]| a.iter().cloned().fold(f64::MAX, f64::min);
         let max = |a: [f64; 4]| a.iter().cloned().fold(f64::MIN, f64::max);
         PlotInfo {
+            guild: None,
             id: Uuid::from_u128(1),
             zone_id: "suburban".into(),
             world_x: (min(xs) + max(xs)) / 2.0,

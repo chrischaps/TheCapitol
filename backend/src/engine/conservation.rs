@@ -37,13 +37,15 @@ pub(crate) async fn strands_accounted(db: &PgPool) -> i64 {
 /// the court's on commissions (S2.1) and on wage offers (S2.6), and the dues
 /// and roster fees the guilds' treasuries paid (S4.2). A flow with a fee
 /// adds its sum here, so a fee charged twice, or a fee with no row, shows as
-/// Strands made or lost.
+/// Strands made or lost. A hall's deed and tax out of a treasury, and its
+/// deed refunded into one (S4.3), are written in the same books, so they
+/// count the same way.
 async fn fees_kept(db: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT (SELECT COALESCE(SUM(fee), 0) FROM market_orders)::BIGINT
               + (SELECT COALESCE(SUM(fee), 0) FROM commissions)::BIGINT
               + (SELECT COALESCE(SUM(fee), 0) FROM wage_offers)::BIGINT
-              - (SELECT COALESCE(SUM(amount), 0) FROM guild_ledger WHERE kind IN ('dues', 'fee'))::BIGINT",
+              - (SELECT COALESCE(SUM(amount), 0) FROM guild_ledger WHERE kind IN ('dues', 'fee', 'hall', 'tax', 'refund'))::BIGINT",
     )
     .fetch_one(db)
     .await

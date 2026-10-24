@@ -480,6 +480,9 @@ pub enum ServerMessage {
         terrain_id: String,
         owner_id: Uuid,
         claimed_at: DateTime<Utc>,
+        /// The guild whose hall it now is (S4.3); `owner_id` is its leader
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guild: Option<crate::rest::PlotGuild>,
     },
     /// The lot `terrain_id` has no owner any more: an admin terrain commit
     /// with `force` released it, or it was foreclosed for unpaid tax (#131).

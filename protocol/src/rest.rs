@@ -917,6 +917,45 @@ pub struct GuildDetail {
     /// The treasury and its dues (S4.2): only its members see them
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub treasury: Option<GuildTreasury>,
+    /// Its hall in the guild district (S4.3), if it holds one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hall: Option<GuildHall>,
+}
+
+/// A guild's hall (S4.3): a guild-district lot it claimed from its
+/// treasury, whose tax the treasury pays too.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GuildHall {
+    pub plot_id: Uuid,
+    /// The `/terrain` lot, `None` for a plot with none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain_id: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub claimed_at: DateTime<Utc>,
+    /// Tax the treasury couldn't pay. The plot (`GET /plots/{id}`) says
+    /// what debt forecloses it.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub tax_owed: i64,
+}
+
+/// `POST /guilds/{id}/hall` (S4.3): the leader claims a guild-district lot
+/// for the guild, at the Exchange hall, from its treasury.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ClaimHall {
+    pub plot_id: Uuid,
+}
+
+/// The guild whose hall a lot is (S4.3), on `/plots/claimed`,
+/// `plot_claimed` and the plot, so a client can name the house.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PlotGuild {
+    pub id: Uuid,
+    pub name: String,
+    pub tag: String,
 }
 
 /// A guild's treasury as its members see it (S4.2).
@@ -963,6 +1002,13 @@ pub enum GuildEntryKind {
     Fee,
     /// A member's share as the guild closed
     Share,
+    /// A hall's deed in the guild district (S4.3): a sink
+    Hall,
+    /// An hour's tax on the hall, or tax owed paid off: a sink
+    Tax,
+    /// The hall's deed refunded, less its debt, as it was foreclosed or
+    /// released: a faucet
+    Refund,
 }
 
 impl GuildEntryKind {
@@ -974,6 +1020,9 @@ impl GuildEntryKind {
             GuildEntryKind::Dues => "dues",
             GuildEntryKind::Fee => "fee",
             GuildEntryKind::Share => "share",
+            GuildEntryKind::Hall => "hall",
+            GuildEntryKind::Tax => "tax",
+            GuildEntryKind::Refund => "refund",
         }
     }
 
@@ -984,6 +1033,9 @@ impl GuildEntryKind {
             "dues" => Some(GuildEntryKind::Dues),
             "fee" => Some(GuildEntryKind::Fee),
             "share" => Some(GuildEntryKind::Share),
+            "hall" => Some(GuildEntryKind::Hall),
+            "tax" => Some(GuildEntryKind::Tax),
+            "refund" => Some(GuildEntryKind::Refund),
             _ => None,
         }
     }
@@ -2786,6 +2838,9 @@ pub struct PlotInfo {
     /// The owner is a citizen (C0.1)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owner_citizen: bool,
+    /// The guild whose hall it is (S4.3); the owner is its leader
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild: Option<PlotGuild>,
     /// When the plot was claimed
     pub claimed_at: Option<DateTime<Utc>>,
     /// Current assessed value for taxes. 0 until the plot is first bought.
@@ -2936,6 +2991,10 @@ pub struct ClaimedPlot {
     pub owner_id: Uuid,
     /// When the current owner claimed it
     pub claimed_at: DateTime<Utc>,
+    /// The guild whose hall it is (S4.3); `owner_id` is its leader
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "backend", sqlx(skip))]
+    pub guild: Option<PlotGuild>,
 }
 
 /// `GET /plots/{id}/permissions`, and the response to `PUT` on the same path

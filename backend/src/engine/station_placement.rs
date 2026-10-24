@@ -102,6 +102,9 @@ impl From<PlacementError> for crate::error::AppError {
 pub struct Lot {
     pub id: Uuid,
     pub owner_id: Option<Uuid>,
+    /// It's a guild's hall, and the one placing is an officer of that guild
+    /// (S4.3), so they may build on it as its leader may
+    pub officer: bool,
     /// Whether the spot is inside the lot's building, or `None` for a lot
     /// with none (a guild hall)
     pub indoors: Option<bool>,
@@ -119,7 +122,7 @@ pub struct Lot {
 pub fn site(player_id: Uuid, off_plot: bool, lot: Option<&Lot>, water: Option<&str>) -> Result<Option<Uuid>, PlacementError> {
     match lot {
         Some(lot) => {
-            if lot.owner_id != Some(player_id) {
+            if lot.owner_id != Some(player_id) && !lot.officer {
                 return Err(PlacementError::NotYourPlot);
             }
             if lot.station_count >= lot.station_capacity {
@@ -252,7 +255,7 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
         return Err(PlacementError::TooFar);
     }
 
-    let lot = lot_at(db, tx, x, y).await?;
+    let lot = lot_at(db, tx, player_id, x, y).await?;
     let plot_id = site(player_id, st.off_plot, lot.as_ref(), water)?;
 
     let expected_kit = st.kit_item.clone().ok_or_else(|| PlacementError::UnknownType(station_type.to_string()))?;
@@ -361,28 +364,32 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
 const PLACEMENT_LOCK: i64 = 0x0300_57a7;
 
 /// The lot under (`x`, `y`), with its room for stations, its row locked in
-/// `tx` until the placement commits. Which lot is under a spot only changes
-/// with the terrain, so finding it needn't be in the transaction.
-async fn lot_at(db: &PgPool, tx: &mut PgConnection, x: f64, y: f64) -> Result<Option<Lot>, sqlx::Error> {
+/// `tx` until the placement commits, as `player_id` would place on it. Which
+/// lot is under a spot only changes with the terrain, so finding it needn't
+/// be in the transaction.
+async fn lot_at(db: &PgPool, tx: &mut PgConnection, player_id: Uuid, x: f64, y: f64) -> Result<Option<Lot>, sqlx::Error> {
     let Some(plot) = crate::routes::plots::find_plot_at_position(db, x, y).await? else {
         return Ok(None);
     };
-    type Row = (Option<Uuid>, i32, i32, Option<i32>, Option<i32>);
-    let (owner_id, station_count, station_capacity, indoor_room, yard_room): Row = sqlx::query_as(
-        "SELECT p.owner_id, p.station_count, psc.station_capacity, p.indoor_room, p.yard_room
+    type Row = (Option<Uuid>, i32, i32, Option<i32>, Option<i32>, bool);
+    let (owner_id, station_count, station_capacity, indoor_room, yard_room, officer): Row = sqlx::query_as(
+        "SELECT p.owner_id, p.station_count, psc.station_capacity, p.indoor_room, p.yard_room,
+                EXISTS (SELECT 1 FROM guild_members m
+                        WHERE m.player_id = $2 AND m.guild_id = p.guild_id AND m.role IN ('leader', 'officer'))
          FROM plots p
          JOIN plot_size_categories psc ON p.size_category = psc.id
          WHERE p.id = $1
          FOR UPDATE OF p",
     )
     .bind(plot.id)
+    .bind(player_id)
     .fetch_one(&mut *tx)
     .await?;
     let (Some(indoor_room), Some(yard_room), Some(corners), Some(zone)) =
         (indoor_room, yard_room, plot.quad(), Zone::from_str(&plot.zone_id))
     else {
         // No building: the lot as a whole
-        return Ok(Some(Lot { id: plot.id, owner_id, indoors: None, station_count, station_capacity }));
+        return Ok(Some(Lot { id: plot.id, owner_id, officer, indoors: None, station_count, station_capacity }));
     };
     let indoors = building::indoors(&corners, zone, x, y);
     let in_place: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stations WHERE plot_id = $1 AND indoors = $2")
@@ -393,6 +400,7 @@ async fn lot_at(db: &PgPool, tx: &mut PgConnection, x: f64, y: f64) -> Result<Op
     Ok(Some(Lot {
         id: plot.id,
         owner_id,
+        officer,
         indoors: Some(indoors),
         station_count: in_place as i32,
         station_capacity: if indoors { indoor_room } else { yard_room },
@@ -404,7 +412,17 @@ mod tests {
     use super::*;
 
     fn lot(owner: Option<Uuid>, count: i32) -> Lot {
-        Lot { id: Uuid::from_u128(7), owner_id: owner, indoors: Some(true), station_count: count, station_capacity: 4 }
+        Lot { id: Uuid::from_u128(7), owner_id: owner, officer: false, indoors: Some(true), station_count: count, station_capacity: 4 }
+    }
+
+    /// A hall's officers build on it as its leader does (S4.3)
+    #[test]
+    fn a_halls_officers_build_on_it() {
+        let (me, leader) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let hall = Lot { officer: true, indoors: None, ..lot(Some(leader), 0) };
+        assert_eq!(site(me, false, Some(&hall), None).unwrap(), Some(Uuid::from_u128(7)));
+        let full = Lot { station_count: 4, ..hall };
+        assert!(matches!(site(me, false, Some(&full), None), Err(PlacementError::PlotFull { .. })));
     }
 
     #[test]

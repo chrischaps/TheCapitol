@@ -406,6 +406,7 @@ mod tests {
     fn plot(id: u128, x: f64, y: f64, owner: Option<Uuid>, count: i32) -> PlotInfo {
         let (x1, y1) = (x + 200.0, y + 200.0);
         PlotInfo {
+            guild: None,
             id: Uuid::from_u128(id),
             zone_id: "suburban".into(),
             world_x: x + 100.0,

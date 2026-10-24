@@ -205,7 +205,7 @@ pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uu
         .fetch_all(&mut *tx)
         .await?;
     sqlx::query(
-        "UPDATE plots SET owner_id = NULL, claimed_at = NULL, assessed_value = 0, granted = FALSE,
+        "UPDATE plots SET owner_id = NULL, guild_id = NULL, claimed_at = NULL, assessed_value = 0, granted = FALSE,
                 tax_owed = 0, tax_carry = 0, last_tax_paid = NULL, station_count = 0
          WHERE id = $1",
     )
@@ -291,6 +291,10 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
 
     for c in conflicts.iter().filter(|c| released.contains(&c.plot_id)) {
         report.released.push(c.terrain_id.clone());
+        let hall: Option<Uuid> = sqlx::query_scalar("SELECT guild_id FROM plots WHERE id = $1")
+            .bind(c.plot_id)
+            .fetch_one(&mut *tx)
+            .await?;
         let returned = return_plot_stations(&mut tx, c.plot_id).await?;
         returned.count_into(&mut flows);
         if !returned.lost.is_empty() {
@@ -309,6 +313,14 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
             continue;
         }
         let value = row.assessed_value;
+        // A hall's deed goes back into its guild's treasury (S4.3)
+        if let Some(guild_id) = hall {
+            let note = "The hall's deed refunded: the terrain changed under it";
+            crate::engine::guilds::refund_hall(&mut tx, guild_id, value as i64, note, chrono::Utc::now())
+                .await
+                .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to guild {guild_id} for its hall: {e}")))?;
+            continue;
+        }
         if value > 0 {
             add_strands_in(
                 &mut tx,

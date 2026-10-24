@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use capitol_protocol::rules::Zone;
 use capitol_protocol::rest::{
-    ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PositionQuery,
+    ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PlotGuild,
+    PositionQuery,
 };
 
 use crate::engine::currency::{announce_balances, subtract_strands_in, TransactionType};
@@ -63,12 +64,13 @@ pub async fn list_plots(
     // Build dynamic query
     let mut sql = format!(
         "SELECT p.*, pl.name as owner_name, COALESCE(acc.kind = 'citizen', FALSE) AS owner_citizen,
-                {STATION_CAPACITY} AS station_capacity, z.deed_cost
+                {STATION_CAPACITY} AS station_capacity, z.deed_cost, g.name AS guild_name, g.tag AS guild_tag
          FROM plots p
          LEFT JOIN players pl ON p.owner_id = pl.id
          LEFT JOIN accounts acc ON acc.id = pl.account_id
          JOIN plot_size_categories psc ON p.size_category = psc.id
          LEFT JOIN zones z ON p.zone_id = z.id
+         LEFT JOIN guilds g ON g.id = p.guild_id
          WHERE 1=1"
     );
 
@@ -135,16 +137,32 @@ pub async fn list_claimed_plots(State(state): State<AppState>) -> Result<Json<Ve
 
 /// A pre-B7 plot with no lot is left out: clients have nothing to draw it on.
 /// An owned plot with no `claimed_at` (none should have one) reads as claimed
-/// long ago, at the Unix epoch.
+/// long ago, at the Unix epoch. A guild's hall names its guild (S4.3).
 async fn claimed_plots(db: &PgPool) -> Result<Vec<ClaimedPlot>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT terrain_id, owner_id, COALESCE(claimed_at, 'epoch'::timestamptz) AS claimed_at
-         FROM plots
-         WHERE owner_id IS NOT NULL AND terrain_id IS NOT NULL
-         ORDER BY terrain_id",
+    type Row = (String, Uuid, DateTime<Utc>, Option<Uuid>, Option<String>, Option<String>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT p.terrain_id, p.owner_id, COALESCE(p.claimed_at, 'epoch'::timestamptz), g.id, g.name, g.tag
+         FROM plots p
+         LEFT JOIN guilds g ON g.id = p.guild_id
+         WHERE p.owner_id IS NOT NULL AND p.terrain_id IS NOT NULL
+         ORDER BY p.terrain_id",
     )
     .fetch_all(db)
-    .await
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(terrain_id, owner_id, claimed_at, id, name, tag)| ClaimedPlot {
+            terrain_id,
+            owner_id,
+            claimed_at,
+            guild: plot_guild(id, name, tag),
+        })
+        .collect())
+}
+
+/// The guild of a plot's joined `guilds` row, if it's a hall (S4.3)
+pub(crate) fn plot_guild(id: Option<Uuid>, name: Option<String>, tag: Option<String>) -> Option<PlotGuild> {
+    Some(PlotGuild { id: id?, name: name?, tag: tag? })
 }
 
 /// Get a single plot by ID
@@ -185,14 +203,15 @@ async fn plot_info(state: &AppState, plot_id: Uuid) -> Result<PlotInfo, AppError
                 p.bounds_min_x, p.bounds_min_y, p.bounds_max_x, p.bounds_max_y,
                 p.size_category, p.plot_type, p.owner_id, p.claimed_at,
                 p.assessed_value, p.last_tax_paid, p.tax_owed, p.station_count,
-                p.terrain_id, p.corners, p.indoor_room, p.yard_room,
+                p.terrain_id, p.corners, p.indoor_room, p.yard_room, p.guild_id,
                 pl.name as owner_name, COALESCE(acc.kind = 'citizen', FALSE) AS owner_citizen,
-                {STATION_CAPACITY} AS station_capacity, z.deed_cost
+                {STATION_CAPACITY} AS station_capacity, z.deed_cost, g.name AS guild_name, g.tag AS guild_tag
          FROM plots p
          LEFT JOIN players pl ON p.owner_id = pl.id
          LEFT JOIN accounts acc ON acc.id = pl.account_id
          JOIN plot_size_categories psc ON p.size_category = psc.id
          LEFT JOIN zones z ON p.zone_id = z.id
+         LEFT JOIN guilds g ON g.id = p.guild_id
          WHERE p.id = $1"
     ))
     .bind(plot_id)
@@ -309,6 +328,7 @@ pub async fn pay_tax(
 }
 
 const NOT_CLAIMABLE: &str = "This zone does not allow plot ownership";
+const GUILDS_ONLY: &str = "A lot in the guild district is a guild's hall: its leader claims it for the guild";
 
 /// Whether a plot can be owned: its zone has plots, and so does the ground it
 /// stands on. Nothing in the wilds is claimed (WD6, #194), whatever its row says.
@@ -364,6 +384,11 @@ async fn claim(
     // and by its deed
     if !claimable(&zone_id, world_x as f64, world_y as f64) {
         return Err(AppError::BadRequest(NOT_CLAIMABLE.into()));
+    }
+    // The guild district's lots are guilds' halls (S4.3): `POST /guilds/{id}/hall`.
+    // A grant hears it isn't for a home zone, below.
+    if zone_id == Zone::GuildDistrict.as_str() && paying == Paying::Strands {
+        return Err(AppError::BadRequest(GUILDS_ONLY.into()));
     }
     let deed_cost = deed_cost.ok_or_else(|| AppError::BadRequest(NOT_CLAIMABLE.into()))?;
     // The zone's deed price tunable (D6.1). The plot is assessed at it.
@@ -421,7 +446,7 @@ async fn claim(
 
     // A pre-B7 plot has no lot for clients to draw, as in `/plots/claimed`.
     if let Some(terrain_id) = terrain_id {
-        let _ = events.send(GameEvent::PlotClaimed { terrain_id, owner_id: player_id, claimed_at });
+        let _ = events.send(GameEvent::PlotClaimed { terrain_id, owner_id: player_id, claimed_at, guild: None });
     }
     if !granted {
         announce_balances(events, [(player_id, new_balance)]);
@@ -697,7 +722,7 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!((listed[0].terrain_id.as_str(), listed[0].owner_id), (terrain_id.as_str(), ada));
         match rx.try_recv() {
-            Ok(GameEvent::PlotClaimed { terrain_id: sent, owner_id, claimed_at }) => {
+            Ok(GameEvent::PlotClaimed { terrain_id: sent, owner_id, claimed_at, .. }) => {
                 assert_eq!((sent, owner_id), (terrain_id, ada));
                 assert_eq!(claimed_at, listed[0].claimed_at, "the broadcast and the list agree on when");
             }
@@ -821,6 +846,28 @@ mod tests {
         // The road walked, a grant opened only now, from the steps
         claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Grant).await.unwrap();
         assert_eq!(grant_of(&db, ada).await, Some((true, Some(lot), false)));
+    }
+
+    /// A guild-district lot is a guild's hall, not a player's to buy (S4.3)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_player_cant_buy_a_guild_lot(db: PgPool) {
+        use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+        let ada = player(&db, "ada", 1_000_000).await;
+        let lot = plot(&db, None, 0).await;
+        sqlx::query("UPDATE plots SET zone_id = 'guild_district', size_category = 'guild_hall', world_x = $2, world_y = $3 WHERE id = $1")
+            .bind(lot)
+            .bind((CENTER_X + 800.0) as f32)
+            .bind(CENTER_Y as f32)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (tx, mut rx) = events();
+
+        let refused = claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Strands).await;
+        assert!(matches!(refused, Err(AppError::BadRequest(m)) if m == GUILDS_ONLY));
+        assert!(rx.try_recv().is_err());
+        assert_eq!((owner(&db, lot).await, balance(&db, ada).await), (Some(None), 1_000_000));
     }
 
     /// Only lots are listed: a pre-B7 plot has nothing for a client to draw on
