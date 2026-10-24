@@ -25,9 +25,9 @@ version = 1
 game_id = "capitol"
 
 # The pad (controls T2.1, plan D6) plays over the shoulder: the left stick
-# walks, the right stick looks, South acts, East backs out, the triggers
-# zoom, and the d-pad, Start and Select open the panels. Inside a panel you
-# use the mouse (#331).
+# walks, the right stick looks, South acts, North trades, East backs out,
+# the triggers zoom, and the d-pad, Start and Select open the panels. Inside
+# a panel you use the mouse (#331).
 #
 # Over the shoulder (Direct, T1.3), the way to walk: the keys at ±1 and the
 # left stick, summed. The stick has no deadzone here: the client applies a
@@ -226,9 +226,11 @@ bindings = [{ type = "key", code = "KeyE" }, { type = "gamepad_button", button =
 # Trading (P7.3): accept the request you've been sent, or else ask the
 # player nearest you, walking closer if they're out of range. A shift-click
 # on someone does the same for them, and this is a key captures can press.
+# Over the shoulder it asks whoever's in front of you, if anyone is, so
+# North on the pad (Y) is the pad's Shift-E (T2.2).
 [actions.trade]
 kind = "button"
-bindings = [{ type = "key", code = "KeyT" }]
+bindings = [{ type = "key", code = "KeyT" }, { type = "gamepad_button", button = "North" }]
 
 # Modifiers for a left click on the world (scripts/input.rhai, P4.3):
 # shift-click a player to trade (P7.3), alt-click a plot to select it (P6.4).

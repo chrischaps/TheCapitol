@@ -1132,13 +1132,133 @@ fn mote_rise() { 11.0 }
 fn focus_is(f, kind) { f != () && f.kind == kind }
 
 // A prompt's "click" as E over the shoulder (T1.5), where the cursor is
-// captured and E, or a click, acts on the focus.
+// captured and E, or a click, acts on the focus; or as A, with a pad in
+// your hands (T2.2), which `draw_act_line` draws as the button.
 fn act_words(line) {
     if is_cursor_captured() {
-        line.replace("Click", "Press E");
-        line.replace("click", "press E");
+        let key = if pad_held() { "{A}" } else { "E" };
+        line.replace("Click", "Press " + key);
+        line.replace("click", "press " + key);
     }
     line
+}
+
+// The pad is in your hands over the shoulder (T2.2): it was the last thing
+// used, with the cursor captured. The prompts then show its buttons.
+fn pad_held() { is_cursor_captured() && last_input_device() == "gamepad" }
+
+// A face button's tint, as the shortcut card's (`theme::pad_tint`): sage
+// A, brick B, slate X, ochre Y. `()` for the rest.
+fn pad_tint(name) {
+    switch name {
+        "A" => [0.561, 0.749, 0.478],
+        "B" => [0.831, 0.478, 0.373],
+        "X" => [0.498, 0.624, 0.812],
+        "Y" => [0.890, 0.757, 0.353],
+        _ => (),
+    }
+}
+
+// One of the pad's controls as a glyph `h` high with its top left at x, y,
+// drawn rather than set in a font (T2.2), as the shortcut card draws them:
+// a face button round, ringed and lettered in its tint; the d-pad ("Up",
+// "Down", "Left", "Right") a cross with that arm lit gold; anything else a
+// small cap with its name. Returns how wide it was.
+fn draw_pad_glyph(x, y, name, h, a) {
+    let r = h / 2.0;
+    let cx = x + r;
+    let cy = y + r;
+    let tint = pad_tint(name);
+    if tint != () {
+        draw_circle(cx + 0.5, cy + 1.5, r, 0.0, 0.0, 0.0, 0.35 * a);
+        draw_circle(cx, cy, r - 0.5, 0.10, 0.09, 0.07, 0.86 * a);
+        draw_circle_outline(cx, cy, r - 1.0, tint[0], tint[1], tint[2], 0.95 * a, 1.5);
+        let m = measure_text_ex(name, h * 0.62, "strong", 0.0);
+        draw_text_opts(cx - m.width / 2.0, cy - m.height / 2.0, name, h * 0.62, #{
+            font: "strong", color: [tint[0], tint[1], tint[2], a],
+        });
+        return h;
+    }
+    let way = switch name {
+        "Up" => [0.0, -1.0],
+        "Down" => [0.0, 1.0],
+        "Left" => [-1.0, 0.0],
+        "Right" => [1.0, 0.0],
+        _ => (),
+    };
+    if way != () {
+        let arm = (h * 0.36).round();
+        draw_rect_ex(x + 0.5, y + r - arm / 2.0 + 1.5, h, arm, 0.0, 0.0, 0.0, 0.35 * a, 2.0, 0);
+        draw_rect_ex(x, y + r - arm / 2.0, h, arm, 0.10, 0.09, 0.07, 0.86 * a, 2.0, 0);
+        draw_rect_ex(cx - arm / 2.0, y, arm, h, 0.10, 0.09, 0.07, 0.86 * a, 2.0, 0);
+        draw_rect_outline_ex(x, y + r - arm / 2.0, h, arm, 0.79, 0.64, 0.15, 0.45 * a, 1.0, 2.0, 0);
+        draw_rect_outline_ex(cx - arm / 2.0, y, arm, h, 0.79, 0.64, 0.15, 0.45 * a, 1.0, 2.0, 0);
+        draw_rect_ex(cx - arm / 2.0 + 1.0, cy - arm / 2.0 + 1.0, arm - 2.0, arm - 2.0, 0.10, 0.09, 0.07, a, 0.0, 0);
+        let lit = arm - 3.0;
+        let reach = r - arm / 2.0;
+        let c = gold();
+        draw_rect_ex(cx + way[0] * reach - lit / 2.0, cy + way[1] * reach - lit / 2.0, lit, lit,
+                     c[0], c[1], c[2], a, 1.5, 0);
+        return h;
+    }
+    let m = measure_text_ex(name, h * 0.6, "strong", 0.0);
+    let w = (m.width + 10.0).max(h);
+    draw_rect_ex(x, y, w, h, 0.10, 0.09, 0.07, 0.86 * a, h / 2.0, 0);
+    draw_rect_outline_ex(x, y, w, h, 0.79, 0.64, 0.15, 0.8 * a, 1.0, h / 2.0, 0);
+    draw_text_opts(x + (w - m.width) / 2.0, y + (h - m.height) / 2.0, name, h * 0.6, #{
+        font: "strong", color: [0.96, 0.90, 0.72, a],
+    });
+    w
+}
+
+// A prompt's second line, centred on `cx` with its shadow, in `ink` at
+// `alpha`: the pad's buttons in it ("{A}", act_words's) drawn as glyphs.
+fn draw_act_line(cx, y, line, size, ink, alpha) {
+    let pieces = [];
+    let rest = line;
+    loop {
+        let open = rest.index_of("{");
+        let close = rest.index_of("}");
+        if open < 0 || close < open {
+            if rest != "" { pieces.push([false, rest]); }
+            break;
+        }
+        if open > 0 { pieces.push([false, rest.sub_string(0, open)]); }
+        pieces.push([true, rest.sub_string(open + 1, close - open - 1)]);
+        rest = rest.sub_string(close + 1);
+    }
+    let h = size + 5.0;
+    let gap = 3.0;
+    let width = 0.0;
+    let tall = 0.0;
+    for p in pieces {
+        if p[0] {
+            width += draw_pad_glyph_width(p[1], h) + 2.0 * gap;
+        } else {
+            let m = measure_text_ex(p[1], size, "strong", 0.0);
+            width += m.width;
+            tall = tall.max(m.height);
+        }
+    }
+    let x = cx - width / 2.0;
+    for p in pieces {
+        if p[0] {
+            x += gap;
+            x += draw_pad_glyph(x, y + tall / 2.0 - h / 2.0, p[1], h, alpha) + gap;
+        } else {
+            let words = p[1];
+            draw_text_opts(x + 1.0, y + 1.0, words, size, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.6 * alpha] });
+            draw_text_opts(x, y, words, size, #{ font: "strong", color: [ink[0], ink[1], ink[2], alpha] });
+            x += measure_text_ex(words, size, "strong", 0.0).width;
+        }
+    }
+}
+
+// How wide `draw_pad_glyph` draws `name`, `h` high.
+fn draw_pad_glyph_width(name, h) {
+    if pad_tint(name) != () { return h; }
+    if ["Up", "Down", "Left", "Right"].contains(name) { return h; }
+    (measure_text_ex(name, h * 0.6, "strong", 0.0).width + 10.0).max(h)
 }
 
 // What E acts on over the shoulder: a node's ring, a station's in gold, a
@@ -1188,12 +1308,15 @@ fn draw_aim(k) {
 
 // "[E] Gather wild grass", and "[Shift E] Trade with Ada" under it: over a
 // node or a station, under someone's feet, clear of the name over them.
+// With a pad in your hands, (A) and (Y) instead (T2.2).
 fn draw_focus_prompt(f) {
     let ground = cap_ground_at(f.x, f.z);
     let at = world_to_screen(f.x, ground + f.top, f.z);
     if !at.visible { return; }
-    let lines = [["E", f.label]];
-    if f.shift_label != () { lines.push(["Shift E", f.shift_label]); }
+    // With a pad in your hands, A acts and Y trades (T2.2)
+    let pad = pad_held();
+    let lines = [[if pad { "A" } else { "E" }, f.label]];
+    if f.shift_label != () { lines.push([if pad { "Y" } else { "Shift E" }, f.shift_label]); }
     let size = 15.0;
     let gap = 7.0;
     let row = 24.0;
@@ -1214,17 +1337,21 @@ fn draw_focus_prompt(f) {
         let words = lines[k][1];
         let km = measure_text_ex(key, 12.0, "strong", 0.0);
         let wm = measure_text_ex(words, size, "strong", 0.0);
-        let kw = km.width + 12.0;
+        let kw = if pad { 19.0 } else { km.width + 12.0 };
         let w = kw + gap + wm.width;
         let x = at.x - w / 2.0;
         let y = top + row * k.to_float();
         let a = if k == 0 { 1.0 } else { 0.8 };
-        draw_rect_ex(x + 1.0, y + 2.0, kw, 19.0, 0.0, 0.0, 0.0, 0.35 * a, 4.0, 0);
-        draw_rect_ex(x, y, kw, 19.0, 0.10, 0.09, 0.07, 0.82 * a, 4.0, 0);
-        draw_rect_outline_ex(x, y, kw, 19.0, 0.79, 0.64, 0.15, 0.95 * a, 1.0, 4.0, 0);
-        draw_text_opts(x + 6.0, y + (19.0 - km.height) / 2.0, key, 12.0, #{
-            font: "strong", color: [0.96, 0.90, 0.72, a],
-        });
+        if pad {
+            draw_pad_glyph(x, y, key, 19.0, a);
+        } else {
+            draw_rect_ex(x + 1.0, y + 2.0, kw, 19.0, 0.0, 0.0, 0.0, 0.35 * a, 4.0, 0);
+            draw_rect_ex(x, y, kw, 19.0, 0.10, 0.09, 0.07, 0.82 * a, 4.0, 0);
+            draw_rect_outline_ex(x, y, kw, 19.0, 0.79, 0.64, 0.15, 0.95 * a, 1.0, 4.0, 0);
+            draw_text_opts(x + 6.0, y + (19.0 - km.height) / 2.0, key, 12.0, #{
+                font: "strong", color: [0.96, 0.90, 0.72, a],
+            });
+        }
         let tx = x + kw + gap;
         let ty = y + (19.0 - wm.height) / 2.0;
         draw_text_opts(tx + 1.0, ty + 1.0, words, size, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.6 * a] });
@@ -1259,6 +1386,7 @@ fn draw_hall_prompt(h, over) {
     let title = "Exchange hall";
     let line = if !h.near { "Click to walk there" }
                else if h.goods { "Goods wait in your box · click to collect" }
+               else if pad_held() { "Click to trade · {Right}" }
                else { "Click to trade · M" };
     let size = 18.0;
     let m = measure_text_ex(title, size, "display", 0.0);
@@ -1271,16 +1399,9 @@ fn draw_hall_prompt(h, over) {
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.86, 0.92, 1.0, 0.97],
     });
-    let line = act_words(line);
-    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
     let ink = if h.goods && h.near { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
-    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{
-        font: "strong", color: [0.0, 0.0, 0.0, 0.55],
-    });
-    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
-        font: "strong", color: [ink[0], ink[1], ink[2], if over || h.near { 0.9 } else { 0.7 }],
-    });
+    draw_act_line(at.x, ly, act_words(line), 13.0, ink, if over || h.near { 0.9 } else { 0.7 });
 }
 
 // ── The road in (#442) ───────────────────────────────────────────────────
@@ -1411,11 +1532,8 @@ fn draw_stall(s, over, walking, now) {
     let top = (at.y - 44.0).max(64.0);
     draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{ font: "display", color: [0.0, 0.0, 0.0, 0.6] });
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{ font: "display", color: [1.0, 0.92, 0.78, 0.97] });
-    let line = act_words(line);
-    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
-    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.55] });
-    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{ font: "strong", color: [0.95, 0.83, 0.62, 0.92] });
+    draw_act_line(at.x, ly, act_words(line), 13.0, [0.95, 0.83, 0.62], 0.92);
 }
 
 // ── The Gazette's notice board (E3.9) ────────────────────────────────────
@@ -1446,16 +1564,9 @@ fn draw_board(h, over, now) {
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.96, 0.92, 0.82, 0.97],
     });
-    let line = act_words(line);
-    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
     let ink = if h.news || fill { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
-    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{
-        font: "strong", color: [0.0, 0.0, 0.0, 0.55],
-    });
-    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
-        font: "strong", color: [ink[0], ink[1], ink[2], 0.92],
-    });
+    draw_act_line(at.x, ly, act_words(line), 13.0, ink, 0.92);
 }
 
 // ── The Deeds Office (#448) ──────────────────────────────────────────────
@@ -1479,16 +1590,9 @@ fn draw_office(h, over, now) {
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.98, 0.9, 0.84, 0.97],
     });
-    let line = act_words(line);
-    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
     let ink = if h.deed_waits { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
-    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{
-        font: "strong", color: [0.0, 0.0, 0.0, 0.55],
-    });
-    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
-        font: "strong", color: [ink[0], ink[1], ink[2], 0.92],
-    });
+    draw_act_line(at.x, ly, act_words(line), 13.0, ink, 0.92);
 }
 
 // The glint over the office's awning: the motes' four-pointed star, turning

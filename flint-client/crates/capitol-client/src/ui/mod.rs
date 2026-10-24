@@ -117,9 +117,9 @@ pub fn controls(ctx: &egui::Context, status: &str, clear_of: Option<egui::Rect>)
 }
 
 /// The inscription window, top left, with the mode's keys (`direct`: over
-/// the shoulder, T1.6) and where the terrain came from (`status`)
-/// underneath. Offline only.
-pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str, direct: bool) {
+/// the shoulder, T1.6, and its pad's with one in your hands, `pad`, T2.2)
+/// and where the terrain came from (`status`) underneath. Offline only.
+pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str, direct: bool, pad: bool) {
     egui::Window::new("inscription")
         .title_bar(false)
         .resizable(false)
@@ -138,7 +138,15 @@ pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str, direct: b
                     .desired_width(240.0),
             );
             ui.add_space(6.0);
-            if direct {
+            if direct && pad {
+                for line in ["{LS} walks  ·  {RS} looks  ·  {A} acts", "{B} closes a panel  ·  press {RS} comes home"] {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        shortcuts::keys_row(ui, line);
+                    });
+                }
+                ui.label(theme::dim("F8 to point and walk"));
+            } else if direct {
                 ui.label(theme::dim("WASD walks · the mouse looks · E acts"));
                 ui.label(theme::dim("Alt or Esc frees the cursor · H or Home comes home"));
                 ui.label(theme::dim("F8 to point and walk"));

@@ -901,6 +901,102 @@ pub fn keycap(ui: &mut Ui, text: &str) -> Response {
     response
 }
 
+/// A face button's tint (T2.2): the pad's own colours, as the town would
+/// paint them. Sage for A, brick for B, slate for X and ochre for Y.
+pub fn pad_tint(button: &str) -> Option<Color32> {
+    Some(match button {
+        "A" => rgb(0x8fbf7a),
+        "B" => rgb(0xd47a5f),
+        "X" => rgb(0x7f9fcf),
+        "Y" => rgb(0xe3c15a),
+        _ => return None,
+    })
+}
+
+/// A pad's control as a small lozenge (T2.2), drawn rather than taken from
+/// a font, the height of a [`keycap`]: the face buttons (`A`, `B`, `X`,
+/// `Y`) round and ringed in their [`pad_tint`], the sticks (`LS`, `RS`) as
+/// a cap in its well, the shoulders (`LB`, `RB`) and triggers (`LT`, `RT`)
+/// as caps rounded on top, the d-pad (`Up`, `Down`, `Left`, `Right`) as a
+/// cross with that arm lit, and `Start` and `Select` as pills with their
+/// marks. Any other name is a [`keycap`].
+pub fn padcap(ui: &mut Ui, name: &str) -> Response {
+    let line = ui.painter().layout_no_wrap("A".to_owned(), strong(size::SMALL), TEXT).size().y;
+    let h = line + 8.0;
+    let width = match name {
+        "LB" | "RB" | "LT" | "RT" | "Start" | "Select" => h * 1.2,
+        "A" | "B" | "X" | "Y" | "LS" | "RS" | "Up" | "Down" | "Left" | "Right" => h,
+        _ => return keycap(ui, name),
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    let edge = Stroke::new(1.0_f32, KEYCAP_EDGE);
+    let letter = |at: egui::Pos2, text: &str, size: f32, colour: Color32| {
+        let g = painter.layout_no_wrap(text.to_owned(), strong(size), colour);
+        painter.galley(at - g.size() * 0.5, g, colour);
+    };
+    match name {
+        "A" | "B" | "X" | "Y" => {
+            let tint = pad_tint(name).unwrap_or(GOLD);
+            let r = h * 0.5 - 0.5;
+            painter.circle_filled(c + egui::vec2(0.0, 1.0), r, KEYCAP_SIDE);
+            painter.circle(c, r - 1.0, KEYCAP, Stroke::new(1.5_f32, tint));
+            letter(c, name, size::SMALL, tint);
+        }
+        "LS" | "RS" => {
+            // The stick's well, and its cap standing in it
+            painter.circle(c, h * 0.5 - 0.5, KEYCAP_SIDE, edge);
+            painter.circle(c, h * 0.34, KEYCAP, Stroke::new(1.0_f32, GOLD_DIM));
+            letter(c, &name[..1], size::SMALL - 2.0, TEXT);
+        }
+        "LB" | "RB" | "LT" | "RT" => {
+            // A trigger is rounded deep on top, a shoulder less
+            let top = if name.ends_with('T') { h * 0.5 } else { 4.0 };
+            let rounding = Rounding { nw: top, ne: top, sw: 3.0, se: 3.0 };
+            painter.rect_filled(rect, rounding, KEYCAP_SIDE);
+            let face = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 2.0));
+            painter.rect(face, rounding, KEYCAP, edge);
+            letter(face.center() + egui::vec2(0.0, 1.0), name, size::SMALL - 1.0, TEXT);
+        }
+        "Up" | "Down" | "Left" | "Right" => {
+            let arm = (h * 0.34).round();
+            let reach = h * 0.5 - 0.5;
+            let bar = |w: f32, l: f32| egui::Rect::from_center_size(c, egui::vec2(w, l));
+            painter.rect(bar(reach * 2.0, arm), 2.0, KEYCAP, edge);
+            painter.rect(bar(arm, reach * 2.0), 2.0, KEYCAP, edge);
+            // Cover the cross's inner edges, so it reads as one piece
+            painter.rect_filled(bar(arm - 2.0, arm - 2.0), 0.0, KEYCAP);
+            let way = match name {
+                "Up" => egui::vec2(0.0, -1.0),
+                "Down" => egui::vec2(0.0, 1.0),
+                "Left" => egui::vec2(-1.0, 0.0),
+                _ => egui::vec2(1.0, 0.0),
+            };
+            let lit = egui::Rect::from_center_size(c + way * (reach - arm * 0.5), egui::vec2(arm - 3.0, arm - 3.0));
+            painter.rect_filled(lit, 1.5, GOLD);
+        }
+        _ => {
+            // Start's three lines, or Select's two windows
+            let pill = rect.shrink2(egui::vec2(0.0, 2.0));
+            painter.rect(pill, pill.height() * 0.5, KEYCAP, edge);
+            let ink = Stroke::new(1.2_f32, TEXT);
+            if name == "Start" {
+                for dy in [-3.0, 0.0, 3.0] {
+                    painter.line_segment([c + egui::vec2(-4.0, dy), c + egui::vec2(4.0, dy)], ink);
+                }
+            } else {
+                let w = egui::vec2(6.0, 5.0);
+                let back = egui::Rect::from_center_size(c + egui::vec2(-1.5, -1.5), w);
+                let front = egui::Rect::from_center_size(c + egui::vec2(1.5, 1.5), w);
+                painter.rect_stroke(back, 1.0, ink);
+                painter.rect(front, 1.0, KEYCAP, ink);
+            }
+        }
+    }
+    response
+}
+
 /// How far along a run of steps is, as pips: gold for each done, a gold
 /// ring for the one at hand, and dim dots for the rest.
 pub fn step_pips(ui: &mut Ui, steps: usize, at: usize) {

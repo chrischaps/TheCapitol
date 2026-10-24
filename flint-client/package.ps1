@@ -99,6 +99,13 @@ CONTROLS
   it, and Esc closes a panel or frees the cursor until you click the
   world again. H puts the camera back over your shoulder.
 
+  With a pad, over the shoulder: the left stick walks, the right stick
+  looks, A acts and Y trades with whoever's in front of you, B backs out
+  of a panel. The triggers zoom, the d-pad opens the inventory (up),
+  crafting (left), the market (right) and the exchange (down), Start the
+  settings and Select the shortcuts; press the right stick for home. The
+  prompts show the pad's buttons once you pick it up.
+
   In both: I inventory, C crafting, X fiber exchange, M the market,
   G the Gazette, L letters, U guilds, Enter to talk, T trade, O nearest
   station. Alt+click a plot for its deed. The wheel or R/F zoom.

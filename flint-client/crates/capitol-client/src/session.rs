@@ -2331,11 +2331,16 @@ impl Session {
         true
     }
 
-    /// Asks the player nearest you to trade (the T key), or accepts the
-    /// request you've been sent.
-    pub fn trade_key(&mut self, now: Instant) {
+    /// Accepts the request you've been sent (the T key, or Y on the pad),
+    /// or else asks whoever's `ahead` of you over the shoulder (T2.2), or
+    /// the player nearest you.
+    pub fn trade_key(&mut self, now: Instant, ahead: Option<Uuid>) {
         if matches!(self.state.trade(), Trade::Incoming { .. }) {
             self.answer_trade(now, true);
+            return;
+        }
+        if let Some(player) = ahead {
+            self.trade_with(now, player);
             return;
         }
         let Some(me) = self.state.local_player() else {

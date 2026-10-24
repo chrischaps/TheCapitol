@@ -33,7 +33,7 @@ use capitol_core::protocol::rest::PlotInfo;
 use capitol_core::protocol::tutorial::{Chapter, Grant, Step, Steps, TutorialProgress};
 use egui::{Align2, Id, RichText};
 
-use super::shortcuts::keys_row;
+use super::shortcuts::{keys_row, on_the_pad};
 use super::theme::{self, size};
 
 /// How long a done step shows its tick before the next card.
@@ -101,11 +101,29 @@ const DIRECT_WALK: (&str, &str) = (
     "[W] [A] [S] [D] walk  ·  Mouse looks",
 );
 
-/// A step's words as [`words`], but in the mode in play: over the shoulder
-/// (`direct`) the walk step says WASD walks.
-fn words_in(step: Step, direct: bool) -> (&'static str, &'static str, &'static str) {
-    match (step, direct) {
-        (Step::Walk, true) => (words(step).0, DIRECT_WALK.0, DIRECT_WALK.1),
+/// The same with a pad in your hands (T2.2): the sticks walk and look.
+const PAD_WALK: (&str, &str) = (
+    "You've come in on the south road, among the farms. Walk with the left stick, the way you face; the right stick \
+     turns you. Round the water by the bridges and fords.",
+    "{LS} walk  ·  {RS} looks",
+);
+
+/// How you're playing, which the cards speak of: point and walk, over the
+/// shoulder on the keys (T1.6), or over the shoulder with a pad (T2.2).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Play {
+    #[default]
+    Click,
+    Keys,
+    Pad,
+}
+
+/// A step's words as [`words`], but as you're playing (`play`): over the
+/// shoulder the walk step says WASD walks, or the stick does.
+fn words_in(step: Step, play: Play) -> (&'static str, &'static str, &'static str) {
+    match (step, play) {
+        (Step::Walk, Play::Keys) => (words(step).0, DIRECT_WALK.0, DIRECT_WALK.1),
+        (Step::Walk, Play::Pad) => (words(step).0, PAD_WALK.0, PAD_WALK.1),
         _ => words(step),
     }
 }
@@ -367,13 +385,13 @@ const WAIVE_AFTER: Duration = Duration::from_secs(7);
 /// takes a bid, so the step never waits on a seller (plan D10).
 pub const BID_FOR: &str = "stone";
 
-/// A step's words on its card: [`words_in`] the mode (`direct`), but for
+/// A step's words on its card: [`words_in`] how you play (`play`), but for
 /// the market box once it's known empty (`box_goods`, `Some(false)`), and
 /// Settle in's for your own lot (`home`, [`home_words`]).
-fn body(step: Step, box_goods: Option<bool>, home: Option<&Home>, direct: bool) -> Cow<'static, str> {
+fn body(step: Step, box_goods: Option<bool>, home: Option<&Home>, play: Play) -> Cow<'static, str> {
     match (step, box_goods) {
         (Step::CollectBox, Some(false)) => BOX_EMPTY.into(),
-        _ => home_words(step, home).map_or(words_in(step, direct).1.into(), Cow::Owned),
+        _ => home_words(step, home).map_or(words_in(step, play).1.into(), Cow::Owned),
     }
 }
 
@@ -497,6 +515,8 @@ pub struct Hints {
     bid_led: bool,
     /// Over the shoulder (T1.6, [`Hints::set_direct`]): the walk step says WASD.
     direct: bool,
+    /// With a pad in your hands (T2.2, [`Hints::set_pad`]): the cards say its buttons.
+    pad: bool,
 }
 
 impl Hints {
@@ -593,6 +613,21 @@ impl Hints {
     /// cards speak of its keys. Call once a frame.
     pub fn set_direct(&mut self, direct: bool) {
         self.direct = direct;
+    }
+
+    /// Whether the pad was the last thing used (T2.2): over the shoulder
+    /// the cards then speak of its sticks and buttons. Call once a frame.
+    pub fn set_pad(&mut self, pad: bool) {
+        self.pad = pad;
+    }
+
+    /// How you're playing, as the cards speak of it.
+    fn play(&self) -> Play {
+        match (self.direct, self.pad) {
+            (false, _) => Play::Click,
+            (true, false) => Play::Keys,
+            (true, true) => Play::Pad,
+        }
     }
 
     /// Your home lot (`onboarding::home_plot` of your plots), for Settle
@@ -774,8 +809,8 @@ impl Hints {
                         Face::Step(step) => {
                             let done = matches!(card, Card::Done(..));
                             let lead = lead.filter(|_| !done);
-                            let body = body(step, self.box_goods, self.home.as_ref(), self.direct);
-                            let asked = step_card(ui, step, &body, done, spot.compact, lead, self.direct);
+                            let body = body(step, self.box_goods, self.home.as_ref(), self.play());
+                            let asked = step_card(ui, step, &body, done, spot.compact, lead, self.play());
                             hide = asked.hide;
                             noted = asked.noted;
                         }
@@ -799,7 +834,7 @@ impl Hints {
         // the area's own response isn't hovered while a child widget is.
         if spot.compact && shown.response.contains_pointer() {
             let (title, body) = match face {
-                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods, self.home.as_ref(), self.direct)),
+                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods, self.home.as_ref(), self.play())),
                 Face::Chapter(c) => (chapter_done_title(c), chapter_close(c).into()),
                 Face::Closing => (CLOSING.0.to_owned(), CLOSING.1.into()),
                 Face::Lesson => (super::quality_card::TITLE.to_owned(), super::quality_card::WORDS.into()),
@@ -938,9 +973,11 @@ struct Asked {
 /// (its words, as [`body`] picks them), and where it leads if anywhere;
 /// `compact` leaves out the words. The tax card, which asks nothing of the
 /// world, ends with "Noted", which is the step. Its keys are the mode's
-/// (`direct`, [`words_in`]).
-fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: bool, lead: Option<Lead>, direct: bool) -> Asked {
-    let (title, _, keys) = words_in(step, direct);
+/// (`play`, [`words_in`]), and with a pad, the pad's where it has them
+/// ([`on_the_pad`]).
+fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: bool, lead: Option<Lead>, play: Play) -> Asked {
+    let (title, _, keys) = words_in(step, play);
+    let keys: Cow<str> = if play == Play::Pad { on_the_pad(keys).into() } else { keys.into() };
     let (at, of) = place_in_chapter(step);
     let mut hide = false;
     let mut noted = false;
@@ -985,7 +1022,7 @@ fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: boo
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        keys_row(ui, keys);
+        keys_row(ui, &keys);
     });
     if step == Step::ReadTax && !done {
         ui.add_space(8.0);
@@ -1425,14 +1462,14 @@ mod tests {
         hints.market_box(None, t0);
         assert_eq!(hints.waive(later), None, "not fetched: nothing's known");
         hints.market_box(Some(true), t0);
-        assert_eq!(body(Step::CollectBox, hints.box_goods, None, false), words(Step::CollectBox).1);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None, Play::Click), words(Step::CollectBox).1);
         assert_eq!(hints.waive(later), None, "something waits: collect it");
 
         // Known empty from t1: it says so, and moves on once it's been read
         let t1 = t0 + Duration::from_secs(2);
         hints.market_box(Some(false), t1);
         hints.market_box(Some(false), t1 + Duration::from_secs(1));
-        assert_eq!(body(Step::CollectBox, hints.box_goods, None, false), BOX_EMPTY);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None, Play::Click), BOX_EMPTY);
         assert_eq!(hints.waive(t1 + WAIVE_AFTER - Duration::from_millis(10)), None, "still being read");
         hints.hide();
         hints.card = Some(Card::Step(Step::CollectBox, t0));
@@ -1450,7 +1487,7 @@ mod tests {
         hints.card = next_card(None, hints.tour.unwrap(), t0);
         hints.market_box(Some(false), t0);
         assert_eq!(hints.waive(later), None);
-        assert_eq!(body(Step::BuyOrder, Some(false), None, false), words(Step::BuyOrder).1);
+        assert_eq!(body(Step::BuyOrder, Some(false), None, Play::Click), words(Step::BuyOrder).1);
     }
 
     /// The bid step leads the market to stone once (#494), and says a bid
@@ -1482,22 +1519,22 @@ mod tests {
     #[test]
     fn settling_in_speaks_of_your_own_lot() {
         let farm = sample_home();
-        let station = body(Step::PlaceAtHome, None, Some(&farm), false);
+        let station = body(Step::PlaceAtHome, None, Some(&farm), Play::Click);
         assert!(station.contains("Your farm fits 12 stations, though its deed allows 25"), "{station}");
-        let tax = body(Step::ReadTax, None, Some(&farm), false);
+        let tax = body(Step::ReadTax, None, Some(&farm), Play::Click);
         assert!(tax.contains("assessed at 250 Strands") && tax.contains("5 a week"), "{tax}");
         assert!(tax.contains("Four weeks unpaid (20 Strands)") && !tax.contains("owes"), "{tax}");
         let owing = Home { owed: 3, ..farm.clone() };
-        assert!(body(Step::ReadTax, None, Some(&owing), false).contains("It owes 3 now."));
+        assert!(body(Step::ReadTax, None, Some(&owing), Play::Click).contains("It owes 3 now."));
         let untaxed = Home { weekly_tax: None, ..farm.clone() };
-        assert!(body(Step::ReadTax, None, Some(&untaxed), false).contains("owes none"));
+        assert!(body(Step::ReadTax, None, Some(&untaxed), Play::Click).contains("owes none"));
         // A yard that fits all its deed allows says nothing of the deed
         let yard = Home { zone: capitol_core::protocol::rules::Zone::Urban, fits: 4, capacity: 4, ..farm.clone() };
-        let yard = body(Step::PlaceAtHome, None, Some(&yard), false);
+        let yard = body(Step::PlaceAtHome, None, Some(&yard), Play::Click);
         assert!(yard.contains("Your yard fits 4 stations:") && !yard.contains("allows"), "{yard}");
         // No home yet: the plain words; other steps keep theirs
-        assert_eq!(body(Step::ReadTax, None, None, false), words(Step::ReadTax).1);
-        assert_eq!(body(Step::SetAutomation, None, Some(&farm), false), words(Step::SetAutomation).1);
+        assert_eq!(body(Step::ReadTax, None, None, Play::Click), words(Step::ReadTax).1);
+        assert_eq!(body(Step::SetAutomation, None, Some(&farm), Play::Click), words(Step::SetAutomation).1);
         // The settle_in samples stand on a farm, the others on none
         let mut hints = Hints::default();
         hints.with_sample("read_tax");
@@ -1535,17 +1572,27 @@ mod tests {
         assert!(CLOSING_FOR > CHAPTER_FOR, "the last card stays longest");
     }
 
-    /// Over the shoulder the walk step says WASD walks (T1.6); the rest,
-    /// and point and walk, keep their words
+    /// Over the shoulder the walk step says WASD walks (T1.6), or with a
+    /// pad the sticks do (T2.2); the rest, and point and walk, keep their
+    /// words
     #[test]
     fn the_walk_step_speaks_of_the_mode() {
-        assert!(body(Step::Walk, None, None, true).contains("Walk with WASD"));
-        assert!(words_in(Step::Walk, true).2.contains("[W]"));
-        assert_eq!(body(Step::Walk, None, None, false), words(Step::Walk).1);
-        assert_eq!(words_in(Step::Walk, true).0, words(Step::Walk).0);
-        for step in Step::ALL.into_iter().filter(|s| *s != Step::Walk) {
-            assert_eq!(words_in(step, true), words(step), "{step:?}");
+        assert!(body(Step::Walk, None, None, Play::Keys).contains("Walk with WASD"));
+        assert!(words_in(Step::Walk, Play::Keys).2.contains("[W]"));
+        assert!(body(Step::Walk, None, None, Play::Pad).contains("Walk with the left stick"));
+        assert!(words_in(Step::Walk, Play::Pad).2.contains("{LS}"));
+        assert_eq!(body(Step::Walk, None, None, Play::Click), words(Step::Walk).1);
+        for play in [Play::Keys, Play::Pad] {
+            assert_eq!(words_in(Step::Walk, play).0, words(Step::Walk).0);
+            for step in Step::ALL.into_iter().filter(|s| *s != Step::Walk) {
+                assert_eq!(words_in(step, play), words(step), "{step:?}");
+            }
         }
+        let mut hints = Hints::default();
+        hints.set_pad(true);
+        assert_eq!(hints.play(), Play::Click, "the pad does nothing in point and walk");
+        hints.set_direct(true);
+        assert_eq!(hints.play(), Play::Pad);
     }
 
     #[test]

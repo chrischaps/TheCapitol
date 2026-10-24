@@ -305,6 +305,9 @@ pub struct CapitolExtension {
     control_mode: Option<ControlMode>,
     /// Alt is held this frame: in Direct it frees the cursor (T1.4).
     alt_held: bool,
+    /// The pad was the last thing used, over the shoulder: the shortcut
+    /// overlay and the road in's cards speak of it (T2.2).
+    pad_held: bool,
     /// How you've played each mode (T3.1), or `None` for captures and
     /// offline runs, which keep none.
     controls_stats: Option<crate::controls_stats::ControlsStats>,
@@ -410,6 +413,7 @@ impl CapitolExtension {
             controls_pinned: None,
             control_mode: None,
             alt_held: false,
+            pad_held: false,
             controls_stats: None,
         }
     }
@@ -485,6 +489,14 @@ impl CapitolExtension {
         if let Some(session) = &mut self.session {
             session.latch_steering();
         }
+    }
+
+    /// The player in focus over the shoulder, if it's a player: whom T, or
+    /// Y on the pad, asks to trade (T2.2).
+    fn player_ahead(&self) -> Option<uuid::Uuid> {
+        let focus = self.shared.focus.lock().ok()?;
+        let mark = focus.as_ref().filter(|m| m.kind == capitol_core::focus::Kind::Player.name())?;
+        mark.id.parse().ok()
     }
 
     /// What's in front of you (`capitol_core::focus`): what the store knows,
@@ -1756,11 +1768,15 @@ impl PlayerExtension for CapitolExtension {
         }
         self.apply_settings(ctx, now);
         self.alt_held = ctx.input.is_action_pressed("with_alt");
+        self.pad_held = self.control_mode() == ControlMode::Direct
+            && ctx.input.last_device() == flint_runtime::InputDevice::Gamepad;
         // Taken in `ui`, where the panel knows its recipe.
         self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
         self.chat_key |= !self.at_login() && ctx.input.is_action_just_pressed("chat");
         let station_key = !self.at_login() && ctx.input.is_action_just_pressed("station");
         let trade_key = !self.at_login() && ctx.input.is_action_just_pressed("trade");
+        // Over the shoulder T and Y ask whoever's in front of you (T2.2)
+        let ahead = self.player_ahead();
         // Back (T2.1): the pad's way out of a panel, as Esc is the keys'
         if !self.at_login() && ctx.input.is_action_just_pressed("back") {
             self.back();
@@ -1779,7 +1795,7 @@ impl PlayerExtension for CapitolExtension {
                 session.open_nearest_station(now);
             }
             if trade_key {
-                session.trade_key(now);
+                session.trade_key(now, ahead);
             }
             walk(ctx, session, &self.shared, now);
             gather(ctx, session, &self.shared, &mut self.sound, now);
@@ -2455,6 +2471,7 @@ impl PlayerExtension for CapitolExtension {
         let pulse = self.shared.pulse("inventory", Instant::now());
         // The road in's cards speak of the mode's keys (T1.6)
         self.hints.set_direct(self.control_mode() == ControlMode::Direct);
+        self.hints.set_pad(self.pad_held);
         if let Some(session) = &mut self.session {
             // First, so every other panel is placed below it.
             let mut sign_out = false;
@@ -3131,7 +3148,7 @@ impl PlayerExtension for CapitolExtension {
         }
         if self.session.is_none() {
             if !self.shared.clean.load(Ordering::Relaxed) {
-                ui::inscription(ctx, &self.shared, &self.terrain.status(), self.control_mode() == ControlMode::Direct);
+                ui::inscription(ctx, &self.shared, &self.terrain.status(), self.control_mode() == ControlMode::Direct, self.pad_held);
             }
         } else if !at_login {
             let chat = self.chat.rect.filter(|_| self.chat.open);
@@ -3278,6 +3295,7 @@ impl PlayerExtension for CapitolExtension {
                 ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
             }
             self.hints.set_direct(self.control_mode() == ControlMode::Direct);
+            self.hints.set_pad(self.pad_held);
             self.hints.show(ctx, Instant::now(), &[], self.lead);
         }
         if let Some(reader) = &mut self.gazette_sample {
@@ -3421,7 +3439,7 @@ impl PlayerExtension for CapitolExtension {
             self.shortcuts.open = false;
         }
         let direct = self.control_mode() == ControlMode::Direct;
-        let asked = self.shortcuts.show(ctx, direct, self.hints.hidden().is_some());
+        let asked = self.shortcuts.show(ctx, direct, self.pad_held, self.hints.hidden().is_some());
         if asked.close {
             self.shortcuts.open = false;
         }
@@ -4465,6 +4483,7 @@ mod pad_tests {
     fn the_buttons_act_back_out_and_open_the_panels() {
         for (button, action) in [
             ("South", "interact"),
+            ("North", "trade"),
             ("East", "back"),
             ("Start", "settings"),
             ("Select", "help"),
