@@ -83,13 +83,26 @@ PLAYING
 
   To see the city with no server at all, run "Explore offline.bat".
 
-KEYS
-  Click the ground to walk, a resource node to gather, a station to use
-  it, a bazaar stall to see its shop.
-  I inventory, C crafting, X fiber exchange, M the market, G the Gazette,
-  T trade, O nearest station. Alt+click a plot for its deed.
-  Wheel or R/F zoom, Q/E or right-drag orbit, H home.
-  F1 or ? lists every shortcut. F10 opens the settings.
+CONTROLS
+  There are two ways to get about, and F8 switches between them at any
+  time. The settings (F10) have the choice too, and keep it.
+
+  Point and walk: click the ground to walk there, a resource node to
+  gather, a station to use it, a bazaar stall to see its shop, a player
+  for their card (Shift+click to trade). WASD pans the view, Q/E or a
+  right-drag orbit, H comes home.
+
+  Over the shoulder: WASD walks the way you face and the mouse looks. A
+  dot marks the middle of the screen, and it brightens when something is
+  in front of you; E (or a click) acts on it: gather, open, read a
+  player's card (Shift+E to trade). Alt frees the cursor while you hold
+  it, and Esc closes a panel or frees the cursor until you click the
+  world again. H puts the camera back over your shoulder.
+
+  In both: I inventory, C crafting, X fiber exchange, M the market,
+  G the Gazette, L letters, U guilds, Enter to talk, T trade, O nearest
+  station. Alt+click a plot for its deed. The wheel or R/F zoom.
+  F1 or ? lists every shortcut for the way you're playing.
 
 NEEDS
   Windows 10 or 11, 64-bit, and a GPU with DirectX 12 or Vulkan.

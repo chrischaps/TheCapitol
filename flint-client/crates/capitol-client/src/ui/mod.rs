@@ -116,9 +116,10 @@ pub fn controls(ctx: &egui::Context, status: &str, clear_of: Option<egui::Rect>)
         });
 }
 
-/// The inscription window, top left, with where the terrain came from
-/// (`status`) underneath. Offline only.
-pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
+/// The inscription window, top left, with the mode's keys (`direct`: over
+/// the shoulder, T1.6) and where the terrain came from (`status`)
+/// underneath. Offline only.
+pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str, direct: bool) {
     egui::Window::new("inscription")
         .title_bar(false)
         .resizable(false)
@@ -137,9 +138,15 @@ pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
                     .desired_width(240.0),
             );
             ui.add_space(6.0);
-            ui.label(theme::dim("WASD pans · wheel, R/F or +/- zooms"));
-            ui.label(theme::dim("Q/E or right-drag turns · H or Home comes home"));
-            ui.label(theme::dim("Click the ground to walk there"));
+            if direct {
+                ui.label(theme::dim("WASD walks · the mouse looks · E acts"));
+                ui.label(theme::dim("Alt or Esc frees the cursor · H or Home comes home"));
+                ui.label(theme::dim("F8 to point and walk"));
+            } else {
+                ui.label(theme::dim("WASD pans · wheel, R/F or +/- zooms"));
+                ui.label(theme::dim("Q/E or right-drag turns · H or Home comes home"));
+                ui.label(theme::dim("Click the ground to walk there"));
+            }
             ui.label(theme::dim(status));
         });
 }

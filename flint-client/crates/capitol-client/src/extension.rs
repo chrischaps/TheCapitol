@@ -1504,7 +1504,7 @@ impl CapitolExtension {
         }
         let body = match mode {
             ControlMode::Click => "Click the ground to walk there. F8 to switch",
-            ControlMode::Direct => "WASD walks the way you face and the mouse looks; Alt or Esc frees the cursor. F8 to switch",
+            ControlMode::Direct => "WASD walks the way you face, the mouse looks and E acts on what's ahead; Alt or Esc frees the cursor. F8 to switch",
         };
         let mut data = toml::Table::new();
         data.insert("title".into(), mode.label().into());
@@ -2397,6 +2397,8 @@ impl PlayerExtension for CapitolExtension {
         // inventory panel while it's open. Neither while signed out.
         let mut inventory_chip = None;
         let pulse = self.shared.pulse("inventory", Instant::now());
+        // The road in's cards speak of the mode's keys (T1.6)
+        self.hints.set_direct(self.control_mode() == ControlMode::Direct);
         if let Some(session) = &mut self.session {
             // First, so every other panel is placed below it.
             let mut sign_out = false;
@@ -3073,7 +3075,7 @@ impl PlayerExtension for CapitolExtension {
         }
         if self.session.is_none() {
             if !self.shared.clean.load(Ordering::Relaxed) {
-                ui::inscription(ctx, &self.shared, &self.terrain.status());
+                ui::inscription(ctx, &self.shared, &self.terrain.status(), self.control_mode() == ControlMode::Direct);
             }
         } else if !at_login {
             let chat = self.chat.rect.filter(|_| self.chat.open);
@@ -3219,6 +3221,7 @@ impl PlayerExtension for CapitolExtension {
                 };
                 ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
             }
+            self.hints.set_direct(self.control_mode() == ControlMode::Direct);
             self.hints.show(ctx, Instant::now(), &[], self.lead);
         }
         if let Some(reader) = &mut self.gazette_sample {
@@ -3361,7 +3364,8 @@ impl PlayerExtension for CapitolExtension {
         if !self.in_world() && !self.hints_sample {
             self.shortcuts.open = false;
         }
-        let asked = self.shortcuts.show(ctx, self.hints.hidden().is_some());
+        let direct = self.control_mode() == ControlMode::Direct;
+        let asked = self.shortcuts.show(ctx, direct, self.hints.hidden().is_some());
         if asked.close {
             self.shortcuts.open = false;
         }

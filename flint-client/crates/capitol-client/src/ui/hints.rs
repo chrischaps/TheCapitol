@@ -93,6 +93,23 @@ fn chapter_close(chapter: Chapter) -> &'static str {
     }
 }
 
+/// Find your feet over the shoulder (T1.6): WASD walks, so the card says
+/// so. Its title is the one [`words`] gives.
+const DIRECT_WALK: (&str, &str) = (
+    "You've come in on the south road, among the farms. Walk with WASD, the way you face; the mouse turns you. \
+     Round the water by the bridges and fords.",
+    "[W] [A] [S] [D] walk  ·  Mouse looks",
+);
+
+/// A step's words as [`words`], but in the mode in play: over the shoulder
+/// (`direct`) the walk step says WASD walks.
+fn words_in(step: Step, direct: bool) -> (&'static str, &'static str, &'static str) {
+    match (step, direct) {
+        (Step::Walk, true) => (words(step).0, DIRECT_WALK.0, DIRECT_WALK.1),
+        _ => words(step),
+    }
+}
+
 /// The chapter after `chapter`, if there is one.
 fn next_chapter(chapter: Chapter) -> Option<Chapter> {
     let at = Chapter::ALL.iter().position(|c| *c == chapter)?;
@@ -350,13 +367,13 @@ const WAIVE_AFTER: Duration = Duration::from_secs(7);
 /// takes a bid, so the step never waits on a seller (plan D10).
 pub const BID_FOR: &str = "stone";
 
-/// A step's words on its card: [`words`], but for the market box once it's
-/// known empty (`box_goods`, `Some(false)`), and Settle in's for your own
-/// lot (`home`, [`home_words`]).
-fn body(step: Step, box_goods: Option<bool>, home: Option<&Home>) -> Cow<'static, str> {
+/// A step's words on its card: [`words_in`] the mode (`direct`), but for
+/// the market box once it's known empty (`box_goods`, `Some(false)`), and
+/// Settle in's for your own lot (`home`, [`home_words`]).
+fn body(step: Step, box_goods: Option<bool>, home: Option<&Home>, direct: bool) -> Cow<'static, str> {
     match (step, box_goods) {
         (Step::CollectBox, Some(false)) => BOX_EMPTY.into(),
-        _ => home_words(step, home).map_or(words(step).1.into(), Cow::Owned),
+        _ => home_words(step, home).map_or(words_in(step, direct).1.into(), Cow::Owned),
     }
 }
 
@@ -478,6 +495,8 @@ pub struct Hints {
     noted: bool,
     /// The bid step has led the market to [`BID_FOR`] ([`Hints::bid_lead`]).
     bid_led: bool,
+    /// Over the shoulder (T1.6, [`Hints::set_direct`]): the walk step says WASD.
+    direct: bool,
 }
 
 impl Hints {
@@ -568,6 +587,12 @@ impl Hints {
         if lesson.is_some() || !matches!(self.card, Some(Card::Lesson(_))) {
             self.lesson = lesson;
         }
+    }
+
+    /// The control mode in play, over the shoulder or not (T1.6): the
+    /// cards speak of its keys. Call once a frame.
+    pub fn set_direct(&mut self, direct: bool) {
+        self.direct = direct;
     }
 
     /// Your home lot (`onboarding::home_plot` of your plots), for Settle
@@ -749,8 +774,8 @@ impl Hints {
                         Face::Step(step) => {
                             let done = matches!(card, Card::Done(..));
                             let lead = lead.filter(|_| !done);
-                            let body = body(step, self.box_goods, self.home.as_ref());
-                            let asked = step_card(ui, step, &body, done, spot.compact, lead);
+                            let body = body(step, self.box_goods, self.home.as_ref(), self.direct);
+                            let asked = step_card(ui, step, &body, done, spot.compact, lead, self.direct);
                             hide = asked.hide;
                             noted = asked.noted;
                         }
@@ -774,7 +799,7 @@ impl Hints {
         // the area's own response isn't hovered while a child widget is.
         if spot.compact && shown.response.contains_pointer() {
             let (title, body) = match face {
-                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods, self.home.as_ref())),
+                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods, self.home.as_ref(), self.direct)),
                 Face::Chapter(c) => (chapter_done_title(c), chapter_close(c).into()),
                 Face::Closing => (CLOSING.0.to_owned(), CLOSING.1.into()),
                 Face::Lesson => (super::quality_card::TITLE.to_owned(), super::quality_card::WORDS.into()),
@@ -912,9 +937,10 @@ struct Asked {
 /// A step's card: its chapter and place in it, then the step, its `body`
 /// (its words, as [`body`] picks them), and where it leads if anywhere;
 /// `compact` leaves out the words. The tax card, which asks nothing of the
-/// world, ends with "Noted", which is the step.
-fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: bool, lead: Option<Lead>) -> Asked {
-    let (title, _, keys) = words(step);
+/// world, ends with "Noted", which is the step. Its keys are the mode's
+/// (`direct`, [`words_in`]).
+fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: bool, lead: Option<Lead>, direct: bool) -> Asked {
+    let (title, _, keys) = words_in(step, direct);
     let (at, of) = place_in_chapter(step);
     let mut hide = false;
     let mut noted = false;
@@ -1399,14 +1425,14 @@ mod tests {
         hints.market_box(None, t0);
         assert_eq!(hints.waive(later), None, "not fetched: nothing's known");
         hints.market_box(Some(true), t0);
-        assert_eq!(body(Step::CollectBox, hints.box_goods, None), words(Step::CollectBox).1);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None, false), words(Step::CollectBox).1);
         assert_eq!(hints.waive(later), None, "something waits: collect it");
 
         // Known empty from t1: it says so, and moves on once it's been read
         let t1 = t0 + Duration::from_secs(2);
         hints.market_box(Some(false), t1);
         hints.market_box(Some(false), t1 + Duration::from_secs(1));
-        assert_eq!(body(Step::CollectBox, hints.box_goods, None), BOX_EMPTY);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None, false), BOX_EMPTY);
         assert_eq!(hints.waive(t1 + WAIVE_AFTER - Duration::from_millis(10)), None, "still being read");
         hints.hide();
         hints.card = Some(Card::Step(Step::CollectBox, t0));
@@ -1424,7 +1450,7 @@ mod tests {
         hints.card = next_card(None, hints.tour.unwrap(), t0);
         hints.market_box(Some(false), t0);
         assert_eq!(hints.waive(later), None);
-        assert_eq!(body(Step::BuyOrder, Some(false), None), words(Step::BuyOrder).1);
+        assert_eq!(body(Step::BuyOrder, Some(false), None, false), words(Step::BuyOrder).1);
     }
 
     /// The bid step leads the market to stone once (#494), and says a bid
@@ -1456,22 +1482,22 @@ mod tests {
     #[test]
     fn settling_in_speaks_of_your_own_lot() {
         let farm = sample_home();
-        let station = body(Step::PlaceAtHome, None, Some(&farm));
+        let station = body(Step::PlaceAtHome, None, Some(&farm), false);
         assert!(station.contains("Your farm fits 12 stations, though its deed allows 25"), "{station}");
-        let tax = body(Step::ReadTax, None, Some(&farm));
+        let tax = body(Step::ReadTax, None, Some(&farm), false);
         assert!(tax.contains("assessed at 250 Strands") && tax.contains("5 a week"), "{tax}");
         assert!(tax.contains("Four weeks unpaid (20 Strands)") && !tax.contains("owes"), "{tax}");
         let owing = Home { owed: 3, ..farm.clone() };
-        assert!(body(Step::ReadTax, None, Some(&owing)).contains("It owes 3 now."));
+        assert!(body(Step::ReadTax, None, Some(&owing), false).contains("It owes 3 now."));
         let untaxed = Home { weekly_tax: None, ..farm.clone() };
-        assert!(body(Step::ReadTax, None, Some(&untaxed)).contains("owes none"));
+        assert!(body(Step::ReadTax, None, Some(&untaxed), false).contains("owes none"));
         // A yard that fits all its deed allows says nothing of the deed
         let yard = Home { zone: capitol_core::protocol::rules::Zone::Urban, fits: 4, capacity: 4, ..farm.clone() };
-        let yard = body(Step::PlaceAtHome, None, Some(&yard));
+        let yard = body(Step::PlaceAtHome, None, Some(&yard), false);
         assert!(yard.contains("Your yard fits 4 stations:") && !yard.contains("allows"), "{yard}");
         // No home yet: the plain words; other steps keep theirs
-        assert_eq!(body(Step::ReadTax, None, None), words(Step::ReadTax).1);
-        assert_eq!(body(Step::SetAutomation, None, Some(&farm)), words(Step::SetAutomation).1);
+        assert_eq!(body(Step::ReadTax, None, None, false), words(Step::ReadTax).1);
+        assert_eq!(body(Step::SetAutomation, None, Some(&farm), false), words(Step::SetAutomation).1);
         // The settle_in samples stand on a farm, the others on none
         let mut hints = Hints::default();
         hints.with_sample("read_tax");
@@ -1507,6 +1533,19 @@ mod tests {
         assert_eq!(hints.hidden(), None, "no chip, no line in the overlay");
         assert_eq!(next_card(None, hints.tour.unwrap(), Instant::now()), None);
         assert!(CLOSING_FOR > CHAPTER_FOR, "the last card stays longest");
+    }
+
+    /// Over the shoulder the walk step says WASD walks (T1.6); the rest,
+    /// and point and walk, keep their words
+    #[test]
+    fn the_walk_step_speaks_of_the_mode() {
+        assert!(body(Step::Walk, None, None, true).contains("Walk with WASD"));
+        assert!(words_in(Step::Walk, true).2.contains("[W]"));
+        assert_eq!(body(Step::Walk, None, None, false), words(Step::Walk).1);
+        assert_eq!(words_in(Step::Walk, true).0, words(Step::Walk).0);
+        for step in Step::ALL.into_iter().filter(|s| *s != Step::Walk) {
+            assert_eq!(words_in(step, true), words(step), "{step:?}");
+        }
     }
 
     #[test]

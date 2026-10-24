@@ -22,7 +22,9 @@
 // (camera.rhai), and then it isn't a pointer: there are no hover rings and
 // a click doesn't go down the list above. It's interact, which acts on the
 // thing in front of you as E does (T1.5): `cap_focus()` says what, and
-// draw_focus rings it and says what E will do. With the cursor freed (a panel, Alt)
+// draw_focus rings it and says what E will do. A dot at the screen's centre
+// is where you're looking (T1.6, draw_aim): the town's gold on a dark edge,
+// faint with nothing in focus and full with something. With the cursor freed (a panel, Alt)
 // clicks go down the list as in Click mode, but for the walk. Once Esc has
 // let the cursor go, a click on the world only takes it back.
 //
@@ -169,6 +171,9 @@ let blooms = [];
 let deeds = [];
 // A trade just made: #{ x, z, tx, tz, born } for the pulse and the rings.
 let trades = [];
+// The aim dot's brightness, 0 faint to 1 full, easing toward the focus's,
+// and when it was last drawn (T1.6).
+let aim = #{ k: 0.0, at: () };
 
 // ── Tuning ───────────────────────────────────────────────────────────────
 
@@ -566,6 +571,16 @@ fn on_draw_ui() {
     let lead = cap_lead();
     if lead != () && !cap_clean() { draw_lead(lead, now); }
     if focus != () && placing == () { draw_focus(focus, now); }
+    if aiming {
+        // The aim dot eases toward full while something's in focus
+        let dt = if aim.at == () { 1.0 } else { (now - aim.at).max(0.0) };
+        let want = if focus != () && placing == () { 1.0 } else { 0.0 };
+        aim.k += (want - aim.k) * (1.0 - (-dt * 14.0).exp());
+        aim.at = now;
+        draw_aim(aim.k);
+    } else {
+        aim.at = ();
+    }
 
     if hover != () && placing == () && over == () && !over_hall && !over_board && !over_office && over_stall == () {
         let n = cap_node_at(hover[0], hover[1]);
@@ -1145,6 +1160,30 @@ fn draw_focus(f, now) {
         }
     }
     draw_focus_prompt(f);
+}
+
+// The aim dot (T1.6): a gold dot on a dark edge at the screen's centre,
+// where the captured cursor reads. `k` runs from 0, faint, with nothing in
+// focus, to 1, full, with something (on_draw_ui eases it), so you can see
+// E has a target before you read the prompt.
+fn draw_aim(k) {
+    let x = screen_width() / 2.0;
+    let y = screen_height() / 2.0;
+    let c = gold();
+    let a = 0.42 + 0.58 * k;
+    draw_circle(x, y, 4.2 + 0.6 * k, 0.06, 0.05, 0.04, 0.55 * a);
+    draw_circle(x, y, 2.6 + 0.6 * k, c[0], c[1], c[2], a);
+    // A faint ring opens round it with a focus, as rings do round the
+    // focus itself
+    if k > 0.02 {
+        let r = 7.5 + 1.5 * k;
+        for i in 0..24 {
+            let t0 = i.to_float() / 24.0 * 2.0 * PI();
+            let t1 = (i + 1).to_float() / 24.0 * 2.0 * PI();
+            draw_line(x + r * t0.cos(), y + r * t0.sin(), x + r * t1.cos(), y + r * t1.sin(),
+                      c[0], c[1], c[2], 0.35 * k, 1.2);
+        }
+    }
 }
 
 // "[E] Gather wild grass", and "[Shift E] Trade with Ada" under it: over a

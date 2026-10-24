@@ -32,9 +32,11 @@
 // shoulder, so the market street fills the view, and walking out eases it
 // back to where you had it, unless you turned the wheel meanwhile.
 //
-// Controls (config/input.toml): WASD or the arrows pan, R and F, + and -
-// or the wheel zoom, Q and E or a right-drag orbit, H or Home comes home.
-// The wheel is the `zoom` action, in notches.
+// Controls (config/input.toml), in point and walk (Click): WASD or the
+// arrows pan, R and F, + and - or the wheel zoom, Q and E or a right-drag
+// orbit, H or Home comes home. The wheel is the `zoom` action, in notches.
+// Over the shoulder (Direct) they differ: see below. Each mode's keys are
+// on its card in the shortcut overlay (ui/shortcuts.rs, T1.6).
 //
 // Signed in, the point is your avatar (cap_follow, P4.2), and WASD pans
 // the view away from it: the pan stays put relative to you as you walk,
@@ -92,7 +94,10 @@
 // "look_sensitivity" and "invert_look_y"). Nothing ever recentres it. The
 // dial rests at the shoulder and runs out to direct_far(), short of the
 // drift to the Capitol and the turn north up; switching back to Click
-// gives the street back and levels the tilt.
+// gives the street back and levels the tilt. H or Home is the shoulder,
+// level, and a right-drag orbits only while the cursor is free. While it's
+// captured, input.rhai draws the aim dot at the screen's centre, where the
+// cursor reads (T1.6).
 //
 // rig_pose and the functions under it are pure, and a Rust test
 // (camera_rig.rs) drives them across every zoom, yaw and position.

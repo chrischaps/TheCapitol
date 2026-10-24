@@ -3,9 +3,22 @@
 # (input_config); a player's own rebinds go over it, in flint/input_capitol.toml
 # under the OS config directory (%APPDATA%\flint\input_capitol.toml on Windows).
 #
-# The camera rig (scripts/camera.rhai) is laid out as in Cities: Skylines:
-# WASD moves, Q/E orbit, R/F zoom, and the wheel zooms too (`zoom`, in
-# notches, up is in). Home and +/- (both rows) work beside H and R/F.
+# There are two control modes (the-capitol-controls.md), and F8
+# (`control_mode`) switches them:
+#
+#   - Point and walk (Click): a click walks, gathers and opens, and the
+#     camera rig (scripts/camera.rhai) is laid out as in Cities: Skylines:
+#     WASD moves the view, Q/E orbit, R/F zoom.
+#   - Over the shoulder (Direct): the same move_* keys walk the way the
+#     camera faces (a steer, T1.3), the captured mouse looks (T1.4), and
+#     `interact` (E) acts on what's in front of you (T1.5). Q/E don't orbit.
+#     Alt (`with_alt`) frees the cursor while held; Esc, which Rust reads,
+#     closes the top panel or frees it until a click on the world.
+#
+# In both, the wheel zooms (`zoom`, in notches, up is in), and Home and
+# +/- (both rows) work beside H and R/F. The shortcut overlay (? or F1,
+# ui/shortcuts.rs) has a card for each mode: a key bound here that the
+# mode reads must be on its card, as its tests check.
 
 version = 1
 game_id = "capitol"
