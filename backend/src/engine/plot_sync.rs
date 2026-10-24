@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use capitol_protocol::rules::{building, Zone};
 use capitol_protocol::terrain::{quad_contains, TerrainPlot};
-use capitol_protocol::ws::ServerMessage;
+use capitol_protocol::ws::{ReclaimedDeed, ServerMessage};
 
 use crate::engine::currency::{add_strands_in, TransactionType};
 use crate::engine::notices;
@@ -135,6 +135,10 @@ pub struct SyncReport {
     /// The owners of released granted plots, whose deed grant was handed
     /// back to spend again (#440)
     pub grants_returned: Vec<Uuid>,
+    /// `(owner, notice, message)`: the `plot_reclaimed` queued for each
+    /// released plot's owner (#342). The caller sends it live
+    /// (`GameEvent::Notice`); an owner away gets it on their return.
+    pub reclaimed: Vec<(Uuid, Uuid, ServerMessage)>,
     /// The lots whose room was worked out (V3.1, #473): new ones, reshaped
     /// ones, and on the first startup after the building came in, every one
     pub roomed: usize,
@@ -300,42 +304,54 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         if !returned.lost.is_empty() {
             tracing::warn!("Releasing plot {}: no room for {:?}, lost with its stations", c.plot_id, returned.lost);
         }
+        let (impounded, lost) = (returned.impounded_for(c.owner_id), returned.lost_for(c.owner_id));
         took(&mut report.returned_to, returned.containers);
         report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
         // The refund is in this transaction, so a plot is never released
         // without its owner getting the deed back. A granted plot's deed was
         // the grant, so the grant goes back, unused, not Strands (#440, D5).
         let row = &existing[&c.terrain_id];
-        if row.granted {
+        let value = row.assessed_value;
+        let (deed, refund) = if row.granted {
             if crate::engine::deed_grants::hand_back_in(&mut tx, c.owner_id, c.plot_id).await? {
                 report.grants_returned.push(c.owner_id);
             }
-            continue;
-        }
-        let value = row.assessed_value;
-        // A hall's deed goes back into its guild's treasury (S4.3)
-        if let Some(guild_id) = hall {
+            (ReclaimedDeed::Grant, 0)
+        } else if let Some(guild_id) = hall {
+            // A hall's deed goes back into its guild's treasury (S4.3)
             let note = "The hall's deed refunded: the terrain changed under it";
             crate::engine::guilds::refund_hall(&mut tx, guild_id, value as i64, note, chrono::Utc::now())
                 .await
                 .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to guild {guild_id} for its hall: {e}")))?;
-            continue;
-        }
-        if value > 0 {
-            add_strands_in(
-                &mut tx,
-                c.owner_id,
-                value as i64,
-                TransactionType::DeedRefund,
-                Some("Deed refunded: the terrain changed under your plot"),
-                Some(c.plot_id),
-            )
-            .await
-            .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to {} for plot {}: {e}", c.owner_id, c.plot_id)))?;
-            if !report.refunded.contains(&c.owner_id) {
-                report.refunded.push(c.owner_id);
+            (ReclaimedDeed::Treasury, value as i64)
+        } else {
+            if value > 0 {
+                add_strands_in(
+                    &mut tx,
+                    c.owner_id,
+                    value as i64,
+                    TransactionType::DeedRefund,
+                    Some("Deed refunded: the terrain changed under your plot"),
+                    Some(c.plot_id),
+                )
+                .await
+                .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to {} for plot {}: {e}", c.owner_id, c.plot_id)))?;
+                if !report.refunded.contains(&c.owner_id) {
+                    report.refunded.push(c.owner_id);
+                }
             }
-        }
+            (ReclaimedDeed::Strands, value.max(0) as i64)
+        };
+        // The owner hears why, now or as they come back (#342)
+        let message = ServerMessage::PlotReclaimed {
+            terrain_id: c.terrain_id.clone(),
+            refund,
+            deed,
+            impounded,
+            lost,
+        };
+        let notice = notices::queue(&mut *tx, c.owner_id, &c.terrain_id, &message).await?;
+        report.reclaimed.push((c.owner_id, notice, message));
     }
     // Rows whose lot is gone or held back. Released plots are unowned by now,
     // so they go too.
@@ -722,6 +738,50 @@ pub(crate) mod tests {
         assert_eq!(owner(&db, lot).await, None, "the lot is gone, so its row is");
         assert_eq!(balance(&db, ada).await, 1050);
         assert_eq!(ledger(&db, ada).await, vec![(1000, "deed_refund".to_string())]);
+        let reclaimed = ServerMessage::PlotReclaimed {
+            terrain_id: format!("test-{lot}"),
+            refund: 1000,
+            deed: ReclaimedDeed::Strands,
+            impounded: vec![],
+            lost: vec![],
+        };
+        assert_eq!(report.reclaimed.len(), 1);
+        assert_eq!((report.reclaimed[0].0, &report.reclaimed[0].2), (ada, &reclaimed), "to send live");
+    }
+
+    /// #342: an owner away when the terrain took their plot hears why, with
+    /// what came back, as they return
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_owner_of_a_reclaimed_plot_hears_when_they_come_back(db: PgPool) {
+        let ada = player(&db, "ada", 50).await;
+        inventory(&db, ada).await;
+        let trail = plot(&db, Some(ada), 250).await;
+        sqlx::query("UPDATE plots SET terrain_id = 'rural_plot_trail_3_L_1' WHERE id = $1").bind(trail).execute(&db).await.unwrap();
+        let on_it = bench(&db, ada, 8000.0, 6800.0).await;
+        sqlx::query("UPDATE stations SET plot_id = $1 WHERE id = $2").bind(trail).bind(on_it).execute(&db).await.unwrap();
+        // A tax warning about it says nothing once it's gone
+        notices::queue(
+            &db,
+            ada,
+            "rural_plot_trail_3_L_1",
+            &ServerMessage::TaxDelinquent { terrain_id: "rural_plot_trail_3_L_1".into(), tax_owed: 20, forecloses_at: 80 },
+        )
+        .await
+        .unwrap();
+
+        sync_plots(&db, &[], OnOwned::Keep).await.unwrap();
+
+        assert_eq!(
+            notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(),
+            vec![ServerMessage::PlotReclaimed {
+                terrain_id: "rural_plot_trail_3_L_1".into(),
+                refund: 250,
+                deed: ReclaimedDeed::Strands,
+                impounded: vec![],
+                lost: vec![],
+            }]
+        );
     }
 
     /// #290: startup keeps an owned plot whose lot is gone, unless the lot is
@@ -770,6 +830,20 @@ pub(crate) mod tests {
         assert_eq!(balance(&db, ada).await, 300);
         assert_eq!(ledger(&db, ada).await, vec![(250, "deed_refund".to_string())]);
         assert_eq!(grant_of(&db, ada).await, Some((false, None, true)), "open again, marked returned");
+        let mut deeds: Vec<_> = report
+            .reclaimed
+            .iter()
+            .map(|(_, _, m)| match m {
+                ServerMessage::PlotReclaimed { terrain_id, refund, deed, .. } => (terrain_id.clone(), *refund, *deed),
+                other => panic!("not a plot_reclaimed: {other:?}"),
+            })
+            .collect();
+        deeds.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            deeds,
+            vec![("rw2_farm_4_7".into(), 250, ReclaimedDeed::Strands), ("rw2_sub_1_0_2_L_3".into(), 0, ReclaimedDeed::Grant)],
+            "each says where its deed went (#342)"
+        );
     }
 
     /// The refund is in the sync's transaction, so a failed one releases nothing
@@ -787,6 +861,7 @@ pub(crate) mod tests {
         assert_eq!(owner(&db, spare).await, Some(None), "the unowned lot wasn't deleted either");
         assert_eq!(balance(&db, ada).await, i64::MAX - 10);
         assert!(ledger(&db, ada).await.is_empty());
+        assert!(notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty(), "no word of it either");
     }
 
     /// A square lot `id` of side 20 centred on (`x`, `y`)

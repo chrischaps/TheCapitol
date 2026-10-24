@@ -291,6 +291,13 @@ pub async fn commit_world_params(
             });
         }
     }
+    // Each owner hears why, before the lot is announced free (#342)
+    if !report.reclaimed.is_empty() {
+        let game = state.game.read().await;
+        for (player_id, notice_id, message) in report.reclaimed {
+            let _ = game.event_sender.send(GameEvent::Notice { player_id, notice_id, message });
+        }
+    }
     let released = report.released.len();
     if !report.released.is_empty() {
         let game = state.game.read().await;

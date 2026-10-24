@@ -41,7 +41,7 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::Fees;
-use capitol_protocol::ws::{ItemCount, PlayerPosition, PresenceHolder, ServerMessage};
+use capitol_protocol::ws::{ItemCount, PlayerPosition, PresenceHolder, ReclaimedDeed, ServerMessage};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -420,6 +420,18 @@ pub enum StateEvent {
         terrain_id: String,
         tax_owed: i64,
         refund: i64,
+        impounded: Vec<ItemCount>,
+        lost: Vec<ItemCount>,
+    },
+    /// Your plot `terrain_id` was taken back because the terrain changed
+    /// under it (`plot_reclaimed`, #342). Its deed came back as `deed` says:
+    /// `refund` Strands to you or your guild's treasury, or the road in's
+    /// grant to spend again. `impounded` and `lost` are as a foreclosure's.
+    /// `LotReleased` follows.
+    PlotReclaimed {
+        terrain_id: String,
+        refund: i64,
+        deed: ReclaimedDeed,
         impounded: Vec<ItemCount>,
         lost: Vec<ItemCount>,
     },
@@ -1186,6 +1198,19 @@ impl GameState {
                 terrain_id: terrain_id.clone(),
                 tax_owed: *tax_owed,
                 refund: *refund,
+                impounded: impounded.clone(),
+                lost: lost.clone(),
+            }),
+            M::PlotReclaimed {
+                terrain_id,
+                refund,
+                deed,
+                impounded,
+                lost,
+            } => out.push(StateEvent::PlotReclaimed {
+                terrain_id: terrain_id.clone(),
+                refund: *refund,
+                deed: *deed,
                 impounded: impounded.clone(),
                 lost: lost.clone(),
             }),

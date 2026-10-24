@@ -378,6 +378,16 @@ pub enum PlotNote {
         impounded: Vec<ItemCount>,
         lost: Vec<ItemCount>,
     },
+    /// One of your plots was taken back because the terrain changed under
+    /// it (#342), and its deed came back as `deed` says: `refund` Strands to
+    /// you or your guild's treasury, or the grant to spend again. Its
+    /// stations came back as a foreclosure's do.
+    Reclaimed {
+        refund: i64,
+        deed: capitol_core::protocol::ws::ReclaimedDeed,
+        impounded: Vec<ItemCount>,
+        lost: Vec<ItemCount>,
+    },
     /// Not about a plot, but a notice like the tax ones, and shown the same
     /// way: your subscription ran out at `until` (E4.1).
     SubscriptionLapsed {
@@ -2998,6 +3008,18 @@ impl Session {
                     } => self.plot_notes.push(PlotNote::Foreclosed {
                         tax_owed: *tax_owed,
                         refund: *refund,
+                        impounded: impounded.clone(),
+                        lost: lost.clone(),
+                    }),
+                    StateEvent::PlotReclaimed {
+                        refund,
+                        deed,
+                        impounded,
+                        lost,
+                        ..
+                    } => self.plot_notes.push(PlotNote::Reclaimed {
+                        refund: *refund,
+                        deed: *deed,
                         impounded: impounded.clone(),
                         lost: lost.clone(),
                     }),

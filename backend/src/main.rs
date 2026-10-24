@@ -179,7 +179,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             report.held_back.len(), report.held_back.join(", ")
         );
     }
-    // Nobody is connected yet, so the owners hear from their queued notices.
+    // Nobody is connected yet, so the owners hear from their queued notices:
+    // `plot_reclaimed` for a released plot (#342), `station_displaced` here.
     for (c, _) in &report.displaced {
         tracing::warn!(
             "Took down {}'s {} {}: the lot {} now covers it",

@@ -521,6 +521,26 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         lost: Vec<ItemCount>,
     },
+    /// Your plot `terrain_id` was taken back because the terrain changed
+    /// under it: an admin's forced commit, or a retired layout's lot released
+    /// at startup (#342). Its stations are gone: their kits came back to your
+    /// inventory, and what was in them to whoever owns it (`inventory_updated`
+    /// comes first). What of yours found no room went to your impound (#141),
+    /// `impounded`, and `lost` found no room even there. The deed came back
+    /// as `deed` says: `refund` strands to you, to your guild's treasury for
+    /// a hall, or as the road in's grant to spend again (`refund` 0).
+    /// `plot_released` goes to everyone. One that happened while you were
+    /// away, as a startup's always is, is sent as you come back.
+    #[serde(rename = "plot_reclaimed")]
+    PlotReclaimed {
+        terrain_id: String,
+        refund: i64,
+        deed: ReclaimedDeed,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        impounded: Vec<ItemCount>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lost: Vec<ItemCount>,
+    },
     /// Your workbench `station_id` stood off a plot (D10) where a terrain
     /// change has laid the lot `terrain_id` (#188), so it was taken down.
     /// Its kit, its tool and what was in it came back to your inventory, as
@@ -920,6 +940,7 @@ impl ServerMessage {
             ServerMessage::PlotReleased { .. } => "plot_released",
             ServerMessage::TaxDelinquent { .. } => "tax_delinquent",
             ServerMessage::PlotForeclosed { .. } => "plot_foreclosed",
+            ServerMessage::PlotReclaimed { .. } => "plot_reclaimed",
             ServerMessage::StationDisplaced { .. } => "station_displaced",
             ServerMessage::StationCondition { .. } => "station_condition",
             ServerMessage::StationCollapsed { .. } => "station_collapsed",
@@ -969,6 +990,19 @@ pub struct ToolUse {
     pub item_type: String,
     pub durability: i32,
     pub max_durability: i32,
+}
+
+/// Where a reclaimed plot's deed went (`plot_reclaimed`, #342)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReclaimedDeed {
+    /// Its price, back to you as strands
+    Strands,
+    /// A guild hall's: its price, back to the guild's treasury (S4.3)
+    Treasury,
+    /// Claimed with the road in's deed grant: the grant is yours to spend
+    /// again (#440)
+    Grant,
 }
 
 /// So many of an item type, as `plot_foreclosed` counts what went to the

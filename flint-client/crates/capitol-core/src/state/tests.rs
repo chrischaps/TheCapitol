@@ -229,6 +229,7 @@ fn test_for(message: &M) -> fn() {
         M::PlotReleased { .. } => plot_released_drops_it_from_my_plots,
         M::TaxDelinquent { .. } => tax_messages_are_reported,
         M::PlotForeclosed { .. } => tax_messages_are_reported,
+        M::PlotReclaimed { .. } => plot_reclaimed_is_reported,
         M::StationDisplaced { .. } => station_displaced_is_reported,
         M::StationCondition { .. } => station_condition_updates_the_station,
         M::StationCollapsed { .. } => station_collapsed_is_reported,
@@ -280,7 +281,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 82, "one fixture per ServerMessage variant");
+    assert_eq!(count, 83, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1774,6 +1775,27 @@ fn plank() -> capitol_protocol::ws::ItemCount {
         item_type: "plank".into(),
         quantity: 140,
     }
+}
+
+#[test]
+fn plot_reclaimed_is_reported() {
+    let mut state = connected();
+    assert_eq!(
+        state.apply_ws(&M::PlotReclaimed {
+            terrain_id: "farm_3_1_12".into(),
+            refund: 250,
+            deed: capitol_protocol::ws::ReclaimedDeed::Strands,
+            impounded: vec![plank()],
+            lost: Vec::new(),
+        }),
+        vec![StateEvent::PlotReclaimed {
+            terrain_id: "farm_3_1_12".into(),
+            refund: 250,
+            deed: capitol_protocol::ws::ReclaimedDeed::Strands,
+            impounded: vec![plank()],
+            lost: Vec::new(),
+        }]
+    );
 }
 
 #[test]

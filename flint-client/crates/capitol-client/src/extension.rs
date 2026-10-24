@@ -4027,6 +4027,40 @@ fn plots(
                 }
                 ("Plot foreclosed".into(), body)
             }
+            PlotNote::Reclaimed {
+                refund,
+                deed,
+                impounded,
+                lost,
+            } => {
+                use capitol_core::protocol::ws::ReclaimedDeed;
+                let catalog = session.state().catalog();
+                let (title, mut body) = match deed {
+                    ReclaimedDeed::Treasury => (
+                        "Your guild's hall was taken back",
+                        format!("The land was laid anew under it. Its deed, {refund} Strands, went back to the treasury"),
+                    ),
+                    ReclaimedDeed::Grant => (
+                        "Your plot was taken back",
+                        "The land was laid anew under it. Your deed grant is yours to spend again".to_string(),
+                    ),
+                    ReclaimedDeed::Strands if refund > 0 => (
+                        "Your plot was taken back",
+                        format!("The land was laid anew under it. Its deed came back: {refund} Strands"),
+                    ),
+                    ReclaimedDeed::Strands => ("Your plot was taken back", "The land was laid anew under it".to_string()),
+                };
+                body.push_str(". Its stations' kits and what they held are back in your pack");
+                if !impounded.is_empty() {
+                    let held = ui::impound::counted(catalog, &impounded);
+                    body.push_str(&format!(". It was full: {held} wait in your impound"));
+                }
+                if !lost.is_empty() {
+                    let gone = ui::impound::counted(catalog, &lost);
+                    body.push_str(&format!(". No room even there for {gone}"));
+                }
+                (title.into(), body)
+            }
         };
         let mut data = toml::Table::new();
         data.insert("title".into(), title.into());
