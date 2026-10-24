@@ -23,6 +23,9 @@
 //!   (`commission_deliveries`, written by `commissions::deliver`), and the
 //!   claims kept and lapsed. A lapse is only ever counted, never named.
 //!
+//! - on a week's last day, the week's names (S3.2): the top three of each of
+//!   the leaderboards `leaderboards::compute` works out as the week ends
+//!
 //! [`compose`] turns them into the edition. It's pure: the headlines come from
 //! templates picked by a hash of the day, never an LLM, so a day always reads
 //! the same. A player who turned their byline off (`players.gazette_named`)
@@ -42,8 +45,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use capitol_protocol::rest::{
-    Gazette, GazetteDeeds, GazetteDelivery, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteSale,
-    GazetteShares, GazetteShop, GazetteStalls, GazetteWant, GazetteWanted,
+    Gazette, GazetteBoard, GazetteDeeds, GazetteDelivery, GazetteMade, GazetteMover, GazettePrice, GazetteProducer,
+    GazetteSale, GazetteShares, GazetteShop, GazetteStalls, GazetteWant, GazetteWanted, GazetteWeekNames, LeaderboardEntry,
+    LeaderboardKind,
 };
 use capitol_protocol::annotation::AnnotationKind;
 use capitol_protocol::rules::{self, Zone};
@@ -265,6 +269,9 @@ pub struct DayRecords {
     pub halls: Vec<String>,
     /// The day on the hall's board (S2.4)
     pub board: Board,
+    /// On a week's last day, the week (`rules::week_of`) and its boards'
+    /// top three (S3.2)
+    pub week: Option<(i64, Vec<GazetteBoard>)>,
 }
 
 /// The day on the hall's board (commons S2.4), before it's ranked
@@ -485,10 +492,15 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     .await?;
 
     let board = gather_board(db, (start, end)).await?;
+    let week = match rules::ends_week(day) {
+        true => Some((rules::week_of(day), super::leaderboards::names(db, rules::week_of(day)).await?)),
+        false => None,
+    };
 
     Ok(DayRecords {
         day,
         board,
+        week,
         prices,
         trades,
         strands,
@@ -893,7 +905,13 @@ pub fn compose(records: &DayRecords) -> Gazette {
         stalls,
         stalls_story,
         wanted,
+        week_names: records.week.as_ref().map(|(week, boards)| week_names(*week, boards, day)),
     }
+}
+
+/// The week's names (S3.2): each board's top three, and their story
+pub fn week_names(week: i64, boards: &[GazetteBoard], day: i64) -> GazetteWeekNames {
+    GazetteWeekNames { week, story: Pen { day }.week_names(boards), boards: boards.to_vec() }
 }
 
 /// Deeds by zone, from the centre out; a zone the Gazette doesn't know last
@@ -1213,6 +1231,57 @@ impl Pen {
     /// The Wanted column's prose (S2.4): what the board still wants, who
     /// came through, the claims kept, and what went begging. Lapses are
     /// counted, never named.
+    /// The week's names (S3.2): who leads each board, and who follows
+    fn week_names(&self, boards: &[GazetteBoard]) -> String {
+        if boards.is_empty() {
+            return self
+                .pick(40, &[
+                    "The week's boards stand empty: nobody made, traded or kept a claim worth counting.",
+                    "No names this week. The boards in the hall wait for someone to make, trade or keep their word.",
+                ])
+                .to_string();
+        }
+        let who = |e: &LeaderboardEntry| resident_of(e.name.as_deref(), e.citizen);
+        let mut lines = vec![self
+            .pick(41, &["The week is out, and so are its names.", "Seven days gone, and the hall's boards have their week's names."])
+            .to_string()];
+        for b in boards {
+            let Some(top) = b.names.first() else { continue };
+            let (salt, options): (u64, &[&str]) = match b.board {
+                LeaderboardKind::Wealth => (42, &[
+                    "{Who} ends it the city's richest, worth {value} Strands{after}.",
+                    "The deepest purse is {who}'s, {value} Strands in coin, land and goods{after}.",
+                ]),
+                LeaderboardKind::Maker => (43, &[
+                    "{Who} made the most, {value} Strands' worth{after}.",
+                    "No hands were busier than {who}'s: {value} Strands of work{after}.",
+                ]),
+                LeaderboardKind::Trader => (44, &[
+                    "At the counters, {who} moved {value} Strands, bought and sold{after}.",
+                    "{Who} was the week's trader, {value} Strands across the Exchange, the stalls and the board{after}.",
+                ]),
+                LeaderboardKind::KeptWord => (45, &[
+                    "And {who} kept their word on {value} Strands of claims{after}.",
+                    "{Who} brought in every unit they promised, {value} Strands' worth{after}.",
+                ]),
+            };
+            let rest: Vec<String> = b.names[1..].iter().map(&who).collect();
+            let after = match rest.as_slice() {
+                [] => String::new(),
+                [one] => format!(", ahead of {one}"),
+                [one, two, ..] => format!(", ahead of {one} and {two}"),
+            };
+            lines.push(
+                self.pick(salt, options)
+                    .replace("{Who}", &capitalise(&who(top)))
+                    .replace("{who}", &who(top))
+                    .replace("{value}", &thousands(top.value))
+                    .replace("{after}", &after),
+            );
+        }
+        lines.join(" ")
+    }
+
     fn wanted(&self, w: &GazetteWanted) -> String {
         let mut text = match w.wanted.first() {
             Some(top) => {
@@ -1477,6 +1546,11 @@ fn capitalise(s: &str) -> String {
 /// Compose and keep day `day`'s edition. `Some` if it's new; `None` if the day
 /// already had one (another start, or a race), which is left as it was.
 pub async fn publish(db: &PgPool, day: i64) -> Result<Option<Gazette>, sqlx::Error> {
+    // A week's last edition names the week's leaders (S3.2), so its boards
+    // come first. They're kept whether or not the edition is new.
+    if rules::ends_week(day) && super::leaderboards::compute(db, rules::week_of(day)).await? {
+        tracing::info!("Leaderboards for week {} are up", rules::week_of(day));
+    }
     let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM gazette_editions WHERE day = $1)")
         .bind(day)
         .fetch_one(db)
@@ -1518,6 +1592,11 @@ pub async fn run_gazette_loop(db: PgPool, events: broadcast::Sender<GameEvent>) 
     loop {
         let now = Utc::now().timestamp_millis();
         let today = rules::day_number(now);
+        // The last week's boards (S3.2), if the server was down when it ended
+        // and the edition that works them out never ran
+        if let Err(e) = super::leaderboards::compute(&db, rules::week_of(today) - 1).await {
+            tracing::error!("Leaderboards for week {} failed: {e}", rules::week_of(today) - 1);
+        }
         match publish(&db, today - 1).await {
             Ok(Some(edition)) => {
                 tracing::info!("The Gazette, No. {}: {}", edition.number, edition.headline);
@@ -1632,7 +1711,30 @@ mod tests {
             // The fixture's day predates the road in's deed (#448)
             settlers: Vec::new(),
             board: busy_board(),
+            week: None,
         }
+    }
+
+    /// A line of a board for the paper
+    fn named(rank: i64, name: Option<&str>, citizen: bool, value: i64) -> LeaderboardEntry {
+        LeaderboardEntry { rank, name: name.map(Into::into), citizen, value, ..Default::default() }
+    }
+
+    /// A week's top three (S3.2): Ada richest, a citizen making most, someone
+    /// out of the papers trading, and one name on kept-their-word
+    fn busy_week() -> Vec<GazetteBoard> {
+        vec![
+            GazetteBoard {
+                board: LeaderboardKind::Wealth,
+                names: vec![named(1, Some("Ada"), false, 12_400), named(2, Some("Cy"), true, 9_050), named(3, None, false, 4_000)],
+            },
+            GazetteBoard {
+                board: LeaderboardKind::Maker,
+                names: vec![named(1, Some("Cy"), true, 3_100), named(2, Some("Ada"), false, 2_200)],
+            },
+            GazetteBoard { board: LeaderboardKind::Trader, names: vec![named(1, None, false, 8_800), named(2, Some("Ada"), false, 6_000)] },
+            GazetteBoard { board: LeaderboardKind::KeptWord, names: vec![named(1, Some("Ada"), false, 640)] },
+        ]
     }
 
     fn asked(item: &str, units: i64, price: i64) -> Asked {
@@ -2063,12 +2165,35 @@ mod tests {
         assert_eq!(count_word(3, true), "Three");
     }
 
+    /// The week's names (S3.2) run only in the edition that ends a week,
+    /// with every board's leader, a citizen marked, and the unnamed as "a
+    /// resident"
+    #[test]
+    fn the_weeks_names_name_each_boards_leaders() {
+        assert_eq!(compose(&busy_day()).week_names, None);
+        let records = DayRecords { week: Some((7, busy_week())), ..busy_day() };
+        let names = compose(&records).week_names.expect("the week's names");
+        assert_eq!((names.week, names.boards.len()), (7, 4));
+        let story = &names.story;
+        for words in ["Ada", "12,400", "ahead of Citizen Cy and a resident", "3,100", "8,800", "640"] {
+            assert!(story.contains(words), "{words}: {story}");
+        }
+        // A resident trades most: a sentence still starts in capitals
+        assert!(!story.contains(". a resident") && !story.contains('{'), "{story}");
+        // The same week reads the same
+        assert_eq!(compose(&records).week_names.unwrap().story, *story);
+
+        let empty = week_names(7, &[], DAY);
+        assert!(empty.boards.is_empty() && !empty.story.is_empty());
+    }
+
     /// Writes `protocol/tests/fixtures/rest/gazette.json` from the busy day.
     /// Run with `--ignored` when the edition's shape changes.
     #[test]
     #[ignore = "writes the protocol's fixture"]
     fn write_the_gazette_fixture() {
-        let response = capitol_protocol::rest::GazetteResponse { edition: Some(compose(&busy_day())), named: true };
+        let records = DayRecords { week: Some((rules::week_of(DAY), busy_week())), ..busy_day() };
+        let response = capitol_protocol::rest::GazetteResponse { edition: Some(compose(&records)), named: true };
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../protocol/tests/fixtures/rest/gazette.json");
         std::fs::write(path, serde_json::to_string(&response).unwrap() + "\n").unwrap();
     }
@@ -2361,6 +2486,34 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(total, 7);
+        }
+
+        /// The edition about a week's last day works out the week's boards
+        /// and names their leaders (S3.2); the day before's has no column
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn the_weeks_last_edition_names_the_week(db: PgPool) {
+            let ada = player(&db, "Ada", 900).await;
+            let bo = player(&db, "Bo", 40).await;
+            sqlx::query("UPDATE players SET gazette_named = FALSE WHERE id = $1").bind(bo.id).execute(&db).await.unwrap();
+            let week = rules::week_of(rules::day_number(Utc::now().timestamp_millis())) - 1;
+            let last = rules::week_first_day(week) + 6;
+            assert!(rules::ends_week(last));
+            let at = DateTime::<Utc>::from_timestamp_millis(rules::day_start_ms(last - 3) + 3_600_000).unwrap();
+            trade(&db, (ada.id, bo.id), "fiber", 50, 2, 100, at).await;
+
+            let before = publish(&db, last - 1).await.unwrap().expect("an edition");
+            assert_eq!(before.week_names, None);
+            assert_eq!(crate::engine::leaderboards::latest(&db).await.unwrap(), None);
+
+            let g = publish(&db, last).await.unwrap().expect("the week's last edition");
+            let names = g.week_names.expect("the week's names");
+            assert_eq!(names.week, week);
+            let wealth = &names.boards[0];
+            assert_eq!(wealth.board, LeaderboardKind::Wealth);
+            assert_eq!((wealth.names[0].name.as_deref(), wealth.names[1].name.as_deref()), (Some("Ada"), None));
+            assert!(names.story.contains("Ada") && names.story.contains("a resident"), "{}", names.story);
+            assert_eq!(crate::engine::leaderboards::latest(&db).await.unwrap(), Some(week));
         }
     }
 }

@@ -129,6 +129,9 @@ const WAGES_TAG: Tag = 170;
 /// registry, one guild, a name to invite, and every action.
 const GUILD_TAG: Tag = 180;
 
+/// The tag on the leaderboards' call (S3.2): one at a time.
+const STANDINGS_TAG: Tag = 190;
+
 /// How often the directory and your stall are asked for again, while in the
 /// world: they change only when a merchant rents, stocks or sells out.
 const BAZAAR_REFRESH: Duration = Duration::from_secs(60);
@@ -254,6 +257,10 @@ pub struct Session {
     gazette: capitol_core::gazette::Reader,
     /// The Gazette's call that's out.
     gazette_asked: Option<capitol_core::gazette::Ask>,
+    /// The week's leaderboards (S3.2), for the board's Standings page.
+    standings: capitol_core::standings::Standings,
+    /// Their call that's out.
+    standings_asked: Option<capitol_core::protocol::rest::LeaderboardQuery>,
     /// A person's card (S0.3): whose is open, and the call for it.
     cards: capitol_core::card::Cards,
     /// Who you've muted (S1.4)
@@ -491,6 +498,8 @@ impl Session {
             market_notes: Vec::new(),
             gazette: capitol_core::gazette::Reader::new(None),
             gazette_asked: None,
+            standings: Default::default(),
+            standings_asked: None,
             cards: Default::default(),
             mutes: Default::default(),
             guilds: Default::default(),
@@ -1689,6 +1698,24 @@ impl Session {
         self.net.rest(request, GAZETTE_TAG);
     }
 
+    /// Sends the leaderboards' next call, if they want one and none is out
+    /// (S3.2).
+    fn tend_standings(&mut self) {
+        if self.auth.phase() != Phase::InWorld || self.standings_asked.is_some() {
+            return;
+        }
+        if let Some(query) = self.standings.wants() {
+            self.standings.sent(query.clone());
+            self.standings_asked = Some(query.clone());
+            self.net.rest(RestRequest::Leaderboards(query), STANDINGS_TAG);
+        }
+    }
+
+    /// The week's leaderboards (S3.2), for the Standings page to read and steer.
+    pub fn standings_mut(&mut self) -> &mut capitol_core::standings::Standings {
+        &mut self.standings
+    }
+
     /// Open someone's card (S0.3): asked for next frame, with what the click
     /// knew shown until it comes.
     pub fn open_card(&mut self, who: capitol_core::card::Who, hint: Option<capitol_core::card::Hint>) {
@@ -2659,6 +2686,19 @@ impl Session {
                         (None, _) => {}
                     }
                 }
+                NetEvent::Rest(STANDINGS_TAG, result) => {
+                    if let Some(query) = self.standings_asked.take() {
+                        match result {
+                            Ok(RestResponse::Leaderboards(answer)) => self.standings.answered(query, (**answer).clone()),
+                            other => {
+                                if let Err(e) = other {
+                                    tracing::warn!("leaderboards: {query:?} failed: {e}");
+                                }
+                                self.standings.failed(&query);
+                            }
+                        }
+                    }
+                }
                 NetEvent::Rest(MAIL_TAG, result) => match result {
                     Ok(RestResponse::Mailbox(mailbox)) => self.mail.paged(mailbox.clone()),
                     Ok(RestResponse::Letter(letter)) => {
@@ -2817,6 +2857,7 @@ impl Session {
                 // An edition may have come out while the link was down
                 if matches!(connection, ConnectionState::Connected { .. }) {
                     self.gazette.connected();
+                    self.standings.connected();
                     self.cards.connected();
                     self.mutes.connected();
                     self.guilds.connected();
@@ -3060,6 +3101,7 @@ impl Session {
             self.tend_admin(now);
             self.tend_bazaar(now);
             self.tend_gazette();
+            self.tend_standings();
             self.tend_card();
             self.tend_mutes();
             self.tend_guilds();
@@ -3169,6 +3211,8 @@ impl Session {
             self.market_notes.clear();
             self.gazette = capitol_core::gazette::Reader::new(None);
             self.gazette_asked = None;
+            self.standings = Default::default();
+            self.standings_asked = None;
             self.cards = Default::default();
             self.chat = capitol_core::chat::Chat::new();
             self.mail.signed_out();

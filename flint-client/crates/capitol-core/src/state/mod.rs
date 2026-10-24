@@ -1458,6 +1458,7 @@ impl GameState {
             | R::Letter(_)
             | R::LettersUnread(_)
             | R::Byline(_)
+            | R::Leaderboards(_)
             | R::Commissions(_)
             | R::Commission(_)
             | R::Delivered(_)

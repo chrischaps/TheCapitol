@@ -101,6 +101,23 @@ pub fn weekday(day: i64) -> &'static str {
     WEEKDAYS[(day - GAZETTE_FIRST_DAY).rem_euclid(7) as usize]
 }
 
+/// The Capitol's week that day `day` falls in, Towerday to Wildday, counted
+/// from the Gazette's first (commons S3.2). The leaderboards are kept by it.
+pub fn week_of(day: i64) -> i64 {
+    (day - GAZETTE_FIRST_DAY).div_euclid(7)
+}
+
+/// The first day (a Towerday) of week `week`.
+pub fn week_first_day(week: i64) -> i64 {
+    GAZETTE_FIRST_DAY + week * 7
+}
+
+/// Whether day `day` ends its week. Its edition, published at the next
+/// week's first midnight, carries the week's names (S3.2).
+pub fn ends_week(day: i64) -> bool {
+    week_of(day + 1) != week_of(day)
+}
+
 /// How many weeks of tax a plot may owe before it's foreclosed (#131). Tax
 /// weeks are the calendar's, 168 hours, charged an hour at a time, not the
 /// Capitol's fourteen-hour [`WEEKDAYS`]. `PlotInfo::forecloses_at` is this
@@ -662,6 +679,11 @@ mod tests {
         assert_eq!(weekday(GAZETTE_FIRST_DAY), "Towerday");
         assert_eq!(weekday(GAZETTE_FIRST_DAY + 4), "Marketday");
         assert_eq!(weekday(GAZETTE_FIRST_DAY - 1), "Wildday");
+        assert_eq!((week_of(GAZETTE_FIRST_DAY), week_of(GAZETTE_FIRST_DAY + 6), week_of(GAZETTE_FIRST_DAY + 7)), (0, 0, 1));
+        assert_eq!(week_of(GAZETTE_FIRST_DAY - 1), -1);
+        assert_eq!(week_first_day(week_of(GAZETTE_FIRST_DAY + 9)), GAZETTE_FIRST_DAY + 7);
+        assert!(ends_week(GAZETTE_FIRST_DAY + 6) && !ends_week(GAZETTE_FIRST_DAY + 5));
+        assert_eq!(weekday(week_first_day(3)), "Towerday");
     }
 
     #[test]

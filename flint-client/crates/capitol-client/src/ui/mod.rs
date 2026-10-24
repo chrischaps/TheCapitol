@@ -77,6 +77,7 @@ pub mod settings;
 pub mod shop;
 pub mod shortcuts;
 pub mod slots;
+pub mod standings;
 pub mod station;
 pub mod theme;
 pub mod trade;

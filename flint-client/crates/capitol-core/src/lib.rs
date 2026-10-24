@@ -81,6 +81,7 @@ pub mod plot;
 pub mod poll;
 pub mod signin;
 pub mod sim;
+pub mod standings;
 pub mod state;
 pub mod station;
 pub mod steering;

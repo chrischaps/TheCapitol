@@ -2516,6 +2516,33 @@ pub struct Gazette {
     /// with there, and in editions from before commissions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wanted: Option<GazetteWanted>,
+    /// The week's names (commons S3.2): the top three of each leaderboard,
+    /// in the edition about a week's last day, which comes out on the next
+    /// week's first. `None` on every other day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week_names: Option<GazetteWeekNames>,
+}
+
+/// The week's names (commons S3.2): the top three on each of the week's
+/// leaderboards, whole-city, with a line of story.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteWeekNames {
+    /// The week (`rules::week_of`)
+    pub week: i64,
+    /// The column's prose
+    pub story: String,
+    /// Each board that had anyone on it, in [`LeaderboardKind::ALL`]'s order
+    pub boards: Vec<GazetteBoard>,
+}
+
+/// One leaderboard's top three, for the paper.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteBoard {
+    pub board: LeaderboardKind,
+    /// From the top
+    pub names: Vec<LeaderboardEntry>,
 }
 
 /// The Wanted column (commons S2.4): the day on the hall's board. Names are
@@ -2745,6 +2772,134 @@ pub struct GazetteResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edition: Option<Gazette>,
     pub named: bool,
+}
+
+/// The weekly leaderboards (commons S3.2, D9).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum LeaderboardKind {
+    /// Strands, deeds at assessed value, and goods at each item's last trade
+    #[default]
+    Wealth,
+    /// The value made in the week: each unit at its target price, or its
+    /// last trade
+    Maker,
+    /// Market, bazaar and commission volume in the week, buying and selling
+    Trader,
+    /// The value of the claims kept in the week
+    KeptWord,
+}
+
+impl LeaderboardKind {
+    pub const ALL: [LeaderboardKind; 4] = [LeaderboardKind::Wealth, LeaderboardKind::Maker, LeaderboardKind::Trader, LeaderboardKind::KeptWord];
+
+    /// The key it's kept and asked for by: `wealth`, `maker`, `trader`,
+    /// `kept_word`
+    pub fn key(self) -> &'static str {
+        match self {
+            LeaderboardKind::Wealth => "wealth",
+            LeaderboardKind::Maker => "maker",
+            LeaderboardKind::Trader => "trader",
+            LeaderboardKind::KeptWord => "kept_word",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<LeaderboardKind> {
+        LeaderboardKind::ALL.into_iter().find(|b| b.key() == key)
+    }
+
+    /// Its title on the board and in the paper
+    pub fn title(self) -> &'static str {
+        match self {
+            LeaderboardKind::Wealth => "Wealth",
+            LeaderboardKind::Maker => "Makers",
+            LeaderboardKind::Trader => "Traders",
+            LeaderboardKind::KeptWord => "Kept their word",
+        }
+    }
+}
+
+/// `GET /leaderboards` query string (S3.2). Everything is optional: every
+/// board, whole-city, the latest week, citizens and people alike.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct LeaderboardQuery {
+    /// One board's key (`wealth`, `maker`, `trader`, `kept_word`), or every
+    /// board
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
+    /// A home zone's id (the zone of a player's oldest plot), or the whole
+    /// city
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// The week (`rules::week_of`), or the latest with boards
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week: Option<i64>,
+    /// People only: citizens are left out and the ranks count again
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub people: bool,
+}
+
+/// `GET /leaderboards` (S3.2): a week's boards, each with its top 20 and
+/// your own line.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct LeaderboardsResponse {
+    /// The week shown, or `None` before the first week's boards
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week: Option<i64>,
+    /// The latest week with boards, for turning back and on
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<i64>,
+    /// The home zone shown, or `None` for the whole city
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub people: bool,
+    /// The home zones that week's boards have anyone in, from the centre out
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<String>,
+    /// The boards asked for, in [`LeaderboardKind::ALL`]'s order
+    pub boards: Vec<Leaderboard>,
+}
+
+/// One board's week (S3.2).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Leaderboard {
+    pub board: LeaderboardKind,
+    /// The top 20, from the top. Ties share a rank.
+    pub top: Vec<LeaderboardEntry>,
+    /// Your own line, wherever you stand, or `None` if you're not on it
+    /// (nothing to count that week, or a citizen in the people-only view)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mine: Option<LeaderboardEntry>,
+    /// How many are on it
+    pub entries: i64,
+}
+
+/// One line of a leaderboard (S3.2).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct LeaderboardEntry {
+    pub rank: i64,
+    /// Their name, or `None` for someone who keeps out of the papers
+    /// ("a resident")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Who they are, for their card; `None` with the name, so a resident
+    /// stays one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_id: Option<Uuid>,
+    /// A citizen, named or not, listed with their mark
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+    /// In Strands
+    pub value: i64,
+    /// It's you
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub me: bool,
 }
 
 /// `GET /gazette` query string.

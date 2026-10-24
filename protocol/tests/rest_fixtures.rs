@@ -71,13 +71,19 @@
 //! open to spend (#448).
 //! `fixtures/rest/free_lots.json` is `GET /bureaucracy/free-lots?zone=rural`
 //! (#448): two farms, nearest the hall first.
+//! `fixtures/rest/leaderboards.json` is `GET /leaderboards` (S3.2): a week's
+//! four boards whole-city, a citizen marked, a resident tied with Bo, your
+//! own line far down wealth and in the top three of traders, and nobody yet
+//! on kept their word. Since S3.2 `gazette.json`'s edition carries the
+//! week's names, as the edition that ends a week does.
 
 use std::fs;
 use std::path::Path;
 
 use capitol_protocol::rest::{
     BazaarDirectory, BazaarShop,
-    AutomationMode, AutomationState, CatalogResponse, GazetteResponse, MarketDepthResponse, MarketHistoryResponse,
+    AutomationMode, AutomationState, CatalogResponse, GazetteResponse, LeaderboardKind, LeaderboardsResponse,
+    MarketDepthResponse, MarketHistoryResponse,
     MarketListingsResponse, MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
@@ -185,6 +191,10 @@ fn a_gazette_round_trips_with_every_section() {
     // The hall's board (S2.4)
     let wanted = edition.wanted.as_ref().unwrap();
     assert!(!wanted.story.is_empty() && !wanted.wanted.is_empty() && wanted.came_through.is_some());
+    // The week's names (S3.2)
+    let names = edition.week_names.as_ref().unwrap();
+    assert_eq!(names.boards.iter().map(|b| b.board).collect::<Vec<_>>(), LeaderboardKind::ALL);
+    assert!(!names.story.is_empty() && names.boards.iter().all(|b| !b.names.is_empty() && b.names.len() <= 3));
     assert_eq!(serde_json::to_string(&response).unwrap(), json);
 }
 
@@ -198,6 +208,24 @@ fn a_gazette_from_before_the_board_still_reads() {
     let response: GazetteResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(response.edition.as_ref().unwrap().wanted, None);
     assert_eq!(serde_json::to_value(&response).unwrap(), old);
+}
+
+#[test]
+fn leaderboards_round_trip_with_your_own_line() {
+    let json = fixture("leaderboards.json");
+    let response: LeaderboardsResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(response.boards.iter().map(|b| b.board).collect::<Vec<_>>(), LeaderboardKind::ALL);
+    let wealth = &response.boards[0];
+    // Ties share a rank; a resident has no name; a citizen is marked
+    assert_eq!(wealth.top.iter().map(|e| e.rank).collect::<Vec<_>>(), [1, 2, 3, 3]);
+    assert!(wealth.top[1].citizen && wealth.top[2].name.is_none());
+    assert!(wealth.mine.as_ref().is_some_and(|m| m.me && m.rank > 20));
+    assert!(response.boards[2].top.iter().any(|e| e.me));
+    for b in LeaderboardKind::ALL {
+        assert_eq!(LeaderboardKind::from_key(b.key()), Some(b));
+        assert_eq!(serde_json::to_string(&b).unwrap(), format!("\"{}\"", b.key()));
+    }
+    assert_eq!(serde_json::to_string(&response).unwrap(), json);
 }
 
 #[test]

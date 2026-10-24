@@ -11,6 +11,7 @@ pub mod gazette;
 pub mod guilds;
 pub mod health;
 pub mod inventory;
+pub mod leaderboards;
 pub mod letters;
 pub mod tutorial;
 pub mod wages;

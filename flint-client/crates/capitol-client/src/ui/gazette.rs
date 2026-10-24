@@ -1,7 +1,9 @@
-//! The notice board's pages (Commons S2.3, S2.7): *Wanted*, the city's
+//! The notice board's pages (Commons S2.3, S2.7, S3.2): *Wanted*, the city's
 //! commissions pinned to cork (`ui/board.rs`), *Work*, the wage offers
-//! pinned beside them (`ui/work.rs`), and The Capitol Gazette (E3.9), the
-//! latest edition as a page of newsprint. Tabs at the top turn between them.
+//! pinned beside them (`ui/work.rs`), *Standings*, the week's leaderboards
+//! as an honours board (`ui/standings.rs`), and The Capitol Gazette (E3.9),
+//! the latest edition as a page of newsprint. Tabs at the top turn between
+//! them. The edition that ends a week carries the week's names (S3.2).
 //!
 //! G or the header's Gazette chip opens the Gazette's page; a click on the
 //! notice board in the Exchange hall's forecourt opens the board on Wanted,
@@ -23,7 +25,7 @@
 use std::path::PathBuf;
 
 use capitol_core::gazette::Reader;
-use capitol_core::protocol::rest::{Gazette, GazettePrice, GazetteWant, GazetteWanted};
+use capitol_core::protocol::rest::{Gazette, GazettePrice, GazetteWant, GazetteWanted, GazetteWeekNames};
 use capitol_core::protocol::rules;
 use egui::{Align, Align2, Color32, Id, Layout, Margin, RichText, Sense, Stroke};
 use flint_runtime::PersistentStore;
@@ -31,6 +33,7 @@ use uuid::Uuid;
 
 use super::board;
 use super::icons::ItemIcons;
+use super::standings;
 use super::work;
 use super::theme::{self, size};
 
@@ -66,6 +69,8 @@ pub enum Action {
     Board(board::Action),
     /// Something on the Work page (S2.7)
     Work(work::Action),
+    /// Something on the Standings page (S3.2)
+    Standings(standings::Action),
 }
 
 /// The board's pages.
@@ -75,6 +80,8 @@ pub enum Page {
     Wanted,
     /// The wage offers (S2.7)
     Work,
+    /// The week's leaderboards (S3.2)
+    Standings,
     #[default]
     Gazette,
 }
@@ -87,6 +94,9 @@ pub struct Wanted<'a> {
     pub icons: &'a mut ItemIcons,
     /// The Work page's offers (S2.7). Without them, there's no Work tab.
     pub work: Option<WorkPage<'a>>,
+    /// The week's leaderboards (S3.2). Without them, there's no Standings
+    /// tab.
+    pub standings: Option<&'a mut capitol_core::standings::Standings>,
 }
 
 /// The Work page's offers and what it draws from (S2.7).
@@ -151,6 +161,17 @@ impl GazettePanel {
         self.page = Page::Work;
     }
 
+    /// Open on the Standings page (S3.2).
+    pub fn open_standings(&mut self) {
+        self.open = true;
+        self.page = Page::Standings;
+    }
+
+    /// Whether the Standings page is the one being read (S3.2).
+    pub fn reading_standings(&self) -> bool {
+        self.open && self.page == Page::Standings
+    }
+
     /// Whether the Gazette's page is the one being read.
     pub fn reading_gazette(&self) -> bool {
         self.open && self.page == Page::Gazette
@@ -203,24 +224,27 @@ impl GazettePanel {
             self.page = Page::Gazette;
         }
         let has_work = wanted.as_ref().is_some_and(|w| w.work.is_some());
-        if self.page == Page::Work && !has_work {
+        let has_standings = wanted.as_ref().is_some_and(|w| w.standings.is_some());
+        if (self.page == Page::Work && !has_work) || (self.page == Page::Standings && !has_standings) {
             self.page = Page::Wanted;
         }
+        let pages = Pages { work: has_work, standings: has_standings };
         let area = egui::Area::new(Id::new("capitol_gazette"))
             .anchor(Align2::CENTER_TOP, [0.0, screen.top() + 14.0 - RISE * (1.0 - ease)])
             .interactable(self.open)
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
                 match (self.page, wanted.as_mut()) {
-                    (Page::Wanted | Page::Work, Some(w)) => {
+                    (Page::Wanted | Page::Work | Page::Standings, Some(w)) => {
                         cork().show(ui, |ui| {
                             let flecks = ui.painter().add(egui::Shape::Noop);
                             ui.set_width(width - 40.0);
-                            tabs(ui, &mut self.page, &mut self.open, true, has_work);
+                            tabs(ui, &mut self.page, &mut self.open, true, pages);
                             ui.add_space(8.0);
                             let room = (height - 150.0).max(120.0);
-                            action = match (self.page, &w.work) {
-                                (Page::Work, Some(p)) => work::page(ui, p.wages, &p.view, w.icons, room).map(Action::Work),
+                            action = match (self.page, &w.work, w.standings.as_deref_mut()) {
+                                (Page::Work, Some(p), _) => work::page(ui, p.wages, &p.view, w.icons, room).map(Action::Work),
+                                (Page::Standings, _, Some(s)) => standings::page(ui, s, room).map(Action::Standings),
                                 _ => board::page(ui, w.board, &w.view, w.icons, room).map(Action::Board),
                             };
                             let rect = ui.min_rect().expand(14.0);
@@ -232,7 +256,7 @@ impl GazettePanel {
                             ui.set_width(width - 40.0);
                             ui.visuals_mut().override_text_color = Some(theme::INK);
                             if w.is_some() {
-                                tabs(ui, &mut self.page, &mut self.open, false, has_work);
+                                tabs(ui, &mut self.page, &mut self.open, false, pages);
                                 ui.add_space(4.0);
                             }
                             action = page(ui, view, &mut self.open, height - 40.0 - if w.is_some() { 34.0 } else { 0.0 }, w.is_none());
@@ -245,17 +269,26 @@ impl GazettePanel {
     }
 }
 
-/// The board's tabs, *Wanted*, *Work* (with `work`) and *The Gazette*, and
-/// the ×. `on_cork`: drawn over the cork, so the paper tabs stand out.
-fn tabs(ui: &mut egui::Ui, page: &mut Page, open: &mut bool, on_cork: bool, work: bool) {
+/// Which of the board's optional pages it has.
+#[derive(Debug, Clone, Copy)]
+struct Pages {
+    work: bool,
+    standings: bool,
+}
+
+/// The board's tabs, *Wanted*, *Work*, *Standings* (each when the board has
+/// them) and *The Gazette*, and the ×. `on_cork`: drawn over the cork, so
+/// the paper tabs stand out.
+fn tabs(ui: &mut egui::Ui, page: &mut Page, open: &mut bool, on_cork: bool, has: Pages) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let pages: &[(Page, &str)] = if work {
-            &[(Page::Wanted, "Wanted"), (Page::Work, "Work"), (Page::Gazette, "The Gazette")]
-        } else {
-            &[(Page::Wanted, "Wanted"), (Page::Gazette, "The Gazette")]
-        };
-        for &(p, title) in pages {
+        let pages = [
+            (Page::Wanted, "Wanted", true),
+            (Page::Work, "Work", has.work),
+            (Page::Standings, "Standings", has.standings),
+            (Page::Gazette, "The Gazette", true),
+        ];
+        for (p, title, _) in pages.into_iter().filter(|(.., shown)| *shown) {
             let on = *page == p;
             let (fill, edge, colour) = match (on, on_cork) {
                 (true, _) => (theme::PAPER, theme::INK, theme::INK),
@@ -370,6 +403,13 @@ fn page(ui: &mut egui::Ui, view: &View, open: &mut bool, height: f32, fold: bool
                 rule(ui, 1.0);
                 ui.add_space(6.0);
                 board(ui, w, &mut action);
+            }
+            // Only the edition that ends a week (S3.2)
+            if let Some(n) = &g.week_names {
+                ui.add_space(10.0);
+                rule(ui, 1.0);
+                ui.add_space(6.0);
+                week_names(ui, n, &mut action);
             }
             ui.add_space(10.0);
             rule(ui, 1.0);
@@ -642,6 +682,41 @@ fn board(ui: &mut egui::Ui, w: &GazetteWanted, action: &mut Option<Action>) {
     }
 }
 
+/// The week's names (commons S3.2): the story beside each board's top three,
+/// as a small table of honours. Narrow, they stack.
+fn week_names(ui: &mut egui::Ui, n: &GazetteWeekNames, action: &mut Option<Action>) {
+    section(ui, "The Week's Names");
+    let honours = |ui: &mut egui::Ui, action: &mut Option<Action>| {
+        for b in &n.boards {
+            ui.label(dim(b.board.title(), size::SMALL).strong().italics());
+            for e in &b.names {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(dim(&format!("{}.", e.rank), size::SMALL));
+                    resident(ui, e.name.as_deref(), e.citizen, action);
+                    ui.label(dim(&format!("{} Strands", super::hud::grouped(e.value)), size::SMALL));
+                });
+            }
+            ui.add_space(3.0);
+        }
+        if n.boards.iter().flat_map(|b| &b.names).any(|e| e.citizen) {
+            ui.horizontal(|ui| {
+                citizen_mark(ui, size::LABEL);
+                ui.label(dim("marks a citizen", size::LABEL).italics());
+            });
+        }
+    };
+    if ui.available_width() >= THREE_COLUMNS {
+        ui.columns(2, |c| {
+            c[0].vertical(|ui| ui.label(ink(&n.story, size::BODY)));
+            c[1].vertical(|ui| honours(ui, action));
+        });
+    } else {
+        ui.label(ink(&n.story, size::BODY));
+        ui.add_space(6.0);
+        honours(ui, action);
+    }
+}
+
 /// The slips, the day's biggest delivery and the tallies.
 fn board_notes(ui: &mut egui::Ui, w: &GazetteWanted, action: &mut Option<Action>) {
     if !w.wanted.is_empty() {
@@ -901,6 +976,8 @@ mod tests {
         // With the stalls in it, so the page draws them (#240), and the board (S2.4)
         assert!(edition.stalls.is_some() && !edition.stalls_story.is_empty());
         assert!(edition.wanted.as_ref().is_some_and(|w| !w.wanted.is_empty() && w.came_through.is_some()));
+        // And the week's names (S3.2)
+        assert!(edition.week_names.as_ref().is_some_and(|n| n.boards.len() == 4));
         assert!(reader.unread());
     }
 
@@ -978,9 +1055,12 @@ mod tests {
         let (mut board, pack, me, now) = board::sample("", &catalog);
         let mut icons = ItemIcons::load(std::path::Path::new(ItemIcons::DIR));
         let wages = work::sample(me, now);
+        let mut standings = standings::sample(false);
         panel.open_work();
         assert_eq!((panel.open, panel.page), (true, Page::Work));
-        for page in [Page::Wanted, Page::Work, Page::Gazette] {
+        panel.open_standings();
+        assert!(panel.reading_standings() && !panel.reading_gazette());
+        for page in [Page::Wanted, Page::Work, Page::Standings, Page::Gazette] {
             panel.page = page;
             let ctx = theme::test_context();
             for _ in 0..3 {
@@ -1003,7 +1083,8 @@ mod tests {
                         wages: &wages,
                         view: work::View { me: Some(me), at: None, now, catalog: &catalog, walking: false, online: true },
                     };
-                    let wanted = Wanted { board: &mut board, view, icons: &mut icons, work: Some(work) };
+                    let wanted =
+                        Wanted { board: &mut board, view, icons: &mut icons, work: Some(work), standings: Some(&mut standings) };
                     assert_eq!(panel.show(ctx, &View { reader: &reader, online: true }, Some(wanted)), None);
                 });
             }

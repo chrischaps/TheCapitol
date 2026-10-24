@@ -146,8 +146,10 @@ struct Args {
     #[arg(long)]
     gazette_sample: bool,
     /// Offline, open the notice board's Wanted page (S2.3) on sample
-    /// commissions: "list" (the default), "post" or "deliver" for a form, or
-    /// "glint" to leave it closed and see the board's glint and hover line
+    /// commissions: "list" (the default), "post" or "deliver" for a form,
+    /// "work" for the Work page, "standings" or "standings-people" for the
+    /// week's leaderboards (S3.2), or "glint" to leave it closed and see the
+    /// board's glint and hover line
     #[arg(long, value_name = "VIEW", num_args = 0..=1, default_missing_value = "list")]
     board_sample: Option<String>,
     /// Offline, open the zone card (#444) on sample facts: "urban",

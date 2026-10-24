@@ -94,6 +94,8 @@ struct BoardSample {
     reader: capitol_core::gazette::Reader,
     /// The Work page's offers (S2.7)
     wages: capitol_core::wages::Wages,
+    /// The Standings page's boards (S3.2)
+    standings: capitol_core::standings::Standings,
 }
 
 
@@ -223,6 +225,9 @@ pub struct CapitolExtension {
     station_panel_sample: Option<capitol_core::state::GameState>,
     /// Its offers, for the Hire tab and a shift (S2.7)
     station_panel_wages: Option<capitol_core::wages::Wages>,
+    /// The Standings page was open last frame: opening it asks for the
+    /// boards again, as a new week's may be up (S3.2)
+    reading_standings: bool,
     /// Its tab, set once the panel has opened (opening picks its own).
     station_panel_tab: Option<ui::station::Tab>,
     /// The Exchange hall (E3.7), and `--hall-sample`: offline, goods waiting
@@ -362,6 +367,7 @@ impl CapitolExtension {
             impound_sample: None,
             station_panel_sample: None,
             station_panel_wages: None,
+            reading_standings: false,
             station_panel_tab: None,
             hall: world::hall::HallLayer::default(),
             hall_sample: false,
@@ -649,17 +655,21 @@ impl CapitolExtension {
     /// Offline, open the notice board's Wanted page (S2.3) on sample
     /// commissions (`--board-sample`): "list" (the default), "post" or
     /// "deliver" for a form, "work" for the Work page's wage offers (S2.7),
-    /// or "glint" to leave it closed, so the board in the forecourt shows
-    /// that your pack could fill some.
+    /// "standings" or "standings-people" for the week's leaderboards with
+    /// citizens and without (S3.2), or "glint" to leave it closed, so the
+    /// board in the forecourt shows that your pack could fill some.
     pub fn with_board_sample(mut self, which: Option<&str>) -> Self {
         if let (Some(which), None) = (which, &self.session) {
             let catalog = capitol_core::catalog::Catalog::fallback();
             let (board, pack, me, now) = ui::board::sample(which, &catalog);
             let wages = ui::work::sample(me, now);
-            self.board_sample = Some(BoardSample { board, pack, me, now, catalog, reader: ui::gazette::sample(), wages });
+            let standings = ui::standings::sample(which == "standings-people");
+            self.board_sample =
+                Some(BoardSample { board, pack, me, now, catalog, reader: ui::gazette::sample(), wages, standings });
             match which {
                 "glint" => {}
                 "work" => self.gazette.open_work(),
+                "standings" | "standings-people" => self.gazette.open_standings(),
                 _ => self.gazette.open_board(false),
             }
         }
@@ -2519,9 +2529,16 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::impound::Action::Close) => self.impound.open = false,
                     None => {}
                 }
-                // The notice board: Wanted (S2.3) and the Gazette (E3.9). The
-                // board is taken out to be drawn beside the state it reads.
+                // The notice board: Wanted (S2.3), Work (S2.7), Standings
+                // (S3.2) and the Gazette (E3.9). The board and the standings
+                // are taken out to be drawn beside the state they read.
+                let reading = self.gazette.reading_standings();
+                if reading && !self.reading_standings {
+                    session.standings_mut().refresh();
+                }
+                self.reading_standings = reading;
                 let mut board = std::mem::take(session.board_mut());
+                let mut standings = std::mem::take(session.standings_mut());
                 let hall = self.terrain.landmark(LandmarkKind::ExchangeHall);
                 let action = {
                     let state = session.state();
@@ -2553,11 +2570,13 @@ impl PlayerExtension for CapitolExtension {
                                 online: true,
                             },
                         }),
+                        standings: Some(&mut standings),
                     };
                     let view = ui::gazette::View { reader: session.gazette(), online: true };
                     self.gazette.show(ctx, &view, Some(wanted))
                 };
                 *session.board_mut() = board;
+                *session.standings_mut() = standings;
                 match action {
                     Some(ui::gazette::Action::Turn(by)) => session.gazette_mut().turn(by),
                     Some(ui::gazette::Action::Byline(named)) => session.set_byline(named),
@@ -2573,6 +2592,9 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::gazette::Action::Work(ui::work::Action::Take(id))) => session.take_work(now, id),
                     Some(ui::gazette::Action::Work(ui::work::Action::Act(ask))) => session.wage_act(ask),
                     Some(ui::gazette::Action::Work(ui::work::Action::Card(id))) => {
+                        session.open_card(capitol_core::card::Who::Id(id), None)
+                    }
+                    Some(ui::gazette::Action::Standings(ui::standings::Action::Card(id))) => {
                         session.open_card(capitol_core::card::Who::Id(id), None)
                     }
                     None => {}
@@ -3056,6 +3078,7 @@ impl PlayerExtension for CapitolExtension {
                         online: false,
                     },
                 }),
+                standings: Some(&mut s.standings),
             };
             self.gazette.reading(&mut s.reader);
             if let Some(ui::gazette::Action::Turn(by)) =

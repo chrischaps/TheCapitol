@@ -27,6 +27,7 @@ use capitol_protocol::rest::{
 use capitol_protocol::rest::{
     Gazette, GazetteByline, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse,
     GazetteDelivery, GazetteSale, GazetteShares, GazetteShop, GazetteStalls, GazetteWant, GazetteWanted,
+    GazetteBoard, GazetteWeekNames, Leaderboard, LeaderboardEntry, LeaderboardKind, LeaderboardsResponse,
 };
 use capitol_protocol::rest::{
     ClaimCommission, ClaimResponse, ClaimsResponse, Commission, CommissionClaim, CommissionDelivery, CommissionsResponse,
@@ -99,6 +100,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         (name = "Bazaar", description = "Stalls, the shops merchants keep in them, and buying from them"),
         (name = "Commissions", description = "The hall's board: standing requests with the money down, claimed from anywhere and delivered at the Exchange hall"),
         (name = "Gazette", description = "The Capitol Gazette: a daily digest of the economy"),
+        (name = "Leaderboards", description = "The week's leaderboards: wealth, makers, traders and kept their word"),
         (name = "Plots", description = "Land plot ownership and permissions"),
         (name = "Bureaucracy", description = "Zone information and deed prices"),
         (name = "Terrain", description = "World terrain data (roads, water)")
@@ -218,6 +220,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::gazette::by_date,
         crate::routes::gazette::get_byline,
         crate::routes::gazette::set_byline,
+        crate::routes::leaderboards::get_leaderboards,
         // Plots
         crate::routes::plots::list_plots,
         crate::routes::plots::list_claimed_plots,
@@ -405,6 +408,13 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         GazetteDelivery,
         GazetteResponse,
         GazetteByline,
+        GazetteWeekNames,
+        GazetteBoard,
+        // Leaderboards (S3.2)
+        LeaderboardKind,
+        LeaderboardsResponse,
+        Leaderboard,
+        LeaderboardEntry,
         // Plots
         ListPlotsResponse,
         PlotInfo,

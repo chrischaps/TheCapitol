@@ -211,6 +211,8 @@ pub enum RestRequest {
     Gazette { day: Option<i64> },
     /// `PUT /gazette/byline`
     SetByline(GazetteByline),
+    /// `GET /leaderboards?board=&zone=&week=&people=`: the week's boards (S3.2)
+    Leaderboards(LeaderboardQuery),
 
     /// `GET /commissions?item=&mine=&status=`: the hall's board (S2.1)
     Commissions(CommissionsQuery),
@@ -359,6 +361,8 @@ pub enum RestResponse {
     Gazette(Box<GazetteResponse>),
     /// Your byline as it now stands
     Byline(GazetteByline),
+    /// The week's leaderboards (S3.2)
+    Leaderboards(Box<LeaderboardsResponse>),
     /// The board, or a part of it (S2.1)
     Commissions(CommissionsResponse),
     /// A commission as posted, or as cancelled or withdrawn
@@ -547,6 +551,7 @@ impl RestRequest {
             | MarketListings
             | MarketBox
             | Gazette { .. }
+            | Leaderboards(_)
             | Commissions(_)
             | MyClaims
             | Wages(_)
@@ -643,6 +648,7 @@ impl RestRequest {
             Gazette { day: None } => "/gazette/latest".into(),
             Gazette { day: Some(_) } => "/gazette".into(),
             SetByline(_) => "/gazette/byline".into(),
+            Leaderboards(_) => "/leaderboards".into(),
             Commissions(_) | PostCommission(_) => "/commissions".into(),
             MyClaims => "/commissions/claims".into(),
             CancelCommission { commission_id } => format!("/commissions/{commission_id}"),
@@ -713,6 +719,7 @@ impl RestRequest {
             SetTunables(b) => req.json(b),
             SetTutorialDismissed(b) => req.json(b),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
+            Leaderboards(q) => req.query(q),
             MarketDepth(q) => req.query(q),
             MyOrders(q) => req.query(q),
             MarketHistory(q) => req.query(q),
@@ -808,6 +815,7 @@ impl RestRequest {
             Q::CollectMarketBox(_) | Q::CollectImpound(_) => A::Collected(de(body)?),
             Q::Gazette { .. } => A::Gazette(Box::new(de(body)?)),
             Q::SetByline(_) => A::Byline(de(body)?),
+            Q::Leaderboards(_) => A::Leaderboards(Box::new(de(body)?)),
             Q::Commissions(_) => A::Commissions(de(body)?),
             Q::PostCommission(_) | Q::CancelCommission { .. } => A::Commission(de(body)?),
             Q::DeliverCommission { .. } => A::Delivered(de(body)?),
@@ -1191,6 +1199,7 @@ mod tests {
             ),
             (RestRequest::Gazette { day: None }, "GET", "/gazette/latest".into()),
             (RestRequest::Gazette { day: Some(248_952) }, "GET", "/gazette".into()),
+            (RestRequest::Leaderboards(Default::default()), "GET", "/leaderboards".into()),
             (
                 RestRequest::SetByline(GazetteByline { named: false }),
                 "PUT",

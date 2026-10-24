@@ -20,6 +20,7 @@ pub mod guilds;
 pub mod grants;
 pub mod impound;
 pub mod interest;
+pub mod leaderboards;
 pub mod ledger;
 pub mod letters;
 pub mod load;
