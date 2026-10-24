@@ -14,6 +14,7 @@ mod building_sample;
 mod camera_path;
 #[cfg(test)]
 mod camera_rig;
+mod controls_stats;
 mod coords;
 mod daylight;
 mod debug_layers;
@@ -217,6 +218,10 @@ struct Args {
     /// listening to a recipe, or drawing its spectrogram
     #[arg(long, value_name = "DIR")]
     write_sounds: Option<PathBuf>,
+    /// Print how you've played each control mode (T3.1), from
+    /// save/controls_stats.toml, and exit
+    #[arg(long)]
+    controls_report: bool,
     /// Offline, draw only the city: no inscription panel, no free-point
     /// mark. For showcase captures (tools/showcase.ps1)
     #[arg(long, requires = "offline")]
@@ -323,6 +328,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
     enter_game_dir(&mut args)?;
+    if args.controls_report {
+        print!("{}", controls_stats::report(controls_stats::ControlsStats::PATH));
+        return Ok(());
+    }
     let (terrain, session) = match &args.offline {
         Some(path) => (terrain::TerrainSource::offline(path)?, None),
         None => {
@@ -401,6 +410,8 @@ fn main() -> Result<()> {
     shared
         .clean
         .store(args.clean, std::sync::atomic::Ordering::Relaxed);
+    // Offline runs and captures: click, whatever is saved, and no stats
+    let capture = args.offline.is_some() || args.exit_after.is_some() || args.input_script.is_some();
     let mut extension = extension::CapitolExtension::new(shared, terrain, session)
         .with_icon_sheet(args.icon_sheet)
         .with_containers(args.containers)
@@ -433,12 +444,9 @@ fn main() -> Result<()> {
         .with_talk_sample(args.talk_sample)
         .with_offline_avatar(args.offline_avatar)
         .with_trade_offer(args.trade_offer.as_deref())
-        .with_controls(args.controls.or_else(|| {
-            let capture = args.offline.is_some()
-                || args.exit_after.is_some()
-                || args.input_script.is_some();
-            capture.then_some(settings::ControlMode::Click)
-        }))
+        .with_controls(args.controls.or_else(|| capture.then_some(settings::ControlMode::Click)))
+        // Captures keep no stats, so a recipe never writes the player's (T3.1)
+        .with_controls_stats((!capture).then(|| controls_stats::ControlsStats::load(controls_stats::ControlsStats::PATH)))
         .with_settings(
             settings::SettingsFile::load(
                 args.settings_file

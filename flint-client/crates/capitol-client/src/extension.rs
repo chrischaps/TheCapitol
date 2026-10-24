@@ -302,6 +302,9 @@ pub struct CapitolExtension {
     control_mode: Option<ControlMode>,
     /// Alt is held this frame: in Direct it frees the cursor (T1.4).
     alt_held: bool,
+    /// How you've played each mode (T3.1), or `None` for captures and
+    /// offline runs, which keep none.
+    controls_stats: Option<crate::controls_stats::ControlsStats>,
 }
 
 impl CapitolExtension {
@@ -403,6 +406,7 @@ impl CapitolExtension {
             controls_pinned: None,
             control_mode: None,
             alt_held: false,
+            controls_stats: None,
         }
     }
 
@@ -419,6 +423,13 @@ impl CapitolExtension {
     /// settings file (`--controls`, and Click for captures and offline).
     pub fn with_controls(mut self, mode: Option<ControlMode>) -> Self {
         self.controls_pinned = mode;
+        self
+    }
+
+    /// Keep how you've played each mode in `file` (T3.1). Without this,
+    /// nothing is kept.
+    pub fn with_controls_stats(mut self, file: Option<crate::controls_stats::ControlsStats>) -> Self {
+        self.controls_stats = file;
         self
     }
 
@@ -1483,6 +1494,9 @@ impl CapitolExtension {
     /// the new mode.
     fn switch_controls(&mut self, ctx: &mut ExtensionCtx, mode: ControlMode, now: Instant) {
         tracing::info!("controls: {}", mode.name());
+        if let Some(stats) = &mut self.controls_stats {
+            stats.switched(mode);
+        }
         // Esc's letting go is Direct's alone (T1.4)
         self.shared.cursor_let_go.store(false, Ordering::Relaxed);
         if let Some(session) = &mut self.session {
@@ -1740,6 +1754,23 @@ impl PlayerExtension for CapitolExtension {
             let (server, me) = (session.server().to_owned(), session.state().me());
             self.gazette.follow(&server, me, session.gazette_mut());
             self.gazette.reading(session.gazette_mut());
+            // How you've played each mode (T3.1): while you play the avatar here
+            let tally = session.take_tally();
+            // `control_mode()` by its fields, with the session borrowed
+            let mode = self.controls_pinned.unwrap_or(self.settings.settings.controls.mode);
+            if let Some(stats) = &mut self.controls_stats {
+                let state = session.state();
+                let playing = session.auth().phase() == capitol_core::auth::Phase::InWorld && state.plays_here();
+                let frame = crate::controls_stats::Frame {
+                    server: session.server(),
+                    me: state.me().filter(|_| playing),
+                    at: state.local_player().map(|p| (p.x, p.y)),
+                    corrections: session.corrections(),
+                    tally,
+                    dt: ctx.clock.delta_time,
+                };
+                stats.frame(now, mode, frame);
+            }
             crafted(ctx, session, &self.shared, &mut self.sound);
             // The road in's card follows the server's tour (#441), which
             // judges the walking, gathering and making itself
@@ -3017,6 +3048,7 @@ impl PlayerExtension for CapitolExtension {
         let view = ui::settings::View {
             server: self.session.as_ref().map(|s| s.server()),
             mutes: self.session.as_ref().map(|s| s.mutes()),
+            played: self.controls_stats.as_ref().and_then(|s| s.current()),
         };
         // A pinned mode is what the panel shows and changes, for this run
         // alone: swapped in for the panel and back out, so the file keeps

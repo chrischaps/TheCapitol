@@ -252,6 +252,13 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 ### T3: Decide (`ct:T3-decide`)
 
 - **T3.1 A/B numbers** (#327, S): `save/controls_stats.toml` and `--controls-report`.
+  *As built:* `controls_stats.rs` in capitol-client. The file is a table per "server player" with `click` and `direct` under it; a missing field or file is zero, and an unreadable one is ignored. Decisions the plan didn't make:
+  - **An interaction** is counted where `Session` decides between acting and walking first: a node, a station, the hall, a stall, the board at the hall and a wage offer. A click or an E on the same thing counts alike, so the split is about reach, not the device. A walk that arrives isn't counted again.
+  - **Distance** is from your server position frame to frame. A step over 200 units is a jump (a reconnect, a presence taken back) and isn't walked.
+  - **Minutes** count only while you play the avatar here, in the world: not at the login, nor while another device has it. A frame counts at most 0.5 s, so a dragged window or a sleep isn't play.
+  - **Gathers** are extractions that yielded something; a failed pull isn't one. Gathers an hour waits for a minute of play.
+  - **Switches** count into the mode switched to, by F8 or the panel, not the first frame's mode.
+  - **Captures and offline runs keep none**, so a recipe never writes the file. It's written every 30 s while there's something new, and as the client closes.
 - **T3.2 Play both and decide** (#328, S, `needs-decision`).
 - **T3.3 Settle the controls** (#329, S to M): carry out T3.2's decision.
 

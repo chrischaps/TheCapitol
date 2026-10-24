@@ -49,6 +49,7 @@ use capitol_core::trading::{self, Approach, Draft};
 use flint_runtime::PersistentStore;
 use uuid::Uuid;
 
+use crate::controls_stats::Tally;
 use crate::terrain::{TerrainSource, CACHE_DIR};
 use crate::ui::slots::Move;
 
@@ -185,6 +186,9 @@ pub struct Session {
     /// What your extractions yielded, by node, since the extension last
     /// took them.
     yields: Vec<(Uuid, Yield)>,
+    /// What the controls' stats count (T3.1), since the extension last
+    /// took it.
+    tally: Tally,
     /// Crafting by hand (P5.5): the craft under way, from the ask to the
     /// settled inventory.
     crafting: Crafting,
@@ -466,6 +470,7 @@ impl Session {
             blocked: Vec::new(),
             harvest: Harvest::default(),
             yields: Vec::new(),
+            tally: Tally::default(),
             crafting: Crafting::default(),
             crafted: Vec::new(),
             placed: HashSet::new(),
@@ -724,8 +729,16 @@ impl Session {
             return;
         }
         match self.harvest.click(node, &self.state, now) {
-            Some(step) => self.step(now, step),
+            Some(step) => {
+                match step {
+                    Step::Extract(_) => self.tally.acted(false),
+                    Step::WalkTo { .. } => self.tally.acted(true),
+                    Step::Hold => {}
+                }
+                self.step(now, step)
+            }
             None => {
+                self.tally.acted(true);
                 if let Some(n) = self.state.node(node) {
                     let (x, y) = (n.x, n.y);
                     self.move_to(now, x, y);
@@ -765,6 +778,11 @@ impl Session {
         self.work_walk.walked();
         self.stall.walked();
         if let Some(step) = self.visit.click(station, &self.state, now) {
+            match step {
+                station::visit::Step::Open(_) => self.tally.acted(false),
+                station::visit::Step::WalkTo { .. } => self.tally.acted(true),
+                _ => {}
+            }
             self.station_step(now, step);
         }
     }
@@ -785,8 +803,12 @@ impl Session {
         self.approach.walked();
         self.stall.walked();
         match self.hall.click(hall, at) {
-            capitol_core::hall::Step::Open => true,
+            capitol_core::hall::Step::Open => {
+                self.tally.acted(false);
+                true
+            }
             capitol_core::hall::Step::WalkTo { x, y } => {
+                self.tally.acted(true);
                 self.walk(now, x, y);
                 false
             }
@@ -821,8 +843,12 @@ impl Session {
         self.board_walk.walked();
         self.work_walk.walked();
         match self.stall.click(streets, stall, at) {
-            capitol_core::bazaar::Step::Open => true,
+            capitol_core::bazaar::Step::Open => {
+                self.tally.acted(false);
+                true
+            }
             capitol_core::bazaar::Step::WalkTo { x, y } => {
+                self.tally.acted(true);
                 self.walk(now, x, y);
                 false
             }
@@ -1160,6 +1186,17 @@ impl Session {
         } else {
             self.motion.destination().into_iter().collect()
         }
+    }
+
+    /// What the controls' stats count since the last call (T3.1): the
+    /// interactions you started, near or far, the blocks and the gathers.
+    pub fn take_tally(&mut self) -> Tally {
+        std::mem::take(&mut self.tally)
+    }
+
+    /// The prediction's corrections this session, a running count.
+    pub fn corrections(&self) -> u32 {
+        self.motion.corrections()
     }
 
     /// Every time the water stopped you since the last call.
@@ -1801,8 +1838,12 @@ impl Session {
         self.stall.walked();
         self.hall.walked();
         match self.board_walk.click(hall, at) {
-            capitol_core::hall::Step::Open => self.board.queue(ask),
+            capitol_core::hall::Step::Open => {
+                self.tally.acted(false);
+                self.board.queue(ask)
+            }
             capitol_core::hall::Step::WalkTo { x, y } => {
+                self.tally.acted(true);
                 self.board.hold(ask);
                 self.walk(now, x, y);
             }
@@ -1890,8 +1931,12 @@ impl Session {
         self.stall.walked();
         let ask = capitol_core::wages::Ask::Take(offer_id);
         match self.work_walk.click(to, at) {
-            capitol_core::wages::Step::Here => self.wages.queue(ask),
+            capitol_core::wages::Step::Here => {
+                self.tally.acted(false);
+                self.wages.queue(ask)
+            }
             capitol_core::wages::Step::WalkTo { x, y } => {
+                self.tally.acted(true);
                 self.wages.hold(ask);
                 self.walk(now, x, y);
             }
@@ -2903,6 +2948,7 @@ impl Session {
                         y,
                     } => {
                         self.route.stop();
+                        self.tally.blocked += 1;
                         self.blocked.push(Blocked {
                             x: *x,
                             y: *y,
@@ -2919,6 +2965,9 @@ impl Session {
                         });
                     }
                     StateEvent::ExtractionCompleted { node_id, item } => {
+                        if item.quantity > 0 {
+                            self.tally.gathers += 1;
+                        }
                         self.yields.push((*node_id, item.clone()));
                     }
                     StateEvent::CraftingCompleted { item } => self.crafted.push(item.clone()),

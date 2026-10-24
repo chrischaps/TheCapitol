@@ -18,6 +18,7 @@
 
 use super::theme::{self, size, DIM, GOLD};
 use crate::session::{normalize_server, server_label};
+use crate::controls_stats::Played;
 use crate::settings::{ControlMode, Settings, Shadows, SENSITIVITY};
 use capitol_core::mutes::Mutes;
 use egui::{Align2, Id, RichText};
@@ -53,6 +54,9 @@ pub struct View<'a> {
     pub server: Option<&'a str>,
     /// Who you've muted, or `None` offline.
     pub mutes: Option<&'a Mutes>,
+    /// How you've played each control mode (T3.1), or `None` before
+    /// you've played, and offline.
+    pub played: Option<&'a Played>,
 }
 
 #[derive(Default)]
@@ -221,6 +225,9 @@ impl SettingsPanel {
             theme::switch(ui, &mut k.invert_look_y)
         })
         .on_hover_text("Over the shoulder, moving the mouse up looks down");
+        if let Some(played) = view.played {
+            how_youve_played(ui, played);
+        }
 
         if let Some(mutes) = view.mutes {
             section(ui, "Muted");
@@ -323,6 +330,29 @@ fn muted(ui: &mut egui::Ui, mutes: &Mutes) -> Option<Uuid> {
 }
 
 /// A section's name, small and spaced, over its rows.
+/// How you've played (T3.1): each mode's numbers side by side, small, for
+/// the A/B. Kept on this machine alone.
+fn how_youve_played(ui: &mut egui::Ui, played: &Played) {
+    ui.add_space(8.0);
+    ui.label(theme::dim("How you've played").size(size::SMALL).italics())
+        .on_hover_text("Kept on this machine only, in save/controls_stats.toml");
+    ui.add_space(2.0);
+    egui::Grid::new("controls_stats").num_columns(3).spacing([12.0, 1.0]).show(ui, |ui| {
+        // The modes' full names don't fit three columns in the panel
+        ui.label("");
+        for head in ["Point", "Shoulder"] {
+            ui.label(theme::dim(head).size(size::SMALL));
+        }
+        ui.end_row();
+        for (name, click, direct) in played.rows() {
+            ui.label(theme::dim(name).size(size::SMALL));
+            ui.label(theme::text(click).size(size::SMALL));
+            ui.label(theme::text(direct).size(size::SMALL));
+            ui.end_row();
+        }
+    });
+}
+
 fn section(ui: &mut egui::Ui, name: &str) {
     ui.add_space(10.0);
     ui.label(theme::label(name));
@@ -343,6 +373,15 @@ mod tests {
         settings: &mut Settings,
         input: egui::RawInput,
     ) -> Option<Action> {
+        frame_with(panel, settings, input, None)
+    }
+
+    fn frame_with(
+        panel: &mut SettingsPanel,
+        settings: &mut Settings,
+        input: egui::RawInput,
+        played: Option<&Played>,
+    ) -> Option<Action> {
         let ctx = theme::test_context();
         let mut action = None;
         for raw in [egui::RawInput::default(), egui::RawInput::default(), input] {
@@ -351,11 +390,32 @@ mod tests {
                 let view = View {
                     server: Some("http://localhost:3000"),
                     mutes: None,
+                    played,
                 };
                 action = panel.show(ctx, settings, &view);
             });
         }
         action
+    }
+
+    #[test]
+    fn how_youve_played_fits_the_panel() {
+        let mut settings = Settings::default();
+        let mut plain = SettingsPanel::default();
+        plain.toggle();
+        frame(&mut plain, &mut settings, egui::RawInput::default());
+        // Long figures in both columns
+        let mut played = Played::default();
+        for m in [&mut played.click, &mut played.direct] {
+            m.seconds = 600_000.0;
+            m.distance = 12_345_678.0;
+            m.gathers = 99_999;
+        }
+        let mut panel = SettingsPanel::default();
+        panel.toggle();
+        frame_with(&mut panel, &mut settings, egui::RawInput::default(), Some(&played));
+        let (plain, with) = (plain.rect.unwrap(), panel.rect.unwrap());
+        assert!(with.width() <= plain.width() + 0.5, "{} against {}", with.width(), plain.width());
     }
 
     #[test]
@@ -404,7 +464,7 @@ mod tests {
                 }
                 let _ = ctx.run(raw, |ctx| {
                     theme::install(ctx);
-                    let view = View { server: Some("http://localhost:3000"), mutes: Some(&mutes) };
+                    let view = View { server: Some("http://localhost:3000"), mutes: Some(&mutes), played: None };
                     if let Some(a) = panel.show(ctx, settings, &view) {
                         action = Some(a);
                     }
