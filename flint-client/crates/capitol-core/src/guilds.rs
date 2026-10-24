@@ -660,6 +660,7 @@ mod tests {
             guild: None,
             mine: false,
             muted: false,
+            own: None,
         };
         guilds.found(&card);
         assert_eq!(guilds.wants(), Some(Ask::Invite { guild_id: ROPE, player_id: CASS }));
