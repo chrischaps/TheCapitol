@@ -1430,6 +1430,7 @@ fn claim_notices_are_reported() {
             claimant_citizen: true,
             quantity: 4,
             until,
+            claimant_standing: "dependable, but has let people down lately".into(),
         }]
     );
     assert_eq!(

@@ -17,6 +17,10 @@
 //! player's impound (#141). Then it's released the same way a forced terrain
 //! commit releases one, and the deed is refunded, less the debt.
 //!
+//! Each hour also counts towards its owners' standing (S3.1): an owner taxed
+//! and owing nothing on any plot adds an hour to their run, and 168 in a row
+//! are a week in good standing (`engine::standing::tax_hour`).
+//!
 //! Both kinds of word to the owner are queued as notices (#138), so an owner
 //! who's offline hears on their return. The owner can pay the debt off
 //! themselves with [`pay_tax_debt`] (`POST /plots/{id}/pay-tax`).
@@ -155,6 +159,8 @@ pub async fn process_property_taxes(db: &PgPool, rate: f64) -> TaxReport {
 
     tracing::info!("Processing taxes for {} owned plots", owned_plots.len());
     let mut charged: Vec<Uuid> = Vec::new();
+    // Each owner taxed this hour, and whether they owe on any plot after it (S3.1)
+    let mut owing: HashMap<Uuid, bool> = HashMap::new();
 
     for (plot_id, owner_id, assessed_value, tax_owed, carry, terrain_id) in owned_plots {
         let weekly = weekly_tax(assessed_value, rate);
@@ -257,6 +263,8 @@ pub async fn process_property_taxes(db: &PgPool, rate: f64) -> TaxReport {
             after
         };
 
+        *owing.entry(owner_id).or_default() |= owed > 0;
+
         if owed >= foreclosure_threshold(assessed_value, rate) {
             match foreclose(db, plot_id, rate).await {
                 Ok(Some(f)) => {
@@ -276,6 +284,11 @@ pub async fn process_property_taxes(db: &PgPool, rate: f64) -> TaxReport {
     }
     charged.sort();
     charged.dedup();
+    let owe: Vec<Uuid> = owing.iter().filter(|(_, owes)| **owes).map(|(p, _)| *p).collect();
+    let good: Vec<Uuid> = owing.iter().filter(|(_, owes)| !**owes).map(|(p, _)| *p).collect();
+    if let Err(e) = super::standing::tax_hour(db, &good, &owe).await {
+        tracing::error!("Failed to count the tax run's weeks in good standing: {:?}", e);
+    }
     match balances_of(db, &charged).await {
         Ok(balances) => report.balances = balances,
         Err(e) => tracing::error!("Failed to read balances after the tax run: {:?}", e),

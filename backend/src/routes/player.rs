@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use capitol_protocol::rest::{
     CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse, MutesResponse, MyGuild,
-    GrantRequest, GrantResponse, PlayerMeResponse, SubscribeRequest, Subscription,
+    GrantRequest, GrantResponse, OwnStanding, PlayerMeResponse, SubscribeRequest, Subscription,
 };
 use capitol_protocol::rules::{in_world, Zone};
 
@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/grant", post(dev_grant))
         .route("/mutes", get(get_mutes))
         .route("/guild", get(get_guild))
+        .route("/standing", get(get_standing))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -49,6 +50,26 @@ pub async fn get_mutes(
 ) -> Result<Json<MutesResponse>, AppError> {
     let player = super::players::player_of(&state.db, auth_user.account_id).await?;
     Ok(Json(MutesResponse { mutes: crate::mutes::list(&state.db, player).await? }))
+}
+
+/// Your standing (S3.1): what the city says of you, the number under it
+/// that only you see, its trend over the week, and your last records
+#[utoipa::path(
+    get,
+    path = "/player/standing",
+    responses(
+        (status = 200, description = "Your standing, in full", body = OwnStanding)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn get_standing(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<OwnStanding>, AppError> {
+    let player = super::players::player_of(&state.db, auth_user.account_id).await?;
+    let mut conn = state.db.acquire().await?;
+    Ok(Json(crate::engine::standing::own(&mut conn, player, chrono::Utc::now()).await?))
 }
 
 /// Your guild, your role in it, and the invitations and applications that

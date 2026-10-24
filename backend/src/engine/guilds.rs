@@ -933,6 +933,8 @@ async fn detail_at(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>, now: DateT
     .bind(guild_id)
     .fetch_all(&mut *conn)
     .await?;
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let mut words = super::standing::words_of(&mut conn, &ids, Utc::now()).await?;
     let members: Vec<GuildMember> = rows
         .into_iter()
         .map(|(id, name, citizen, role, joined_at)| GuildMember {
@@ -941,8 +943,7 @@ async fn detail_at(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>, now: DateT
             citizen,
             role: GuildRole::parse(&role).unwrap_or(GuildRole::Member),
             joined_at,
-            // S3.1 (#395) brings the record and the words
-            standing: standing::NEW_IN_TOWN.into(),
+            standing: words.remove(&id).unwrap_or_else(|| standing::NEW_IN_TOWN.into()),
         })
         .collect();
     let sees_waiting = viewer.is_some_and(|v| members.iter().any(|m| m.id == v && m.role.may_invite()));

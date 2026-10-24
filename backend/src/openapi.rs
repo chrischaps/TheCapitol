@@ -10,7 +10,7 @@ use capitol_protocol::rest::{
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, RefreshRequest, MoveItemRequest, MoveItemResponse,
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
-    PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerCard, SendLetter, Correspondent, Letter, LetterBox, Mailbox, LettersUnread, PlayerMeResponse, MutesResponse, MutedPlayer, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
+    PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerCard, OwnStanding, SendLetter, Correspondent, Letter, LetterBox, Mailbox, LettersUnread, PlayerMeResponse, MutesResponse, MutedPlayer, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse,
     StationContainerResponse, StationInfo, StationTool, StationAutomation, Produced, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, GrantRequest, GrantItem, GrantResponse, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
@@ -129,6 +129,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::players::mute,
         crate::routes::players::unmute,
         crate::routes::player::get_mutes,
+        crate::routes::player::get_standing,
         // Letters
         crate::routes::letters::send,
         crate::routes::letters::get_letters,
@@ -252,6 +253,9 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         // Player
         PlayerMeResponse,
         PlayerCard,
+        OwnStanding,
+        capitol_protocol::rules::standing::Record,
+        capitol_protocol::rules::standing::Deed,
         MutesResponse,
         capitol_protocol::tutorial::TutorialProgress,
         capitol_protocol::tutorial::Grant,

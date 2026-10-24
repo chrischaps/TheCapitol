@@ -275,7 +275,14 @@ impl Board {
             return;
         }
         match at {
-            Some(i) => self.open[i] = commission,
+            Some(i) => {
+                // The board's messages leave the poster's words out (S3.1): keep the ones we had
+                let mut commission = commission;
+                if commission.poster_standing.is_empty() {
+                    commission.poster_standing = std::mem::take(&mut self.open[i].poster_standing);
+                }
+                self.open[i] = commission;
+            }
             None => {
                 let i = self.open.partition_point(|c| (c.posted_at, c.id) > (commission.posted_at, commission.id));
                 self.open.insert(i, commission);
@@ -642,12 +649,22 @@ pub fn fill_words(n: usize) -> Option<String> {
 }
 
 /// The toast for a claim on your commission.
-pub fn claimed_words(name: &str, citizen: bool, quantity: i32, item_name: &str, until: DateTime<Utc>, now: DateTime<Utc>) -> (String, String) {
+/// `standing` is what's said of them (S3.1), if the notice said.
+pub fn claimed_words(
+    name: &str,
+    citizen: bool,
+    standing: &str,
+    quantity: i32,
+    item_name: &str,
+    until: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> (String, String) {
     let who = if citizen { format!("{name}, a citizen,") } else { name.to_owned() };
-    (
-        "A claim on your commission".into(),
-        format!("{who} promised {quantity} {item_name}, held for them for {}.", time_left(until, now)),
-    )
+    let mut body = format!("{who} promised {quantity} {item_name}, held for them for {}.", time_left(until, now));
+    if !standing.is_empty() {
+        body.push_str(&format!(" They're spoken of as {standing}."));
+    }
+    ("A claim on your commission".into(), body)
 }
 
 /// The toast for your claim's last hour.
@@ -711,6 +728,7 @@ mod tests {
             status: CommissionStatus::Open,
             claimed: 0,
             withdrawn: false,
+            poster_standing: String::new(),
         }
     }
 
@@ -726,6 +744,7 @@ mod tests {
             claimed_at: at(0),
             until: at(24 * 60),
             status: ClaimStatus::Open,
+            claimant_standing: String::new(),
         }
     }
 
@@ -996,7 +1015,21 @@ mod tests {
         let (title, body) = lapsed_words(true, "Ada", false, 4, 1, "Planks");
         assert_eq!(title, "Your claim lapsed");
         assert!(body.starts_with("Only 1 of the 4 Planks"));
-        let (_, body) = claimed_words("Cy", true, 4, "Iron Ore", at(24 * 60), at(0));
+        let (_, body) = claimed_words("Cy", true, "", 4, "Iron Ore", at(24 * 60), at(0));
         assert_eq!(body, "Cy, a citizen, promised 4 Iron Ore, held for them for 1 d.");
+        let (_, body) = claimed_words("Bo", false, "dependable", 2, "Rope", at(60), at(0));
+        assert_eq!(body, "Bo promised 2 Rope, held for them for 1 h. They're spoken of as dependable.");
+    }
+
+    #[test]
+    fn the_posters_words_outlast_the_boards_messages() {
+        let mut board = Board::default();
+        board.apply(Commission { poster_standing: "dependable".into(), ..commission(1, "rope", 0, 10, 0) });
+        // commission_updated carries no words: the card keeps the ones it had
+        board.apply(Commission { delivered: 2, ..commission(1, "rope", 0, 10, 0) });
+        assert_eq!((board.open[0].delivered, board.open[0].poster_standing.as_str()), (2, "dependable"));
+        // and a list that says otherwise is believed
+        board.apply(Commission { poster_standing: "well regarded".into(), ..commission(1, "rope", 0, 10, 0) });
+        assert_eq!(board.open[0].poster_standing, "well regarded");
     }
 }

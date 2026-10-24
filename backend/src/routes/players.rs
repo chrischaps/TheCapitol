@@ -3,7 +3,8 @@
 //! `/player` is you; `/players` is everyone. A card says only what anyone
 //! in the city could know: the name, whether they're a citizen, how long
 //! they've been here, where they live and what's said of them. Nothing of
-//! their Strands or goods.
+//! their Strands or goods. Your own card adds your standing's number, its
+//! trend and your history (S3.1), which nobody else's shows.
 //!
 //! Mutes (S1.4) are here too: `PUT` and `DELETE /players/{id}/mute`, and
 //! `GET /player/mutes` beside the rest of you. `crate::mutes` keeps them.
@@ -18,8 +19,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use capitol_protocol::rest::{MutesResponse, PlayerCard};
-use capitol_protocol::rules::{self, standing};
+use capitol_protocol::rules;
 
+use crate::engine::standing;
 use crate::engine::tutorial::{self, Did};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -184,16 +186,25 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
     };
     let (id, name, citizen, created, mine, home, muted, guild) =
         row.ok_or_else(|| AppError::NotFound("No one goes by that".into()))?;
+    // Anyone sees the words; only you, your number and how it got there (S3.1)
+    let now = Utc::now();
+    let mut conn = db.acquire().await?;
+    let own = if mine { Some(standing::own(&mut conn, id, now).await?) } else { None };
+    let words = match &own {
+        Some(own) => own.words.clone(),
+        None => standing::words_for(&mut conn, id, now).await?,
+    };
     Ok(PlayerCard {
         id,
         name,
         citizen,
         since: rules::day_number(created.timestamp_millis()),
         home,
-        standing: standing::NEW_IN_TOWN.into(),
+        standing: words,
         guild,
         mine,
         muted,
+        own,
     })
 }
 
@@ -246,7 +257,7 @@ mod tests {
         assert_eq!((seen.id, seen.name.as_str(), seen.citizen, seen.mine), (ada, "Ada", false, false));
         assert_eq!(seen.since, rules::day_number(Utc::now().timestamp_millis()));
         assert_eq!((seen.home, seen.guild), (None, None), "no plot, and no guilds yet");
-        assert_eq!(seen.standing, standing::NEW_IN_TOWN);
+        assert_eq!(seen.standing, rules::standing::NEW_IN_TOWN);
 
         let own = card(&db, ada_acc, Who::Id(ada)).await.unwrap();
         assert!(own.mine && !own.muted);
@@ -256,6 +267,42 @@ mod tests {
         crate::mutes::set(&db, &events, bea, ada, true).await.unwrap();
         assert!(card(&db, bea_acc, Who::Id(ada)).await.unwrap().muted);
         assert!(!card(&db, ada_acc, Who::Id(bea)).await.unwrap().muted, "a mute is one way");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn someone_elses_card_shows_the_words_and_yours_the_number_and_history_too(db: PgPool) {
+        let ada = player(&db, "Ada", 100).await;
+        let bea = player(&db, "Bea", 100).await;
+        // Five weeks of tax in good standing: 5, dependable
+        for week in 0..5 {
+            sqlx::query("INSERT INTO tax_good_weeks (id, player_id, at) VALUES ($1, $2, NOW() - $3 * INTERVAL '1 week')")
+                .bind(Uuid::new_v4())
+                .bind(ada)
+                .bind(week as f64)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+
+        let seen = card(&db, account_of(&db, bea).await, Who::Id(ada)).await.unwrap();
+        assert_eq!(seen.standing, rules::standing::DEPENDABLE);
+        assert_eq!(seen.own, None, "the number is Ada's alone");
+        let by_name = card(&db, account_of(&db, bea).await, Who::Name("ada")).await.unwrap();
+        assert_eq!((by_name.standing.as_str(), by_name.own.is_none()), (rules::standing::DEPENDABLE, true));
+
+        let mine = card(&db, account_of(&db, ada).await, Who::Id(ada)).await.unwrap();
+        let own = mine.own.expect("your own card has your number");
+        assert_eq!((mine.standing.as_str(), own.words.as_str()), (rules::standing::DEPENDABLE, rules::standing::DEPENDABLE));
+        assert!((own.score - 5.0).abs() < 1e-9 && own.trend.abs() < 1.0 + 1e-9, "{own:?}");
+        assert_eq!((own.records, own.history.len()), (5, 5));
+        assert!(own.history.iter().all(|r| r.deed == rules::standing::Deed::TaxWeek));
+        assert!(own.history.windows(2).all(|w| w[0].at >= w[1].at), "newest first");
+
+        // Bea, with nothing done yet, is new in town to both
+        assert_eq!(card(&db, account_of(&db, ada).await, Who::Id(bea)).await.unwrap().standing, rules::standing::NEW_IN_TOWN);
+        let hers = card(&db, account_of(&db, bea).await, Who::Id(bea)).await.unwrap().own.unwrap();
+        assert_eq!((hers.score, hers.records, hers.history.len()), (0.0, 0, 0));
     }
 
     #[sqlx::test(migrations = "./migrations")]

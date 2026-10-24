@@ -198,7 +198,9 @@ pub async fn post(db: &PgPool, poster_id: Uuid, req: &PostCommission, now: DateT
     .execute(&mut *tx)
     .await?;
 
-    let posted = load(&mut tx, id).await?.ok_or(CourtError::NotFound)?;
+    let mut posted = load(&mut tx, id).await?.ok_or(CourtError::NotFound)?;
+    // The board hears what's said of a new poster with the post (S3.1)
+    posted.poster_standing = super::standing::words_for(&mut tx, poster_id, now).await?;
     tx.commit().await?;
     Ok(posted)
 }
@@ -660,6 +662,7 @@ pub async fn claim(
     .await?;
 
     let (claimant_name, claimant_citizen) = name_of(&mut tx, claimant_id).await?;
+    let claimant_standing = super::standing::words_for(&mut tx, claimant_id, now).await?;
     let message = ServerMessage::CommissionClaimed {
         commission_id,
         claim_id: id,
@@ -669,6 +672,7 @@ pub async fn claim(
         claimant_citizen,
         quantity: req.quantity,
         until,
+        claimant_standing,
     };
     let notice_id = notices::queue(&mut *tx, head.poster_id, &id.to_string(), &message).await?;
     let claim = load_claim(&mut tx, id).await?.ok_or(CourtError::NoClaim)?;
@@ -951,6 +955,7 @@ fn from_row(row: Row) -> Result<Commission, sqlx::Error> {
             .ok_or_else(|| sqlx::Error::Decode(format!("commissions.status is {status:?}").into()))?,
         claimed,
         withdrawn,
+        poster_standing: String::new(),
     })
 }
 
@@ -980,7 +985,14 @@ pub async fn list(db: &PgPool, player_id: Uuid, query: &CommissionsQuery) -> Res
     .bind(MAX_LISTED)
     .fetch_all(db)
     .await?;
-    rows.into_iter().map(from_row).collect()
+    let mut commissions: Vec<Commission> = rows.into_iter().map(from_row).collect::<Result<_, _>>()?;
+    // What's said of each poster, for the board's cards (S3.1)
+    let posters: Vec<Uuid> = commissions.iter().map(|c| c.poster_id).collect();
+    let words = super::standing::words_in(db, &posters, Utc::now()).await?;
+    for c in &mut commissions {
+        c.poster_standing = words.get(&c.poster_id).cloned().unwrap_or_default();
+    }
+    Ok(commissions)
 }
 
 /// A `commission_claims` row with its claimant, as [`CLAIM_COLUMNS`] selects it
@@ -1006,6 +1018,7 @@ fn claim_from_row(row: ClaimRow) -> Result<CommissionClaim, sqlx::Error> {
         until,
         status: ClaimStatus::parse(&status)
             .ok_or_else(|| sqlx::Error::Decode(format!("commission_claims.status is {status:?}").into()))?,
+        claimant_standing: String::new(),
     })
 }
 
@@ -1029,7 +1042,14 @@ pub async fn claims_on(db: &PgPool, commission_id: Uuid) -> Result<Vec<Commissio
     .bind(MAX_CLAIMS_LISTED)
     .fetch_all(db)
     .await?;
-    rows.into_iter().map(claim_from_row).collect()
+    let mut claims: Vec<CommissionClaim> = rows.into_iter().map(claim_from_row).collect::<Result<_, _>>()?;
+    // What's said of each claimant, for the poster's view of who promised (S3.1)
+    let claimants: Vec<Uuid> = claims.iter().map(|c| c.claimant_id).collect();
+    let words = super::standing::words_in(db, &claimants, Utc::now()).await?;
+    for c in &mut claims {
+        c.claimant_standing = words.get(&c.claimant_id).cloned().unwrap_or_default();
+    }
+    Ok(claims)
 }
 
 /// `claimant_id`'s standing claims, the soonest to run out first.

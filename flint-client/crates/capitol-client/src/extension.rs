@@ -208,7 +208,7 @@ pub struct CapitolExtension {
     /// A person's card (S0.3), and `--card-sample`: a card, and today's
     /// game day, to show offline.
     card: ui::card::CardPanel,
-    card_sample: Option<(capitol_core::card::Cards, i64)>,
+    card_sample: Option<(capitol_core::card::Cards, i64, capitol_core::catalog::Catalog)>,
     /// Letters (S1.5), and `--mail-sample`: sample boxes to show offline.
     mail: ui::mail::MailPanel,
     mail_sample: Option<(capitol_core::mail::Mail, ui::mail::View)>,
@@ -2498,7 +2498,7 @@ impl PlayerExtension for CapitolExtension {
                 let today = rules::day_number(
                     session.state().server_time_ms().unwrap_or_else(|| capitol_core::chrono::Utc::now().timestamp_millis()),
                 );
-                let view = ui::card::View { shown: session.cards().shown(), today, online: true };
+                let view = ui::card::View { shown: session.cards().shown(), today, online: true, catalog: session.state().catalog() };
                 match self.card.show(ctx, &view) {
                     Some(ui::card::Action::Trade(id)) => {
                         session.trade_with(now, id);
@@ -2988,9 +2988,9 @@ impl PlayerExtension for CapitolExtension {
         if let Some((guilds, view)) = &mut self.guild_sample {
             let _ = self.guild.show(ctx, guilds, view);
         }
-        if let Some((cards, today)) = &mut self.card_sample {
+        if let Some((cards, today, catalog)) = &mut self.card_sample {
             // Trade is drawn as it would be signed in; offline it asks no one
-            let view = ui::card::View { shown: cards.shown(), today: *today, online: true };
+            let view = ui::card::View { shown: cards.shown(), today: *today, online: true, catalog };
             if let Some(ui::card::Action::Close) = self.card.show(ctx, &view) {
                 cards.close();
             }

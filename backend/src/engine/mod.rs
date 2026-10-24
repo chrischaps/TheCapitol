@@ -38,6 +38,7 @@ pub mod talk;
 mod regeneration;
 pub mod slow_work;
 pub mod slot_moves;
+pub mod standing;
 pub mod station_placement;
 pub mod station_removal;
 pub mod station_tools;

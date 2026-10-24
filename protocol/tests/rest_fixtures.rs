@@ -39,6 +39,8 @@
 //! hour, a deposit, a buy order's escrow and a sale less its fee, out walking.
 //! `fixtures/rest/player_card.json` is `GET /players/{id}/card` (S0.3): a
 //! citizen with a farm, a week in the city, in no guild, seen by someone else.
+//! `fixtures/rest/my_card.json` is your own card (S3.1): your standing's
+//! number, its trend and the history under the words, which only you see.
 //! `fixtures/rest/mutes.json` is `GET /player/mutes` (S1.4): a citizen and a
 //! person muted.
 //! `fixtures/rest/mailbox.json` is `GET /letters?box=in` (S1.5): a citizen's
@@ -425,6 +427,21 @@ fn a_card_round_trips_leaving_out_what_isnt_so() {
 }
 
 #[test]
+fn your_own_card_round_trips_with_the_number_under_its_words() {
+    use capitol_protocol::rest::PlayerCard;
+    use capitol_protocol::rules::standing::{self, Deed};
+    let json = fixture("my_card.json");
+    let card: PlayerCard = serde_json::from_str(&json).unwrap();
+    let own = card.own.as_ref().expect("your own card has your number");
+    assert!(card.mine && own.words == card.standing && card.standing.ends_with(standing::LET_DOWN_LATELY));
+    assert_eq!((own.score, own.trend, own.records, own.history.len()), (8.25, -1.5, 9, 5));
+    assert_eq!(own.history[0].deed, Deed::Lapsed { units: 2 });
+    assert_eq!(own.history[2].deed, Deed::TaxWeek);
+    assert_eq!(standing::line(&own.history[3], "Log"), "Kept a claim: 10 log for Citizen Cy");
+    assert_eq!(serde_json::to_string(&card).unwrap(), json);
+}
+
+#[test]
 fn mutes_round_trip_marking_only_the_citizen() {
     use capitol_protocol::rest::MutesResponse;
     let json = fixture("mutes.json");
@@ -476,6 +493,9 @@ fn commissions_round_trip_marking_only_the_citizen() {
     let board: CommissionsResponse = serde_json::from_str(&json).unwrap();
     let citizens: Vec<bool> = board.commissions.iter().map(|c| c.poster_citizen).collect();
     assert_eq!(citizens, [true, false]);
+    // What's said of the poster is on the list, and left out when it isn't known (S3.1)
+    let words: Vec<&str> = board.commissions.iter().map(|c| c.poster_standing.as_str()).collect();
+    assert_eq!(words, ["dependable", ""]);
     for c in &board.commissions {
         assert_eq!(c.status, CommissionStatus::Open);
         assert_eq!(c.escrow_strands, commission_value(c.price, c.quantity - c.delivered));
@@ -511,6 +531,7 @@ fn claims_round_trip_marking_only_the_citizen() {
     let claims: ClaimsResponse = serde_json::from_str(&json).unwrap();
     let marks: Vec<(bool, ClaimStatus)> = claims.claims.iter().map(|k| (k.claimant_citizen, k.status)).collect();
     assert_eq!(marks, [(true, ClaimStatus::Open), (false, ClaimStatus::Kept)]);
+    assert_eq!(claims.claims[0].claimant_standing, "well regarded");
     assert_eq!(serde_json::to_string(&claims).unwrap(), json);
 }
 
@@ -572,6 +593,7 @@ fn wages_round_trip_with_their_work_and_shift() {
     assert!(matches!(field.work, Work::Gather { .. }) && matches!(forge.work, Work::Craft { .. }));
     let shift = field.shift.as_ref().expect("a shift on it");
     assert!(shift.worker_citizen && shift.ended_at.is_none() && Some(shift) == wages.shift.as_ref());
+    assert_eq!((field.employer_standing.as_str(), forge.employer_standing.as_str()), ("a pillar of the Capitol", ""));
     assert_eq!(field.escrow_strands, offer_value(field.rate, field.cap - field.made));
     assert_eq!((forge.status, forge.fee), (OfferStatus::Open, court_fee(offer_value(forge.rate, forge.cap))));
     assert_eq!(serde_json::to_string(&wages).unwrap(), json);

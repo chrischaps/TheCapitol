@@ -355,6 +355,8 @@ pub enum StateEvent {
         claimant_citizen: bool,
         quantity: i32,
         until: DateTime<Utc>,
+        /// What's said of the claimant (S3.1)
+        claimant_standing: String,
     },
     /// An hour or less is left on your claim (`claim_due_soon`, S2.2)
     ClaimDueSoon {
@@ -1066,13 +1068,14 @@ impl GameState {
                 out.push(StateEvent::Board(commission.clone()))
             }
             // Commons S2.2: claims' notices, to the poster and the claimant
-            M::CommissionClaimed { item_type, claimant_name, claimant_citizen, quantity, until, .. } => {
+            M::CommissionClaimed { item_type, claimant_name, claimant_citizen, quantity, until, claimant_standing, .. } => {
                 out.push(StateEvent::CommissionClaimed {
                     item_type: item_type.clone(),
                     claimant_name: claimant_name.clone(),
                     claimant_citizen: *claimant_citizen,
                     quantity: *quantity,
                     until: *until,
+                    claimant_standing: claimant_standing.clone(),
                 })
             }
             M::ClaimDueSoon { commission_id, item_type, quantity, delivered, until, .. } => {

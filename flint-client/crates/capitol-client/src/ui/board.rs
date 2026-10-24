@@ -238,7 +238,7 @@ fn card(ui: &mut egui::Ui, board: &mut Board, view: &View, icons: &mut ItemIcons
             ui.label(ink_dim("·", size::BODY));
             ui.label(ink_dim(&format!("due in {}", cm::time_left(c.due_at, view.now)), size::BODY));
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             ui.label(ink_dim("Posted by", size::SMALL));
             if c.poster_citizen {
@@ -246,8 +246,14 @@ fn card(ui: &mut egui::Ui, board: &mut Board, view: &View, icons: &mut ItemIcons
             }
             if mine {
                 ui.label(RichText::new("you").font(theme::strong(size::SMALL)).color(theme::INK));
-            } else if name_link(ui, &c.poster_name) {
-                action = Some(Action::Card(c.poster_id));
+            } else {
+                if name_link(ui, &c.poster_name) {
+                    action = Some(Action::Card(c.poster_id));
+                }
+                // What's said of them (S3.1)
+                if !c.poster_standing.is_empty() {
+                    ui.label(ink_dim(&format!("· {}", c.poster_standing), size::SMALL).italics());
+                }
             }
         });
         claims(ui, board, c);
@@ -781,6 +787,7 @@ pub fn sample(which: &str, catalog: &Catalog) -> (Board, Option<Container>, Uuid
     use capitol_core::protocol::rest::{ClaimsResponse, CommissionClaim, CommissionsResponse};
     use capitol_core::protocol::rules::court::{ClaimStatus, CommissionStatus};
     use capitol_core::protocol::rules::stacking::Units;
+    use capitol_core::protocol::rules::standing;
     let posted: Commission = capitol_core::serde_json::from_str::<capitol_core::protocol::ws::ServerMessage>(include_str!(
         "../../../../../protocol/tests/fixtures/server/commission_posted.json"
     ))
@@ -809,6 +816,13 @@ pub fn sample(which: &str, catalog: &Catalog) -> (Board, Option<Container>, Uuid
         c.posted_at = now - hours(n as i64);
         c.due_at = now + hours(due);
         c.status = CommissionStatus::Open;
+        c.poster_standing = match n {
+            1 => standing::WELL_REGARDED.into(),
+            2 => standing::DEPENDABLE.into(),
+            3 => format!("{}, but {}", standing::FINDING_THEIR_FEET, standing::LET_DOWN_LATELY),
+            5 => standing::PILLAR.into(),
+            _ => standing::NEW_IN_TOWN.into(),
+        };
         c
     };
     let iron = make(1, "iron_ore", "Citizen Cy", true, 55, 20, 6, 6, 77);
@@ -840,6 +854,7 @@ pub fn sample(which: &str, catalog: &Catalog) -> (Board, Option<Container>, Uuid
             claimed_at: now - hours(4),
             until: now + hours(20),
             status: ClaimStatus::Open,
+            claimant_standing: String::new(),
         }],
     });
     // A pack with iron ore of three qualities, rope, and a few other things

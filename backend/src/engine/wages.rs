@@ -263,7 +263,9 @@ pub async fn offer(db: &PgPool, employer_id: Uuid, req: &OfferWages, now: DateTi
     .execute(&mut *tx)
     .await?;
 
-    let offered = load(&mut tx, id).await?.ok_or(WageError::NotFound)?;
+    let mut offered = load(&mut tx, id).await?.ok_or(WageError::NotFound)?;
+    // The board hears what's said of a new employer with the offer (S3.1)
+    offered.employer_standing = super::standing::words_for(&mut tx, employer_id, now).await?;
     tx.commit().await?;
     let news = News {
         board: vec![ServerMessage::WageOffered { offer: offered.clone() }],
@@ -870,6 +872,7 @@ fn from_row(row: OfferRow, shift: Option<WageShift>) -> Result<WageOffer, sqlx::
         ends_at: row.ends_at,
         status: OfferStatus::parse(&row.status).ok_or_else(|| decode("status"))?,
         shift,
+        employer_standing: String::new(),
     })
 }
 
@@ -955,10 +958,17 @@ pub async fn list(db: &PgPool, player_id: Uuid, query: &WagesQuery) -> Result<Ve
     let mut conn = db.acquire().await?;
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let mut shifts = running_shifts(&mut conn, &ids).await?;
-    rows.into_iter().map(|row| {
+    let mut offers: Vec<WageOffer> = rows.into_iter().map(|row| {
         let shift = shifts.remove(&row.id);
         from_row(row, shift)
-    }).collect()
+    }).collect::<Result<_, _>>()?;
+    // What's said of each employer, for the Work page's cards (S3.1)
+    let employers: Vec<Uuid> = offers.iter().map(|o| o.employer_id).collect();
+    let words = super::standing::words_of(&mut conn, &employers, Utc::now()).await?;
+    for offer in &mut offers {
+        offer.employer_standing = words.get(&offer.employer_id).cloned().unwrap_or_default();
+    }
+    Ok(offers)
 }
 
 /// The shift `worker_id` is working, if they are.

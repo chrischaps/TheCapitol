@@ -1033,6 +1033,7 @@ pub fn sample_wages(which: &str) -> Wages {
         ends_at: now + hours(67),
         status: OfferStatus::Open,
         shift: Some(worker.clone()),
+        employer_standing: String::new(),
     };
     let mut wages = Wages::default();
     wages.connected();

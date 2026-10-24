@@ -1959,8 +1959,9 @@ impl Session {
         let catalog = self.state.catalog();
         let now = self.state.utc_now();
         let (title, body) = match change {
-            StateEvent::CommissionClaimed { item_type, claimant_name, claimant_citizen, quantity, until } => {
-                cm::claimed_words(claimant_name, *claimant_citizen, *quantity, &catalog.item_name(item_type), *until, now)
+            StateEvent::CommissionClaimed { item_type, claimant_name, claimant_citizen, quantity, until, claimant_standing } => {
+                let item = catalog.item_name(item_type);
+                cm::claimed_words(claimant_name, *claimant_citizen, claimant_standing, *quantity, &item, *until, now)
             }
             StateEvent::ClaimDueSoon { item_type, quantity, delivered, until, .. } => {
                 cm::due_soon_words(*quantity, *delivered, &catalog.item_name(item_type), *until, now)

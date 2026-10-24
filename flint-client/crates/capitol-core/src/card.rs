@@ -8,11 +8,17 @@
 //! mark) is shown, so the card opens at once and fills in.
 //!
 //! The words a card says are here too, so they're tested without egui:
-//! how long someone has been in the city, and where they live.
+//! how long someone has been in the city, and where they live. On your own
+//! card, the number under your standing's words, its trend over the week and
+//! your history (S3.1): `score_words`, `trend_words`, `when_words`,
+//! `history_line`.
 
 use capitol_protocol::rest::PlayerCard;
-use capitol_protocol::rules::Zone;
+use capitol_protocol::rules::standing::{self, Record};
+use capitol_protocol::rules::{self, Zone};
 use uuid::Uuid;
+
+use crate::catalog::Catalog;
 
 /// Whose card.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,10 +179,50 @@ pub fn home_words(home: Option<&str>, mine: bool) -> String {
     }
 }
 
+/// Your standing's number, to a tenth.
+pub fn score_words(score: f64) -> String {
+    format!("{score:.1}")
+}
+
+/// Which way the week went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trend {
+    Up,
+    Down,
+    Steady,
+}
+
+/// The score's move over the last `rules::standing::TREND_DAYS` game days:
+/// "▲ 1.5 this week", "▼ 2.7 this week", "Steady this week".
+pub fn trend_words(trend: f64) -> (String, Trend) {
+    if trend >= 0.05 {
+        (format!("▲ {trend:.1} this week"), Trend::Up)
+    } else if trend <= -0.05 {
+        (format!("▼ {:.1} this week", -trend), Trend::Down)
+    } else {
+        ("Steady this week".into(), Trend::Steady)
+    }
+}
+
+/// When a record was, in game days from `today`.
+pub fn when_words(record: &Record, today: i64) -> String {
+    match today - rules::day_number(record.at.timestamp_millis()) {
+        ..=0 => "today".into(),
+        1 => "yesterday".into(),
+        n @ 2..=13 => format!("{n} days ago"),
+        n => format!("{} weeks ago", n / 7),
+    }
+}
+
+/// A line of your history, its goods named as the catalog names them.
+pub fn history_line(record: &Record, catalog: &Catalog) -> String {
+    let item = record.item_type.as_deref().map(|t| catalog.item_name(t)).unwrap_or_default();
+    standing::line(record, &item)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capitol_protocol::rules::standing;
 
     fn card(n: u128, name: &str) -> PlayerCard {
         PlayerCard {
@@ -189,6 +235,7 @@ mod tests {
             guild: None,
             mine: false,
             muted: false,
+            own: None,
         }
     }
 
@@ -290,5 +337,30 @@ mod tests {
         assert_eq!(home_words(Some("capitol"), true), "Lives in the Capitol");
         assert_eq!(home_words(None, false), "No land of their own yet");
         assert_eq!(home_words(None, true), "No land of your own yet");
+    }
+
+    #[test]
+    fn your_number_and_its_week_read_to_a_tenth() {
+        assert_eq!(score_words(8.25), "8.2");
+        assert_eq!(score_words(-2.0), "-2.0");
+        assert_eq!(trend_words(1.46), ("▲ 1.5 this week".into(), Trend::Up));
+        assert_eq!(trend_words(-2.7), ("▼ 2.7 this week".into(), Trend::Down));
+        assert_eq!(trend_words(0.01), ("Steady this week".into(), Trend::Steady));
+    }
+
+    #[test]
+    fn a_line_of_history_names_its_goods_and_its_day() {
+        use capitol_protocol::rules::standing::Deed;
+        let today = rules::GAZETTE_FIRST_DAY + 30;
+        let on = |day: i64| chrono::DateTime::from_timestamp_millis(rules::day_start_ms(day) + 60_000).unwrap();
+        let kept = Record { at: on(today - 1), deed: Deed::Kept { units: 10 }, item_type: Some("iron_ore".into()), other: Some("Ada".into()) };
+        let catalog = Catalog::fallback();
+        assert_eq!(history_line(&kept, &catalog), format!("Kept a claim: 10 {} for Ada", catalog.item_name("iron_ore").to_lowercase()));
+        assert_eq!(when_words(&kept, today), "yesterday");
+        assert_eq!(when_words(&Record { at: on(today), ..kept.clone() }, today), "today");
+        assert_eq!(when_words(&Record { at: on(today - 5), ..kept.clone() }, today), "5 days ago");
+        assert_eq!(when_words(&Record { at: on(today - 15), ..kept.clone() }, today), "2 weeks ago");
+        let week = Record { at: on(today), deed: Deed::TaxWeek, item_type: None, other: None };
+        assert_eq!(history_line(&week, &catalog), "A week of property tax paid in full");
     }
 }

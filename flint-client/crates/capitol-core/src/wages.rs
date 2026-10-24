@@ -214,7 +214,14 @@ impl Wages {
             return;
         }
         match at {
-            Some(i) => self.open[i] = offer,
+            Some(i) => {
+                // The board's messages leave the employer's words out (S3.1): keep the ones we had
+                let mut offer = offer;
+                if offer.employer_standing.is_empty() {
+                    offer.employer_standing = std::mem::take(&mut self.open[i].employer_standing);
+                }
+                self.open[i] = offer;
+            }
             None => {
                 let i = self.open.partition_point(|o| (o.posted_at, o.id) > (offer.posted_at, offer.id));
                 self.open.insert(i, offer);
@@ -737,6 +744,7 @@ mod tests {
             ends_at: at(minutes + 3 * 24 * 60),
             status: OfferStatus::Open,
             shift: None,
+            employer_standing: String::new(),
         }
     }
 
@@ -887,6 +895,7 @@ mod tests {
             guild: None,
             mine: false,
             muted: false,
+            own: None,
         });
         assert!(matches!(w.named(), Named::Found { id, .. } if id.as_u128() == 9));
         let Some(Ask::Offer(o)) = w.post(&d, Some(1000), me()) else { panic!("it goes") };

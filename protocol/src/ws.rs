@@ -723,6 +723,9 @@ pub enum ServerMessage {
         claimant_citizen: bool,
         quantity: i32,
         until: DateTime<Utc>,
+        /// What's said of the claimant (S3.1, `rules::standing::words`)
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        claimant_standing: String,
     },
     /// To the claimant: an hour or less is left on your claim, with
     /// `delivered` of `quantity` in

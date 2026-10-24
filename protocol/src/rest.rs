@@ -676,6 +676,27 @@ pub struct PlayerCard {
     /// You've muted them (S1.4): nothing they say reaches you
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// On your own card only (S3.1): your number under the words, its trend
+    /// and how it got there. Nobody else's card has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<OwnStanding>,
+}
+
+/// `GET /player/standing` (S3.1), and your own card's `own`: what the city
+/// says of you, and the number under it, which only you see.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct OwnStanding {
+    /// What others see: `rules::standing::words`
+    pub words: String,
+    /// `rules::standing::score`
+    pub score: f64,
+    /// The score now less a week ago: `rules::standing::trend`
+    pub trend: f64,
+    /// How many records there are in all
+    pub records: i64,
+    /// The last `rules::standing::HISTORY` of them, newest first
+    pub history: Vec<rules::standing::Record>,
 }
 
 /// `GET /player/mutes` (S1.4): the people you've muted, newest first.
@@ -2271,6 +2292,11 @@ pub struct Commission {
     /// they end.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub withdrawn: bool,
+    /// What's said of the poster (S3.1, `rules::standing::words`). The
+    /// board's lists and a new post carry it; later board messages leave it
+    /// out, so a client keeps the one it had.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub poster_standing: String,
 }
 
 fn is_zero(n: &i32) -> bool {
@@ -2358,6 +2384,10 @@ pub struct CommissionClaim {
     /// When it runs out: `rules::court::claim_until`
     pub until: DateTime<Utc>,
     pub status: rules::court::ClaimStatus,
+    /// What's said of the claimant (S3.1), for the poster's view of who
+    /// promised: on `GET /commissions/{id}/claims`
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub claimant_standing: String,
 }
 
 /// A claim made or ended, and the commission after it.
@@ -3170,6 +3200,11 @@ pub struct WageOffer {
     /// The shift being worked on it now, if there is one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shift: Option<WageShift>,
+    /// What's said of the employer (S3.1). `GET /wages` and a new offer
+    /// carry it; later board messages leave it out, so a client keeps the
+    /// one it had.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub employer_standing: String,
 }
 
 /// A worker's shift on an offer: running while `ended_at` is empty.

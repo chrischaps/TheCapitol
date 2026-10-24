@@ -20,6 +20,10 @@ pub trait StableMath {
     fn stable_asin(self) -> f64;
     fn stable_atan2(self, other: f64) -> f64;
     fn stable_hypot(self, other: f64) -> f64;
+    /// `ln(1 + self)`, exact near 0
+    fn stable_ln_1p(self) -> f64;
+    /// `2^self`
+    fn stable_exp2(self) -> f64;
 }
 
 impl StableMath for f64 {
@@ -46,6 +50,16 @@ impl StableMath for f64 {
     #[inline]
     fn stable_hypot(self, other: f64) -> f64 {
         libm::hypot(self, other)
+    }
+
+    #[inline]
+    fn stable_ln_1p(self) -> f64 {
+        libm::log1p(self)
+    }
+
+    #[inline]
+    fn stable_exp2(self) -> f64 {
+        libm::exp2(self)
     }
 }
 

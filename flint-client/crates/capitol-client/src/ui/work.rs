@@ -251,7 +251,7 @@ fn card(ui: &mut egui::Ui, wages: &Wages, view: &View, icons: &mut ItemIcons, o:
                 ui.label(ink_dim(&wg::whereabouts(at, [o.x, o.y]), size::BODY));
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             ui.label(ink_dim("Offered by", size::SMALL));
             if o.employer_citizen {
@@ -259,8 +259,14 @@ fn card(ui: &mut egui::Ui, wages: &Wages, view: &View, icons: &mut ItemIcons, o:
             }
             if mine {
                 ui.label(RichText::new("you").font(theme::strong(size::SMALL)).color(theme::INK));
-            } else if name_link(ui, &o.employer_name) {
-                action = Some(Action::Card(o.employer_id));
+            } else {
+                if name_link(ui, &o.employer_name) {
+                    action = Some(Action::Card(o.employer_id));
+                }
+                // What's said of them (S3.1)
+                if !o.employer_standing.is_empty() {
+                    ui.label(ink_dim(&format!("· {}", o.employer_standing), size::SMALL).italics());
+                }
             }
             if o.worker_id.is_some() {
                 let whom = if o.worker_id == view.me { "you".to_owned() } else { o.worker_name.clone().unwrap_or_default() };
@@ -336,7 +342,7 @@ fn moves(ui: &mut egui::Ui, wages: &Wages, view: &View, o: &WageOffer, first: bo
 /// named for you, one of yours with someone on it, and one being worked.
 pub fn sample(me: Uuid, now: DateTime<Utc>) -> Wages {
     use capitol_core::protocol::rest::{WageShift, WagesResponse};
-    use capitol_core::protocol::rules::{court, wages::OfferStatus};
+    use capitol_core::protocol::rules::{court, standing, wages::OfferStatus};
     let hours = capitol_core::chrono::Duration::hours;
     let offer = |n: u128, employer: &str, citizen: bool, work: Work, rate: i64, cap: i32, made: i32, x: f64, y: f64, runs: i64| WageOffer {
         id: Uuid::from_u128(0x3930 + n),
@@ -357,6 +363,7 @@ pub fn sample(me: Uuid, now: DateTime<Utc>) -> Wages {
         ends_at: now + hours(runs),
         status: OfferStatus::Open,
         shift: None,
+        employer_standing: if citizen { standing::DEPENDABLE } else { standing::WELL_REGARDED }.into(),
     };
     let craft = |recipe: &str| Work::Craft { station_id: Uuid::from_u128(0x5000), recipe_id: recipe.into() };
     let gather = |resource: &str| Work::Gather { plot_id: Uuid::from_u128(0x6000), resource: resource.into() };

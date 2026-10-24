@@ -7,8 +7,9 @@
 //!
 //! It says what anyone in the city could know: the name, with the lozenge
 //! for a citizen; how long they've been here; where they live; what's said
-//! of them (standing in words, D8: "new in town" until S3.1) and their guild
-//! once there are guilds (S4.1). Then Trade, as T or a shift-click asks,
+//! of them (standing in words, D8) and their guild (S4.1). Your own card
+//! adds the number under your words, which nobody else sees, how the week
+//! moved it, and your last records (S3.1). Then Trade, as T or a shift-click asks,
 //! and Write, a letter to them (S1.5); under them a quiet Mute (S1.4):
 //! their words stop reaching you, on every device, and they aren't told.
 //!
@@ -16,8 +17,9 @@
 //! lantern, a citizen's pale one, and gold for your own, the colour of
 //! what's yours. The words are `capitol_core::card`'s.
 
-use capitol_core::card::{home_words, time_in_city, Hint, Shown};
-use capitol_core::protocol::rest::{Correspondent, PlayerCard};
+use capitol_core::card::{history_line, home_words, score_words, time_in_city, trend_words, when_words, Hint, Shown, Trend};
+use capitol_core::catalog::Catalog;
+use capitol_core::protocol::rest::{Correspondent, OwnStanding, PlayerCard};
 use egui::{Align2, Color32, Id, RichText};
 use uuid::Uuid;
 
@@ -30,6 +32,8 @@ const FADE: f32 = 0.18;
 const RISE: f32 = 10.0;
 /// The name's size, in the inscriptional capitals.
 const NAME: f32 = 19.0;
+/// How tall your history runs before it scrolls.
+const HISTORY: f32 = 168.0;
 
 /// What the card asks for this frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +56,8 @@ pub struct View<'a> {
     pub today: i64,
     /// Signed in, so Trade can ask. Offline it's a sample.
     pub online: bool,
+    /// For the goods your history names.
+    pub catalog: &'a Catalog,
 }
 
 /// What the card shows, kept so it can fade out after the session lets go.
@@ -182,8 +188,12 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
         ui.label(RichText::new(&card.standing).font(theme::body(size::BODY)).color(GOLD).italics());
     });
     if card.mine {
-        ui.add_space(6.0);
+        ui.add_space(4.0);
         ui.label(theme::dim("This is how the city sees you.").size(size::SMALL));
+        if let Some(own) = &card.own {
+            ui.add_space(6.0);
+            yours(ui, own, view);
+        }
         return None;
     }
     ui.add_space(8.0);
@@ -217,9 +227,43 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
     action
 }
 
+/// Your own standing, in a well: the number and its week, then your history.
+fn yours(ui: &mut egui::Ui, own: &OwnStanding, view: &View) {
+    theme::well().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(score_words(own.score)).font(theme::display(size::HEADING)).color(GOLD));
+            let (words, way) = trend_words(own.trend);
+            let colour = match way {
+                Trend::Up => theme::ENOUGH,
+                Trend::Down => theme::SHORT,
+                Trend::Steady => DIM,
+            };
+            ui.label(RichText::new(words).font(theme::body(size::SMALL)).color(colour));
+        });
+        ui.label(theme::dim("Only you see the number. Others hear the words.").size(size::SMALL).italics());
+        ui.add_space(4.0);
+        if own.history.is_empty() {
+            ui.label(theme::dim("Nothing on your record yet. Keep a claim, pay a wage or keep your tax paid.").size(size::SMALL));
+            return;
+        }
+        theme::scrolled(ui, "capitol_card_history", HISTORY, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            for record in &own.history {
+                let colour = if record.deed.is_breach() { theme::SHORT } else { TEXT };
+                ui.label(RichText::new(history_line(record, view.catalog)).font(theme::body(size::SMALL)).color(colour));
+                ui.label(theme::dim(when_words(record, view.today)).size(size::SMALL).italics());
+            }
+        });
+        if own.records > own.history.len() as i64 {
+            ui.label(theme::dim(format!("The last {} of {} records", own.history.len(), own.records)).size(size::SMALL));
+        }
+    });
+}
+
 /// `--card-sample [citizen|person|muted|mine]`: what a click on that one
 /// shows, the server's answer already in. `muted` is the person, muted.
-pub fn sample(which: &str) -> (capitol_core::card::Cards, i64) {
+pub fn sample(which: &str) -> (capitol_core::card::Cards, i64, Catalog) {
     use capitol_core::card::{Cards, Who};
     use capitol_core::protocol::rules;
     let today = rules::GAZETTE_FIRST_DAY + 30;
@@ -239,7 +283,23 @@ pub fn sample(which: &str) -> (capitol_core::card::Cards, i64) {
                 ..card
             }
         }
-        "mine" => card = PlayerCard { name: "You".into(), citizen: false, home: None, since: today, mine: true, ..card },
+        "mine" => {
+            // Your own, with the number and history under the words, the records rebased onto today
+            let mut mine: PlayerCard = capitol_core::serde_json::from_str(include_str!(
+                "../../../../../protocol/tests/fixtures/rest/my_card.json"
+            ))
+            .expect("the own card fixture parses");
+            if let Some(own) = mine.own.as_mut() {
+                let last = own.history.first().map(|r| r.at).unwrap_or_default();
+                let shift = capitol_core::chrono::DateTime::from_timestamp_millis(rules::day_start_ms(today) + 3_600_000)
+                    .unwrap_or_default()
+                    - last;
+                for record in &mut own.history {
+                    record.at += shift;
+                }
+            }
+            card = PlayerCard { name: "You".into(), since: today - 4, ..mine }
+        }
         _ => {}
     }
     let mut cards = Cards::default();
@@ -247,7 +307,7 @@ pub fn sample(which: &str) -> (capitol_core::card::Cards, i64) {
     cards.open(who.clone(), None);
     cards.sent(who);
     cards.answered(card);
-    (cards, today)
+    (cards, today, Catalog::fallback())
 }
 
 #[cfg(test)]
@@ -259,6 +319,7 @@ mod tests {
     /// and returns any action and where it was drawn.
     fn run(cards: &Cards, today: i64, width: f32, click_at: Option<egui::Pos2>) -> (Option<Action>, Option<egui::Rect>) {
         let ctx = theme::test_context();
+        let catalog = Catalog::fallback();
         let mut panel = CardPanel::default();
         let mut out = (None, None);
         for frame in 0..8 {
@@ -278,7 +339,7 @@ mod tests {
                 }
             }
             let _ = ctx.run(raw, |ctx| {
-                if let Some(a) = panel.show(ctx, &View { shown: cards.shown(), today, online: true }) {
+                if let Some(a) = panel.show(ctx, &View { shown: cards.shown(), today, online: true, catalog: &catalog }) {
                     out.0 = Some(a);
                 }
                 out.1 = panel.rect;
@@ -297,7 +358,7 @@ mod tests {
     #[test]
     fn every_sample_card_draws_top_right_on_a_small_screen() {
         for which in ["citizen", "person", "muted", "mine"] {
-            let (cards, today) = sample(which);
+            let (cards, today, _) = sample(which);
             let (action, rect) = run(&cards, today, 853.0, None);
             let rect = rect.expect("drawn");
             assert!((853.0 - rect.right() - 16.0).abs() < 1.0 && rect.width() < 300.0, "{which}: {rect:?}");
@@ -327,7 +388,7 @@ mod tests {
 
     #[test]
     fn someone_elses_card_asks_them_to_trade_writes_to_them_or_mutes_them() {
-        let (cards, today) = sample("person");
+        let (cards, today, _) = sample("person");
         let ada = Uuid::from_u128(0xada);
         let found = actions_on(&cards, today);
         assert!(found.contains(&Action::Trade(ada)) && found.contains(&Action::Mute(ada)), "{found:?}");
@@ -338,7 +399,7 @@ mod tests {
 
     #[test]
     fn a_muted_card_says_so_and_unmutes() {
-        let (mut cards, today) = sample("person");
+        let (mut cards, today, _) = sample("person");
         let ada = Uuid::from_u128(0xada);
         cards.set_muted(ada, true);
         let found = actions_on(&cards, today);
@@ -348,9 +409,25 @@ mod tests {
 
     #[test]
     fn your_own_card_has_no_mute() {
-        let (cards, today) = sample("mine");
+        let (cards, today, _) = sample("mine");
         let found = actions_on(&cards, today);
         assert!(found.iter().all(|a| matches!(a, Action::Close)), "{found:?}");
+    }
+
+    #[test]
+    fn your_own_card_carries_your_number_and_history_and_no_one_elses_does() {
+        for which in ["citizen", "person", "muted"] {
+            assert_eq!(sample_card(which).own, None, "{which}");
+        }
+        let mine = sample_card("mine");
+        let own = mine.own.as_ref().expect("yours has your number");
+        assert!(own.history.len() >= 5 && own.words == mine.standing);
+        // The history and the number make yours the taller card
+        let (cards, today, _) = sample("mine");
+        let tall = run(&cards, today, 1280.0, None).1.expect("drawn").height();
+        let (cards, today, _) = sample("person");
+        let short = run(&cards, today, 1280.0, None).1.expect("drawn").height();
+        assert!(tall > short + 60.0, "{tall} against {short}");
     }
 
     #[test]
