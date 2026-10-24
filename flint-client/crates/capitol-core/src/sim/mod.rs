@@ -9,6 +9,8 @@
 //! - [`run`]: the swarm itself, one thread a bot.
 //! - [`wage`]: work offered, what it pays and what a role's own trade earns
 //!   (Commons S2.8). Pure.
+//! - [`guild`]: guilds for a role's trade, what a member pays in, and when it
+//!   leaves (Commons S4.5). Pure.
 //!
 //! Every bot plays as a player would, with no help from the server: it walks,
 //! extracts, crafts at its own stations, buys a deed with fiber it deposited,
@@ -27,6 +29,7 @@
 //! every real one, so two game hours take twelve minutes. `/health` says the
 //! scale, and the report counts in game hours.
 
+pub mod guild;
 pub mod lot;
 pub mod plan;
 pub mod report;
@@ -578,6 +581,22 @@ impl Role {
         (self.does(&hire.job) && hire.left > 0 && hire.tooled).then(|| vec![Choice::TakeWork, Choice::Pass])
     }
 
+    /// The words a guild's name or charter names the role's trade by (S4.5),
+    /// in the singular: an ore gatherer's guild says "ore" or "miners". The
+    /// first is the trade's good, or for a merchant its name.
+    pub fn trade_words(&self) -> &'static [&'static str] {
+        match self {
+            Role::Gatherer(Gather::Fiber) => &["fiber", "fibre", "rope", "roper"],
+            Role::Gatherer(Gather::Wood) => &["log", "wood", "woodcutter", "forester", "lumber"],
+            Role::Gatherer(Gather::Ore) => &["ore", "miner", "mining"],
+            Role::Crafter(Craft::Planks) => &["plank", "sawyer", "timber", "carpenter"],
+            Role::Crafter(Craft::Ingots) => &["ingot", "smelter", "smelting", "foundry"],
+            Role::Crafter(Craft::Tools) => &["tool", "toolmaker", "handle", "smith"],
+            Role::Builder => &["brick", "builder", "mason", "bricklayer"],
+            Role::Merchant => &["merchant", "trader"],
+        }
+    }
+
     /// The role as a roster names it (C1.1): `gatherer-fiber`, `builder`.
     pub fn slug(&self) -> &'static str {
         match self {
@@ -621,7 +640,7 @@ pub fn merchant_items(seed: u64) -> Vec<&'static str> {
 
 /// The Strands a bot keeps back from goods and rent: [`FLOOR`] for its
 /// fees, and a deed's price until it has a plot.
-fn kept(holdings: &Holdings) -> i64 {
+pub(crate) fn kept(holdings: &Holdings) -> i64 {
     FLOOR + if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 }
 }
 

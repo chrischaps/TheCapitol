@@ -384,6 +384,24 @@ pub fn question(q: &Question) -> String {
                 "{employer} offers piece-rate work: {work}, at {rate} Strands a unit, up to {left} more, for the next {ends:.0} game hours. Working steadily it pays about {pays} Strands a game hour, paid for each unit as it's made, from escrow. {own} Take the work, or leave it?"
             )
         }
+        Question::Guild { guilds } => {
+            let each: Vec<String> = guilds
+                .iter()
+                .map(|g| {
+                    let why = match (g.invited, g.trade) {
+                        (true, _) => ", which has invited you",
+                        (false, true) => ", for your trade",
+                        (false, false) => "",
+                    };
+                    let charter = if g.charter.is_empty() { String::new() } else { format!(": \"{}\"", g.charter) };
+                    format!("{} [{}], {} members{why}{charter}", g.name, g.tag, g.members)
+                })
+                .collect();
+            format!(
+                "You're in no guild. A guild is a name over a hall, a shared purse, and its members' company; members pay its weekly dues between them, and you would pay in a little on its guild day. These would have you: {}. Ask to join one, or stay out of them for now?",
+                each.join("; ")
+            )
+        }
     }
 }
 
@@ -419,6 +437,8 @@ pub fn label(c: &Choice) -> String {
         Choice::Pass => "pass".into(),
         Choice::Post { item, .. } => format!("post for {item}"),
         Choice::TakeWork => "take the work".into(),
+        Choice::Apply { guild } => format!("join {guild}"),
+        Choice::Stay => "stay out".into(),
     }
 }
 
@@ -530,6 +550,8 @@ pub fn entry(c: &Choice) -> String {
             range(price)
         ),
         Choice::TakeWork => "Take the work: walk there and work the shift through your working hours, paid for each unit as it's made".into(),
+        Choice::Apply { guild } => format!("Ask to join {guild}, or accept its invitation: an officer takes you in"),
+        Choice::Stay => "Stay out of these guilds for today, and decline any invitation".into(),
     }
 }
 

@@ -1938,6 +1938,102 @@ impl Bot {
         }
     }
 
+    /// Our guild, our place in it, and the invitations and applications that
+    /// name us (Commons S4.1). From anywhere.
+    pub fn my_guild(&mut self) -> Result<capitol_protocol::rest::MyGuild, BotError> {
+        match self.call("reading our guild", RestRequest::MyGuild)? {
+            RestResponse::MyGuild(mine) => Ok(mine),
+            other => Err(unexpected("reading our guild", &other)),
+        }
+    }
+
+    /// Every guild, the largest first (S4.1).
+    pub fn guilds(&mut self) -> Result<Vec<capitol_protocol::rest::GuildSummary>, BotError> {
+        match self.call("reading the guilds", RestRequest::Guilds)? {
+            RestResponse::Guilds(guilds) => Ok(guilds.guilds),
+            other => Err(unexpected("reading the guilds", &other)),
+        }
+    }
+
+    /// A guild, its charter and its roster (S4.1).
+    pub fn guild(&mut self, guild_id: Uuid) -> Result<capitol_protocol::rest::GuildDetail, BotError> {
+        match self.call("reading a guild", RestRequest::Guild { guild_id })? {
+            RestResponse::Guild(guild) => Ok(guild),
+            other => Err(unexpected("reading a guild", &other)),
+        }
+    }
+
+    /// Founds a guild (S4.1): at the Exchange hall, with a subscription, for
+    /// [`FOUNDING_FEE`](capitol_protocol::rules::guild::FOUNDING_FEE).
+    pub fn found_guild(&mut self, found: capitol_protocol::rest::FoundGuild) -> Result<capitol_protocol::rest::MyGuild, BotError> {
+        match self.call("founding a guild", RestRequest::FoundGuild(found))? {
+            RestResponse::MyGuild(mine) => {
+                if let Some(g) = &mine.guild {
+                    self.log(format!("founded {} [{}]", g.name, g.tag));
+                }
+                Ok(mine)
+            }
+            other => Err(unexpected("founding a guild", &other)),
+        }
+    }
+
+    /// Invites `player_id` into `guild_id`, or accepts their application,
+    /// which takes them in (S4.1): an officer's or the leader's.
+    pub fn invite_to_guild(&mut self, guild_id: Uuid, player_id: Uuid) -> Result<capitol_protocol::rest::MyGuild, BotError> {
+        match self.call("inviting to a guild", RestRequest::InviteToGuild { guild_id, player_id })? {
+            RestResponse::MyGuild(mine) => Ok(mine),
+            other => Err(unexpected("inviting to a guild", &other)),
+        }
+    }
+
+    /// Asks to join `guild_id`, or accepts its invitation, which takes us in
+    /// (S4.1). From anywhere.
+    pub fn apply_to_guild(&mut self, guild_id: Uuid) -> Result<capitol_protocol::rest::MyGuild, BotError> {
+        match self.call("applying to a guild", RestRequest::ApplyToGuild { guild_id })? {
+            RestResponse::MyGuild(mine) => {
+                let joined = mine.guild.as_ref().is_some_and(|g| g.id == guild_id);
+                self.log(format!("{} guild {guild_id}", if joined { "joined" } else { "applied to" }));
+                Ok(mine)
+            }
+            other => Err(unexpected("applying to a guild", &other)),
+        }
+    }
+
+    /// Declines `guild_id`'s invitation, or withdraws our application (S4.1).
+    pub fn decline_guild(&mut self, guild_id: Uuid) -> Result<capitol_protocol::rest::MyGuild, BotError> {
+        let player_id = self.state.me().ok_or_else(|| BotError::Failed("not signed in".into()))?;
+        match self.call("declining a guild", RestRequest::DeclineGuildInvite { guild_id, player_id })? {
+            RestResponse::MyGuild(mine) => Ok(mine),
+            other => Err(unexpected("declining a guild", &other)),
+        }
+    }
+
+    /// Leaves `guild_id` (S4.1): free, and from anywhere.
+    pub fn leave_guild(&mut self, guild_id: Uuid) -> Result<capitol_protocol::rest::MyGuild, BotError> {
+        match self.call("leaving a guild", RestRequest::LeaveGuild { guild_id })? {
+            RestResponse::MyGuild(mine) => {
+                self.log(format!("left guild {guild_id}"));
+                Ok(mine)
+            }
+            other => Err(unexpected("leaving a guild", &other)),
+        }
+    }
+
+    /// Pays `strands` into `guild_id`'s treasury (S4.2). From anywhere.
+    pub fn deposit_to_guild(&mut self, guild_id: Uuid, strands: i64) -> Result<capitol_protocol::rest::MyGuild, BotError> {
+        let request = capitol_protocol::rest::GuildStrands {
+            strands,
+            note: String::new(),
+        };
+        match self.call("paying into a guild", RestRequest::DepositToGuild { guild_id, request })? {
+            RestResponse::MyGuild(mine) => {
+                self.log(format!("paid {strands} into guild {guild_id}"));
+                Ok(mine)
+            }
+            other => Err(unexpected("paying into a guild", &other)),
+        }
+    }
+
     /// Crafts `recipe_id` at `station_id` on a wage shift (S2.6): from what's
     /// in the station's box, whoever put it there, and into it, the
     /// employer's. Stand within the station's reach. Nothing comes to us but
@@ -2368,6 +2464,24 @@ impl Bot {
         }
     }
 
+    /// Says the phrasebook's line for `occasion` to our guild, `guild`
+    /// (`guild_id`), in its channel (S4.5), if the bot has a voice and its
+    /// window has room. A model's words come late and out loud, so a guild
+    /// line is always the phrasebook's
+    /// ([#511](https://github.com/chrischaps/TheCapitol/issues/511)). True if
+    /// it spoke.
+    pub fn speak_to_guild(&mut self, occasion: Occasion, guild: &str, guild_id: Uuid) -> bool {
+        let moment = Moment::with(guild, guild_id, self.state.server_time_ms());
+        let line = self.voice.as_mut().and_then(|v| v.from_the_book(occasion, &moment, Instant::now()));
+        match line {
+            Some(line) => {
+                self.say(Channel::Guild, line);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Someone besides the bot is near enough to hear a local line, and the
     /// bot plays its avatar here (a watcher can't talk locally).
     fn heard(&self) -> bool {
@@ -2554,6 +2668,11 @@ fn journaled(change: &StateEvent) -> bool {
             | StateEvent::WageTaken { .. }
             | StateEvent::WagePaid { .. }
             | StateEvent::WageShiftEnded { .. }
+            // Guilds (S4.5): a roster changed, an invitation, debt, the end
+            | StateEvent::GuildChanged { .. }
+            | StateEvent::GuildNotice { .. }
+            | StateEvent::GuildDues { .. }
+            | StateEvent::GuildDissolved { .. }
     ) || matches!(
         change,
         StateEvent::Market(m) if matches!(**m, MarketEvent::OrderPlaced(_) | MarketEvent::OrderFilled { .. })

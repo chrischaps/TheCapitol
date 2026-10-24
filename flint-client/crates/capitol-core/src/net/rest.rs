@@ -80,6 +80,8 @@ pub enum RestRequest {
     DeclineGuildInvite { guild_id: Uuid, player_id: Uuid },
     /// `POST /guilds/{id}/leave`
     LeaveGuild { guild_id: Uuid },
+    /// `POST /guilds/{id}/deposit`: Strands into its treasury (S4.2)
+    DepositToGuild { guild_id: Uuid, request: GuildStrands },
     /// `DELETE /guilds/{id}/members/{player}`: expel them
     ExpelFromGuild { guild_id: Uuid, player_id: Uuid },
     /// `PUT /guilds/{id}/members/{player}`: make them an officer, a member,
@@ -462,6 +464,7 @@ impl RestRequest {
             | ApplyToGuild { .. }
             | InviteToGuild { .. }
             | LeaveGuild { .. }
+            | DepositToGuild { .. }
             | Extract(_)
             | MoveItem(_)
             | SplitStack { .. }
@@ -587,6 +590,7 @@ impl RestRequest {
                 format!("/guilds/{guild_id}/invites/{player_id}")
             }
             LeaveGuild { guild_id } => format!("/guilds/{guild_id}/leave"),
+            DepositToGuild { guild_id, .. } => format!("/guilds/{guild_id}/deposit"),
             ExpelFromGuild { guild_id, player_id } | SetGuildRole { guild_id, player_id, .. } => {
                 format!("/guilds/{guild_id}/members/{player_id}")
             }
@@ -682,6 +686,7 @@ impl RestRequest {
             Letters(q) => req.query(q),
             FoundGuild(b) => req.json(b),
             SetGuildRole { request, .. } => req.json(request),
+            DepositToGuild { request, .. } => req.json(request),
             Extract(b) => req.json(b),
             MoveItem(b) => req.json(b),
             SplitStack { request, .. } => req.json(request),
@@ -756,6 +761,7 @@ impl RestRequest {
             | Q::InviteToGuild { .. }
             | Q::DeclineGuildInvite { .. }
             | Q::LeaveGuild { .. }
+            | Q::DepositToGuild { .. }
             | Q::ExpelFromGuild { .. }
             | Q::SetGuildRole { .. } => A::MyGuild(de(body)?),
             Q::Guilds => A::Guilds(de(body)?),
@@ -1070,6 +1076,11 @@ mod tests {
             (RestRequest::InviteToGuild { guild_id: id, player_id: id }, "POST", format!("/guilds/{id}/invites/{id}")),
             (RestRequest::DeclineGuildInvite { guild_id: id, player_id: id }, "DELETE", format!("/guilds/{id}/invites/{id}")),
             (RestRequest::LeaveGuild { guild_id: id }, "POST", format!("/guilds/{id}/leave")),
+            (
+                RestRequest::DepositToGuild { guild_id: id, request: GuildStrands { strands: 5, note: String::new() } },
+                "POST",
+                format!("/guilds/{id}/deposit"),
+            ),
             (RestRequest::ExpelFromGuild { guild_id: id, player_id: id }, "DELETE", format!("/guilds/{id}/members/{id}")),
             (
                 RestRequest::SetGuildRole {

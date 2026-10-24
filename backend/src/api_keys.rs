@@ -182,7 +182,12 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         // Working for a wage: a citizen takes the work and stops its shift
         // on its key (Commons S2.8). Offering work stays a person's
         | ("POST", "wages", [_, "take"])
-        | ("DELETE", "wages", [_, "shift"]) => Some(ApiKeyScope::Play),
+        | ("DELETE", "wages", [_, "shift"])
+        // Guilds: a citizen asks to join, declines an invitation and leaves
+        // on its key (Commons S4.5). Founding and running one stay a
+        // person's, and a subscriber's
+        | ("POST", "guilds", [_, "apply" | "leave"])
+        | ("DELETE", "guilds", [_, "invites", _]) => Some(ApiKeyScope::Play),
         ("POST", "exchange", ["deposit" | "withdraw"])
         | ("POST", "market", ["orders"] | ["box", "collect"])
         | ("DELETE", "market", ["orders", _])
@@ -193,6 +198,8 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         // The hall's board: a citizen posts, claims and delivers on its key
         // (Commons S2.5)
         | ("POST", "commissions", [] | [_, "deliver" | "claim"])
+        // Paying into its guild's treasury (S4.5)
+        | ("POST", "guilds", [_, "deposit"])
         | ("DELETE", "commissions", [_] | [_, "claim"]) => Some(ApiKeyScope::Trade),
         _ => None,
     }
@@ -419,6 +426,19 @@ mod tests {
         assert_eq!(rest(Method::DELETE, "/wages/abc/shift"), Some(Play));
         assert_eq!(rest(Method::POST, "/wages"), None);
         assert_eq!(rest(Method::DELETE, "/wages/abc"), None);
+        // A citizen joins, leaves and pays into a guild; it never founds or
+        // runs one (S4.5)
+        assert_eq!(rest(Method::GET, "/guilds"), Some(Read));
+        assert_eq!(rest(Method::GET, "/player/guild"), Some(Read));
+        assert_eq!(rest(Method::POST, "/guilds/abc/apply"), Some(Play));
+        assert_eq!(rest(Method::POST, "/guilds/abc/leave"), Some(Play));
+        assert_eq!(rest(Method::DELETE, "/guilds/abc/invites/def"), Some(Play));
+        assert_eq!(rest(Method::POST, "/guilds/abc/deposit"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/guilds"), None);
+        assert_eq!(rest(Method::POST, "/guilds/abc/invites/def"), None);
+        assert_eq!(rest(Method::POST, "/guilds/abc/withdraw"), None);
+        assert_eq!(rest(Method::PUT, "/guilds/abc/members/def"), None);
+        assert_eq!(rest(Method::DELETE, "/guilds/abc/members/def"), None);
     }
 
     #[test]

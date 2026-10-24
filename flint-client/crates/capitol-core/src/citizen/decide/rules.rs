@@ -60,6 +60,11 @@
 //! books, by its [`wage_margin`]: more for the thrifty, and for the bold,
 //! who'd sooner their own trade; less for the careful, since a wage is a
 //! sure thing. With nothing at the books to go by, the careful take it.
+//!
+//! Guilds (Commons S4.5, [`guild`]): a citizen asks to join a guild for its
+//! trade the more readily the more sociable, and one that invited it more
+//! readily still. A middling citizen joins its trade's guild; a reserved
+//! one stays out unless it's asked. Staying out is a steady [`PASS`].
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Temperament, Verdict};
 use crate::sim::{BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
@@ -209,6 +214,8 @@ impl Decider for RulesDecider {
                 // Passing is a steady PASS, on the board and a wage alike
                 Choice::Pass => (PASS, Decision::plain(i)),
                 Choice::TakeWork => wage(s, i),
+                Choice::Apply { guild: name } => guild(s, i, name),
+                Choice::Stay => (PASS, Decision::plain(i)),
                 Choice::Post { price, quantity, .. } => {
                     // At its bid's price and a premium, for what it would bid for
                     let bid = price.min as f64;
@@ -449,6 +456,26 @@ fn wage(s: &Situation, i: usize) -> (f64, Decision) {
         Some(_) => 0.2,
         None => 0.35 + 0.5 * (1.0 - t.risk as f64),
     };
+    (u, Decision::plain(i))
+}
+
+/// Asking to join the guild named `name` (S4.5): the company of its
+/// members appeals the more the more sociable the citizen, and an
+/// invitation more again. A guild for its trade, and a bigger one, a little
+/// more. A middling citizen asks to join its trade's guild, a reserved one
+/// waits to be asked, and the most reserved stay out even then.
+fn guild(s: &Situation, i: usize, name: &str) -> (f64, Decision) {
+    let Question::Guild { guilds } = &s.question else {
+        return (0.0, Decision::plain(i));
+    };
+    let Some(g) = guilds.iter().find(|g| g.name == name) else {
+        return (0.0, Decision::plain(i));
+    };
+    let t = &s.who.temperament;
+    let u = 0.15 + 0.7 * t.sociability as f64
+        + if g.invited { 0.25 } else { 0.0 }
+        + if g.trade { 0.05 } else { 0.0 }
+        + 0.01 * g.members.min(10) as f64;
     (u, Decision::plain(i))
 }
 
@@ -1056,6 +1083,48 @@ mod tests {
         assert_eq!(pick(100, None, with(|t| t.risk = 0.0)), 0);
         assert_eq!(pick(100, None, middling), 0);
         assert_eq!(pick(100, None, with(|t| t.risk = 1.0)), 1);
+    }
+
+    fn guilds(guilds: Vec<super::super::GuildSeen>, t: Temperament) -> Situation {
+        let mut menu: Vec<Choice> = guilds.iter().map(|g| Choice::Apply { guild: g.name.clone() }).collect();
+        menu.push(Choice::Stay);
+        situation(Question::Guild { guilds }, menu, t)
+    }
+
+    fn seen(name: &str, members: u32, invited: bool, trade: bool) -> super::super::GuildSeen {
+        super::super::GuildSeen {
+            name: name.into(),
+            tag: "ORE".into(),
+            members,
+            charter: "For the miners of the ranges.".into(),
+            invited,
+            trade,
+        }
+    }
+
+    #[test]
+    fn the_sociable_join_their_trades_guild_and_the_reserved_wait_to_be_asked() {
+        let pick = |g: Vec<_>, t| decide(&guilds(g, t)).0.pick;
+        let ore = || seen("The Ore Guild", 1, false, true);
+        let asked = || seen("The Ore Guild", 1, true, true);
+        // A middling citizen asks to join its trade's guild, clearly enough
+        assert_eq!(pick(vec![ore()], Temperament::default()), 0);
+        let (_, confidence) = decide(&guilds(vec![ore()], with(|t| t.sociability = 0.8)));
+        assert!(confidence >= super::super::RULES_THRESHOLD, "{confidence}");
+        // A reserved one stays out, unless it's invited
+        assert_eq!(pick(vec![ore()], with(|t| t.sociability = 0.2)), 1);
+        assert_eq!(pick(vec![asked()], with(|t| t.sociability = 0.2)), 0);
+        // The most reserved stay out even then
+        assert_eq!(pick(vec![asked()], with(|t| t.sociability = 0.0)), 1);
+        // Of two, the one that asked it, then the bigger
+        let both = vec![seen("Diggers", 9, false, true), seen("The Ore Guild", 1, true, true)];
+        assert_eq!(pick(both, Temperament::default()), 1);
+        let both = vec![seen("Diggers", 2, false, true), seen("The Ore Guild", 8, false, true)];
+        assert_eq!(pick(both, Temperament::default()), 1);
+        // A name not on the question fits nothing
+        let mut s = guilds(vec![ore()], Temperament::default());
+        s.menu[0] = Choice::Apply { guild: "Nobody's".into() };
+        assert_eq!(decide(&s).0.pick, 1);
     }
 
     #[test]

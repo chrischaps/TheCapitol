@@ -15,10 +15,12 @@
 //! (#295). A town's merchants (C1.6, [`merchant`]) earn a float and make a
 //! market. And every citizen walks the road in, the tutorial, and claims
 //! its deed at the end of it (#450, [`road_in`]). They answer and post
-//! commissions on the hall's board too (Commons S2.5, [`board`]), and take
-//! work for a wage in their working hours (S2.8, [`wages`]).
+//! commissions on the hall's board too (Commons S2.5, [`board`]), take
+//! work for a wage in their working hours (S2.8, [`wages`]), and join the
+//! guilds of their trades and pay into them (S4.5, [`guilds`]).
 
 mod board;
+mod guilds;
 mod idle;
 mod merchant;
 mod people;
@@ -257,6 +259,10 @@ pub(crate) fn live(
         if let Err(e) = citizen.end_shift("signed_off") {
             town.health(|h| h.failed(format!("stopping its shift: {e}")));
         }
+        // A guild day's deposit it hasn't made, before it goes (S4.5)
+        if let Err(e) = citizen.pay_in_on_leaving() {
+            town.health(|h| h.failed(format!("paying into its guild: {e}")));
+        }
     }
     // What the day's last steps did: its walk home, and its deed
     citizen.journal();
@@ -332,9 +338,10 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::Road { .. }, Some(Action::Road(_)))
         | (Choice::Claim { .. } | Choice::Deliver { .. }, Some(Action::Board(_)))
         | (Choice::TakeWork, Some(Action::Wage(_)))
+        | (Choice::Apply { .. }, Some(Action::Guild(_)))
         | (Choice::Post { .. }, Some(Action::Trade(Trade::Post { .. })))
         | (Choice::Rest | Choice::Hall, None) => true,
-        (Choice::Keep | Choice::Gather { .. } | Choice::Pass, _) => return Fate::Passed,
+        (Choice::Keep | Choice::Gather { .. } | Choice::Pass | Choice::Stay, _) => return Fate::Passed,
         _ => false,
     };
     match result {
@@ -403,6 +410,9 @@ struct SimBot {
     /// The work offered as it last read it, and its shift (S2.8). Only a
     /// citizen works for a wage.
     wages: wages::Wages,
+    /// Its guild as it last read it, and what it has done about guilds
+    /// (S4.5). Only a citizen joins one.
+    guilds: guilds::Guilds,
 }
 
 /// What a bot does next.
@@ -418,6 +428,9 @@ enum Action {
     Board(board::BoardAct),
     /// Work taken for a wage, or a unit of its shift (S2.8).
     Wage(wages::WageAct),
+    /// Joining a guild, paying in or leaving (S4.5), between its other
+    /// business: never a round of its own.
+    Guild(guilds::GuildAct),
 }
 
 impl SimBot {
@@ -457,6 +470,7 @@ impl SimBot {
             on_road: false,
             board: board::Board::new(),
             wages: wages::Wages::new(),
+            guilds: guilds::Guilds::new(),
         }
     }
 
@@ -537,6 +551,10 @@ impl SimBot {
             // What it owes on the board shapes its work (S2.5)
             self.read_board()?;
             self.read_wages()?;
+            // Its guild (S4.5): joined, paid into or left from where it
+            // stands, before the round's own business
+            self.read_guild()?;
+            self.mind_guild(phase, town)?;
             let holdings = self.holdings();
             // The round's decisions, whose outcomes are logged after it (C3.1)
             let mark = self.mind.mark();
@@ -593,6 +611,7 @@ impl SimBot {
                         Action::Road(lesson) => self.walk_road(*lesson),
                         Action::Board(act) => self.board_act(act),
                         Action::Wage(act) => self.wage_act(act),
+                        Action::Guild(act) => self.guild_act(act),
                     };
                     if errand_label.is_some() {
                         self.doing = errand_label;
@@ -695,6 +714,41 @@ impl SimBot {
             Action::Road(step) => format!("the road in: {}", road_in::does(*step)),
             Action::Board(act) => act.label(),
             Action::Wage(act) => act.label(),
+            Action::Guild(act) => act.label(),
+        }
+    }
+
+    /// Its guild's business, if any is due (S4.5): the decision to join is
+    /// settled against the call that came of it. A call that fails is on its
+    /// health line, and only a final error ends the round.
+    fn mind_guild(&mut self, phase: Option<Phase>, town: Option<&Tether>) -> Result<(), BotError> {
+        let mark = self.mind.mark();
+        let holdings = self.holdings();
+        let act = match self.choose_guild(&holdings, phase) {
+            Ok(act) => act,
+            Err(e) if e.is_final() => return Err(e),
+            Err(_) => None,
+        };
+        let Some(act) = act else {
+            self.settle(mark, None, &Ok(()));
+            return Ok(());
+        };
+        let result = self.guild_act(&act);
+        let label = act.label();
+        self.settle(mark, Some(&Action::Guild(act)), &result);
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_final() => Err(e),
+            Err(e) => {
+                self.entries.push(Entry::Failed {
+                    label: label.clone(),
+                    why: e.to_string(),
+                });
+                if let Some(town) = town {
+                    town.health(|h| h.failed(format!("{label}: {e}")));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1077,6 +1131,11 @@ impl SimBot {
                 StateEvent::ToolBroke { item_type, .. } => {
                     self.entries.push(Entry::ToolBroke { item: item_type, at })
                 }
+                // Guilds (S4.5): read again, and a guild it's out of
+                StateEvent::GuildChanged { .. }
+                | StateEvent::GuildNotice { .. }
+                | StateEvent::GuildDues { .. }
+                | StateEvent::GuildDissolved { .. } => self.guild_event(&change),
                 change => self.entries.extend(market_entry(change, at)),
             }
         }

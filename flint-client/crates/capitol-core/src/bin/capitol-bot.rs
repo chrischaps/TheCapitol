@@ -15,6 +15,8 @@
 //!                                               # a person posting on the hall's board (S2.5)
 //! capitol-bot --prefix boss --hire workbench:tool_handle:6:20 --hire sawbench:plank:2:30
 //!                                               # a person hiring at benches of their own (S2.8)
+//! capitol-bot --prefix founder --subscribe 30 --grant 1000 --guild "The Ore Guild:ORE:For all who dig ore."
+//!                                               # a person founding a guild, taking in who applies (S4.5)
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -27,7 +29,8 @@ use std::time::{Duration, Instant};
 use capitol_core::bot::{Account, Bot, BotError, TradeOffer};
 use capitol_core::market_maker::{self, Maker, MakerConfig};
 use capitol_core::net::NetConfig;
-use capitol_core::protocol::rest::{GrantItem, GrantRequest, OfferWages, PostCommission};
+use capitol_core::protocol::rest::{FoundGuild, GrantItem, GrantRequest, GuildDetail, MyGuild, OfferWages, PostCommission};
+use capitol_core::protocol::ws::GuildNoticeKind;
 use capitol_core::protocol::rules::market::grade_floor;
 use capitol_core::protocol::rules::wages::{OfferStatus, Work};
 use capitol_core::protocol::tutorial;
@@ -111,6 +114,12 @@ FLAGS:
                         each take, the work as it's made and each shift's
                         end, until every offer is done or --seconds is up.
                         Only a server with DEV_GRANTS=on gives the grant
+    --guild <name:tag:charter>
+                        Found a guild as a person (Commons S4.5), at the
+                        Exchange hall, for 500 Strands: it needs --subscribe
+                        and the Strands (--grant). Then stay, taking in each
+                        who applies, and printing who joins and leaves and
+                        each move of its treasury, until --seconds is up
     --grant <strands>   Top up with this many Strands first, as a grant. Only
                         a server with DEV_GRANTS=on gives one
     --sim <bots>        Run the economy sim: this many bots, each with a role
@@ -162,6 +171,7 @@ struct Options {
     tutorial: bool,
     commissions: Vec<PostCommission>,
     hires: Vec<Hire>,
+    guild: Option<FoundGuild>,
     grant: Option<i64>,
 }
 
@@ -204,6 +214,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         tutorial: false,
         commissions: Vec::new(),
         hires: Vec::new(),
+        guild: None,
         grant: None,
     };
     let mut maker = MakerConfig::default();
@@ -314,6 +325,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             "--tutorial" => options.tutorial = true,
             "--commission" => options.commissions.push(commission(&value()?)?),
             "--hire" => options.hires.push(hire(&value()?)?),
+            "--guild" => options.guild = Some(guild(&value()?)?),
             "--grant" => options.grant = Some(number(&flag, &value()?)?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
@@ -392,6 +404,24 @@ fn commission(value: &str) -> Result<PostCommission, String> {
     })
 }
 
+/// `The Ore Guild:ORE:For all who dig ore.`, as `--guild` takes it: the
+/// charter may hold colons of its own.
+fn guild(value: &str) -> Result<FoundGuild, String> {
+    let mut parts = value.splitn(3, ':');
+    let (Some(name), Some(tag)) = (parts.next(), parts.next()) else {
+        return Err(format!("--guild: {value:?} isn't name:tag:charter"));
+    };
+    let found = FoundGuild {
+        name: name.trim().into(),
+        tag: tag.trim().into(),
+        charter: parts.next().unwrap_or("").trim().into(),
+    };
+    if found.name.is_empty() || found.tag.is_empty() {
+        return Err(format!("--guild: {value:?} isn't name:tag:charter"));
+    }
+    Ok(found)
+}
+
 /// `workbench:tool_handle:6:20`, as `--hire` takes it.
 fn hire(value: &str) -> Result<Hire, String> {
     let [station, recipe, rate, cap] = value.split(':').collect::<Vec<_>>()[..] else {
@@ -443,6 +473,9 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     }
     if !options.hires.is_empty() {
         return hire_at(&mut bot, &options.hires, deadline);
+    }
+    if let Some(found) = &options.guild {
+        return run_a_guild(&mut bot, found, deadline);
     }
     // These loops can start over, so they carry on through a dropped
     // connection or a server restart (C0.6).
@@ -544,6 +577,76 @@ fn post_commissions(bot: &mut Bot, commissions: &[PostCommission], deadline: Opt
     }
     bot.log(if open == 0 { "every commission is filled or done".to_string() } else { format!("{open} still open") });
     Ok(())
+}
+
+/// Founds `found` at the Exchange hall, as a person would (S4.5), then
+/// takes in each who applies, printing who joins and leaves and each move
+/// of its treasury, until `deadline`.
+fn run_a_guild(bot: &mut Bot, found: &FoundGuild, deadline: Option<Instant>) -> Result<(), BotError> {
+    bot.go_to_exchange()?;
+    bot.record();
+    let mut mine = bot.found_guild(found.clone())?;
+    let guild_id = mine.guild.as_ref().map(|g| g.id).ok_or_else(|| BotError::Failed("founded no guild".into()))?;
+    let mut read_at = Instant::now();
+    while deadline.is_none_or(|d| Instant::now() < d) {
+        bot.idle(Duration::from_secs(1))?;
+        let mut read = read_at.elapsed() >= Duration::from_secs(30);
+        for change in bot.take_journal() {
+            match change {
+                StateEvent::GuildNotice {
+                    kind: GuildNoticeKind::Applied,
+                    who,
+                    name,
+                    citizen,
+                    ..
+                } => {
+                    bot.log(format!("{name}{} applied", mark(citizen)));
+                    match bot.invite_to_guild(guild_id, who) {
+                        Ok(_) => bot.log(format!("took {name} in")),
+                        Err(e) => bot.log(format!("couldn't take {name} in: {e}")),
+                    }
+                    read = true;
+                }
+                StateEvent::GuildChanged { .. } | StateEvent::GuildDues { .. } => read = true,
+                _ => {}
+            }
+        }
+        if read {
+            read_at = Instant::now();
+            let now = bot.my_guild()?;
+            for line in guild_moves(&mine, &now) {
+                bot.log(line);
+            }
+            mine = now;
+        }
+    }
+    let members = mine.guild.as_ref().map_or(0, |g| g.members.len());
+    let strands = mine.guild.as_ref().and_then(|g| g.treasury.as_ref()).map_or(0, |t| t.strands);
+    bot.log(format!("{members} members, {strands} Strands in the treasury"));
+    Ok(())
+}
+
+/// What changed in a guild between two reads: who joined and left, and its
+/// treasury.
+fn guild_moves(was: &MyGuild, now: &MyGuild) -> Vec<String> {
+    let (Some(was), Some(now)) = (&was.guild, &now.guild) else {
+        return Vec::new();
+    };
+    let ids = |g: &GuildDetail| g.members.iter().map(|m| m.id).collect::<HashSet<_>>();
+    let (before, after) = (ids(was), ids(now));
+    let mut out: Vec<String> = now
+        .members
+        .iter()
+        .filter(|m| !before.contains(&m.id))
+        .map(|m| format!("{}{} joined, {} members now", m.name, mark(m.citizen), now.members.len()))
+        .collect();
+    out.extend(was.members.iter().filter(|m| !after.contains(&m.id)).map(|m| format!("{} left", m.name)));
+    let strands = |g: &GuildDetail| g.treasury.as_ref().map_or(0, |t| t.strands);
+    let (a, b) = (strands(was), strands(now));
+    if a != b {
+        out.push(format!("treasury {b} Strands ({:+})", b - a));
+    }
+    out
 }
 
 /// Hires at stations of its own, as a person would (S2.8): a grant of the
@@ -790,6 +893,17 @@ mod tests {
         assert!(parse(args("--commission log:20")).is_err());
         assert!(parse(args("--commission log:20:9:Z")).is_err());
         assert!(parse(args("--commission log:many:9")).is_err());
+    }
+
+    #[test]
+    fn a_guild_is_name_tag_and_a_charter_that_may_hold_colons() {
+        let flags = ["--subscribe", "30", "--guild", "The Ore Guild:ORE:Ore: dug, carried, sold."].map(String::from);
+        let found = parse(flags).unwrap().unwrap().guild.unwrap();
+        assert_eq!((found.name.as_str(), found.tag.as_str()), ("The Ore Guild", "ORE"));
+        assert_eq!(found.charter, "Ore: dug, carried, sold.");
+        assert_eq!(parse(args("--guild Diggers:DIG")).unwrap().unwrap().guild.unwrap().charter, "");
+        assert!(parse(args("--guild Diggers")).is_err());
+        assert!(parse(args("--guild :DIG:ore")).is_err());
     }
 
     #[test]

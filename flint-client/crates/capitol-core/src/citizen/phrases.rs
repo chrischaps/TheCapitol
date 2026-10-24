@@ -50,10 +50,13 @@ pub enum Occasion {
     Hired,
     /// A shift it worked for someone ended (S2.8).
     ShiftDone,
+    /// It joined a guild (S4.5): said to the guild, in its channel, so it
+    /// names nobody.
+    Joined,
 }
 
 impl Occasion {
-    pub const ALL: [Occasion; 10] = [
+    pub const ALL: [Occasion; 11] = [
         Occasion::Greeting,
         Occasion::Opening,
         Occasion::Accepting,
@@ -64,6 +67,7 @@ impl Occasion {
         Occasion::Letter,
         Occasion::Hired,
         Occasion::ShiftDone,
+        Occasion::Joined,
     ];
 }
 
@@ -427,6 +431,23 @@ pub fn lines(occasion: Occasion, band: Band) -> &'static [&'static str] {
             "Done and paid. Lovely doing business!",
             "That's me off. Take care, {name}!",
         ],
+        (Joined, Reserved) => &["Glad to be in.", "Right. I'm in.", "Count me in, then.", "{hello}. New here.", "I'll pull my weight.", "In. Good."],
+        (Joined, Even) => &[
+            "{hello}, all. Glad to be one of you.",
+            "Thanks for having me. I'll pay my way.",
+            "Good to be in. Shout if you need a hand.",
+            "{hello}, everyone. Pleased to join.",
+            "Glad to be here. Let's do well by it.",
+            "I'm in. Good to know you all.",
+        ],
+        (Joined, Warm) => &[
+            "{hello}, everyone! So glad to be one of you!",
+            "Thank you for having me! I'll do my part.",
+            "What a lovely thing, a guild. Hello, all!",
+            "I'm in! Anything you need, just ask.",
+            "{hello}, friends! Proud to be with you.",
+            "Here I am! Looking forward to it, all of you.",
+        ],
     }
 }
 
@@ -568,6 +589,18 @@ impl Voice {
             words,
         });
         true
+    }
+
+    /// The phrasebook's line for `occasion` now, if the window has room for
+    /// it: never a model's, for what's said where a model's late words
+    /// couldn't follow, such as a guild's channel (S4.5).
+    pub fn from_the_book(&mut self, occasion: Occasion, moment: &Moment, now: Instant) -> Option<String> {
+        if !self.room(now) {
+            return None;
+        }
+        self.spoken.push_back(now);
+        self.count(PHRASEBOOK);
+        Some(self.book.say(occasion, moment))
     }
 
     /// The lines whose moment has come, as far as the window has room. One
@@ -834,6 +867,19 @@ mod tests {
             assert!(voice.due(t + Duration::from_millis(1999)).is_empty());
             assert_eq!(voice.due(t + Duration::from_secs(5)).len(), 1);
         }
+    }
+
+    #[test]
+    fn a_guild_hears_the_phrasebook_at_once_within_the_window() {
+        let mut voice = Voice::phrasebook(&temper(0.5), 5);
+        let now = Instant::now();
+        let guild = moment("The Ore Guild", Uuid::from_u128(7), NOON);
+        let line = voice.from_the_book(Occasion::Joined, &guild, now).expect("room for it");
+        assert!(lines(Occasion::Joined, Band::Even).iter().any(|l| fill(l, &guild) == line), "{line}");
+        // Nothing waits for later, and it counts against the window
+        assert!(!voice.has_due());
+        let said = (0..LINES_PER_WINDOW * 2).filter(|_| voice.from_the_book(Occasion::Joined, &guild, now).is_some()).count();
+        assert_eq!(said, LINES_PER_WINDOW - 1);
     }
 
     #[test]

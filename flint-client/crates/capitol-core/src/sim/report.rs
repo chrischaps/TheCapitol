@@ -86,6 +86,17 @@ pub enum Entry {
     /// A shift of its ended, `why` in a word (`cap`, `day`, `employer`),
     /// with `made` units made on it.
     ShiftEnded { why: String, made: i32 },
+    /// It asked to join `guild`, or accepted its invitation (Commons S4.5).
+    Applied { guild: String },
+    /// It's in `guild` now.
+    Joined { guild: String },
+    /// It paid `strands` into its guild's treasury on a guild day.
+    PaidIn { guild: String, strands: i64 },
+    /// It's out of `guild`, `why` in a word (`debt`, `expelled`,
+    /// `dissolved`).
+    LeftGuild { guild: String, why: String },
+    /// Its share of `guild`'s treasury as the guild closed.
+    GuildShare { guild: String, strands: i64 },
 }
 
 /// One bot's run, as the report needs it.
@@ -128,6 +139,8 @@ impl BotRun {
                 Entry::Delivered { paid, .. } => expected += paid,
                 Entry::Expired { refunded, .. } => expected += refunded,
                 Entry::Earned { paid, .. } => expected += paid,
+                Entry::PaidIn { strands, .. } => expected -= strands,
+                Entry::GuildShare { strands, .. } => expected += strands,
                 _ => {}
             }
         }
@@ -269,6 +282,43 @@ impl Wages {
     }
 }
 
+/// What citizens did in the guilds (Commons S4.5), every bot together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuildLife {
+    /// Applications made, invitations accepted among them
+    pub applied: usize,
+    /// Members gained, by guild
+    pub joined: BTreeMap<String, usize>,
+    /// Deposits made on guild days, and the Strands in them
+    pub deposits: usize,
+    pub paid_in: i64,
+    /// Guilds left, by why
+    pub left: BTreeMap<String, usize>,
+    /// Shares of closing treasuries
+    pub shares: i64,
+}
+
+impl GuildLife {
+    /// Whether any citizen had anything to do with a guild.
+    pub fn busy(&self) -> bool {
+        *self != GuildLife::default()
+    }
+
+    fn count(&mut self, entry: &Entry) {
+        match entry {
+            Entry::Applied { .. } => self.applied += 1,
+            Entry::Joined { guild } => *self.joined.entry(guild.clone()).or_insert(0) += 1,
+            Entry::PaidIn { strands, .. } => {
+                self.deposits += 1;
+                self.paid_in += strands;
+            }
+            Entry::LeftGuild { why, .. } => *self.left.entry(why.clone()).or_insert(0) += 1,
+            Entry::GuildShare { strands, .. } => self.shares += strands,
+            _ => {}
+        }
+    }
+}
+
 /// Time spent under one step label.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeLine {
@@ -309,6 +359,8 @@ pub struct Report {
     pub court: Court,
     /// What citizens earned working for others (S2.8)
     pub wages: Wages,
+    /// What citizens did in the guilds (S4.5)
+    pub guilds: GuildLife,
 }
 
 /// What a market maker's [`BotRun::role`] says.
@@ -331,11 +383,13 @@ impl Report {
         let mut fees = 0;
         let mut court = Court::default();
         let mut wages = Wages::default();
+        let mut guilds = GuildLife::default();
         for run in runs {
             *roles.entry(run.role.clone()).or_insert(0) += 1;
             for entry in &run.entries {
                 court.count(entry);
                 wages.count(entry);
+                guilds.count(entry);
                 match entry {
                     Entry::Made {
                         item,
@@ -401,6 +455,12 @@ impl Report {
                     | Entry::Lapsed { .. } => {}
                     // Counted by the wages
                     Entry::TookWork { .. } | Entry::Earned { .. } | Entry::ShiftEnded { .. } => {}
+                    // Counted by the guilds
+                    Entry::Applied { .. }
+                    | Entry::Joined { .. }
+                    | Entry::PaidIn { .. }
+                    | Entry::LeftGuild { .. }
+                    | Entry::GuildShare { .. } => {}
                 }
             }
         }
@@ -479,6 +539,7 @@ impl Report {
                 .reduce(|a, b| (a.0 + b.0, a.1 + b.1)),
             court,
             wages,
+            guilds,
         }
     }
 
@@ -695,6 +756,24 @@ impl Report {
                 w.shifts, w.units, w.earned
             );
         }
+        if self.guilds.busy() {
+            let g = &self.guilds;
+            let joined: Vec<String> = g.joined.iter().map(|(name, n)| format!("{name} {n}")).collect();
+            let joined = if joined.is_empty() { "none".to_string() } else { joined.join(", ") };
+            let left: Vec<String> = g.left.iter().map(|(why, n)| format!("{n} {}", left_words(why))).collect();
+            let left = if left.is_empty() { "none".to_string() } else { left.join(", ") };
+            let shares = if g.shares > 0 {
+                format!("; {} Strands back in shares as guilds closed", g.shares)
+            } else {
+                String::new()
+            };
+            let _ = writeln!(md, "\n## Guilds\n");
+            let _ = writeln!(
+                md,
+                "- Applications: {}; members gained: {joined}; left: {left}\n- Paid in on guild days: {} deposits, {} Strands{shares}",
+                g.applied, g.deposits, g.paid_in
+            );
+        }
         let _ = writeln!(md, "\n## Where the time went\n");
         let _ = writeln!(md, "| Step | Bot-hours | Steps | Failed |");
         let _ = writeln!(md, "|---|---:|---:|---:|");
@@ -801,6 +880,15 @@ fn ended_words(why: &str) -> String {
         "employer" => "by the employer".into(),
         "failed" => "when the work failed".into(),
         "worker" => "by the worker".into(),
+        why => why.replace('_', " "),
+    }
+}
+
+/// Why a citizen left a guild, as the guilds section says it.
+fn left_words(why: &str) -> String {
+    match why {
+        "debt" => "over its debt".into(),
+        "dissolved" => "as it was dissolved".into(),
         why => why.replace('_', " "),
     }
 }
@@ -1121,5 +1209,45 @@ mod tests {
         assert!(md.contains("Shifts taken: 2; ended: 1 at the cap, 1 at the end of a day"), "{md}");
         assert!(md.contains("Units made for employers: 6, paid 12 Strands"), "{md}");
         assert!(!Report::build(&[], 1.0, 1.0, 60.0).sections().contains("## Wages"));
+    }
+
+    #[test]
+    fn guild_life_is_counted_and_paying_in_is_no_tax() {
+        let member = BotRun {
+            name: "Percy".into(),
+            role: "gatherer (ore)".into(),
+            entries: vec![
+                Entry::Applied {
+                    guild: "The Ore Guild".into(),
+                },
+                Entry::Joined {
+                    guild: "The Ore Guild".into(),
+                },
+                Entry::PaidIn {
+                    guild: "The Ore Guild".into(),
+                    strands: 12,
+                },
+                Entry::LeftGuild {
+                    guild: "The Ore Guild".into(),
+                    why: "dissolved".into(),
+                },
+                Entry::GuildShare {
+                    guild: "The Ore Guild".into(),
+                    strands: 4,
+                },
+            ],
+            strands_start: 100,
+            strands_end: 92,
+            error: None,
+        };
+        assert_eq!(member.tax(), 0);
+        let report = Report::build(&[member], 1.0, 1.0, 60.0);
+        let g = &report.guilds;
+        assert_eq!((g.applied, g.deposits, g.paid_in, g.shares), (1, 1, 12, 4));
+        let md = report.sections();
+        assert!(md.contains("## Guilds"), "{md}");
+        assert!(md.contains("Applications: 1; members gained: The Ore Guild 1; left: 1 as it was dissolved"), "{md}");
+        assert!(md.contains("Paid in on guild days: 1 deposits, 12 Strands; 4 Strands back in shares"), "{md}");
+        assert!(!Report::build(&[], 1.0, 1.0, 60.0).sections().contains("## Guilds"));
     }
 }

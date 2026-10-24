@@ -2,7 +2,8 @@
 //! buy, bid, stall and free-time questions over a spread of holdings, books
 //! and temperaments, and the hall's board's since S2.5: a commission for
 //! what it makes, and a post for what it needs. Since S2.8, work offered
-//! at its trade, at a spread of rates. A fresh live town asks only work and bank questions
+//! at its trade, at a spread of rates, and since S4.5 a guild for its trade
+//! to join, some of them having invited it. A fresh live town asks only work and bank questions
 //! (#294), so this is what a new layer is measured on until the logs hold
 //! the rest. `capitol-town corpus` writes it as a rules-only citizen's log.
 
@@ -14,7 +15,7 @@ use capitol_protocol::rules::wages::Work;
 use uuid::Uuid;
 
 use super::log::{self, Fate, Log};
-use super::{Cascade, Choice, Held, Mind, Place, Question, Quote, Situation, Temperament, When, Who};
+use super::{Cascade, Choice, GuildSeen, Held, Mind, Place, Question, Quote, Situation, Temperament, When, Who};
 use crate::catalog::Catalog;
 use crate::sim::plan::Holdings;
 use crate::sim::wage::{self, Hire};
@@ -162,9 +163,40 @@ fn round(r: u32) -> Vec<Situation> {
                 };
                 out.push(s(question, menu, 1));
             }
+            // A guild for its trade (S4.5): some invited it, and some have
+            // a rival for its trade too
+            let word = role.trade_words()[0];
+            let mut guilds = vec![GuildSeen {
+                name: format!("The {} Guild", capitalised(word)),
+                tag: word.chars().take(4).collect::<String>().to_uppercase(),
+                members: 1 + n % 6,
+                charter: format!("For everyone in the {word} trade."),
+                invited: n.is_multiple_of(3),
+                trade: true,
+            }];
+            if n % 4 == 1 {
+                guilds.push(GuildSeen {
+                    name: format!("{}s Together", capitalised(word)),
+                    tag: "TOG".into(),
+                    members: 3,
+                    charter: String::new(),
+                    invited: false,
+                    trade: true,
+                });
+            }
+            let mut menu: Vec<Choice> = guilds.iter().map(|g| Choice::Apply { guild: g.name.clone() }).collect();
+            menu.push(Choice::Stay);
+            let stay = menu.len() - 1;
+            out.push(s(Question::Guild { guilds }, menu, stay));
         }
     }
     out
+}
+
+/// `word` with a capital: `Ore`.
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
 }
 
 /// Work at `role`'s own trade, as an employer would offer it: a craft at

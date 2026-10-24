@@ -251,6 +251,26 @@ pub enum Question {
         pays: i64,
         earns: Option<i64>,
     },
+    /// Whether to ask to join one of `guilds`, or stay out of them all
+    /// (Commons S4.5). Asked once a game day of a citizen in no guild, and
+    /// at once when a guild invites it.
+    Guild { guilds: Vec<GuildSeen> },
+}
+
+/// A guild as a citizen sees it when it asks whether to join (S4.5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuildSeen {
+    pub name: String,
+    pub tag: String,
+    pub members: u32,
+    /// The start of its charter ([`guild::shown`](crate::sim::guild::shown))
+    pub charter: String,
+    /// It invited the citizen: applying takes it in
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invited: bool,
+    /// Its name or charter names the citizen's trade
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trade: bool,
 }
 
 impl Question {
@@ -268,6 +288,7 @@ impl Question {
             Question::Road { .. } => "road".into(),
             Question::Commission { id, .. } => format!("commission {id}"),
             Question::Wage { id, .. } => format!("wage {id}"),
+            Question::Guild { .. } => "guild".into(),
         }
     }
 }
@@ -417,6 +438,12 @@ pub enum Choice {
     /// each unit as it's made, until the cap, the end of its day, or the
     /// employer stops it. On the menu beside [`Pass`](Self::Pass).
     TakeWork,
+    /// Ask to join the guild named `guild` (S4.5), or accept its invitation:
+    /// an officer or its leader takes it in, for a Strand from its treasury.
+    Apply { guild: String },
+    /// Stay out of the guilds on the menu, for today, and decline any that
+    /// invited it.
+    Stay,
 }
 
 impl Choice {
