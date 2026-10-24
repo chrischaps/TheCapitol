@@ -30,6 +30,14 @@ pub struct Shared {
     /// T1.3), radians round the point it looks at, 0 standing it south:
     /// what Direct mode's keys walk against. `None` until the rig says.
     pub view_yaw: Arc<Mutex<Option<f64>>>,
+    /// Something wants the cursor free (`cap_wants_cursor`, T1.4): a panel,
+    /// the login, Alt held, a station being placed, or Escape having let it
+    /// go. The extension sets it at the end of `ui`; in Direct the camera
+    /// rig captures the cursor whenever it's false.
+    pub wants_cursor: Arc<AtomicBool>,
+    /// Escape let the cursor go with no panel open (T1.4). A click on the
+    /// world takes it back (`cap_take_cursor`), and so does a panel closing.
+    pub cursor_let_go: Arc<AtomicBool>,
     /// Where you stand in world metres (P4.2), for the camera to follow.
     /// `None` offline, and until the server has said where you are.
     pub follow: Arc<Mutex<Option<[f32; 3]>>>,
@@ -648,6 +656,18 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             *v = yaw.is_finite().then_some(yaw);
         }
     });
+    // `cap_wants_cursor() -> bool`: something wants the cursor free (T1.4):
+    // a panel, the login, Alt, a station being placed, or Escape. In Direct
+    // the camera rig captures it whenever nothing does.
+    let wants = shared.wants_cursor.clone();
+    engine.register_fn("cap_wants_cursor", move || wants.load(Ordering::Relaxed));
+    // `cap_cursor_let_go() -> bool`: Escape let the cursor go with no panel
+    // open, so a click on the world takes it back rather than acting, with
+    // `cap_take_cursor()` (T1.4).
+    let let_go = shared.cursor_let_go.clone();
+    engine.register_fn("cap_cursor_let_go", move || let_go.load(Ordering::Relaxed));
+    let let_go = shared.cursor_let_go.clone();
+    engine.register_fn("cap_take_cursor", move || let_go.store(false, Ordering::Relaxed));
     // `cap_at_login() -> bool`: the login form is up, so the camera rig
     // circles the tower instead of taking input.
     let at_login = shared.at_login.clone();

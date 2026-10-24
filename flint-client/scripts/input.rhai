@@ -18,6 +18,13 @@
 //   6. anywhere else: walk there                    (P4.3, here)
 //      but not over the shoulder, where WASD walks  (T1.3)
 //
+// Over the shoulder (T1.4) the cursor is captured while nothing wants it
+// (camera.rhai), and then it isn't a pointer: there are no hover rings and
+// a click doesn't go down the list above. It's interact, which acts on the
+// thing in front of you (T1.5, #323). With the cursor freed (a panel, Alt)
+// clicks go down the list as in Click mode, but for the walk. Once Esc has
+// let the cursor go, a click on the world only takes it back.
+//
 // Each is a function below that gets the click (#{ x, z } in world
 // metres, `shift`, `alt`) and returns true when it took it.
 //
@@ -221,6 +228,10 @@ fn on_update() {
         if h == () { cap_place_off(); } else { cap_place_hover(h[0], h[1]); }
     }
     if !is_mouse_just_pressed(0) { return; }
+    // Over the shoulder (T1.4): a captured click is interact, which is
+    // T1.5's (#323); a click after Esc let the cursor go takes it back
+    if is_cursor_captured() { return; }
+    if cap_cursor_let_go() { cap_take_cursor(); return; }
 
     // The ground under the cursor, or () over the sky.
     let g = pick();
@@ -472,7 +483,9 @@ fn on_draw_ui() {
     }
     // Picked here rather than in on_update: on_draw_ui sees the camera this
     // frame renders with, so the reticle can't trail the ground under it.
-    let hover = pick();
+    // A captured cursor (T1.4) hovers nothing: it's a view, not a pointer.
+    let aiming = is_cursor_captured();
+    let hover = if aiming { () } else { pick() };
     let placing = cap_placing();
     if placing != () { draw_placement(placing, now); }
     // While placing, a station under the cursor is in the ghost's way, not
@@ -532,7 +545,7 @@ fn on_draw_ui() {
     for s in splashes { draw_splash(s, now); }
 
     let hall = cap_hall();
-    let free = hall != () && placing == () && over == ();
+    let free = hall != () && placing == () && over == () && !aiming;
     let over_board = free && board_under_cursor();
     let over_office = free && !over_board && office_under_cursor();
     let over_hall = free && !over_board && !over_office && hall_under_cursor();
@@ -542,7 +555,7 @@ fn on_draw_ui() {
         draw_office(hall, over_office, now);
     }
     let bazaar = cap_bazaar();
-    let over_stall = if bazaar != () && placing == () && over == () && !over_board && !over_office && !over_hall {
+    let over_stall = if bazaar != () && placing == () && over == () && !aiming && !over_board && !over_office && !over_hall {
         stall_under_cursor()
     } else { () };
     if bazaar != () { draw_bazaar(bazaar, over_stall, now); }

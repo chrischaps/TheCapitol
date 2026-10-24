@@ -295,6 +295,8 @@ pub struct CapitolExtension {
     controls_pinned: Option<ControlMode>,
     /// The mode last applied, to tell a switch. `None` before the first frame.
     control_mode: Option<ControlMode>,
+    /// Alt is held this frame: in Direct it frees the cursor (T1.4).
+    alt_held: bool,
 }
 
 impl CapitolExtension {
@@ -394,6 +396,7 @@ impl CapitolExtension {
             graphics: None,
             controls_pinned: None,
             control_mode: None,
+            alt_held: false,
         }
     }
 
@@ -1292,8 +1295,12 @@ impl CapitolExtension {
     /// settle.
     fn apply_settings(&mut self, ctx: &mut ExtensionCtx, now: Instant) {
         let mode = self.control_mode();
-        if self.control_mode.replace(mode).is_some_and(|was| was != mode) {
+        let was = self.control_mode.replace(mode);
+        if was.is_some_and(|was| was != mode) {
             self.switch_controls(ctx, mode, now);
+        }
+        if was != Some(mode) && mode == ControlMode::Direct {
+            self.enter_direct();
         }
         let settings = &self.settings.settings;
         self.sound.set_volumes(settings.audio);
@@ -1323,17 +1330,131 @@ impl CapitolExtension {
     /// the new mode.
     fn switch_controls(&mut self, ctx: &mut ExtensionCtx, mode: ControlMode, now: Instant) {
         tracing::info!("controls: {}", mode.name());
+        // Esc's letting go is Direct's alone (T1.4)
+        self.shared.cursor_let_go.store(false, Ordering::Relaxed);
         if let Some(session) = &mut self.session {
             session.stop_walk(now);
         }
         let body = match mode {
             ControlMode::Click => "Click the ground to walk there. F8 to switch",
-            ControlMode::Direct => "WASD walks the way you face; click things to use them. F8 to switch",
+            ControlMode::Direct => "WASD walks the way you face and the mouse looks; Alt or Esc frees the cursor. F8 to switch",
         };
         let mut data = toml::Table::new();
         data.insert("title".into(), mode.label().into());
         data.insert("body".into(), body.into());
         ctx.fire_event("controls_note", data);
+    }
+
+    /// Into Direct, the first frame too (T1.4): the inventory and crafting
+    /// panels, open from the start in Click, close, or an open panel would
+    /// keep the cursor free from the first frame. I and C bring them back.
+    fn enter_direct(&mut self) {
+        self.inventory.open = false;
+        self.crafting.open = false;
+    }
+
+    /// A panel is up that takes clicks (T1.4): those that keep a rect are
+    /// read by it, as drawn this frame.
+    fn panel_open(&self) -> bool {
+        let rects = [
+            self.inventory.rect,
+            self.crafting.rect,
+            self.exchange.rect,
+            self.market.rect,
+            self.impound.rect,
+            self.shop.rect,
+            self.station.rect,
+            self.card.rect,
+            self.plot_panel.rect,
+            self.trade.rect,
+        ];
+        rects.iter().any(Option::is_some)
+            || self.chat.open
+            || self.mail.open
+            || self.gazette.open
+            || self.guild.open
+            || self.settings_panel.open
+            || self.shortcuts.open
+            || self.deeds.is_open()
+            || self.zone_card.is_open()
+    }
+
+    /// Whether something wants the cursor free (T1.4), for `Shared`: a
+    /// panel, the login, the "Playing on another device" banner, a station
+    /// being placed, Alt, or Escape having let it go. A panel open clears
+    /// Escape's, so closing it captures the cursor again.
+    ///
+    /// The road in's card doesn't count: it's up for the whole tour, and
+    /// Direct would never capture. Alt frees the cursor for its buttons.
+    fn wants_cursor(&self) -> bool {
+        let let_go = &self.shared.cursor_let_go;
+        let panel = self.panel_open();
+        if panel {
+            let_go.store(false, Ordering::Relaxed);
+        }
+        let session = self.session.as_ref();
+        let elsewhere = session.is_some_and(|s| s.state().presence().is_some_and(|p| !p.yours));
+        let placing = session.is_some_and(|s| s.placing().is_some());
+        panel || self.at_login() || elsewhere || placing || self.alt_held || let_go.load(Ordering::Relaxed)
+    }
+
+    /// Esc over the shoulder (T1.4): closes the panel on top, by a fixed
+    /// order from the ones that open over others down to the inventory.
+    /// The trade window keeps its own buttons, so Esc never walks out of a
+    /// deal. Returns whether it closed one.
+    fn close_top_panel(&mut self) -> bool {
+        if let Some(session) = &mut self.session {
+            if session.cards().is_open() {
+                session.close_card();
+                return true;
+            }
+        }
+        if self.zone_card.is_open() {
+            self.zone_card.close();
+            return true;
+        }
+        if self.deeds.is_open() {
+            self.deeds.close();
+            return true;
+        }
+        for open in [
+            &mut self.settings_panel.open,
+            &mut self.mail.open,
+            &mut self.guild.open,
+            &mut self.gazette.open,
+        ] {
+            if *open {
+                *open = false;
+                return true;
+            }
+        }
+        if self.shop.rect.is_some() {
+            self.shop.close();
+            return true;
+        }
+        for open in [&mut self.market.open, &mut self.exchange.open, &mut self.impound.open] {
+            if *open {
+                *open = false;
+                return true;
+            }
+        }
+        if let Some(session) = &mut self.session {
+            if session.state().open_station().is_some() {
+                session.close_station();
+                return true;
+            }
+            if session.state().picked_plot().is_some() {
+                session.close_plot();
+                return true;
+            }
+        }
+        for open in [&mut self.crafting.open, &mut self.inventory.open] {
+            if *open {
+                *open = false;
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -1416,6 +1537,7 @@ impl PlayerExtension for CapitolExtension {
             }
         }
         self.apply_settings(ctx, now);
+        self.alt_held = ctx.input.is_action_pressed("with_alt");
         // Taken in `ui`, where the panel knows its recipe.
         self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
         self.chat_key |= !self.at_login() && ctx.input.is_action_just_pressed("chat");
@@ -2030,6 +2152,14 @@ impl PlayerExtension for CapitolExtension {
         if self.chat.open {
             if key.pressed() {
                 self.chat.close();
+            }
+            return true;
+        }
+        // Over the shoulder (T1.4) Esc closes the top panel, or with none
+        // open lets the cursor go, and never quits
+        if self.control_mode() == ControlMode::Direct {
+            if key.pressed() && !self.close_top_panel() {
+                self.shared.cursor_let_go.store(true, Ordering::Relaxed);
             }
             return true;
         }
@@ -3045,6 +3175,10 @@ impl PlayerExtension for CapitolExtension {
         if let Some(action) = action {
             self.act(action);
         }
+        // Over the shoulder the camera rig captures the cursor whenever
+        // nothing here wants it (T1.4)
+        let wants = self.wants_cursor();
+        self.shared.wants_cursor.store(wants, Ordering::Relaxed);
         // Every widget clicked, and everything let go after a drag (a slot
         // filled), makes its sound next frame.
         let (clicked, dropped) =
@@ -3901,5 +4035,68 @@ fn attach_each<'a>(ctx: &mut ExtensionCtx, names: impl Iterator<Item = &'a Strin
         if let Err(e) = attached {
             tracing::warn!("world: no entity for {name}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    //! T1.4: over the shoulder Esc closes the top panel, or lets the cursor
+    //! go, and never reaches the engine's quit; in Click it does as before.
+    use super::*;
+    use std::path::Path;
+    use winit::keyboard::ModifiersState;
+
+    fn extension(mode: ControlMode) -> CapitolExtension {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let terrain = TerrainSource::offline(&path).expect("fixture");
+        let mut ext = CapitolExtension::new(Shared::default(), terrain, None);
+        ext.controls_pinned = Some(mode);
+        ext
+    }
+
+    fn escape(ext: &mut CapitolExtension) -> bool {
+        let key = KeyInput {
+            key: KeyCode::Escape,
+            state: ElementState::Pressed,
+            repeat: false,
+            character: None,
+            modifiers: ModifiersState::empty(),
+            scripted: true,
+        };
+        ext.on_key(&key)
+    }
+
+    #[test]
+    fn escape_closes_the_top_panel_then_lets_the_cursor_go_and_never_quits() {
+        let mut ext = extension(ControlMode::Direct);
+        let let_go = ext.shared.cursor_let_go.clone();
+        ext.enter_direct();
+        assert!(!ext.inventory.open && !ext.crafting.open, "Direct starts with the view clear");
+        ext.inventory.open = true;
+        ext.mail.open = true;
+        assert!(escape(&mut ext), "kept from the engine");
+        assert!(!ext.mail.open && ext.inventory.open, "the letters, over the inventory, first");
+        assert!(escape(&mut ext));
+        assert!(!ext.inventory.open);
+        assert!(!let_go.load(Ordering::Relaxed), "closing a panel isn't letting go");
+        assert!(escape(&mut ext), "with no panel open, still kept from the engine");
+        assert!(let_go.load(Ordering::Relaxed), "and the cursor is let go");
+        assert!(ext.wants_cursor(), "so it stays free");
+        // A panel opening clears it, so closing that captures again
+        ext.inventory.rect = Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)));
+        assert!(ext.wants_cursor());
+        assert!(!let_go.load(Ordering::Relaxed));
+        ext.inventory.rect = None;
+        assert!(!ext.wants_cursor(), "nothing wants it now: Direct captures it");
+        ext.alt_held = true;
+        assert!(ext.wants_cursor(), "Alt frees it");
+    }
+
+    #[test]
+    fn in_click_escape_still_reaches_the_engine() {
+        let mut ext = extension(ControlMode::Click);
+        ext.inventory.open = true;
+        assert!(!escape(&mut ext));
+        assert!(ext.inventory.open);
     }
 }

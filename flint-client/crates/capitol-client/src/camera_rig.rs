@@ -77,7 +77,12 @@ impl Rig {
     }
 
     fn pose(&self, fx: f64, fz: f64, zoom: f64, yaw: f64) -> Pose {
-        let m: Map = self.call("rig_pose", (fx, fz, zoom, yaw));
+        self.tilted(fx, fz, zoom, yaw, 0.0)
+    }
+
+    /// The pose with the mouse's tilt on the pitch (T1.4).
+    fn tilted(&self, fx: f64, fz: f64, zoom: f64, yaw: f64, tilt: f64) -> Pose {
+        let m: Map = self.call("rig_pose", (fx, fz, zoom, yaw, tilt));
         let get = |k: &str| m[k].as_float().unwrap() as f32;
         Pose {
             p: [get("px"), get("py"), get("pz")],
@@ -570,7 +575,12 @@ fn with_walls(scene: flint_player::RayScene) -> Rig {
 
 /// A wall 2.2 m high across x = 1..1.5, as a stall's back wall stands.
 fn a_wall() -> flint_player::RayScene {
-    let (lo, hi) = ([1.0f32, 0.0, -5.0], [1.5f32, 2.2, 5.0]);
+    a_wall_of(2.2)
+}
+
+/// A wall `high` m high across x = 1..1.5.
+fn a_wall_of(high: f32) -> flint_player::RayScene {
+    let (lo, hi) = ([1.0f32, 0.0, -5.0], [1.5f32, high, 5.0]);
     let corner = |k: usize| {
         [
             if k & 1 == 0 { lo[0] } else { hi[0] },
@@ -679,4 +689,112 @@ fn the_bazaar_takes_the_view_down_and_gives_it_back() {
     with_this(&rig, &mut s, "bazaar_ease", (true,));
     with_this(&rig, &mut s, "bazaar_ease", (false,));
     assert!((zoom_to(&s) - 0.02).abs() < 1e-9);
+}
+
+/// T1.4: over the shoulder the mouse tilts the view within -10° to +35° of
+/// the dial's pitch, and never past straight down.
+#[test]
+fn the_mouse_tilts_within_its_limits() {
+    let rig = Rig::load();
+    let (low, high) = (rig.num("tilt_low"), rig.num("tilt_high"));
+    assert_eq!((low, high), (-10.0, 35.0));
+    let tilt = |t: f64, dy: f64| -> f64 { rig.call("tilt_by", (t, dy, 1.0_f64)) };
+    assert!(tilt(0.0, 100.0) > 0.0, "the mouse down looks down");
+    assert!(tilt(0.0, -100.0) < 0.0, "the mouse up looks up");
+    assert_eq!(tilt(0.0, 1e6), high);
+    assert_eq!(tilt(0.0, -1e6), low);
+    assert_eq!(tilt(high, 50.0), high, "held at the limit, not wound past it");
+    let sensitive: f64 = rig.call("tilt_by", (0.0_f64, 100.0_f64, 2.0_f64));
+    assert!((sensitive - 2.0 * tilt(0.0, 100.0)).abs() < 1e-9, "look_sensitivity scales it");
+    let pitch = |zoom: f64, t: f64| -> f64 { rig.call("pose_pitch", (zoom, t)) };
+    assert!((pitch(0.0, low) - (-5.0)).abs() < 1e-9, "a little up from the shoulder");
+    let cap: f64 = rig.call("zoom_cap", (true,));
+    for zoom in zooms().take_while(|&z| z <= cap) {
+        assert!(pitch(zoom, high) <= rig.num("map_pitch"), "turned over at {zoom}");
+        assert!(pitch(zoom, low) < pitch(zoom, 0.0) && pitch(zoom, 0.0) < pitch(zoom, high));
+        // Tilted up, the horizon still stays out of frame once the fog thins
+        let pose = rig.tilted(0.0, 200.0, zoom, 0.0, low);
+        if pose.p[1] - GROUND > CLEAR_FROM - 10.0 {
+            assert!(pitch(zoom, low) > VFOV / 2.0 + 5.0, "the horizon in frame at {zoom}");
+        }
+    }
+}
+
+/// T1.4: over the shoulder the dial runs out to about 120 m, short of the
+/// drift to the Capitol and the turn north up.
+#[test]
+fn over_the_shoulder_the_dial_stops_short_of_the_map() {
+    let rig = Rig::load();
+    let cap: f64 = rig.call("zoom_cap", (true,));
+    let far: f64 = rig.call("rig_distance", (cap,));
+    assert!((far - 120.0).abs() < 0.5, "{far} m");
+    assert!(cap < rig.num("centre_from") && cap < rig.num("north_from"));
+    assert!(cap > rig.num("street_zoom"), "out past the street");
+    let click: f64 = rig.call("zoom_cap", (false,));
+    assert_eq!(click, 1.0, "Click keeps the map");
+    // Out at the cap the view still looks at the point, not the Capitol
+    let pose = rig.tilted(300.0, -200.0, cap, 0.7, 0.0);
+    assert!((pose.t[0] - 300.0).abs() < 1.0 && (pose.t[2] + 200.0).abs() < 1.0, "{:?}", pose.t);
+}
+
+/// T1.4: at every tilt, zoom up to Direct's cap and yaw, on the plain and
+/// in the wilds, the camera stays above the ground.
+#[test]
+fn a_tilted_camera_never_goes_under_the_ground() {
+    let field = crate::world::land::tests::fixture_field();
+    let rig = Rig::load_on(Some(field));
+    let ground = |x: f32, z: f32| GROUND + crate::world::land::rise_on(field, [x, z]);
+    let cap: f64 = rig.call("zoom_cap", (true,));
+    let (inner, outer) = Zone::Wilderness.radii();
+    let mut focus = vec![(0.0, 200.0), (0.0, 60.0), (-283.0, 283.0)];
+    for share in [0.2, 0.5, 0.9] {
+        let r = (inner + share * (outer - inner)) * crate::coords::S as f64;
+        for k in 0..8 {
+            let a = k as f64 * std::f64::consts::TAU / 8.0;
+            focus.push((r * a.cos(), r * a.sin()));
+        }
+    }
+    for tilt in [-10.0, -5.0, 0.0, 15.0, 35.0] {
+        for zoom in zooms().take_while(|&z| z <= cap).step_by(6) {
+            for yaw in yaws().step_by(3) {
+                for &(fx, fz) in &focus {
+                    let pose = rig.tilted(fx, fz, zoom, yaw, tilt);
+                    let [px, py, pz] = pose.p;
+                    assert!(
+                        py >= ground(px, pz) + 1.4,
+                        "under the ground at {:?}, tilt {tilt} zoom {zoom:.2}",
+                        pose.p
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// T1.4: with the view tilted right down, a wall behind you still pulls the
+/// camera in (E3.13), as it does level: the rig's own steps, rise and then
+/// pull in, leave a clear line from your head to the camera.
+#[test]
+fn a_wall_pulls_the_camera_in_with_the_view_tilted() {
+    let rig = with_walls(a_wall_of(8.0));
+    // You at the origin, the camera standing off toward +x (yaw a quarter
+    // turn), behind the wall at x 1 to 1.5
+    let yaw = std::f64::consts::FRAC_PI_2;
+    let head: rhai::Array = vec![0.0_f64.into(), (GROUND as f64 + 1.6).into(), 0.0_f64.into()];
+    for tilt in [0.0, 20.0, 35.0] {
+        let m: Map = rig.call("rig_pose", (0.0_f64, 0.0_f64, 0.0_f64, yaw, tilt));
+        let px = m["px"].as_float().unwrap();
+        assert!(px > 1.5, "tilt {tilt}: the camera stands behind the wall ({px})");
+        let need: f64 = rig.call("rise_needed", (m.clone(), head.clone()));
+        let lifted: Map = rig.call("lifted", (m, need));
+        let d: f64 = rig.call("rig_distance", (0.0_f64,));
+        let share: f64 = rig.call("clear_share", (lifted.clone(), d, head.clone()));
+        assert!(share < 1.0, "tilt {tilt}: the wall is in the way");
+        let pulled: Map = rig.call("pulled", (lifted, share));
+        let at = ["px", "py", "pz"].map(|k| pulled[k].as_float().unwrap());
+        assert!(at[0] < 1.0, "tilt {tilt}: pulled in to your side of the wall, at {at:?}");
+        let camera: rhai::Array = at.iter().map(|&v| v.into()).collect();
+        let clear: f64 = rig.call("clear_line", (head.clone(), camera));
+        assert_eq!(clear, 1.0, "tilt {tilt}: the line to you is clear");
+    }
 }

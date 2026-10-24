@@ -83,6 +83,17 @@
 // Q/E don't orbit (E acts, T1.5), and walking doesn't swing the view round
 // behind you, which would turn the way W walks as you went.
 //
+// The action camera (Direct, T1.4): the rig captures the cursor whenever
+// nothing wants it free (cap_wants_cursor: a panel, the login, Alt, a
+// station being placed, or Esc having let it go), and asks again whenever
+// is_cursor_captured() disagrees. While it's captured the mouse turns the
+// view, directly, with no easing on the yaw, and tilts it within
+// tilt_low() to tilt_high() of the dial's pitch (cap_setting
+// "look_sensitivity" and "invert_look_y"). Nothing ever recentres it. The
+// dial rests at the shoulder and runs out to direct_far(), short of the
+// drift to the Capitol and the turn north up; switching back to Click
+// gives the street back and levels the tilt.
+//
 // rig_pose and the functions under it are pure, and a Rust test
 // (camera_rig.rs) drives them across every zoom, yaw and position.
 
@@ -163,6 +174,14 @@ fn yaw_k() { 10.0 }
 // A notch of the wheel multiplies the distance by about 1.22, as it did
 // before the dial reached the shoulder (E3.13): the steps are in zoom, so
 // they shrink as the dial grows.
+// Over the shoulder (T1.4): how far out the dial runs (m), short of
+// centre_from()'s 166.5; how far a count of raw mouse motion turns the view
+// (radians), and how far below or above the dial's pitch the mouse may tilt
+// it (degrees; more is further down).
+fn direct_far() { 120.0 }
+fn look_rate() { 0.0025 }
+fn tilt_low() { -10.0 }
+fn tilt_high() { 35.0 }
 fn wheel_step() { 0.0374 }   // zoom per wheel notch
 fn key_zoom_rate() { 0.374 } // zoom per second on R/F or +/-
 fn orbit_rate() { 1.6 }     // radians per second on Q/E
@@ -222,6 +241,9 @@ let rig = #{
     pan_x: 0.0, pan_z: 0.0,
     // The control mode last frame, "click" or "direct" (T1.1).
     mode: (),
+    // Over the shoulder, the mouse's tilt on the dial's pitch (degrees,
+    // T1.4). 0 in Click.
+    tilt: 0.0,
     // A canal stopped you (P4.3): #{ born, dx, dz }, the way you were
     // going, for a nudge toward the water and back. () when still.
     bump: (),
@@ -253,8 +275,20 @@ fn on_update() {
     if rig.mode == "direct" && mode == "click" {
         rig.pan_x = 0.0;
         rig.pan_z = 0.0;
+        rig.tilt = 0.0;
+        rig.zoom_to = street_zoom();
+        rig.arriving = true;
+    } else if rig.mode != "direct" && mode == "direct" {
+        // Over the shoulder is where Direct rests (T1.4)
+        rig.zoom_to = 0.0;
+        rig.arriving = true;
     }
     rig.mode = mode;
+    // Capture the cursor whenever nothing wants it, and ask again until
+    // the engine says it's done (it takes effect at the frame's end)
+    let capture = mode == "direct" && !cap_wants_cursor();
+    if capture != is_cursor_captured() { set_cursor_captured(capture); }
+    if mode == "direct" { rig.zoom_to = rig.zoom_to.min(zoom_cap(true)); }
 
     let moved = false;
     let you = cap_follow();
@@ -319,9 +353,14 @@ fn on_update() {
     let zk = if rig.arriving { arrive_zoom_k() } else { zoom_k() };
     rig.zoom += (rig.zoom_to - rig.zoom) * (1.0 - (-zk * dt).exp());
     if (rig.zoom_to - rig.zoom).abs() < 0.002 { rig.arriving = false; }
-    rig.yaw += (rig.yaw_to - rig.yaw) * (1.0 - (-yaw_k() * dt).exp());
+    // The mouse turns the view directly over the shoulder: no easing
+    if rig.mode == "direct" {
+        rig.yaw = rig.yaw_to;
+    } else {
+        rig.yaw += (rig.yaw_to - rig.yaw) * (1.0 - (-yaw_k() * dt).exp());
+    }
 
-    let pose = rig_pose(rig.focus_x, rig.focus_z, rig.zoom, rig.yaw);
+    let pose = rig_pose(rig.focus_x, rig.focus_z, rig.zoom, rig.yaw, rig.tilt);
     if rig.shot != () {
         // Held, or easing out of it.
         let s = rig.shot;
@@ -550,7 +589,22 @@ fn steer(dt, you) {
         this.zoomed = true;
         this.arriving = false;
         this.zoom_to = (this.zoom_to - (notches * wheel_step() - keys * key_zoom_rate() * dt) * feel)
-            .max(0.0).min(1.0);
+            .max(0.0).min(zoom_cap(direct));
+    }
+
+    // Look (T1.4): over the shoulder with the cursor captured, the mouse
+    // turns the view as it moves, right turning right, and tilts it
+    if direct && is_cursor_captured() {
+        let dx = mouse_delta_x();
+        let dy = mouse_delta_y();
+        if dx != 0.0 || dy != 0.0 {
+            any = true;
+            this.turned = total_time();
+            let look = look_feel();
+            this.yaw_to -= dx * look_rate() * look;
+            let up = if cap_setting("invert_look_y") == true { -1.0 } else { 1.0 };
+            this.tilt = tilt_by(this.tilt, dy * up, look);
+        }
     }
 
     // Orbit: Q turns the view left, E right, and so does dragging right.
@@ -585,7 +639,9 @@ fn steer(dt, you) {
             this.pan_x = 0.0;
             this.pan_z = 0.0;
         }
-        this.zoom_to = street_zoom();
+        // Over the shoulder, home is the shoulder, level
+        this.zoom_to = if direct { 0.0 } else { street_zoom() };
+        this.tilt = 0.0;
         this.yaw_to = this.yaw - wrap_angle(this.yaw);
     }
     any
@@ -595,6 +651,25 @@ fn steer(dt, you) {
 fn sensitivity() {
     let s = cap_setting("camera_sensitivity");
     if type_of(s) == "f64" { s } else { 1.0 }
+}
+
+// The settings' look sensitivity (T1.4), or 1 if there's none to read.
+fn look_feel() {
+    let s = cap_setting("look_sensitivity");
+    if type_of(s) == "f64" { s } else { 1.0 }
+}
+
+// The furthest the dial runs: over the shoulder (T1.4) out to
+// direct_far(), short of the drift to the Capitol; otherwise to the map.
+fn zoom_cap(direct) {
+    if direct { zoom_at(direct_far()) } else { 1.0 }
+}
+
+// The tilt after `dy` counts of mouse motion down the screen (down tilts
+// the view further down, as a mouse-look does), at `look` sensitivity,
+// held within tilt_low() to tilt_high() degrees.
+fn tilt_by(tilt, dy, look) {
+    (tilt + dy * look_rate().to_degrees() * look).max(tilt_low()).min(tilt_high())
 }
 
 // Where H brings the point back to: you, or offline where the rig starts.
@@ -655,7 +730,8 @@ fn start_view(view) {
 // So the subject stays in frame, and Q/E or a drag then orbit round it
 // (issue #92). Otherwise (the
 // login circle, which lands on you next) it's street zoom, with the point
-// followed just ahead of the camera.
+// followed just ahead of the camera. Either way, over the shoulder (T1.4)
+// it then eases on down to the shoulder.
 fn take_over_from_shot(framed) {
     let s = this.shot;
     let dx = s.at[0] - s.pos[0];
@@ -683,7 +759,8 @@ fn take_over_from_shot(framed) {
     this.focus_x = this.target_x;
     this.focus_z = this.target_z;
     this.yaw_to = this.yaw;
-    this.zoom_to = this.zoom;
+    // Over the shoulder (T1.4) the dial comes on down to where Direct rests
+    this.zoom_to = if this.mode == "direct" { 0.0 } else { this.zoom };
     this.release = 0.0;
     this.release_len = release_time();
 }
@@ -761,9 +838,10 @@ fn on_draw_ui() {
 
 // ── The rig's geometry (pure) ────────────────────────────────────────────
 
-// The camera for a focus point (fx, fz) on the ground, a zoom and a yaw:
+// The camera for a focus point (fx, fz) on the ground, a zoom, a yaw and
+// the mouse's tilt on the pitch (degrees, T1.4; 0 in Click):
 // #{ px, py, pz } where it stands and #{ tx, ty, tz } what it looks at.
-fn rig_pose(fx, fz, zoom, yaw) {
+fn rig_pose(fx, fz, zoom, yaw, tilt) {
     // Toward the map, look at the Capitol, north up.
     let c = smooth((zoom - centre_from()) / (1.0 - centre_from()));
     let lx = fx * (1.0 - c);
@@ -774,7 +852,7 @@ fn rig_pose(fx, fz, zoom, yaw) {
     let heading = yaw - wrap_angle(yaw) * n;
 
     let d = rig_distance(zoom);
-    let p = rig_pitch(zoom).to_radians();
+    let p = pose_pitch(zoom, tilt).to_radians();
     // Close in (E3.13), the look rises to chest height and moves ahead of
     // the point and over its right shoulder. Away from you is
     // (-sin, -cos) in x, z, and right is (cos, -sin).
@@ -840,7 +918,7 @@ fn rig_distance(zoom) {
 fn framing_zoom(at, from, yaw) {
     let z = from.min(district_zoom());
     while z < district_zoom() {
-        let pose = rig_pose(at[0], at[2], z, yaw);
+        let pose = rig_pose(at[0], at[2], z, yaw, 0.0);
         let lx = pose.tx - pose.px;
         let ly = pose.ty - pose.py;
         let lz = pose.tz - pose.pz;
@@ -876,6 +954,12 @@ fn rig_pitch(zoom) {
     } else {
         lerp(street_pitch(), map_pitch(), smooth((zoom - zs) / (1.0 - zs)))
     }
+}
+
+// The pitch at a zoom with the mouse's tilt on it (T1.4), never past
+// straight down, which would turn the view over.
+fn pose_pitch(zoom, tilt) {
+    (rig_pitch(zoom) + tilt).min(map_pitch())
 }
 
 // The lowest the camera may be above the land at horizontal radius r: over
