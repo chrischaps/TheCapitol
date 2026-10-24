@@ -655,10 +655,18 @@ mod tests {
     }
 
     #[test]
-    fn closed_it_shows_the_last_lines_across_both_channels() {
+    fn closed_it_shows_the_last_lines_across_every_channel() {
         let (log, _, _) = sample(Instant::now(), 30.0);
         let texts: Vec<_> = recent(&log, 3).iter().map(|l| l.text.as_str()).collect();
-        assert_eq!(texts, ["Good morning to you both.", "And clay, while the river's low.", "Thanks! I'll bring the copper back as ingots."]);
+        // Capitol, Guild, then Local: one from each
+        assert_eq!(
+            texts,
+            [
+                "And clay, while the river's low.",
+                "Fiber's in the long shed. Take what you need for the order.",
+                "Thanks! I'll bring the copper back as ingots."
+            ]
+        );
     }
 
     #[test]
