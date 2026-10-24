@@ -285,7 +285,10 @@ fn on_update() {
         rig.zoom_to = street_zoom();
         rig.arriving = true;
     } else if rig.mode != "direct" && mode == "direct" {
-        // Over the shoulder is where Direct rests (T1.4)
+        // Over the shoulder is where Direct rests (T1.4), on you: drop
+        // Click's pan, or the view would turn round where it was panned to
+        rig.pan_x = 0.0;
+        rig.pan_z = 0.0;
         rig.zoom_to = 0.0;
         rig.arriving = true;
     }
@@ -648,7 +651,7 @@ fn steer(dt, you) {
 
     // Home: back to the start, at street zoom, north up. The yaw unwinds
     // by the short way, never a full turn.
-    // Over the shoulder there's no pan to drop.
+    // Over the shoulder there's no pan to drop: entering Direct drops it.
     if is_action_just_pressed("home") {
         any = true;
         if !direct || you == () {
