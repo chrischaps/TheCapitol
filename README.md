@@ -100,7 +100,7 @@ In PowerShell, `scripts\town.ps1` does the same: `up [-Online n] [-Merchants m] 
 
 - **The first `up`** takes a few minutes: it builds the server and `capitol-town`, creates the database (every migration, every node planted), makes an admin for it and mints the citizens. `up --online <n> --merchants <m>` sets how many are on at once. Later runs reuse all of it, and the citizens carry on from where they stood.
 - **A new town knows nobody.** Register an account on the client's login form the first time you go in.
-- **Switching worlds asks for your password again,** because the client keeps one server's sign-in ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
+- **Switching worlds keeps you signed in to each:** the client keeps a sign-in, and the last email, for each server ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
 - **The town fills up.** Its citizens save up and buy deeds, so its land gets taken the longer it runs. `reset` gives a fresh one.
 - **What it keeps** is in `flint-client/town/` (git-ignored): the roster with the citizens' keys, the admin's password, their health (`town.status`), their decision logs and the server's log (`backend.log`). It runs copies of the binaries, so it never locks the exe that `cargo run` rebuilds.
 - `TOWN_PORT`, `TOWN_DB` and `TOWN_REDIS` move it to another port, database or Redis db.

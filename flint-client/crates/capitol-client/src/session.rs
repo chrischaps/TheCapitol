@@ -3359,10 +3359,14 @@ impl Link {
     }
 }
 
-/// `save/session.toml`: the server last chosen, the last email that signed
-/// in, and its refresh token (E0.6), with the server the token belongs to. A
-/// token is only tried on that server. The access tokens files held before
-/// E0.6, under `token`, are ignored.
+/// `save/session.toml`: the server last chosen, and for each server the last
+/// email that signed in there and its refresh token (E0.6), under
+/// `[servers."<url>"]`. A token is only tried on its own server, so the usual
+/// world and the town (#337) each keep their sign-in (#338). The top-level
+/// `email` is the last one used anywhere, to fill the form on a server with
+/// no entry yet. A file from before #338, with one `refresh_token` and its
+/// `token_server`, loads as that server's entry. The access tokens files held
+/// before E0.6, under `token`, are ignored.
 ///
 /// It's a file of its own, not the engine's `save/persist.toml`. Scripts can
 /// read and write every key in that store (`persist_get`), and a session
@@ -3375,7 +3379,9 @@ pub struct SessionFile {
 
 const SERVER: &str = "server";
 const EMAIL: &str = "email";
+const SERVERS: &str = "servers";
 const TOKEN: &str = "refresh_token";
+/// Before #338: the server the one `refresh_token` belonged to.
 const TOKEN_SERVER: &str = "token_server";
 
 impl SessionFile {
@@ -3390,7 +3396,71 @@ impl SessionFile {
                 tracing::warn!("session: ignoring {}: {e}", path.display());
             }
         }
-        SessionFile { path, store }
+        let mut file = SessionFile { path, store };
+        file.upgrade();
+        file
+    }
+
+    /// Moves a pre-#338 file's one token into its server's entry. It's
+    /// written out with the next save.
+    fn upgrade(&mut self) {
+        let token = self.get(TOKEN);
+        let server = self.get(TOKEN_SERVER);
+        self.store.remove(TOKEN);
+        self.store.remove(TOKEN_SERVER);
+        if let (Some(token), Some(server)) = (token, server) {
+            if self.entry(&server).is_none() {
+                let email = self.get(EMAIL);
+                self.set_entry(&server, email.as_deref(), Some(&token));
+            }
+        }
+    }
+
+    /// A server's key in `servers`: hosts and schemes don't care for case.
+    fn key(server: &str) -> String {
+        server.to_ascii_lowercase()
+    }
+
+    fn entry(&self, server: &str) -> Option<&toml::map::Map<String, toml::Value>> {
+        self.store
+            .get(SERVERS)
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get(&Self::key(server)))
+            .and_then(|v| v.as_table())
+    }
+
+    fn entry_str(&self, server: &str, key: &str) -> Option<String> {
+        self.entry(server)
+            .and_then(|e| e.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
+    fn set_entry(&mut self, server: &str, email: Option<&str>, token: Option<&str>) {
+        let mut servers = self
+            .store
+            .get(SERVERS)
+            .and_then(|v| v.as_table())
+            .cloned()
+            .unwrap_or_default();
+        let mut entry = toml::map::Map::new();
+        for (k, v) in [(EMAIL, email), (TOKEN, token)] {
+            if let Some(v) = v {
+                entry.insert(k.to_owned(), toml::Value::String(v.to_owned()));
+            }
+        }
+        let key = Self::key(server);
+        if entry.is_empty() {
+            servers.remove(&key);
+        } else {
+            servers.insert(key, toml::Value::Table(entry));
+        }
+        if servers.is_empty() {
+            self.store.remove(SERVERS);
+        } else {
+            self.store.set(SERVERS, toml::Value::Table(servers));
+        }
     }
 
     fn get(&self, key: &str) -> Option<String> {
@@ -3420,22 +3490,23 @@ impl SessionFile {
         self.save();
     }
 
-    /// The email, and the refresh token if it belongs to `server`.
+    /// `server`'s email and refresh token. A server with no email of its own
+    /// gets the last one used anywhere.
     pub fn remembered(&self, server: &str) -> Remembered {
-        let refresh_token = match self.get(TOKEN_SERVER) {
-            Some(s) if s == server => self.get(TOKEN),
-            _ => None,
-        };
         Remembered {
-            email: self.get(EMAIL),
-            refresh_token,
+            email: self.entry_str(server, EMAIL).or_else(|| self.get(EMAIL)),
+            refresh_token: self.entry_str(server, TOKEN),
         }
     }
 
+    /// Keeps `server`'s sign-in, and leaves every other server's alone: a
+    /// sign-out here clears only this server's token.
     pub fn remember(&mut self, server: &str, remembered: &Remembered) {
-        self.set(EMAIL, remembered.email.as_deref());
-        self.set(TOKEN, remembered.refresh_token.as_deref());
-        self.set(TOKEN_SERVER, remembered.refresh_token.as_ref().map(|_| server));
+        let email = remembered.email.as_deref();
+        if email.is_some() {
+            self.set(EMAIL, email);
+        }
+        self.set_entry(server, email, remembered.refresh_token.as_deref());
         self.save();
     }
 
@@ -4833,6 +4904,82 @@ mod tests {
         assert_eq!(
             SessionFile::load(&path).remembered("http://a:3000").refresh_token,
             None
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn signed_in(email: &str, token: Option<&str>) -> Remembered {
+        Remembered {
+            email: Some(email.into()),
+            refresh_token: token.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn each_server_keeps_its_own_sign_in() {
+        let dir = std::env::temp_dir().join(format!("capitol-session-two-{}", std::process::id()));
+        let path = dir.join("session.toml");
+        let (world, town) = ("http://localhost:3000", "http://127.0.0.1:3300");
+        let mut file = SessionFile::load(&path);
+        file.remember(world, &signed_in("chris@capitol.local", Some("w0rld")));
+        file.remember(town, &signed_in("mayor@town.local", Some("t0wn")));
+
+        // Switching back and forth finds each server's own.
+        let file = SessionFile::load(&path);
+        assert_eq!(file.remembered(world), signed_in("chris@capitol.local", Some("w0rld")));
+        assert_eq!(file.remembered(town), signed_in("mayor@town.local", Some("t0wn")));
+        assert_eq!(
+            file.remembered("HTTP://LOCALHOST:3000").refresh_token.as_deref(),
+            Some("w0rld")
+        );
+        // A new server fills the form with the last email used anywhere.
+        assert_eq!(
+            file.remembered("http://elsewhere:3000"),
+            signed_in("mayor@town.local", None)
+        );
+
+        // Signing out of the town leaves the world signed in.
+        let mut file = file;
+        file.remember(town, &signed_in("mayor@town.local", None));
+        let file = SessionFile::load(&path);
+        assert_eq!(file.remembered(town), signed_in("mayor@town.local", None));
+        assert_eq!(file.remembered(world), signed_in("chris@capitol.local", Some("w0rld")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_from_before_338_loads_as_its_servers_entry() {
+        let dir = std::env::temp_dir().join(format!("capitol-session-old-{}", std::process::id()));
+        let path = dir.join("session.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "server = \"http://localhost:3000\"\n\
+             email = \"chris@capitol.local\"\n\
+             refresh_token = \"0ld\"\n\
+             token_server = \"http://localhost:3000\"\n",
+        )
+        .unwrap();
+
+        let mut file = SessionFile::load(&path);
+        assert_eq!(
+            file.remembered("http://localhost:3000"),
+            signed_in("chris@capitol.local", Some("0ld"))
+        );
+        assert_eq!(file.remembered("http://127.0.0.1:3300").refresh_token, None);
+
+        // The first save writes the new shape, with no stray top-level token.
+        file.remember("http://127.0.0.1:3300", &signed_in("mayor@town.local", Some("t0wn")));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("token_server"), "{text}");
+        let file = SessionFile::load(&path);
+        assert_eq!(
+            file.remembered("http://localhost:3000"),
+            signed_in("chris@capitol.local", Some("0ld"))
+        );
+        assert_eq!(
+            file.remembered("http://127.0.0.1:3300"),
+            signed_in("mayor@town.local", Some("t0wn"))
         );
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -27,7 +27,7 @@
 #
 # and in the usual world with play.bat as ever. A new town knows nobody, so
 # register an account on the client's form the first time. The client keeps
-# one server's sign-in, so a switch asks for the password again (#338).
+# a sign-in for each server, so switching back and forth needs none (#338).
 #
 # What the town keeps is in flint-client/town/ (git-ignored: the roster holds
 # the citizens' keys, and admin.env the admin's password), with the backend's
