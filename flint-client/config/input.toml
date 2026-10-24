@@ -146,6 +146,15 @@ bindings = [{ type = "key", code = "Enter" }, { type = "key", code = "NumpadEnte
 kind = "button"
 bindings = [{ type = "key", code = "KeyO" }]
 
+# Over the shoulder (Direct mode, T1.5): act on what's in front of you, as a
+# click on it would. Gather the node, open the station, see a player's card
+# (Shift-E asks them to trade), go to the hall, a stall, the notice board or
+# the Deeds Office. A captured left click does the same. E is orbit_right
+# too, which only Click mode reads, and Click mode ignores this.
+[actions.interact]
+kind = "button"
+bindings = [{ type = "key", code = "KeyE" }]
+
 # Trading (P7.3): accept the request you've been sent, or else ask the
 # player nearest you, walking closer if they're out of range. A shift-click
 # on someone does the same for them, and this is a key captures can press.

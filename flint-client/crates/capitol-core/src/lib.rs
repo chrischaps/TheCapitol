@@ -63,6 +63,7 @@ pub mod chat;
 pub mod commissions;
 pub mod citizen;
 pub mod craft;
+pub mod focus;
 pub mod deeds;
 pub mod exchange;
 pub mod gazette;

@@ -647,6 +647,13 @@ impl Session {
         }
     }
 
+    /// Holds the steering after an interaction (T1.5, plan D5): a key held
+    /// through E doesn't walk you off what you just started, until it's let
+    /// go ([`Steering::latch`]).
+    pub fn latch_steering(&mut self) {
+        self.steering.latch();
+    }
+
     /// Whether you're walking: on a heading, or to a destination.
     pub fn moving(&self) -> bool {
         self.motion.steering() || self.destination().is_some()
@@ -3787,6 +3794,76 @@ mod tests {
         play(&mut session, 0.1, (0.0, 0.0), &never);
         play(&mut session, 0.5, along, &never);
         assert!(!gathering(&session), "a fresh press walks off and ends it");
+        play(&mut session, 0.5, (0.0, 0.0), &never);
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Against the local stack (controls T1.5): looking just to one side
+    /// of the grass near you, it's the focus, and E on it (what the
+    /// extension asks for a node: the click's extract, then the latch)
+    /// gathers it, with W held all the while. Run `capitol-bot --prefix walk
+    /// --gather 0` once first for `Walk1`.
+    #[test]
+    #[ignore = "needs the local stack and the capitol-bot --prefix walk account; walks to grass first"]
+    fn e_gathers_the_grass_in_front_and_a_held_key_keeps_it() {
+        use capitol_core::focus::{self, Kind};
+        use capitol_core::state::Activity;
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let dir = std::env::temp_dir().join(format!("capitol-focus-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in("walk1@bots.capitol.local", "walk-1-capitol-bot");
+        let mut play = |session: &mut Session, secs: f64, way: (f64, f64), done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs_f64(secs);
+            while Instant::now() < deadline && !done(session) {
+                session.update(Instant::now(), &mut terrain);
+                session.steer(Instant::now(), way);
+                session.sample(Instant::now());
+                std::thread::sleep(Duration::from_millis(16));
+            }
+        };
+        let never = |_: &Session| false;
+        let me = |s: &Session| s.state().local_player().map(|p| (p.x, p.y)).unwrap();
+        play(&mut session, 60.0, (0.0, 0.0), &|s| s.state().local_player().is_some() && s.walks.is_some());
+
+        // 3 m short of the nearest grass
+        let from = me(&session);
+        let grass = session
+            .state()
+            .nodes()
+            .values()
+            .filter(|n| n.resource_type == "grass" && session.state().node_available(n.id))
+            .min_by(|a, b| (a.x - from.0).hypot(a.y - from.1).total_cmp(&(b.x - from.0).hypot(b.y - from.1)))
+            .map(|n| (n.x, n.y))
+            .expect("grass somewhere");
+        let d = (grass.0 - from.0).hypot(grass.1 - from.1).max(1.0);
+        let stand = (grass.0 - (grass.0 - from.0) / d * 30.0, grass.1 - (grass.1 - from.1) / d * 30.0);
+        session.move_to(Instant::now(), stand.0, stand.1);
+        play(&mut session, 240.0, (0.0, 0.0), &|s| !s.moving() && (me(s).0 - stand.0).hypot(me(s).1 - stand.1) < 2.0);
+        play(&mut session, 0.5, (0.0, 0.0), &never);
+
+        // Looking 3° to the side of it (a tree further on, dead ahead, would
+        // outscore grass 10° off, and needs an axe)
+        let at = me(&session);
+        let toward = (grass.1 - at.1).atan2(grass.0 - at.0) + 3f64.to_radians();
+        let view = (toward.cos(), toward.sin());
+        let f = focus::focus(&focus::from_state(session.state()), at, view).expect("something in front");
+        eprintln!("focus: {} {} at {:.1}", f.kind.name(), f.label, f.distance);
+        assert_eq!(f.kind, Kind::Node);
+        assert!(f.label.starts_with("Gather "), "{}", f.label);
+
+        // E, with W held from before it and after
+        let gathering = |s: &Session| matches!(s.state().me().and_then(|id| s.state().activity(id)), Some(Activity::Extracting { .. }));
+        play(&mut session, 0.2, view, &never);
+        session.extract(Instant::now(), f.id.parse().unwrap());
+        session.latch_steering();
+        play(&mut session, 30.0, view, &gathering);
+        assert!(gathering(&session), "E gathered, with W held");
+        play(&mut session, 0.5, view, &never);
+        assert!(gathering(&session), "W held through E doesn't end the gather");
         play(&mut session, 0.5, (0.0, 0.0), &never);
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);

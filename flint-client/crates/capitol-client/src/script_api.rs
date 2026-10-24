@@ -119,6 +119,13 @@ pub struct Shared {
     pub open_card: Arc<Mutex<Option<String>>>,
     /// Where trading stands, for the thread between you (`cap_trade`).
     pub trade: Arc<Mutex<Option<TradeMark>>>,
+    /// What's in front of you over the shoulder (`cap_focus`, T1.5), as the
+    /// extension left it this frame. `None` in Click mode, while the cursor
+    /// is free, and with nothing in front.
+    pub focus: Arc<Mutex<Option<FocusMark>>>,
+    /// A captured left click (`cap_interact`, T1.5): act on the focus, as E
+    /// does. The extension takes it next frame.
+    pub interact: Arc<AtomicBool>,
     /// How the camera rig answers you (P8.4), from the settings, for
     /// `cap_setting`.
     pub camera_feel: Arc<Mutex<crate::settings::CameraFeel>>,
@@ -353,6 +360,25 @@ pub struct ZoneBanner {
     pub at: Instant,
     /// The zone you came into the world in, not one you walked into.
     pub first: bool,
+}
+
+/// What's in front of you over the shoulder (T1.5), as scripts see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusMark {
+    /// `capitol_core::focus::Kind::name`: "node", "station", "player",
+    /// "board", "office", "stall" or "hall".
+    pub kind: &'static str,
+    pub id: String,
+    /// What E does: "Gather wild grass".
+    pub label: String,
+    /// What Shift-E does, if it's something else: "Trade with Ada".
+    pub shift_label: Option<String>,
+    /// The point of it you're looking at, world metres (X, Z).
+    pub at: [f32; 2],
+    /// The ring round it, metres: a node's or a station's own, else 0.
+    pub r: f32,
+    /// How high over the ground its prompt hangs, metres.
+    pub top: f32,
 }
 
 /// One resource node as scripts see it.
@@ -821,6 +847,31 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             *c = Some(id.to_owned());
         }
     });
+    // `cap_focus() -> #{ kind, id, label, shift_label, x, z, r, top } or ()`:
+    // what's in front of you over the shoulder (T1.5), which E or a captured
+    // click acts on. `x, z` is the point of it you're looking at, world
+    // metres, `r` the ring round it (0 for a footprint), `top` how high its
+    // prompt hangs; `shift_label` is () when Shift-E does what E does.
+    let focus = shared.focus.clone();
+    engine.register_fn("cap_focus", move || -> rhai::Dynamic {
+        let Some(f) = focus.lock().ok().and_then(|f| f.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let mut m = rhai::Map::new();
+        m.insert("kind".into(), f.kind.into());
+        m.insert("id".into(), f.id.into());
+        m.insert("label".into(), f.label.into());
+        m.insert("shift_label".into(), f.shift_label.map_or(rhai::Dynamic::UNIT, Into::into));
+        m.insert("x".into(), (f.at[0] as f64).into());
+        m.insert("z".into(), (f.at[1] as f64).into());
+        m.insert("r".into(), (f.r as f64).into());
+        m.insert("top".into(), (f.top as f64).into());
+        m.into()
+    });
+    // `cap_interact()`: act on the focus, as E does (a captured left click,
+    // T1.5). Taken next frame.
+    let interact = shared.interact.clone();
+    engine.register_fn("cap_interact", move || interact.store(true, Ordering::Relaxed));
     // `cap_trade() -> #{ state, x, y, z, mine, theirs } or ()`: where trading
     // stands. `state` is "asking", "incoming", "walking" or "open"; x, y, z
     // are the other player's feet in world metres, or () if they aren't
@@ -1733,6 +1784,28 @@ mod tests {
         let x: f64 = engine.eval("cap_route()[0][0]").unwrap();
         assert_eq!(x, 1.0);
         assert_eq!(engine.eval::<i64>("cap_route().len()").unwrap(), 2);
+    }
+
+    #[test]
+    fn scripts_read_the_focus_and_interact_with_it() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>("cap_focus()").is_ok(), "() with nothing in front");
+        *shared.focus.lock().unwrap() = Some(FocusMark {
+            kind: "player",
+            id: "ada".into(),
+            label: "Ada".into(),
+            shift_label: Some("Trade with Ada".into()),
+            at: [1.5, -2.0],
+            r: 0.85,
+            top: 0.0,
+        });
+        let words: String = engine.eval(r#"let f = cap_focus(); `${f.kind} ${f.label} / ${f.shift_label} at ${f.x}, ${f.z}`"#).unwrap();
+        assert_eq!(words, "player Ada / Trade with Ada at 1.5, -2.0");
+        assert!(!shared.interact.load(Ordering::Relaxed));
+        engine.run("cap_interact()").unwrap();
+        assert!(shared.interact.load(Ordering::Relaxed));
     }
 
     #[test]

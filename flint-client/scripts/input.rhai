@@ -21,7 +21,8 @@
 // Over the shoulder (T1.4) the cursor is captured while nothing wants it
 // (camera.rhai), and then it isn't a pointer: there are no hover rings and
 // a click doesn't go down the list above. It's interact, which acts on the
-// thing in front of you (T1.5, #323). With the cursor freed (a panel, Alt)
+// thing in front of you as E does (T1.5): `cap_focus()` says what, and
+// draw_focus rings it and says what E will do. With the cursor freed (a panel, Alt)
 // clicks go down the list as in Click mode, but for the walk. Once Esc has
 // let the cursor go, a click on the world only takes it back.
 //
@@ -228,9 +229,10 @@ fn on_update() {
         if h == () { cap_place_off(); } else { cap_place_hover(h[0], h[1]); }
     }
     if !is_mouse_just_pressed(0) { return; }
-    // Over the shoulder (T1.4): a captured click is interact, which is
-    // T1.5's (#323); a click after Esc let the cursor go takes it back
-    if is_cursor_captured() { return; }
+    // Over the shoulder (T1.4): a captured click is interact (T1.5), which
+    // acts on what's in front of you, as E does; a click after Esc let the
+    // cursor go takes it back
+    if is_cursor_captured() { cap_interact(); return; }
     if cap_cursor_let_go() { cap_take_cursor(); return; }
 
     // The ground under the cursor, or () over the sky.
@@ -486,6 +488,8 @@ fn on_draw_ui() {
     // A captured cursor (T1.4) hovers nothing: it's a view, not a pointer.
     let aiming = is_cursor_captured();
     let hover = if aiming { () } else { pick() };
+    // What E acts on over the shoulder (T1.5): it stands in for the hover
+    let focus = if aiming { cap_focus() } else { () };
     let placing = cap_placing();
     if placing != () { draw_placement(placing, now); }
     // While placing, a station under the cursor is in the ghost's way, not
@@ -546,9 +550,9 @@ fn on_draw_ui() {
 
     let hall = cap_hall();
     let free = hall != () && placing == () && over == () && !aiming;
-    let over_board = free && board_under_cursor();
-    let over_office = free && !over_board && office_under_cursor();
-    let over_hall = free && !over_board && !over_office && hall_under_cursor();
+    let over_board = (free && board_under_cursor()) || focus_is(focus, "board");
+    let over_office = (free && !over_board && office_under_cursor()) || focus_is(focus, "office");
+    let over_hall = (free && !over_board && !over_office && hall_under_cursor()) || focus_is(focus, "hall");
     if hall != () {
         draw_hall(hall, over_hall, now);
         draw_board(hall, over_board, now);
@@ -557,10 +561,11 @@ fn on_draw_ui() {
     let bazaar = cap_bazaar();
     let over_stall = if bazaar != () && placing == () && over == () && !aiming && !over_board && !over_office && !over_hall {
         stall_under_cursor()
-    } else { () };
+    } else if focus_is(focus, "stall") { focus.id } else { () };
     if bazaar != () { draw_bazaar(bazaar, over_stall, now); }
     let lead = cap_lead();
     if lead != () && !cap_clean() { draw_lead(lead, now); }
+    if focus != () && placing == () { draw_focus(focus, now); }
 
     if hover != () && placing == () && over == () && !over_hall && !over_board && !over_office && over_stall == () {
         let n = cap_node_at(hover[0], hover[1]);
@@ -1106,6 +1111,88 @@ fn mote_every() { 0.8 }
 fn mote_life() { 3.2 }
 fn mote_rise() { 11.0 }
 
+// ── Focus (T1.5) ─────────────────────────────────────────────────────────
+
+// Whether the focus is a `kind`.
+fn focus_is(f, kind) { f != () && f.kind == kind }
+
+// A prompt's "click" as E over the shoulder (T1.5), where the cursor is
+// captured and E, or a click, acts on the focus.
+fn act_words(line) {
+    if is_cursor_captured() {
+        line.replace("Click", "Press E");
+        line.replace("click", "press E");
+    }
+    line
+}
+
+// What E acts on over the shoulder: a node's ring, a station's in gold, a
+// ring at someone's feet, and by it what E (and Shift-E) will do. The hall,
+// its board, the office and the stalls show as hovered instead, with their
+// own prompts, above.
+fn draw_focus(f, now) {
+    if f.kind == "hall" || f.kind == "board" || f.kind == "office" || f.kind == "stall" { return; }
+    let y = cap_mark_y();
+    let c = gold();
+    let r = f.r * (1.0 + 0.04 * (now * 2.4).sin());
+    ring(f.x, f.z, y, r, c, 0.85, 2.0, 48);
+    ring(f.x, f.z, y, r * 1.3, c, 0.25, 1.0, 56);
+    if f.kind == "station" {
+        let spin = now * 0.4;
+        for i in 0..4 {
+            let a = spin + i.to_float() * 0.5 * PI();
+            arc(f.x, f.z, y, r + 0.22, a - 0.16, a + 0.16, c, 0.6, 1.5);
+        }
+    }
+    draw_focus_prompt(f);
+}
+
+// "[E] Gather wild grass", and "[Shift E] Trade with Ada" under it: over a
+// node or a station, under someone's feet, clear of the name over them.
+fn draw_focus_prompt(f) {
+    let ground = cap_ground_at(f.x, f.z);
+    let at = world_to_screen(f.x, ground + f.top, f.z);
+    if !at.visible { return; }
+    let lines = [["E", f.label]];
+    if f.shift_label != () { lines.push(["Shift E", f.shift_label]); }
+    let size = 15.0;
+    let gap = 7.0;
+    let row = 24.0;
+    let below = f.kind == "player";
+    let height = row * lines.len().to_float();
+    let top = if below { at.y + 14.0 } else { at.y - 12.0 - height };
+    // Over the shoulder what's ahead stands just over your head on the
+    // screen: lift the prompt clear of your own name rather than across it
+    for t in cap_name_tags() {
+        if !t.me || !t.named { continue; }
+        let clear = t.y + t.size + 4.0;
+        if top < clear && top + height > t.y - 4.0 && (t.x - at.x).abs() < 160.0 {
+            top = t.y - 6.0 - height;
+        }
+    }
+    for k in 0..lines.len() {
+        let key = lines[k][0];
+        let words = lines[k][1];
+        let km = measure_text_ex(key, 12.0, "strong", 0.0);
+        let wm = measure_text_ex(words, size, "strong", 0.0);
+        let kw = km.width + 12.0;
+        let w = kw + gap + wm.width;
+        let x = at.x - w / 2.0;
+        let y = top + row * k.to_float();
+        let a = if k == 0 { 1.0 } else { 0.8 };
+        draw_rect_ex(x + 1.0, y + 2.0, kw, 19.0, 0.0, 0.0, 0.0, 0.35 * a, 4.0, 0);
+        draw_rect_ex(x, y, kw, 19.0, 0.10, 0.09, 0.07, 0.82 * a, 4.0, 0);
+        draw_rect_outline_ex(x, y, kw, 19.0, 0.79, 0.64, 0.15, 0.95 * a, 1.0, 4.0, 0);
+        draw_text_opts(x + 6.0, y + (19.0 - km.height) / 2.0, key, 12.0, #{
+            font: "strong", color: [0.96, 0.90, 0.72, a],
+        });
+        let tx = x + kw + gap;
+        let ty = y + (19.0 - wm.height) / 2.0;
+        draw_text_opts(tx + 1.0, ty + 1.0, words, size, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.6 * a] });
+        draw_text_opts(tx, ty, words, size, #{ font: "strong", color: [0.98, 0.95, 0.88, 0.97 * a] });
+    }
+}
+
 // The hall's marks: its footprint traced while you hover it or stand in
 // range, the prompt over it, and the motes while goods wait.
 fn draw_hall(h, over, now) {
@@ -1120,7 +1207,10 @@ fn draw_hall(h, over, now) {
         }
     }
     if h.goods { draw_motes(h, now); }
-    if (over || h.near) && !h.open { draw_hall_prompt(h, over); }
+    // Over the shoulder only the focus speaks: "press E" while you're
+    // looking elsewhere would be a lie
+    let near = h.near && !is_cursor_captured();
+    if (over || near) && !h.open { draw_hall_prompt(h, over); }
 }
 
 // "Exchange hall", and under it what a click will do, over the clock.
@@ -1142,6 +1232,7 @@ fn draw_hall_prompt(h, over) {
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.86, 0.92, 1.0, 0.97],
     });
+    let line = act_words(line);
     let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
     let ink = if h.goods && h.near { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
@@ -1281,6 +1372,7 @@ fn draw_stall(s, over, walking, now) {
     let top = (at.y - 44.0).max(64.0);
     draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{ font: "display", color: [0.0, 0.0, 0.0, 0.6] });
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{ font: "display", color: [1.0, 0.92, 0.78, 0.97] });
+    let line = act_words(line);
     let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
     draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.55] });
@@ -1315,6 +1407,7 @@ fn draw_board(h, over, now) {
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.96, 0.92, 0.82, 0.97],
     });
+    let line = act_words(line);
     let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
     let ink = if h.news || fill { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
@@ -1347,6 +1440,7 @@ fn draw_office(h, over, now) {
     draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.98, 0.9, 0.84, 0.97],
     });
+    let line = act_words(line);
     let lm = measure_text_ex(line, 13.0, "strong", 0.0);
     let ly = top + m.height + 5.0;
     let ink = if h.deed_waits { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };

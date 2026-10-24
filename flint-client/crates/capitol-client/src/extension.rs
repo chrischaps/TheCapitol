@@ -428,6 +428,149 @@ impl CapitolExtension {
             .unwrap_or(self.settings.settings.controls.mode)
     }
 
+    /// Focus and interact (T1.5, plan D5): over the shoulder with the cursor
+    /// captured, publish what's in front of you (`cap_focus`), and on E or a
+    /// captured click (`cap_interact`) act on it. Acting asks for what a
+    /// click on it would, through the same `Shared` requests the scripts
+    /// use, so reach, the walk to it and the rules are a click's. Shift-E on
+    /// a player asks to trade, as a shift-click does; E is their card.
+    fn focus_and_interact(&mut self, ctx: &ExtensionCtx) {
+        use capitol_core::focus::Kind;
+        let clicked = self.shared.interact.swap(false, Ordering::Relaxed);
+        let aiming = matches!(self.control_mode(), ControlMode::Direct)
+            && !self.at_login()
+            && ctx.is_cursor_captured();
+        let focus = if aiming { self.find_focus() } else { None };
+        let mark = focus.as_ref().map(|f| self.focus_mark(f));
+        if let Ok(mut m) = self.shared.focus.lock() {
+            *m = mark;
+        }
+        let Some(f) = focus else { return };
+        if !clicked && !ctx.input.is_action_just_pressed("interact") {
+            return;
+        }
+        let shift = ctx.input.is_action_pressed("with_shift");
+        let ask = |slot: &std::sync::Mutex<Option<String>>| {
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(f.id.clone());
+            }
+        };
+        tracing::info!("interact: {} {} ({})", f.kind.name(), f.id, f.label);
+        match f.kind {
+            Kind::Node => ask(&self.shared.extract),
+            Kind::Station => ask(&self.shared.open_station),
+            Kind::Player if shift => ask(&self.shared.trade_with),
+            Kind::Player => ask(&self.shared.open_card),
+            Kind::Board => self.shared.read_gazette.store(true, Ordering::Relaxed),
+            Kind::Office => self.shared.open_office.store(true, Ordering::Relaxed),
+            Kind::Stall => ask(&self.shared.visit_stall),
+            Kind::Hall => self.shared.visit_hall.store(true, Ordering::Relaxed),
+        }
+        // A key held through E doesn't walk you off what it started
+        if let Some(session) = &mut self.session {
+            session.latch_steering();
+        }
+    }
+
+    /// What's in front of you (`capitol_core::focus`): what the store knows,
+    /// or offline the samples', with the hall, its board, the Deeds Office
+    /// and the bazaar's stalls as they're drawn, against where you stand and
+    /// the yaw the rig means to have (`cap_view_yaw`).
+    fn find_focus(&self) -> Option<capitol_core::focus::Focus> {
+        use capitol_core::focus::{self, Candidate, Kind};
+        let you = self.shared.follow.lock().ok().and_then(|f| *f)?;
+        let [x, y] = crate::coords::to_server(you[0], you[2]);
+        let yaw = self.shared.view_yaw.lock().ok().and_then(|y| *y)?;
+        let view = capitol_core::steering::camera_way(1.0, 0.0, yaw);
+        let mut candidates = match &self.session {
+            Some(session) => focus::from_state(session.state()),
+            None => self.sample_candidates(),
+        };
+        let server = |p: [f32; 2]| {
+            let [x, y] = crate::coords::to_server(p[0], p[1]);
+            (x, y)
+        };
+        let quad = |c: &[[f32; 2]; 4]| c.map(server);
+        if let Some(h) = self.shared.hall.lock().ok().and_then(|h| h.clone()) {
+            candidates.push(Candidate::area(Kind::Hall, "exchange_hall", "The Exchange hall", quad(&h.corners)));
+            candidates.push(Candidate::area(Kind::Board, "notice_board", "The Notice Board", quad(&h.board)));
+            candidates.push(Candidate::area(Kind::Office, "deeds_office", "The Deeds Office", quad(&h.office)));
+        }
+        if let Some(b) = self.shared.bazaar.lock().ok().and_then(|b| b.clone()) {
+            for s in &b.stalls {
+                let label = s.name.clone().unwrap_or_else(|| "A stall to let".to_owned());
+                candidates.push(Candidate::area(Kind::Stall, s.id.clone(), label, quad(&s.corners)));
+            }
+        }
+        // Last frame's focus holds until another is clearly better
+        let held = self.shared.focus.lock().ok().and_then(|f| f.as_ref().map(|f| (f.kind, f.id.clone())));
+        let held = held.and_then(|(kind, id)| Kind::named(kind).map(|k| (k, id)));
+        focus::focus_holding(&candidates, (x, y), view, held.as_ref().map(|(k, id)| (*k, id.as_str())))
+    }
+
+    /// Offline, the samples' nodes and stations, so a capture can show the
+    /// focus with no server (`--node-sample`, `--station-sample`).
+    fn sample_candidates(&self) -> Vec<capitol_core::focus::Candidate> {
+        use capitol_core::catalog::Catalog;
+        use capitol_core::focus;
+        static CATALOG: std::sync::OnceLock<Catalog> = std::sync::OnceLock::new();
+        let mut out = Vec::new();
+        if let Some(Some(state)) = &self.station_sample {
+            out.extend(focus::from_state(state));
+        }
+        if let Some(Some(b)) = &self.building_sample {
+            out.extend(focus::from_state(&b.state));
+        }
+        if let Some(sample) = &self.node_sampled {
+            let catalog = CATALOG.get_or_init(Catalog::fallback);
+            let available = sample.nodes().values().filter(|n| n.state == "available");
+            out.extend(available.map(|n| focus::node(n, catalog)));
+        }
+        out
+    }
+
+    /// The focus as scripts see it: where it's drawn, with the ring round a
+    /// node or a station as their own marks have it.
+    fn focus_mark(&self, f: &capitol_core::focus::Focus) -> script_api::FocusMark {
+        use capitol_core::focus::Kind;
+        let mut at = crate::coords::to_world(f.at.0, f.at.1);
+        let (mut r, mut top) = (0.0, 0.0);
+        match f.kind {
+            Kind::Node => {
+                (r, top) = (1.0, 1.4);
+                if let Some(n) = self.shared.nodes.lock().ok().and_then(|ns| ns.iter().find(|n| n.id == f.id).cloned()) {
+                    (at, r) = (n.at, n.r.max(1.0));
+                }
+            }
+            Kind::Station => {
+                (r, top) = (1.0, 1.6);
+                if let Some(s) = self.shared.stations.lock().ok().and_then(|ss| ss.iter().find(|s| s.id == f.id).cloned()) {
+                    (at, r, top) = (s.at, s.radius, s.top + 0.5);
+                }
+            }
+            Kind::Player => {
+                r = 0.85;
+                // Where they're drawn, not where the server last had them
+                let drawn = self.shared.players.lock().ok().and_then(|ps| {
+                    ps.iter().find(|p| p.id.to_string() == f.id).map(|p| [p.at[0], p.at[2]])
+                });
+                if let Some(p) = drawn {
+                    at = p;
+                }
+            }
+            _ => {}
+        }
+        script_api::FocusMark {
+            kind: f.kind.name(),
+            id: f.id.clone(),
+            label: f.label.clone(),
+            shift_label: f.shift_label.clone(),
+            at,
+            r,
+            top,
+        }
+    }
+
     /// Play no sound (`--mute`, and every capture).
     pub fn with_mute(mut self, on: bool) -> Self {
         self.sound = Soundscape::new(on);
@@ -1830,6 +1973,7 @@ impl PlayerExtension for CapitolExtension {
             );
             fire_node_changes(ctx, changes);
         }
+        self.focus_and_interact(ctx);
         self.shared
             .at_login
             .store(self.at_login(), Ordering::Relaxed);
