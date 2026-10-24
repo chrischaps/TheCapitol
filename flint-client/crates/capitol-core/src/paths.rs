@@ -10,10 +10,10 @@
 //!
 //! - **The graph** is the roads and the wild trails. Every vertex is a node,
 //!   a long segment is cut into pieces of [`SPAN`], and roads that meet
-//!   within [`WELD`] without sharing a vertex are joined. Open ground joins
-//!   the rest: a road's loose end, or a network still apart, gets a line to
-//!   the nearest node of another within [`JOIN`] (a rural lane stops short
-//!   of the suburb's streets and of the wild passes). The bridges are
+//!   within [`WELD`] without sharing a vertex are joined. On the default
+//!   world that's one network already (#341). Open ground joins whatever
+//!   is left apart: a road's loose end, or a network still apart, gets a
+//!   line to the nearest node of another within [`JOIN`]. The bridges are
 //!   roads over the rings, the fords are on the trails, and a trail over a
 //!   river is its bridge, so the graph crosses water only where the server
 //!   lets you.
@@ -67,8 +67,12 @@ pub const SPAN: f64 = 40.0;
 /// is walkable: a T-junction whose stem ends beside the through road.
 pub const WELD: f64 = 30.0;
 /// How far across open ground a loose road end, or a network apart from the
-/// rest, is joined to another.
-pub const JOIN: f64 = 600.0;
+/// rest, is joined to another. It was 600 while the old rural trails
+/// stopped short of the suburb and the passes (#211). Since the farms'
+/// lanes weld, the default world's roads make one network without it, so it
+/// joins nothing there, at any reach (#341). It's kept, short, for a world
+/// whose roads don't all meet.
+pub const JOIN: f64 = 150.0;
 /// How far a pulled-tight leg may stray from the way it replaces.
 pub const DEVIATION: f64 = 25.0;
 
@@ -221,6 +225,11 @@ struct Access {
 impl WalkGraph {
     /// Builds the graph of `terrain`'s roads and trails.
     pub fn new(terrain: &TerrainResponse) -> Self {
+        Self::joined_within(terrain, JOIN)
+    }
+
+    /// [`Self::new`], joining across open ground within `reach`.
+    fn joined_within(terrain: &TerrainResponse, reach: f64) -> Self {
         let mut graph = WalkGraph {
             version: terrain.version.clone(),
             center: (terrain.center_x, terrain.center_y),
@@ -255,15 +264,14 @@ impl WalkGraph {
                 }
             }
         }
-        graph.join();
+        graph.join(reach);
         graph
     }
 
-    /// Joins the roads the open ground joins: a rural lane that stops short
-    /// of the suburb's streets, a trail that starts in a field. Each loose
+    /// Joins the roads the open ground joins, if any don't meet. Each loose
     /// end, and each network still apart from the largest, gets a line to
-    /// the nearest node of another network it can walk to within [`JOIN`].
-    fn join(&mut self) {
+    /// the nearest node of another network it can walk to within `reach`.
+    fn join(&mut self, reach: f64) {
         for _ in 0..JOIN_ROUNDS {
             let networks = self.networks();
             let mut sizes = HashMap::<u32, usize>::new();
@@ -281,7 +289,7 @@ impl WalkGraph {
                 }
                 let p = self.nodes[i as usize];
                 let other = self
-                    .near(p, JOIN)
+                    .near(p, reach)
                     .into_iter()
                     .filter(|&j| networks[j as usize] != network)
                     .take(JOIN_TRIES)

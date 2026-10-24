@@ -417,3 +417,58 @@ fn the_road_ins_stops_are_the_clients() {
         assert!(graph.route((SPAWN_X, SPAWN_Y), stop.road).is_some(), "no way to the {zone} stop");
     }
 }
+
+/// The graph's networks by size, largest first.
+fn network_sizes(graph: &WalkGraph) -> Vec<usize> {
+    let mut sizes = HashMap::<u32, usize>::new();
+    for c in graph.networks() {
+        *sizes.entry(c).or_default() += 1;
+    }
+    let mut sizes: Vec<usize> = sizes.into_values().collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    sizes
+}
+
+/// The fixture world's roads make one network by their shared vertices and
+/// welds alone, so [`JOIN`] adds no line across open ground to it (#341). A
+/// change that leaves a road apart fails here, rather than as a walk that
+/// cuts across a field.
+#[test]
+fn the_roads_alone_make_one_network() {
+    let (terrain, graph) = world();
+    let roads = WalkGraph::joined_within(terrain, 0.0);
+    let sizes = network_sizes(&roads);
+    assert_eq!(sizes.len(), 1, "networks apart, largest first: {:?}", &sizes[..sizes.len().min(8)]);
+    assert_eq!(roads.edges, graph.edges, "JOIN added a line to the fixture world");
+}
+
+/// What a smaller JOIN does to the fixture world's graph (#341).
+#[test]
+#[ignore]
+fn print_join_reaches() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+    let terrain = read_terrain_file(&path).unwrap();
+    for reach in [600.0, 300.0, 150.0, 60.0, 0.0] {
+        let start = Instant::now();
+        let graph = WalkGraph::joined_within(&terrain, reach);
+        let built = start.elapsed();
+        let roads = WalkGraph::joined_within(&terrain, 0.0);
+        let (mut joins, mut length, mut longest) = (0, 0.0, 0.0f64);
+        for i in 0..graph.len() {
+            for &(j, _) in &graph.edges[i] {
+                if i < j as usize && !roads.adjacent(i as u32, j) {
+                    let d = distance(graph.nodes[i], graph.nodes[j as usize]);
+                    joins += 1;
+                    length += d;
+                    longest = longest.max(d);
+                }
+            }
+        }
+        let sizes = network_sizes(&graph);
+        eprintln!(
+            "JOIN {reach:>4}: {} networks {:?}, {joins} joins, {length:.0} long, longest {longest:.0}, built in {built:?}",
+            sizes.len(),
+            &sizes[..sizes.len().min(8)]
+        );
+    }
+}
