@@ -24,7 +24,7 @@ use crate::api_keys::{self, KeyAuth, KeyGrant};
 use crate::engine::GameEvent;
 use crate::engine::load::{self, SocketEnd};
 use crate::engine::presence::{self, Holder, PresenceEvent};
-use crate::engine::currency::announce_balances;
+use crate::engine::currency::{add_strands_in, announce_balances, subtract_strands_in, TransactionType};
 use crate::models::{ItemType, PlayerState};
 use crate::error::SESSIONS_UNAVAILABLE;
 use crate::routes::auth::Claims;
@@ -2020,8 +2020,23 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
         }
     }
 
-    // Start database transaction
     let mut tx = state.db.begin().await.map_err(|e| format!("DB error: {}", e))?;
+    let balances = settle_trade(&mut tx, &session).await?;
+    tx.commit().await.map_err(|e| format!("DB error: {}", e))?;
+
+    tracing::info!("Trade {} executed successfully between {} and {}", trade_id, player_a, player_b);
+    Ok((trade_id, balances))
+}
+
+/// A trade's writes, inside the caller's transaction: checks both offers
+/// still hold, hands the items over, and moves the Strands. Returns each
+/// side's new balance if Strands changed hands. Any error should roll the
+/// transaction back.
+async fn settle_trade(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: &crate::engine::trading::TradeSession,
+) -> Result<Vec<(Uuid, i64)>, String> {
+    let (trade_id, player_a, player_b) = (session.id, session.player_a, session.player_b);
 
     // Verify every item offered still exists, is its offerer's, and holds the units offered
     for (items, owner) in [(&session.offer_a.items, player_a), (&session.offer_b.items, player_b)] {
@@ -2031,10 +2046,10 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
             )
             .bind(item_id)
             .bind(owner)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(|e| format!("DB error: {}", e))?;
-            let held = crate::engine::units::units_of(&mut tx, *item_id)
+            let held = crate::engine::units::units_of(tx, *item_id)
                 .await
                 .map_err(|e| format!("DB error: {}", e))?;
             if owned.is_none() || !held.contains(units) {
@@ -2046,13 +2061,13 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
     // Verify strand balances
     let balance_a: (i64,) = sqlx::query_as("SELECT strand_balance FROM players WHERE id = $1 FOR UPDATE")
         .bind(player_a)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(|e| format!("DB error: {}", e))?;
 
     let balance_b: (i64,) = sqlx::query_as("SELECT strand_balance FROM players WHERE id = $1 FOR UPDATE")
         .bind(player_b)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(|e| format!("DB error: {}", e))?;
 
@@ -2070,7 +2085,7 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
     let mut placing: Vec<(Uuid, Uuid)> = Vec::new();
     for (items, to) in [(&session.offer_a.items, player_b), (&session.offer_b.items, player_a)] {
         for (item_id, units) in items {
-            placing.push((hand_over(&mut tx, *item_id, units, to).await?, to));
+            placing.push((hand_over(tx, *item_id, units, to).await?, to));
         }
     }
     for to in [player_a, player_b] {
@@ -2080,71 +2095,25 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
             .map(|(id, _)| *id)
             .collect();
         if !stacks.is_empty() {
-            place_in_inventory(&mut tx, to, &stacks).await?;
+            place_in_inventory(tx, to, &stacks).await?;
         }
     }
 
-    // Transfer strands
+    // Move the Strands: the net, one audited row a side, so the payer's
+    // trade_sent and the payee's trade_received net to zero in the ledger,
+    // and each trail explains its balance (#506). Both offers were checked
+    // against their gross above.
     let net_strands = session.offer_b.strands - session.offer_a.strands;
-    let new_balance_a = balance_a.0 + net_strands;
-    let new_balance_b = balance_b.0 - net_strands;
-
-    sqlx::query("UPDATE players SET strand_balance = $1 WHERE id = $2")
-        .bind(new_balance_a)
-        .bind(player_a)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {}", e))?;
-
-    sqlx::query("UPDATE players SET strand_balance = $1 WHERE id = $2")
-        .bind(new_balance_b)
-        .bind(player_b)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {}", e))?;
-
-    // Add audit records for currency changes
-    if session.offer_a.strands > 0 {
-        sqlx::query(
-            "INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type, reference_id, description)
-             VALUES ($1, $2, $3, $4, 'trade_sent', $5, 'Trade payment')"
-        )
-        .bind(player_a)
-        .bind(-session.offer_a.strands)
-        .bind(balance_a.0)
-        .bind(balance_a.0 - session.offer_a.strands)
-        .bind(trade_id)
-        .execute(&mut *tx)
-        .await
-        .ok();
+    if net_strands == 0 {
+        return Ok(Vec::new());
     }
-
-    if session.offer_b.strands > 0 {
-        sqlx::query(
-            "INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type, reference_id, description)
-             VALUES ($1, $2, $3, $4, 'trade_sent', $5, 'Trade payment')"
-        )
-        .bind(player_b)
-        .bind(-session.offer_b.strands)
-        .bind(balance_b.0)
-        .bind(balance_b.0 - session.offer_b.strands)
-        .bind(trade_id)
-        .execute(&mut *tx)
-        .await
-        .ok();
-    }
-
-    // Commit transaction
-    tx.commit().await.map_err(|e| format!("DB error: {}", e))?;
-
-    tracing::info!("Trade {} executed successfully between {} and {}", trade_id, player_a, player_b);
-
-    let balances = if net_strands != 0 {
-        vec![(player_a, new_balance_a), (player_b, new_balance_b)]
-    } else {
-        Vec::new()
-    };
-    Ok((trade_id, balances))
+    let (payer, payee) = if net_strands > 0 { (player_b, player_a) } else { (player_a, player_b) };
+    let paid = net_strands.abs();
+    let payer_balance =
+        subtract_strands_in(tx, payer, paid, TransactionType::TradeSent, Some("Trade payment"), Some(trade_id)).await?;
+    let payee_balance =
+        add_strands_in(tx, payee, paid, TransactionType::TradeReceived, Some("Trade payment"), Some(trade_id)).await?;
+    Ok(vec![(payer, payer_balance), (payee, payee_balance)])
 }
 
 /// Gives `units` of the stack `item_id` to `to`, out of any container: the
@@ -2498,5 +2467,71 @@ mod tests {
         all.merge(&all_held(&db, bob, "fiber").await);
         assert_eq!(all, mixed, "no unit lost its quality");
         assert_eq!(marked(&db, part).await, Marked::by(Some(ada), &Units::uniform(4, 92)), "nor its maker's mark");
+    }
+
+    /// Strands offered both ways move as the net, one row a side: the
+    /// payer's trade_sent and the payee's trade_received net to zero, and
+    /// every trail explains its balance (#506)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_trade_audits_its_strands_on_both_sides(db: sqlx::PgPool) {
+        use crate::engine::conservation::{assert_audited, balances_of};
+        use crate::engine::plot_sync::tests::player;
+        use capitol_protocol::ledger::StrandFlow;
+
+        let ada = player(&db, "ada", 100).await;
+        let bob = player(&db, "bob", 100).await;
+        let start = balances_of(&db, [ada, bob]).await;
+        let rows = |trade: Uuid| {
+            let db = db.clone();
+            async move {
+                sqlx::query_as::<_, (Uuid, i64, i64, i64, String)>(
+                    "SELECT player_id, amount, balance_before, balance_after, transaction_type
+                     FROM currency_transactions WHERE reference_id = $1 ORDER BY amount",
+                )
+                .bind(trade)
+                .fetch_all(&db)
+                .await
+                .unwrap()
+            }
+        };
+
+        // Ada offers 15 and Bob 40: Bob pays Ada the 25 between them
+        let mut session = crate::engine::trading::TradeSession::new(ada, bob);
+        session.offer_a.strands = 15;
+        session.offer_b.strands = 40;
+        let mut tx = db.begin().await.unwrap();
+        let balances = settle_trade(&mut tx, &session).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(balances, vec![(bob, 75), (ada, 125)]);
+        assert_eq!(
+            rows(session.id).await,
+            vec![
+                (bob, -25, 100, 75, "trade_sent".to_string()),
+                (ada, 25, 100, 125, "trade_received".to_string()),
+            ]
+        );
+        assert_audited(&db, &start).await;
+
+        // The other way round, and an even trade moves nothing
+        let mut back = crate::engine::trading::TradeSession::new(ada, bob);
+        back.offer_a.strands = 30;
+        let mut even = crate::engine::trading::TradeSession::new(ada, bob);
+        (even.offer_a.strands, even.offer_b.strands) = (10, 10);
+        let mut tx = db.begin().await.unwrap();
+        assert_eq!(settle_trade(&mut tx, &back).await.unwrap(), vec![(ada, 95), (bob, 105)]);
+        assert_eq!(settle_trade(&mut tx, &even).await.unwrap(), vec![]);
+        tx.commit().await.unwrap();
+        assert!(rows(even.id).await.is_empty());
+        assert_audited(&db, &start).await;
+        for kind in ["trade_sent", "trade_received"] {
+            assert_eq!(StrandFlow::of(kind), StrandFlow::Transfer);
+        }
+
+        // An offer past the balance refuses the trade, whatever the net
+        let mut broke = crate::engine::trading::TradeSession::new(ada, bob);
+        (broke.offer_a.strands, broke.offer_b.strands) = (500, 499);
+        let mut tx = db.begin().await.unwrap();
+        assert!(settle_trade(&mut tx, &broke).await.unwrap_err().contains("insufficient"));
     }
 }
