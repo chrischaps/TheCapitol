@@ -34,6 +34,8 @@ use std::fmt;
 
 use plan::{Goal, Holdings, Step, FLOAT, FLOOR};
 
+use capitol_protocol::rules::court;
+
 use crate::catalog::Catalog;
 use crate::citizen::decide::{Choice, Span};
 
@@ -132,6 +134,31 @@ pub const LOT: i32 = 10;
 pub const STALL_AT: i32 = 2 * SELL_AT;
 /// Days of rent a citizen pays at a time.
 pub const STALL_DAYS: i64 = 2;
+/// The most commissions a citizen keeps open on the hall's board (S2.5),
+/// under the court's five.
+pub const MAX_POSTS: usize = 2;
+/// The days a citizen's commission runs: the court's, which are real ones.
+pub const POST_DAYS: i64 = 2;
+/// The grade a citizen's commission asks for: any, as its bids do.
+pub const POST_GRADE: &str = "F";
+
+/// A commission on the hall's board as a citizen's menu needs it (S2.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wanted<'a> {
+    pub item: &'a str,
+    /// What no claim holds: anyone may claim it or deliver it
+    pub unclaimed: i32,
+    /// What its own claim on it still owes, 0 without one
+    pub owed: i32,
+    /// Units it holds at the commission's grade
+    pub meeting: i32,
+    /// The most it would promise: what it makes in a day's work
+    pub day_work: i32,
+    /// It can gather or make the item at the grade, in the time a claim runs
+    pub can_make: bool,
+    /// Its claim runs out within the court's hour of grace
+    pub due_soon: bool,
+}
 
 /// A trade a bot makes instead of the planner's step, as its mind decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +171,9 @@ pub enum Trade {
     Stock { item: String, quantity: i32, price: i64 },
     /// A merchant's spell of making a market in its goods (C1.6).
     MakeMarket,
+    /// A commission on the hall's board for an input its bids haven't
+    /// filled (S2.5).
+    Post { item: String, quantity: i32, price: i64 },
 }
 
 impl Trade {
@@ -155,6 +185,7 @@ impl Trade {
             Trade::Bid { item, .. } => format!("bid for {item}"),
             Trade::Stock { item, .. } => format!("stock {item}"),
             Trade::MakeMarket => "make a market".into(),
+            Trade::Post { item, .. } => format!("post for {item}"),
         }
     }
 }
@@ -213,11 +244,20 @@ impl Role {
     /// earns its [`FLOAT`] back by fiber first (#294): with nothing in hand
     /// it can't pay a sale's fee, so it can't sell its way out, and it can't
     /// buy what it would otherwise gather.
+    ///
+    /// What its claims on commissions still want of it comes before
+    /// anything (S2.5): a promise is kept first.
     pub fn goals(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
         let mut goals = self.work(catalog, holdings);
         if !self.banks() && holdings.strands < FLOOR {
             goals.insert(0, Goal::Strands(FLOAT));
         }
+        let owed = holdings
+            .owed
+            .iter()
+            .filter(|(_, short)| *short > 0)
+            .map(|(item, short)| Goal::hold(item, holdings.count(item) + short));
+        goals.splice(0..0, owed);
         goals
     }
 
@@ -420,6 +460,86 @@ impl Role {
             },
             Choice::Keep,
         ])
+    }
+
+    /// What the role answers a commission for (S2.5): what it gathers or
+    /// makes, and for a fiber gatherer rope too, which it twists from its
+    /// fiber by hand. A merchant answers none: it earns its float.
+    pub fn answers(&self) -> &'static [&'static str] {
+        match self {
+            Role::Gatherer(Gather::Fiber) => &["fiber", "rope"],
+            Role::Gatherer(Gather::Wood) => &["log"],
+            Role::Gatherer(Gather::Ore) => &["iron_ore"],
+            Role::Crafter(Craft::Planks) => &["plank"],
+            Role::Crafter(Craft::Ingots) => &["iron_ingot"],
+            Role::Crafter(Craft::Tools) => &["tool_handle"],
+            Role::Builder => &["brick"],
+            Role::Merchant => &[],
+        }
+    }
+
+    /// The menu for a commission on the board (S2.5), if there's a question
+    /// to ask:
+    /// - **Deliver** what it holds at the grade, up to what's open to it.
+    ///   On a claim of its own, only once it holds all it owes, or its
+    ///   claim is nearly out.
+    /// - **Claim**, for something it answers, with none of its own on it,
+    ///   that it can make at the grade in time: up to a day's work.
+    /// - **Pass**, always.
+    pub fn commission_menu(&self, w: &Wanted) -> Option<Vec<Choice>> {
+        let mut menu = Vec::new();
+        let open = court::deliverable(w.unclaimed, w.owed).min(w.meeting);
+        let ready = w.owed == 0 || w.meeting >= w.owed || w.due_soon;
+        if open > 0 && ready {
+            menu.push(Choice::Deliver {
+                quantity: Span::new(1, open),
+            });
+        }
+        let most = w.unclaimed.min(w.day_work);
+        if w.owed == 0 && most > 0 && w.can_make && self.answers().contains(&w.item) {
+            menu.push(Choice::Claim {
+                quantity: Span::new(1, most),
+            });
+        }
+        if menu.is_empty() {
+            return None;
+        }
+        menu.push(Choice::Pass);
+        Some(menu)
+    }
+
+    /// The menu for posting a commission for `item` (S2.5), if there's a
+    /// question to ask: the role needs it, its standing bid at `bid` hasn't
+    /// filled in a day, it has fewer than [`MAX_POSTS`] open, and it can
+    /// put the price and the court's fee down on some, with what it
+    /// [`kept`] back. Post (from the bid's price to twice it, up to two
+    /// lots), or pass.
+    pub fn post_menu(&self, holdings: &Holdings, item: &str, bid: i64, open: usize) -> Option<Vec<Choice>> {
+        if open >= MAX_POSTS || !self.needs().contains(&item) {
+            return None;
+        }
+        let bid = bid.max(1);
+        let top = bid * 2;
+        let budget = holdings.strands - kept(holdings);
+        let mut afford = 2 * LOT;
+        while afford > 0 && {
+            let value = court::commission_value(top, afford);
+            value + court::court_fee(value) > budget
+        } {
+            afford -= 1;
+        }
+        (afford > 0).then(|| {
+            vec![
+                Choice::Post {
+                    item: item.to_string(),
+                    grade: POST_GRADE.to_string(),
+                    price: Span::new(bid, top),
+                    quantity: Span::new(1, afford),
+                    due: POST_DAYS,
+                },
+                Choice::Pass,
+            ]
+        })
     }
 
     /// The role as a roster names it (C1.1): `gatherer-fiber`, `builder`.
@@ -819,6 +939,134 @@ mod tests {
             }
         }
         assert!(cases >= 30, "{cases}");
+    }
+
+    fn wanted(item: &str) -> Wanted<'_> {
+        Wanted {
+            item,
+            unclaimed: 20,
+            owed: 0,
+            meeting: 0,
+            day_work: LOT,
+            can_make: true,
+            due_soon: false,
+        }
+    }
+
+    #[test]
+    fn every_role_answers_a_commission_for_what_it_makes() {
+        let claim = |most| Choice::Claim {
+            quantity: Span::new(1, most),
+        };
+        let deliver = |most| Choice::Deliver {
+            quantity: Span::new(1, most),
+        };
+        for role in ROLES {
+            for item in role.answers() {
+                // Up to a day's work, or what's unclaimed if that's less
+                assert_eq!(role.commission_menu(&wanted(item)), Some(vec![claim(LOT), Choice::Pass]), "{role}");
+                let few = Wanted { unclaimed: 4, ..wanted(item) };
+                assert_eq!(role.commission_menu(&few), Some(vec![claim(4), Choice::Pass]), "{role}");
+                // What it holds at the grade, it may deliver now
+                let held = Wanted { meeting: 6, ..wanted(item) };
+                assert_eq!(role.commission_menu(&held), Some(vec![deliver(6), claim(LOT), Choice::Pass]), "{role}");
+                // Not what it can't make in time, at the grade
+                let cant = Wanted { can_make: false, ..wanted(item) };
+                assert_eq!(role.commission_menu(&cant), None, "{role}");
+                // Nothing left to claim or bring
+                let none = Wanted { unclaimed: 0, ..held };
+                assert_eq!(role.commission_menu(&none), None, "{role}");
+            }
+            // What it doesn't make, it can't promise; only bring what it has
+            let other = wanted("workbench_kit");
+            assert_eq!(role.commission_menu(&other), None, "{role}");
+            let held = Wanted { meeting: 3, ..other };
+            assert_eq!(role.commission_menu(&held), Some(vec![deliver(3), Choice::Pass]), "{role}");
+        }
+        assert!(Role::Merchant.answers().is_empty());
+        assert_eq!(Role::Gatherer(Gather::Fiber).answers(), ["fiber", "rope"]);
+        assert_eq!(Role::Gatherer(Gather::Ore).answers(), ["iron_ore"]);
+    }
+
+    #[test]
+    fn a_claim_is_delivered_once_all_it_owes_is_in_hand() {
+        let role = Role::Gatherer(Gather::Wood);
+        let deliver = |most| Choice::Deliver {
+            quantity: Span::new(1, most),
+        };
+        let owing = |meeting| Wanted {
+            owed: 10,
+            unclaimed: 5,
+            meeting,
+            ..wanted("log")
+        };
+        // Short of it: nothing to ask, and no second claim
+        assert_eq!(role.commission_menu(&owing(4)), None);
+        // All of it, and the unclaimed part too if it holds more
+        assert_eq!(role.commission_menu(&owing(10)), Some(vec![deliver(10), Choice::Pass]));
+        assert_eq!(role.commission_menu(&owing(30)), Some(vec![deliver(15), Choice::Pass]));
+        // With the claim nearly out, what it has
+        let late = Wanted { due_soon: true, ..owing(4) };
+        assert_eq!(role.commission_menu(&late), Some(vec![deliver(4), Choice::Pass]));
+    }
+
+    #[test]
+    fn what_a_claim_still_wants_is_worked_for_first() {
+        let catalog = Catalog::fallback();
+        let mut h = Holdings {
+            strands: FLOAT,
+            owed: vec![("rope".into(), 3)],
+            ..Holdings::default()
+        };
+        h.items.insert("fiber".into(), 6);
+        h.items.insert("rope".into(), 1);
+        let fiber = Role::Gatherer(Gather::Fiber);
+        let errands = fiber.errands(&catalog, &h).unwrap();
+        assert_eq!(errands[0].goal, Some(Goal::hold("rope", 4)));
+        assert!(matches!(errands[0].step, Step::Craft { .. }), "{:?}", errands[0].step);
+        // Owing nothing more, the role's own work
+        h.owed = vec![("rope".into(), 0)];
+        let errands = fiber.errands(&catalog, &h).unwrap();
+        assert_eq!(errands[0].goal, Some(Goal::hold("fiber", 7)));
+    }
+
+    #[test]
+    fn a_crafter_posts_for_what_its_bids_need_while_it_has_room_and_strands() {
+        let planks = Role::Crafter(Craft::Planks);
+        let h = Holdings {
+            strands: 1000,
+            plot_room: Some(2),
+            ..Holdings::default()
+        };
+        let menu = planks.post_menu(&h, "log", 10, 0).unwrap();
+        assert_eq!(
+            menu,
+            vec![
+                Choice::Post {
+                    item: "log".into(),
+                    grade: POST_GRADE.into(),
+                    price: Span::new(10, 20),
+                    quantity: Span::new(1, 2 * LOT),
+                    due: POST_DAYS,
+                },
+                Choice::Pass,
+            ]
+        );
+        // Two open already, or something its trade doesn't need: no question
+        assert_eq!(planks.post_menu(&h, "log", 10, MAX_POSTS), None);
+        assert_eq!(planks.post_menu(&h, "stone", 10, 0), None);
+        assert_eq!(Role::Gatherer(Gather::Wood).post_menu(&h, "log", 10, 0), None);
+        // The whole price and the court's fee go down, from what it keeps spare
+        let short = Holdings { strands: 100, ..h.clone() };
+        let Some(Choice::Post { quantity, .. }) = planks.post_menu(&short, "log", 10, 0).map(|m| m[0].clone()) else {
+            panic!("a post")
+        };
+        let value = court::commission_value(20, quantity.max);
+        assert!(value + court::court_fee(value) <= 100 - FLOOR, "{quantity:?}");
+        let more = court::commission_value(20, quantity.max + 1);
+        assert!(more + court::court_fee(more) > 100 - FLOOR);
+        let broke = Holdings { strands: 20, ..h };
+        assert_eq!(planks.post_menu(&broke, "log", 10, 0), None);
     }
 
     #[test]

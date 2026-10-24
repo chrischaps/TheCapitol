@@ -233,9 +233,16 @@ fn describe(choice: &Choice, price: bool) -> (String, String) {
     match (choice, price) {
         (Choice::Counter { .. }, _) => ("how many Strands better a deal should it ask for?".into(), "Strands better".into()),
         (Choice::Pay { .. }, _) => ("how many Strands should it pay?".into(), "Strands".into()),
-        (Choice::Buy { .. } | Choice::Bid { .. }, true) => ("what should it pay for each, at most?".into(), "Strands each".into()),
+        (Choice::Buy { .. } | Choice::Bid { .. } | Choice::Post { .. }, true) => ("what should it pay for each, at most?".into(), "Strands each".into()),
         (_, true) => ("what price should it ask for each?".into(), "Strands each".into()),
-        (Choice::Sell { item, .. } | Choice::Buy { item, .. } | Choice::Bid { item, .. } | Choice::Stock { item, .. }, false) => {
+        (
+            Choice::Sell { item, .. }
+            | Choice::Buy { item, .. }
+            | Choice::Bid { item, .. }
+            | Choice::Stock { item, .. }
+            | Choice::Post { item, .. },
+            false,
+        ) => {
             ("how many should it trade?".into(), item.clone())
         }
         (_, false) => ("how many?".into(), "of them".into()),

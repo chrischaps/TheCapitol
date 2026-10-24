@@ -266,7 +266,8 @@ impl SimBot {
             self.settle(mark, Some(&Action::Trade(trade)), &result);
             result?;
         }
-        Ok(())
+        // What its bids haven't filled in a day, it posts for (S2.5)
+        self.post_wants()
     }
 
     /// Leaves a bid for `quantity` of `item` at `price` on the book, to
@@ -283,6 +284,7 @@ impl SimBot {
             grade_rule: None,
         })?;
         self.mind.placed(order.id);
+        self.board.bid(item, price);
         Ok(())
     }
 

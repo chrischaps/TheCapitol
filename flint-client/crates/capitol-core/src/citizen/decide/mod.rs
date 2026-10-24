@@ -220,6 +220,20 @@ pub enum Question {
     /// the wire, or go on with its errand (#450): the tutorial, walked by
     /// the rules, whose end earns a deed (road-in plan D3).
     Road { step: String },
+    /// Whether to claim a commission on the hall's board, deliver to it, or
+    /// leave it (Commons S2.5): `wanted` units of `item` at or over `grade`
+    /// (`A` to `F`, F taking anything), at `price` Strands each, due in
+    /// `due` game hours. `wanted` is what's open to the citizen: the
+    /// unclaimed part, and `claimed`, what its own claim still owes.
+    Commission {
+        id: Uuid,
+        item: String,
+        grade: String,
+        wanted: i32,
+        claimed: i32,
+        price: i64,
+        due: f64,
+    },
 }
 
 impl Question {
@@ -235,6 +249,7 @@ impl Question {
             Question::Market => "market".into(),
             Question::Ask => "ask".into(),
             Question::Road { .. } => "road".into(),
+            Question::Commission { id, .. } => format!("commission {id}"),
         }
     }
 }
@@ -359,19 +374,41 @@ pub enum Choice {
     /// in `chapter`, by its name too, and what taking it is, in a few
     /// words (`twist a rope`).
     Road { step: String, chapter: String, does: String },
+    /// Promise to bring some of a commission's wants (S2.5): a claim holds
+    /// them for the citizen for a day, never past the due date, and a claim
+    /// not kept is a breach on its record. Needs a quantity.
+    Claim { quantity: Span<i32> },
+    /// Bring some of a commission's wants to the hall now, from what it
+    /// holds at the grade, and be paid for each. Needs a quantity.
+    Deliver { quantity: Span<i32> },
+    /// Leave a commission for someone else, or post none.
+    Pass,
+    /// Post a commission on the hall's board for `item`, at or over `grade`,
+    /// due in `due` days (the court's, which are real ones), with the whole
+    /// price down and the court's fee on top (S2.5): demand said out loud.
+    /// Its price's span starts at what the citizen's standing bid offers.
+    /// Needs a price and a quantity.
+    Post {
+        item: String,
+        grade: String,
+        price: Span<i64>,
+        quantity: Span<i32>,
+        due: i64,
+    },
 }
 
 impl Choice {
     /// The parameters it takes: (price, quantity).
-    fn takes(&self) -> (Option<Span<i64>>, Option<Span<i32>>) {
+    pub(crate) fn takes(&self) -> (Option<Span<i64>>, Option<Span<i32>>) {
         match self {
             Choice::Sell { price, quantity, .. }
             | Choice::Buy { price, quantity, .. }
             | Choice::Bid { price, quantity, .. }
             | Choice::Stock { price, quantity, .. }
-            | Choice::BuyFrom { price, quantity, .. } => (Some(*price), Some(*quantity)),
+            | Choice::BuyFrom { price, quantity, .. }
+            | Choice::Post { price, quantity, .. } => (Some(*price), Some(*quantity)),
             Choice::Counter { strands } | Choice::Pay { strands } => (Some(*strands), None),
-            Choice::SellTo { quantity, .. } => (None, Some(*quantity)),
+            Choice::SellTo { quantity, .. } | Choice::Claim { quantity } | Choice::Deliver { quantity } => (None, Some(*quantity)),
             _ => (None, None),
         }
     }

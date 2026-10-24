@@ -299,12 +299,9 @@ fn letters_tool() -> Value {
 
 /// The entry's parameters: whether it takes a price, and a quantity.
 fn takes(c: &Choice) -> (bool, bool) {
-    match c {
-        Choice::Sell { .. } | Choice::Buy { .. } | Choice::Bid { .. } | Choice::Stock { .. } => (true, true),
-        // A counter or a payment is a sum of Strands: a price
-        Choice::Counter { .. } | Choice::Pay { .. } => (true, false),
-        _ => (false, false),
-    }
+    // A counter or a payment is a sum of Strands: a price
+    let (price, quantity) = c.takes();
+    (price.is_some(), quantity.is_some())
 }
 
 /// The tool for [`Menu::Schema`]: one branch for each entry.

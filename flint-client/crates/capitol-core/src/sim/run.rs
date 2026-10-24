@@ -14,8 +14,10 @@
 //! passes. Lingering among other citizens, it may ask one for a trade
 //! (#295). A town's merchants (C1.6, [`merchant`]) earn a float and make a
 //! market. And every citizen walks the road in, the tutorial, and claims
-//! its deed at the end of it (#450, [`road_in`]).
+//! its deed at the end of it (#450, [`road_in`]). They answer and post
+//! commissions on the hall's board too (Commons S2.5, [`board`]).
 
+mod board;
 mod idle;
 mod merchant;
 mod people;
@@ -319,8 +321,10 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::Stock { .. }, Some(Action::Trade(Trade::Stock { .. })))
         | (Choice::MakeMarket { .. }, Some(Action::Trade(Trade::MakeMarket)))
         | (Choice::Road { .. }, Some(Action::Road(_)))
+        | (Choice::Claim { .. } | Choice::Deliver { .. }, Some(Action::Board(_)))
+        | (Choice::Post { .. }, Some(Action::Trade(Trade::Post { .. })))
         | (Choice::Rest | Choice::Hall, None) => true,
-        (Choice::Keep | Choice::Gather { .. }, _) => return Fate::Passed,
+        (Choice::Keep | Choice::Gather { .. } | Choice::Pass, _) => return Fate::Passed,
         _ => false,
     };
     match result {
@@ -383,6 +387,9 @@ struct SimBot {
     road: Option<road_in::Road>,
     /// Its last round was a step on the road: what carrying on means there.
     on_road: bool,
+    /// The hall's board as it last read it, and its part in it (S2.5). Only
+    /// a citizen reads it.
+    board: board::Board,
 }
 
 /// What a bot does next.
@@ -394,6 +401,8 @@ enum Action {
     Market,
     /// A bit of the road in's next step (#450).
     Road(capitol_protocol::tutorial::Step),
+    /// A claim, or a delivery, at the hall's board (S2.5).
+    Board(board::BoardAct),
 }
 
 impl SimBot {
@@ -431,6 +440,7 @@ impl SimBot {
             asked: HashMap::new(),
             road: None,
             on_road: false,
+            board: board::Board::new(),
         }
     }
 
@@ -508,9 +518,13 @@ impl SimBot {
                 }
             }
             let catalog = self.bot.state().catalog().clone();
+            // What it owes on the board shapes its work (S2.5)
+            self.read_board()?;
             let holdings = self.holdings();
             // The round's decisions, whose outcomes are logged after it (C3.1)
             let mark = self.mind.mark();
+            // A promise first, then the board, before the road or a trade
+            let board = if self.people { self.choose_board(&holdings) } else { None };
             // What to work on, then whether to trade first (C1.3)
             let errand = match self.role.errands(&catalog, &holdings) {
                 Ok(errands) if errands.is_empty() => Ok(None),
@@ -520,12 +534,12 @@ impl SimBot {
             // The road in first, while a step on it is open (#450): by day and
             // at market hours, and in the night's work what needs no walk
             let road = match &errand {
-                _ if self.road.is_none() => None,
+                _ if self.road.is_none() || board.is_some() => None,
                 Ok(errand) => self.choose_road(&holdings, errand.as_ref()),
                 Err(_) => self.choose_road(&holdings, None),
             };
             let trade = match &errand {
-                _ if road.is_some() => None,
+                _ if road.is_some() || board.is_some() => None,
                 // No market in the night's work (#276)
                 Ok(Some(errand)) if self.trading && !self.night_shift => self.choose_trade(&holdings, errand),
                 _ => None,
@@ -535,11 +549,12 @@ impl SimBot {
             // it carries on with after.
             let step = errand.map(|e| e.map(|e| e.step));
             let errand_label = step.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.label(&catalog));
-            let action = match (road, step, trade) {
-                (Some(lesson), _, _) => Ok(Some(Action::Road(lesson))),
-                (None, _, Some(trade)) => Ok(Some(Action::Trade(trade))),
+            let action = match (board, road, step, trade) {
+                (Some(act), ..) => Ok(Some(Action::Board(act))),
+                (None, Some(lesson), _, _) => Ok(Some(Action::Road(lesson))),
+                (None, None, _, Some(trade)) => Ok(Some(Action::Trade(trade))),
                 _ if phase == Some(Phase::Market) => Ok(Some(Action::Market)),
-                (None, step, None) => step.map(|s| s.map(Action::Step)),
+                (None, None, step, None) => step.map(|s| s.map(Action::Step)),
             };
             match action {
                 Ok(Some(action)) => {
@@ -554,6 +569,7 @@ impl SimBot {
                         Action::Step(step) => self.take(step),
                         Action::Market => self.keep_market(town),
                         Action::Road(lesson) => self.walk_road(*lesson),
+                        Action::Board(act) => self.board_act(act),
                     };
                     if errand_label.is_some() {
                         self.doing = errand_label;
@@ -654,6 +670,7 @@ impl SimBot {
                 format!("{at} the {place}")
             }
             Action::Road(step) => format!("the road in: {}", road_in::does(*step)),
+            Action::Board(act) => act.label(),
         }
     }
 
@@ -788,7 +805,8 @@ impl SimBot {
         if self.merchant.is_some() {
             return self.choose_market(holdings, errand);
         }
-        if let Some(product) = self.role.product() {
+        // What a claim of its own wants isn't for sale (S2.5)
+        if let Some(product) = self.role.product().filter(|p| !self.board.owes(p)) {
             let (bid, ask) = self.best(product);
             if let Some(menu) = self.role.sell_menu(holdings, errand.goal.as_ref(), bid, ask) {
                 let question = Question::Sell { item: product.into() };
@@ -926,12 +944,17 @@ impl SimBot {
             // decision log against what put them up (C3.1)
             match &change {
                 StateEvent::Market(event) => match &**event {
-                    MarketEvent::OrderFilled { order, trade } => self.mind.filled(
-                        order.id,
-                        trade.quantity as i64,
-                        trade.price * trade.quantity as i64,
-                        order.status != OrderStatus::Open,
-                    ),
+                    MarketEvent::OrderFilled { order, trade } => {
+                        if order.side == OrderSide::Buy {
+                            self.board.filled(&order.item_type);
+                        }
+                        self.mind.filled(
+                            order.id,
+                            trade.quantity as i64,
+                            trade.price * trade.quantity as i64,
+                            order.status != OrderStatus::Open,
+                        )
+                    }
                     MarketEvent::OrderClosed(order) => self.mind.closed(order.id),
                     _ => {}
                 },
@@ -945,20 +968,61 @@ impl SimBot {
                 StateEvent::ExtractionCompleted { item, .. } if item.quantity == 0 => {
                     self.entries.push(Entry::Missed { item: item.item_type, at })
                 }
-                StateEvent::ExtractionCompleted { item, .. } => self.entries.push(Entry::Made {
-                    item: item.item_type,
-                    quantity: item.quantity,
-                    quality: item.quality,
-                    gathered: true,
-                    at,
-                }),
-                StateEvent::CraftingCompleted { item } => self.entries.push(Entry::Made {
-                    item: item.item_type,
-                    quantity: item.quantity,
-                    quality: item.quality,
-                    gathered: false,
-                    at,
-                }),
+                StateEvent::ExtractionCompleted { item, .. } => {
+                    self.board.made(&item.item_type, item.quantity);
+                    self.entries.push(Entry::Made {
+                        item: item.item_type,
+                        quantity: item.quantity,
+                        quality: item.quality,
+                        gathered: true,
+                        at,
+                    })
+                }
+                StateEvent::CraftingCompleted { item } => {
+                    self.board.made(&item.item_type, item.quantity);
+                    self.entries.push(Entry::Made {
+                        item: item.item_type,
+                        quantity: item.quantity,
+                        quality: item.quality,
+                        gathered: false,
+                        at,
+                    })
+                }
+                // The board's notices (S2.5). A fill a person delivered is
+                // counted here; one a citizen made, by its delivery
+                StateEvent::CommissionDelivered {
+                    item_type,
+                    deliverer_citizen,
+                    left,
+                    ..
+                } => {
+                    self.board.stale();
+                    if left == 0 && !deliverer_citizen {
+                        self.entries.push(Entry::Filled { item: item_type });
+                    }
+                }
+                StateEvent::CommissionExpired { item_type, refunded, .. } => {
+                    self.board.stale();
+                    self.entries.push(Entry::Expired {
+                        item: item_type,
+                        refunded,
+                    });
+                }
+                StateEvent::ClaimLapsed {
+                    item_type,
+                    claimant_id,
+                    quantity,
+                    delivered,
+                    ..
+                } => {
+                    self.board.stale();
+                    if Some(claimant_id) == self.bot.state().me() {
+                        self.entries.push(Entry::Lapsed {
+                            item: item_type,
+                            quantity: quantity - delivered,
+                        });
+                    }
+                }
                 StateEvent::ToolBroke { item_type, .. } => {
                     self.entries.push(Entry::ToolBroke { item: item_type, at })
                 }
@@ -1006,6 +1070,7 @@ impl SimBot {
             .count() as i32;
         let wanted = (self.role.room_wanted() - placed).max(0);
         h.plot_spare = h.plot_room.map_or(0, |room| room - wanted);
+        h.owed = self.owed();
         h
     }
 
@@ -1058,6 +1123,10 @@ impl SimBot {
                 self.bid(item, *quantity, *price)?;
                 self.bot.collect_market_box()?;
             }
+            Trade::Post { item, quantity, price } => {
+                self.bot.go_to_exchange()?;
+                self.post(item, *quantity, *price)?;
+            }
             Trade::Sell { .. } | Trade::Buy { .. } => {
                 self.bot.go_to_exchange()?;
                 self.trade_at_the_hall(trade)?;
@@ -1091,7 +1160,7 @@ impl SimBot {
                     grade_rule: None,
                 }
             }
-            Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket => {
+            Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket | Trade::Post { .. } => {
                 return Err(BotError::Failed(format!("{} isn't a trade at the hall", trade.label())))
             }
             Trade::Buy { item, quantity, price } => PlaceOrder {
@@ -1123,13 +1192,22 @@ impl SimBot {
 
     /// One pull from a node of `resource`, or of any resource that yields
     /// the same with the same tool (#336), finding one first.
+    ///
+    /// For a claim whose goods come from the wilds (S2.5), only a node out
+    /// there will do.
     fn gather(&mut self, resource: &str) -> Result<(), BotError> {
         let kinds = kinds(self.bot.state().catalog(), resource);
+        let wild = self
+            .bot
+            .state()
+            .catalog()
+            .resource_type(resource)
+            .is_some_and(|r| self.board.wild(&r.yields_item));
         let mut explored = 0;
         for _ in 0..MAX_EXPLORES {
             self.learn_nodes();
             let pick = self.random();
-            let Some(node) = self.nearest(&kinds, pick) else {
+            let Some(node) = self.nearest(&kinds, pick, wild) else {
                 self.explore(&kinds, explored)?;
                 explored += 1;
                 continue;
@@ -1173,8 +1251,10 @@ impl SimBot {
     /// A near node of one of `kinds` that nobody is gathering and that's
     /// available, or was depleted long enough ago to have grown back. One of
     /// the three nearest, picked by `pick` (in [0, 1)), so a crowd spreads
-    /// out rather than queueing at one patch.
-    fn nearest(&self, kinds: &[String], pick: f64) -> Option<ResourceNodeInfo> {
+    /// out rather than queueing at one patch. With `wild`, only one in the
+    /// Wilderness: any there, since a node's quality isn't on the wire
+    /// ([#504](https://github.com/chrischaps/TheCapitol/issues/504)).
+    fn nearest(&self, kinds: &[String], pick: f64, wild: bool) -> Option<ResourceNodeInfo> {
         let regrown: HashMap<&str, Duration> = kinds
             .iter()
             .map(|kind| {
@@ -1200,6 +1280,7 @@ impl SimBot {
                 })
             })
             .filter(|s| state.harvester(s.node.id).is_none())
+            .filter(|s| !wild || Zone::from_position(s.node.x, s.node.y) == Zone::Wilderness)
             .map(|s| &s.node)
             .collect();
         near.sort_by(|a, b| (a.x - x).hypot(a.y - y).total_cmp(&(b.x - x).hypot(b.y - y)));
@@ -1267,10 +1348,14 @@ impl SimBot {
     /// Whether it looks in the wilds first when it explores (#336): a
     /// citizen who takes chances, about a third of them, walks out to the
     /// ranges for their better grade. A swarm bot, with no persona, doesn't.
+    ///
+    /// A claim on ore from the wilds sends anyone out there (S2.5).
     fn ventures(&self) -> bool {
-        self.persona
-            .as_ref()
-            .is_some_and(|p| p.temperament.risk >= VENTURE_RISK)
+        self.board.wild("iron_ore")
+            || self
+                .persona
+                .as_ref()
+                .is_some_and(|p| p.temperament.risk >= VENTURE_RISK)
     }
 
     fn place(&mut self, kit: &str, station: &str, on_plot: bool) -> Result<(), BotError> {

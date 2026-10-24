@@ -480,6 +480,7 @@ fn kind(q: &Question) -> &'static str {
         Question::Market => "market",
         Question::Ask => "ask",
         Question::Road { .. } => "road",
+        Question::Commission { .. } => "commission",
     }
 }
 
@@ -679,7 +680,7 @@ mod tests {
         let situations = situations();
         let questions: std::collections::BTreeSet<_> = situations.iter().map(|s| kind(&s.question)).collect();
         assert!(situations.len() >= 60, "{}", situations.len());
-        assert_eq!(questions.len(), 4, "work, free time, sell and buy: {questions:?}");
+        assert_eq!(questions.len(), 5, "work, free time, sell, buy and commission: {questions:?}");
         record(&path, &situations);
         let report = replay(&path, Cascade::rules);
         assert_eq!(report.decisions, situations.len());

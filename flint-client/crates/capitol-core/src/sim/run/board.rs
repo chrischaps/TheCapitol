@@ -1,0 +1,561 @@
+//! A citizen at the hall's board (Commons S2.5): it answers commissions and
+//! posts its own, as people do, through the court's normal routes and fees.
+//!
+//! - **Reading.** The board and its own claims are read every
+//!   [`READ_EVERY`], and again after a notice says something changed.
+//! - **Keeping its word.** A claim of its own comes first: once it holds
+//!   all it owes at the grade (or the claim is nearly out), it walks to the
+//!   hall and delivers, before anything else that day. Until then its work
+//!   makes what it owes ([`Holdings::owed`]), and it sells none of it.
+//! - **Answering.** A commission for something its trade makes
+//!   ([`Role::answers`](crate::sim::Role::answers)) is a question
+//!   ([`Question::Commission`]): claim up to a day's work of it, deliver
+//!   what it holds, or pass. One a round, the best paid first, and one it
+//!   passed isn't asked about again for [`ASK_AGAIN`].
+//! - **Making it in time.** A claim is offered only for what it can make at
+//!   the grade where it goes ([`ground`]) in the time a claim runs. An ore
+//!   gatherer counts the wild veins: a grade the rural ring can't give, or a
+//!   price that pays the walk ([`WILD_PAY`]), sends it to the ranges, and it
+//!   gathers only there until the claim is kept.
+//! - **Posting.** A crafter whose bid for an input has stood a game day
+//!   without a fill posts a commission for it at the bid's price and a
+//!   premium, never with more than [`MAX_POSTS`](crate::sim::MAX_POSTS)
+//!   open ([`SimBot::post_wants`]).
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
+
+use capitol_protocol::rest::{Commission, CommissionClaim, PostCommission};
+use capitol_protocol::rules::court::{self, ClaimStatus, CommissionStatus};
+use capitol_protocol::rules::market::grade_floor;
+use capitol_protocol::rules::{Zone, DAY_LENGTH_SECS};
+use uuid::Uuid;
+
+use super::super::plan::Holdings;
+use super::super::report::Entry;
+use super::super::{Gather, Role, Trade, Wanted, LOT, POST_DAYS, POST_GRADE};
+use super::{Action, SimBot};
+use crate::bot::BotError;
+use crate::catalog::Catalog;
+use crate::citizen::decide::{Choice, Question};
+use crate::commissions::{meeting, stacks_for, GRADES};
+
+/// How often a citizen reads the board, at most, in game seconds.
+const READ_EVERY: f64 = 300.0;
+/// Game seconds before a commission it passed is asked about again.
+const ASK_AGAIN: f64 = 3600.0;
+/// A commission paying this many times the books pays an ore gatherer's
+/// walk to the ranges, where the veins are thicker and better (#336).
+const WILD_PAY: f64 = 1.5;
+/// What the wilds' quality table adds at its deepest and highest: the last
+/// rows of `backend/content/wilds.toml`'s `[quality]` (depth 10, height 8).
+/// Only the server's planner reads that file, so it's kept here and a test
+/// holds the two together ([#504](https://github.com/chrischaps/TheCapitol/issues/504)).
+pub(crate) const WILD_QUALITY_ADD: i32 = 18;
+/// The grade a citizen trusts itself to craft a good at: C. Its inputs'
+/// quality decides, and a citizen doesn't plan for them.
+const MADE_REACH: i32 = 55;
+
+/// Where a citizen would go for a commission's goods at its grade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ground {
+    /// Where it works anyway: its own zone's nodes, or its own craft
+    Home,
+    /// Out to the ranges: an ore gatherer's wild veins
+    Wilds,
+}
+
+/// Whether `role` can gather or make `item` at `min_quality`, and where
+/// (S2.5). A node's quality is drawn across its spawn's range (in the
+/// wilds from the row's floor up to the resource's top and
+/// [`WILD_QUALITY_ADD`]); a citizen counts on the top third of it, since a
+/// node's own quality isn't on the wire (#504). The
+/// wild veins count for an ore gatherer only. A good no node yields is
+/// crafted, and made up to [`MADE_REACH`].
+pub(crate) fn ground(role: Role, catalog: &Catalog, item: &str, min_quality: i32) -> Option<Ground> {
+    let sources: Vec<_> = catalog.resource_types().iter().filter(|r| r.yields_item == item).collect();
+    if sources.is_empty() {
+        return (min_quality <= MADE_REACH).then_some(Ground::Home);
+    }
+    let reach = |floor: i32, top: i32| floor + (top - floor) * 2 / 3;
+    let mut wilds = false;
+    for r in sources {
+        for spawn in r.spawns.iter().filter(|s| s.density > 0.0) {
+            if spawn.zone == Zone::Wilderness.as_str() {
+                let top = (r.base_quality_max + WILD_QUALITY_ADD).min(100);
+                let floor = spawn.quality_floor.unwrap_or(r.base_quality_min).max(r.base_quality_min);
+                wilds |= reach(floor, top) >= min_quality;
+            } else if reach(r.base_quality_min, r.base_quality_max) >= min_quality {
+                return Some(Ground::Home);
+            }
+        }
+    }
+    (wilds && role == Role::Gatherer(Gather::Ore)).then_some(Ground::Wilds)
+}
+
+/// A commission's grade as a letter, `A` to `F`: the best whose floor it
+/// asks for.
+pub(crate) fn grade_of(min_quality: i32) -> &'static str {
+    GRADES
+        .iter()
+        .find(|g| grade_floor(g).is_some_and(|f| f <= min_quality))
+        .copied()
+        .unwrap_or("F")
+}
+
+/// What a claim may promise of `item`, by what the citizen made of it in
+/// `made` over the last game day. Until it has worked a day, or for
+/// something it hasn't made in one (a fiber gatherer's first rope), it
+/// counts on a lot.
+fn day_work(made: &VecDeque<(Instant, String, i32)>, item: &str, worked: Duration) -> i32 {
+    let day = Duration::from_secs(DAY_LENGTH_SECS as u64);
+    let n: i32 = made.iter().filter(|(at, i, _)| i == item && at.elapsed() < day).map(|(_, _, q)| q).sum();
+    if worked >= day && n > 0 {
+        n
+    } else {
+        n.max(LOT)
+    }
+}
+
+/// A citizen's view of the board, and its own part in it.
+pub(super) struct Board {
+    commissions: Vec<Commission>,
+    claims: Vec<CommissionClaim>,
+    /// When it last read them; `None` makes the next round read again
+    read_at: Option<Instant>,
+    /// Commissions it passed, and when
+    passed: HashMap<Uuid, Instant>,
+    /// What it made, and when, for a day's work
+    made: VecDeque<(Instant, String, i32)>,
+    began: Instant,
+    /// Inputs its bids have wanted since, unfilled, and the bid's price
+    wanting: HashMap<String, (Instant, i64)>,
+    /// Commissions it claimed whose goods come from the wilds
+    wild: HashSet<Uuid>,
+}
+
+impl Board {
+    pub(super) fn new() -> Board {
+        Board {
+            commissions: Vec::new(),
+            claims: Vec::new(),
+            read_at: None,
+            passed: HashMap::new(),
+            made: VecDeque::new(),
+            began: Instant::now(),
+            wanting: HashMap::new(),
+            wild: HashSet::new(),
+        }
+    }
+
+    /// Something changed on the board: read it again next round.
+    pub(super) fn stale(&mut self) {
+        self.read_at = None;
+    }
+
+    /// `quantity` of `item` came into its hands.
+    pub(super) fn made(&mut self, item: &str, quantity: i32) {
+        let day = Duration::from_secs(DAY_LENGTH_SECS as u64);
+        while self.made.front().is_some_and(|(at, _, _)| at.elapsed() >= day) {
+            self.made.pop_front();
+        }
+        self.made.push_back((Instant::now(), item.to_string(), quantity));
+    }
+
+    /// A bid for `item` at `price` went up: it's wanted since the first.
+    pub(super) fn bid(&mut self, item: &str, price: i64) {
+        self.wanting.entry(item.to_string()).or_insert((Instant::now(), price)).1 = price;
+    }
+
+    /// A bid for `item` filled: it isn't wanting any more.
+    pub(super) fn filled(&mut self, item: &str) {
+        self.wanting.remove(item);
+    }
+
+    /// Its standing claims with something still to bring, and the
+    /// commission of each.
+    fn owing(&self) -> impl Iterator<Item = (&CommissionClaim, &Commission)> {
+        self.claims
+            .iter()
+            .filter(|c| c.status == ClaimStatus::Open && c.quantity > c.delivered)
+            .filter_map(|c| self.commissions.iter().find(|m| m.id == c.commission_id).map(|m| (c, m)))
+    }
+
+    /// Whether a claim of its own still wants `item`.
+    pub(super) fn owes(&self, item: &str) -> bool {
+        self.owing().any(|(_, m)| m.item_type == item)
+    }
+
+    /// Whether a claim of its own on `item` is to come from the wilds.
+    pub(super) fn wild(&self, item: &str) -> bool {
+        self.owing().any(|(c, m)| m.item_type == item && self.wild.contains(&c.commission_id))
+    }
+}
+
+/// What a citizen does at the board this round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BoardAct {
+    /// Claim `quantity` of commission `id`'s `item`; from the wilds, with
+    /// `wild`
+    Claim { id: Uuid, item: String, quantity: i32, wild: bool },
+    /// Walk to the hall and deliver `quantity` of `item` to commission `id`
+    Deliver { id: Uuid, item: String, quantity: i32 },
+}
+
+impl BoardAct {
+    /// What the health line and the report call it: `claim log`.
+    pub(super) fn label(&self) -> String {
+        match self {
+            BoardAct::Claim { item, .. } => format!("claim {item}"),
+            BoardAct::Deliver { item, .. } => format!("deliver {item}"),
+        }
+    }
+}
+
+impl SimBot {
+    /// Reads the board and its own claims if a read is due. A board it can't
+    /// read is an empty one until the next read; only a final error ends
+    /// the round.
+    pub(super) fn read_board(&mut self) -> Result<(), BotError> {
+        if !self.people || self.board.read_at.is_some_and(|t| t.elapsed() < self.wall(READ_EVERY)) {
+            return Ok(());
+        }
+        self.board.read_at = Some(Instant::now());
+        match self.bot.commissions().and_then(|c| Ok((c, self.bot.my_claims()?))) {
+            Ok((commissions, claims)) => {
+                self.board.commissions = commissions;
+                self.board.claims = claims;
+                let standing: HashSet<Uuid> = self.board.claims.iter().map(|c| c.commission_id).collect();
+                self.board.wild.retain(|id| standing.contains(id));
+                Ok(())
+            }
+            Err(e) if e.is_final() => Err(e),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// What its claims want of it that it doesn't hold at their grade, by
+    /// item, for [`Holdings::owed`].
+    pub(super) fn owed(&self) -> Vec<(String, i32)> {
+        let pack = self.bot.state().inventory();
+        let mut owed: Vec<(String, i32)> = Vec::new();
+        for (claim, c) in self.board.owing() {
+            let held = held_at_grade(c, pack);
+            let short = claim.quantity - claim.delivered - held;
+            match owed.iter_mut().find(|(item, _)| *item == c.item_type) {
+                Some((_, n)) => *n += short.max(0),
+                None => owed.push((c.item_type.clone(), short.max(0))),
+            }
+        }
+        owed
+    }
+
+    /// Asks the mind about the board, if there's a question: first its own
+    /// claims, ready to deliver, then the best paid commission it could
+    /// answer. `None`: nothing to do there this round.
+    pub(super) fn choose_board(&mut self, holdings: &Holdings) -> Option<BoardAct> {
+        let me = self.bot.state().me()?;
+        let now = self.bot.state().utc_now();
+        let grace = chrono::Duration::seconds(court::CLAIM_GRACE_SECS);
+        // At night it works from home: claims, but no walk to the hall
+        let walks = !self.night_shift;
+        let pack = self.bot.state().inventory().cloned();
+        let worked = self.board.began.elapsed();
+        // Its own claims first, once it holds what they want
+        let owing: Vec<(CommissionClaim, Commission)> =
+            self.board.owing().map(|(claim, c)| (claim.clone(), c.clone())).collect();
+        for (claim, c) in owing {
+            let due_soon = claim.until - now <= grace;
+            let wanted = Wanted {
+                item: &c.item_type,
+                unclaimed: court::unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn),
+                owed: claim.quantity - claim.delivered,
+                meeting: if walks || due_soon { held_at_grade(&c, pack.as_ref()) } else { 0 },
+                day_work: 0,
+                can_make: false,
+                due_soon,
+            };
+            if let Some(act) = self.ask_commission(&c, &wanted, holdings, false) {
+                return Some(act);
+            }
+        }
+        // Then the board: what it answers, the best paid first
+        let again = self.wall(ASK_AGAIN);
+        self.board.passed.retain(|_, at| at.elapsed() < again);
+        let mine: HashSet<Uuid> = self.board.claims.iter().filter(|c| c.status == ClaimStatus::Open).map(|c| c.commission_id).collect();
+        let mut open: Vec<Commission> = self
+            .board
+            .commissions
+            .iter()
+            .filter(|c| c.status == CommissionStatus::Open && c.poster_id != me && !c.withdrawn)
+            .filter(|c| !mine.contains(&c.id) && !self.board.passed.contains_key(&c.id))
+            .filter(|c| self.role.answers().contains(&c.item_type.as_str()))
+            .cloned()
+            .collect();
+        open.sort_by_key(|c| std::cmp::Reverse(c.price));
+        let catalog = self.bot.state().catalog().clone();
+        for c in open {
+            let unclaimed = court::unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn);
+            let ground = ground(self.role, &catalog, &c.item_type, c.min_quality);
+            let day_work = day_work(&self.board.made, &c.item_type, worked);
+            // In time: a day's work is a game day's, and a claim runs a court
+            // day at most, never past the due date
+            let runs = (court::claim_until(now, c.due_at) - now).num_seconds();
+            let takes = unclaimed.min(day_work) as i64 * DAY_LENGTH_SECS / day_work.max(1) as i64;
+            let wanted = Wanted {
+                item: &c.item_type,
+                unclaimed,
+                owed: 0,
+                meeting: if walks { held_at_grade(&c, pack.as_ref()) } else { 0 },
+                day_work,
+                can_make: ground.is_some() && takes <= runs,
+                due_soon: false,
+            };
+            // Better ore pays the walk to the ranges
+            let pays = self.worth(&c.item_type).is_some_and(|w| c.price as f64 >= w as f64 * WILD_PAY);
+            let wild = ground == Some(Ground::Wilds) || (pays && self.role == Role::Gatherer(Gather::Ore));
+            if self.role.commission_menu(&wanted).is_none() {
+                continue;
+            }
+            return self.ask_commission(&c, &wanted, holdings, wild);
+        }
+        None
+    }
+
+    /// The mind's answer about commission `c`, as `wanted` sees it: what
+    /// to do, or `None` to pass (and not be asked again for a while).
+    fn ask_commission(&mut self, c: &Commission, wanted: &Wanted, holdings: &Holdings, wild: bool) -> Option<BoardAct> {
+        let menu = self.role.commission_menu(wanted)?;
+        let now = self.bot.state().utc_now();
+        let question = Question::Commission {
+            id: c.id,
+            item: c.item_type.clone(),
+            grade: grade_of(c.min_quality).to_string(),
+            wanted: court::deliverable(wanted.unclaimed, wanted.owed),
+            claimed: wanted.owed,
+            price: c.price,
+            due: (c.due_at - now).num_seconds().max(0) as f64 * self.scale / 3600.0,
+        };
+        let pass = menu.len() - 1;
+        let act = match self.decide(question, menu, pass, holdings) {
+            Some((d, Choice::Claim { .. })) => BoardAct::Claim {
+                id: c.id,
+                item: c.item_type.clone(),
+                quantity: d.quantity?,
+                wild,
+            },
+            Some((d, Choice::Deliver { .. })) => BoardAct::Deliver {
+                id: c.id,
+                item: c.item_type.clone(),
+                quantity: d.quantity?,
+            },
+            _ => {
+                if wanted.owed == 0 {
+                    self.board.passed.insert(c.id, Instant::now());
+                }
+                return None;
+            }
+        };
+        Some(act)
+    }
+
+    /// Does what it chose at the board.
+    pub(super) fn board_act(&mut self, act: &BoardAct) -> Result<(), BotError> {
+        match act {
+            BoardAct::Claim { id, item, quantity, wild } => {
+                let claimed = self.bot.claim_commission(*id, *quantity);
+                self.board.stale();
+                // Refused (someone claimed it first, say): not asked again
+                // straight away
+                if claimed.is_err() {
+                    self.board.passed.insert(*id, Instant::now());
+                }
+                let claimed = claimed?;
+                if *wild {
+                    self.board.wild.insert(*id);
+                }
+                self.entries.push(Entry::Promised {
+                    item: item.clone(),
+                    quantity: claimed.claim.quantity,
+                });
+                // What it owes counts from now, not at the next read
+                self.board.claims.retain(|c| c.commission_id != *id);
+                self.board.claims.push(claimed.claim);
+                if let Some(c) = self.board.commissions.iter_mut().find(|c| c.id == *id) {
+                    *c = claimed.commission;
+                }
+                Ok(())
+            }
+            BoardAct::Deliver { id, item, quantity } => {
+                self.bot.go_to_exchange()?;
+                let result = self.deliver(*id, item, *quantity);
+                self.board.stale();
+                if result.is_err() {
+                    self.board.passed.insert(*id, Instant::now());
+                }
+                result?;
+                // At the hall anyway: what its trade wants
+                self.bot.collect_market_box()?;
+                self.post_demand()
+            }
+        }
+    }
+
+    /// Delivers up to `quantity` of `item` to commission `id` from its pack,
+    /// stack by stack, the fullest at the grade first. At the hall.
+    fn deliver(&mut self, id: Uuid, item: &str, quantity: i32) -> Result<(), BotError> {
+        let Some(c) = self.board.commissions.iter().find(|c| c.id == id).cloned() else {
+            return Err(BotError::Failed(format!("commission {id} is off the board")));
+        };
+        let stacks: Vec<(Uuid, i32)> = stacks_for(&c, self.bot.state().inventory())
+            .into_iter()
+            .map(|s| (s.item_id, meeting(&s.units, c.min_quality) as i32))
+            .collect();
+        let (mut left, mut paid, mut filled) = (quantity, 0, false);
+        for (stack, n) in stacks {
+            if left <= 0 || filled {
+                break;
+            }
+            let delivery = self.bot.deliver_commission(id, stack, left.min(n))?;
+            left -= delivery.units.count() as i32;
+            paid += delivery.paid;
+            filled = delivery.commission.status == CommissionStatus::Filled;
+        }
+        if left == quantity {
+            return Err(BotError::Failed(format!("no {item} at the commission's grade to deliver")));
+        }
+        self.entries.push(Entry::Delivered {
+            item: item.to_string(),
+            quantity: quantity - left,
+            paid,
+            filled,
+        });
+        Ok(())
+    }
+
+    /// At the hall: for each input its bids have wanted a game day without
+    /// a fill, asks the mind whether to post a commission for it.
+    pub(super) fn post_wants(&mut self) -> Result<(), BotError> {
+        let Some(me) = self.bot.state().me() else { return Ok(()) };
+        let day = Duration::from_secs(DAY_LENGTH_SECS as u64);
+        for item in self.role.needs() {
+            let Some(&(since, bid)) = self.board.wanting.get(*item) else { continue };
+            let mine: Vec<&Commission> = self
+                .board
+                .commissions
+                .iter()
+                .filter(|c| c.poster_id == me && c.status == CommissionStatus::Open)
+                .collect();
+            if since.elapsed() < day || mine.iter().any(|c| c.item_type == *item) {
+                continue;
+            }
+            let open = mine.len();
+            let holdings = self.holdings();
+            let Some(menu) = self.role.post_menu(&holdings, item, bid, open) else { continue };
+            let mark = self.mind.mark();
+            let pass = menu.len() - 1;
+            let trade = match self.decide(Question::Buy { item: item.to_string() }, menu, pass, &holdings) {
+                Some((d, Choice::Post { item, .. })) => match (d.price, d.quantity) {
+                    (Some(price), Some(quantity)) => Trade::Post { item, quantity, price },
+                    _ => continue,
+                },
+                _ => {
+                    self.settle(mark, None, &Ok(()));
+                    // Asked again after another day of wanting
+                    self.board.wanting.insert(item.to_string(), (Instant::now(), bid));
+                    continue;
+                }
+            };
+            let Trade::Post { item, quantity, price } = &trade else { unreachable!() };
+            let result = self.post(item, *quantity, *price);
+            self.settle(mark, Some(&Action::Trade(trade.clone())), &result);
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Posts a commission for `quantity` of `item` at `price` each. At the
+    /// hall.
+    pub(super) fn post(&mut self, item: &str, quantity: i32, price: i64) -> Result<(), BotError> {
+        let posted = self.bot.post_commission(PostCommission {
+            item_type: item.to_string(),
+            min_quality: grade_floor(POST_GRADE).unwrap_or(0),
+            quantity,
+            price,
+            due_days: POST_DAYS,
+        })?;
+        self.entries.push(Entry::Posted {
+            item: item.to_string(),
+            quantity,
+            price,
+            fee: posted.fee,
+        });
+        // Wanting starts again from now: another day before another post
+        if let Some(w) = self.board.wanting.get_mut(item) {
+            w.0 = Instant::now();
+        }
+        self.board.commissions.insert(0, posted);
+        Ok(())
+    }
+}
+
+/// How many units its pack holds at commission `c`'s grade.
+fn held_at_grade(c: &Commission, pack: Option<&crate::state::Container>) -> i32 {
+    stacks_for(c, pack).iter().map(|s| meeting(&s.units, c.min_quality)).sum::<i64>() as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::Craft;
+
+    #[test]
+    fn ore_at_a_grade_the_rural_ring_cant_give_is_found_in_the_wilds() {
+        let catalog = Catalog::fallback();
+        let ore = Role::Gatherer(Gather::Ore);
+        assert_eq!(ground(ore, &catalog, "iron_ore", 0), Some(Ground::Home));
+        assert_eq!(ground(ore, &catalog, "iron_ore", 55), Some(Ground::Home));
+        // B: past the rural veins' top third, inside the wild ones'
+        assert_eq!(ground(ore, &catalog, "iron_ore", 75), Some(Ground::Wilds));
+        // Nobody else counts on the ranges
+        assert_eq!(ground(Role::Builder, &catalog, "iron_ore", 75), None);
+        // Nothing gives A
+        assert_eq!(ground(ore, &catalog, "iron_ore", 95), None);
+        // A crafted good, up to C
+        assert_eq!(ground(Role::Crafter(Craft::Planks), &catalog, "plank", 55), Some(Ground::Home));
+        assert_eq!(ground(Role::Crafter(Craft::Planks), &catalog, "plank", 75), None);
+    }
+
+    #[test]
+    fn the_wilds_top_add_is_wilds_tomls() {
+        let text = include_str!("../../../../../../backend/content/wilds.toml");
+        let wilds: toml::Value = toml::from_str(text).unwrap();
+        let last = |key: &str| {
+            wilds["quality"][key].as_array().unwrap().last().unwrap().as_array().unwrap()[1].as_integer().unwrap()
+        };
+        assert_eq!(WILD_QUALITY_ADD as i64, last("depth") + last("height"));
+    }
+
+    #[test]
+    fn a_grade_is_the_best_whose_floor_is_asked_for() {
+        assert_eq!(grade_of(0), "F");
+        assert_eq!(grade_of(34), "F");
+        assert_eq!(grade_of(35), "D");
+        assert_eq!(grade_of(60), "C");
+        assert_eq!(grade_of(75), "B");
+        assert_eq!(grade_of(100), "A");
+    }
+
+    #[test]
+    fn a_days_work_is_what_it_made_in_a_day_or_a_lot_until_it_has() {
+        let mut made = VecDeque::new();
+        let day = Duration::from_secs(DAY_LENGTH_SECS as u64);
+        assert_eq!(day_work(&made, "log", Duration::ZERO), LOT);
+        made.push_back((Instant::now(), "log".to_string(), 25));
+        made.push_back((Instant::now(), "plank".to_string(), 7));
+        assert_eq!(day_work(&made, "log", Duration::ZERO), 25);
+        assert_eq!(day_work(&made, "plank", Duration::ZERO), LOT);
+        assert_eq!(day_work(&made, "plank", day), 7);
+        assert_eq!(day_work(&made, "stone", day), LOT);
+    }
+}

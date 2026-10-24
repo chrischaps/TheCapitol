@@ -44,8 +44,18 @@
 //! was doing ([`ROAD`]), since at its end is a deed, its home if it has
 //! none. On the road's question everything else is putting it off, and
 //! worth [`PUT_OFF`] of what it would be, so the rules settle it clearly.
+//!
+//! The board (Commons S2.5, [`commission`]): a claim already made is
+//! delivered before anything else ([`DELIVER`]). A commission's price is
+//! weighed against the books: a citizen claims one that beats the last
+//! trade by its margin ([`margin`]: more for the thrifty, less for the
+//! bold), and delivers what it holds to one that pays the books' price,
+//! sooner than promise more.
+//! Passing is a steady [`PASS`]. A crafter posts a commission for an input
+//! its bids haven't filled, at the bid's price and a premium
+//! ([`premium`]: less for the thrifty), the more readily the less thrifty.
 
-use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Verdict};
+use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Temperament, Verdict};
 use crate::sim::{BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
 
 /// What "what the rules would do" is worth.
@@ -63,6 +73,12 @@ const WHIM: f64 = 0.12;
 const ROAD: f64 = 1.0;
 /// What anything else on the road's menu is worth, of what it would be.
 const PUT_OFF: f64 = 0.6;
+/// What delivering is worth, on a claim of its own or at a fair price: more
+/// than anything, so a promise is kept before the day's other work, and
+/// goods in hand go before a promise of more (S2.5).
+const DELIVER: f64 = 1.0;
+/// What leaving a commission be is worth.
+const PASS: f64 = 0.5;
 
 /// The rules layer. It keeps no state: the same situation gets the same
 /// answer, which is what lets C3.1 replay a log exactly.
@@ -183,6 +199,19 @@ impl Decider for RulesDecider {
                     (0.65 + 0.25 * t.sociability as f64, d)
                 }
                 Choice::Road { .. } => (ROAD, Decision::plain(i)),
+                Choice::Claim { .. } | Choice::Deliver { .. } | Choice::Pass => commission(s, i, choice),
+                Choice::Post { price, quantity, .. } => {
+                    // At its bid's price and a premium, for what it would bid for
+                    let bid = price.min as f64;
+                    let p = ((bid * premium(t)).round() as i64).max(price.min + 1);
+                    let want = (LOT as f64 * (1.5 - t.thrift as f64)).round() as i32;
+                    let d = Decision {
+                        pick: i,
+                        price: Some(price.clamp(p)),
+                        quantity: Some(quantity.clamp(want)),
+                    };
+                    (0.6 + 0.3 * (1.0 - t.thrift as f64), d)
+                }
             };
             // On the road's question, anything else puts the road off (#450)
             let road = matches!(s.question, Question::Road { .. }) && !matches!(choice, Choice::Road { .. });
@@ -332,6 +361,62 @@ fn trade(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
             (u, d)
         }
         _ => (if q < 0.6 && !closes { SURE } else { 0.3 }, Decision::plain(i)),
+    }
+}
+
+/// What a citizen wants a commission's price to beat the last trade by
+/// before it takes on a promise: about a tenth, more for the thrifty and
+/// less for the bold.
+pub(crate) fn margin(t: &Temperament) -> f64 {
+    1.1 + 0.3 * (t.thrift as f64 - 0.5) - 0.2 * (t.risk as f64 - 0.5)
+}
+
+/// What a crafter offers over its standing bid when it posts a commission
+/// for the input: a fifth, a twentieth for the thriftiest.
+pub(crate) fn premium(t: &Temperament) -> f64 {
+    1.35 - 0.3 * t.thrift as f64
+}
+
+/// A commission on the board (S2.5), valued at the citizen's books.
+///
+/// - **Deliver** on a claim of its own before anything else ([`DELIVER`]);
+///   without one, deliver what it holds if the price is the books' or
+///   better.
+/// - **Claim** a commission whose price beats the last trade by its
+///   [`margin`]. With no trade to go by, the bold take a chance on it.
+/// - **Pass** otherwise: a steady [`PASS`].
+///
+/// Each takes as many as its span allows: the menu caps a claim at a day's
+/// work and a delivery at what it holds.
+fn commission(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
+    let Question::Commission { item, claimed, price, .. } = &s.question else {
+        // A commission's answers on another question's menu fit nothing,
+        // but passing is always safe
+        let u = if matches!(choice, Choice::Pass) { PASS } else { 0.0 };
+        return (u, Decision::plain(i));
+    };
+    let t = &s.who.temperament;
+    let worth = worth(s, item);
+    let most = |quantity: &super::Span<i32>| Decision {
+        pick: i,
+        price: None,
+        quantity: Some(quantity.max),
+    };
+    match choice {
+        Choice::Deliver { quantity } => {
+            let u = if *claimed > 0 || worth.is_none_or(|w| *price >= w) { DELIVER } else { 0.3 };
+            (u, most(quantity))
+        }
+        Choice::Claim { quantity } => {
+            let u = match worth {
+                Some(w) if *price as f64 >= w as f64 * margin(t) => SURE,
+                Some(_) => 0.2,
+                // Nothing to go by: a chance, for those who take them
+                None => 0.3 + 0.5 * t.risk as f64,
+            };
+            (u, most(quantity))
+        }
+        _ => (PASS, Decision::plain(i)),
     }
 }
 
@@ -804,6 +889,103 @@ mod tests {
         assert_eq!(decide(&ask(thrifty, true)).0, Decision { pick: 1, price: None, quantity: Some(14) });
         // Shy: leaves them be
         assert_eq!(decide(&ask(with(|t| t.sociability = 0.0), true)).0.pick, 2);
+    }
+
+    fn commission(price: i64, claimed: i32, menu: Vec<Choice>, last: Option<i64>, t: Temperament) -> Situation {
+        let q = Question::Commission {
+            id: uuid::Uuid::nil(),
+            item: "log".into(),
+            grade: "F".into(),
+            wanted: 20,
+            claimed,
+            price,
+            due: 30.0,
+        };
+        let mut s = situation(q, menu, t);
+        if let Some(last) = last {
+            s.market.push(Quote {
+                item: "log".into(),
+                bid: None,
+                ask: None,
+                last: Some(last),
+            });
+        }
+        s
+    }
+
+    fn claim(most: i32) -> Choice {
+        Choice::Claim {
+            quantity: Span::new(1, most),
+        }
+    }
+
+    fn deliver(most: i32) -> Choice {
+        Choice::Deliver {
+            quantity: Span::new(1, most),
+        }
+    }
+
+    #[test]
+    fn a_promise_is_kept_before_anything_else() {
+        for t in [Temperament::default(), with(|t| t.thrift = 1.0), with(|t| t.risk = 0.0)] {
+            // Even at a price under the books: it was promised
+            let (d, confidence) = decide(&commission(6, 10, vec![deliver(10), Choice::Pass], Some(10), t));
+            assert_eq!(d, Decision { pick: 0, price: None, quantity: Some(10) });
+            assert!(confidence >= 0.9, "{confidence}");
+        }
+    }
+
+    #[test]
+    fn a_commission_is_claimed_when_it_beats_the_books_by_the_margin() {
+        let menu = || vec![claim(10), Choice::Pass];
+        let pick = |price, t| decide(&commission(price, 0, menu(), Some(10), t)).0;
+        let middling = Temperament::default();
+        // A tenth over the last trade, for a middling citizen
+        assert_eq!(pick(11, middling), Decision { pick: 0, price: None, quantity: Some(10) });
+        assert_eq!(pick(10, middling).pick, 1);
+        // The thrifty want more for a promise, the bold less
+        assert_eq!(pick(12, with(|t| t.thrift = 1.0)).pick, 1);
+        assert_eq!(pick(13, with(|t| t.thrift = 1.0)).pick, 0);
+        assert_eq!(pick(10, with(|t| t.risk = 1.0)).pick, 0);
+        // A middling claim is settled by the rules, not passed up
+        let (_, confidence) = decide(&commission(12, 0, menu(), Some(10), middling));
+        assert!(confidence >= super::super::RULES_THRESHOLD, "{confidence}");
+        // With no trade to go by, the bold take a chance and the careful pass
+        assert_eq!(decide(&commission(5, 0, menu(), None, with(|t| t.risk = 1.0))).0.pick, 0);
+        assert_eq!(decide(&commission(5, 0, menu(), None, with(|t| t.risk = 0.0))).0.pick, 1);
+    }
+
+    #[test]
+    fn goods_in_hand_are_delivered_sooner_than_promised() {
+        let menu = || vec![deliver(6), claim(10), Choice::Pass];
+        let (d, confidence) = decide(&commission(12, 0, menu(), Some(10), Temperament::default()));
+        assert_eq!(d, Decision { pick: 0, price: None, quantity: Some(6) });
+        assert!(confidence >= super::super::RULES_THRESHOLD, "{confidence}");
+        // Under the books, it neither sells them there nor promises more
+        assert_eq!(decide(&commission(8, 0, menu(), Some(10), Temperament::default())).0.pick, 2);
+    }
+
+    #[test]
+    fn a_crafter_posts_for_an_unfilled_input_at_its_bid_and_a_premium() {
+        let post = |t| {
+            let menu = vec![
+                Choice::Post {
+                    item: "log".into(),
+                    grade: "F".into(),
+                    price: Span::new(10, 20),
+                    quantity: Span::new(1, 20),
+                    due: 2,
+                },
+                Choice::Pass,
+            ];
+            decide(&situation(Question::Buy { item: "log".into() }, menu, t))
+        };
+        let (d, confidence) = post(Temperament::default());
+        assert_eq!(d, Decision { pick: 0, price: Some(12), quantity: Some(LOT) });
+        assert!(confidence >= super::super::RULES_THRESHOLD, "{confidence}");
+        // The thriftiest offer a Strand over, for fewer, and still post
+        let (d, _) = post(with(|t| t.thrift = 1.0));
+        assert_eq!(d, Decision { pick: 0, price: Some(11), quantity: Some(5) });
     }
 
     #[test]

@@ -71,6 +71,9 @@ pub struct Holdings {
     /// doesn't walk the road, which buys its plot as before, and a spent
     /// deed means the next plot is bought too.
     pub road_deed: Option<Grant>,
+    /// What its claims on commissions still want of it that it doesn't hold
+    /// at their grade, by item (Commons S2.5): its work makes them first.
+    pub owed: Vec<(String, i32)>,
 }
 
 impl Holdings {

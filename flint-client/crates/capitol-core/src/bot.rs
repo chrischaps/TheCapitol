@@ -1876,6 +1876,79 @@ impl Bot {
         }
     }
 
+    /// Every open commission on the hall's board (S2.1), newest first. From
+    /// anywhere.
+    pub fn commissions(&mut self) -> Result<Vec<capitol_protocol::rest::Commission>, BotError> {
+        let query = capitol_protocol::rest::CommissionsQuery::default();
+        match self.call("reading the board", RestRequest::Commissions(query))? {
+            RestResponse::Commissions(board) => Ok(board.commissions),
+            other => Err(unexpected("reading the board", &other)),
+        }
+    }
+
+    /// Our standing claims on commissions (S2.2). From anywhere.
+    pub fn my_claims(&mut self) -> Result<Vec<capitol_protocol::rest::CommissionClaim>, BotError> {
+        match self.call("listing our claims", RestRequest::MyClaims)? {
+            RestResponse::Claims(claims) => Ok(claims.claims),
+            other => Err(unexpected("listing our claims", &other)),
+        }
+    }
+
+    /// Claims `quantity` of a commission's wants (S2.2): a promise to
+    /// deliver them within the day. From anywhere.
+    pub fn claim_commission(
+        &mut self,
+        commission_id: Uuid,
+        quantity: i32,
+    ) -> Result<capitol_protocol::rest::ClaimResponse, BotError> {
+        let request = RestRequest::ClaimCommission {
+            commission_id,
+            request: capitol_protocol::rest::ClaimCommission { quantity },
+        };
+        match self.call("claiming a commission", request)? {
+            RestResponse::Claim(claimed) => {
+                self.log(format!(
+                    "claimed {} {} on the board",
+                    claimed.claim.quantity, claimed.commission.item_type
+                ));
+                Ok(claimed)
+            }
+            other => Err(unexpected("claiming a commission", &other)),
+        }
+    }
+
+    /// Delivers up to `quantity` units from the stack `item_id` to a
+    /// commission (S2.1), the lowest that meet its grade, and is paid for
+    /// each from its escrow. The bot must be at the Exchange hall.
+    pub fn deliver_commission(
+        &mut self,
+        commission_id: Uuid,
+        item_id: Uuid,
+        quantity: i32,
+    ) -> Result<capitol_protocol::rest::CommissionDelivery, BotError> {
+        let request = RestRequest::DeliverCommission {
+            commission_id,
+            request: capitol_protocol::rest::DeliverCommission {
+                item_id,
+                qualities: None,
+                quantity: Some(quantity),
+            },
+        };
+        match self.call("delivering to a commission", request)? {
+            RestResponse::Delivered(delivery) => {
+                self.log(format!(
+                    "delivered {} {} for {} Strands",
+                    delivery.units.count(),
+                    delivery.commission.item_type,
+                    delivery.paid
+                ));
+                self.settle()?;
+                Ok(delivery)
+            }
+            other => Err(unexpected("delivering to a commission", &other)),
+        }
+    }
+
     /// Strands and goods from nowhere, on a server with `DEV_GRANTS` on (E3.8).
     /// The goods land in the market box.
     pub fn grant(&mut self, request: GrantRequest) -> Result<GrantResponse, BotError> {
@@ -2369,6 +2442,11 @@ fn journaled(change: &StateEvent) -> bool {
             | StateEvent::CraftingCompleted { .. }
             | StateEvent::ToolBroke { .. }
             | StateEvent::CurrencyChanged { .. }
+            // The board's notices (S2.5): what a citizen posted or claimed came to
+            | StateEvent::CommissionClaimed { .. }
+            | StateEvent::CommissionDelivered { .. }
+            | StateEvent::CommissionExpired { .. }
+            | StateEvent::ClaimLapsed { .. }
     ) || matches!(
         change,
         StateEvent::Market(m) if matches!(**m, MarketEvent::OrderPlaced(_) | MarketEvent::OrderFilled { .. })

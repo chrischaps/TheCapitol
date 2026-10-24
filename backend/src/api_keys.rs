@@ -185,7 +185,11 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("POST", "bazaar", ["stalls", _, "rent"] | ["mine", "listings"] | ["listings", _, "buy"])
         | ("DELETE", "bazaar", ["listings", _])
         | ("POST", "plots", [_, "claim" | "pay-tax"])
-        | ("PUT", "plots", [_, "permissions"]) => Some(ApiKeyScope::Trade),
+        | ("PUT", "plots", [_, "permissions"])
+        // The hall's board: a citizen posts, claims and delivers on its key
+        // (Commons S2.5)
+        | ("POST", "commissions", [] | [_, "deliver" | "claim"])
+        | ("DELETE", "commissions", [_] | [_, "claim"]) => Some(ApiKeyScope::Trade),
         _ => None,
     }
 }
@@ -397,6 +401,14 @@ mod tests {
         assert_eq!(rest(Method::POST, "/letters/abc/read"), Some(Play));
         assert_eq!(rest(Method::POST, "/letters"), None);
         assert_eq!(rest(Method::DELETE, "/letters/abc"), None);
+        // The hall's board is trade (S2.5)
+        assert_eq!(rest(Method::GET, "/commissions"), Some(Read));
+        assert_eq!(rest(Method::POST, "/commissions"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/commissions/abc/deliver"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/commissions/abc/claim"), Some(Trade));
+        assert_eq!(rest(Method::DELETE, "/commissions/abc/claim"), Some(Trade));
+        assert_eq!(rest(Method::DELETE, "/commissions/abc"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/commissions/abc"), None);
     }
 
     #[test]

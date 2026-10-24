@@ -1,17 +1,21 @@
 //! A town's worth of situations, made up (C3.3): every role's work, sell,
 //! buy, bid, stall and free-time questions over a spread of holdings, books
-//! and temperaments. A fresh live town asks only work and bank questions
+//! and temperaments, and the hall's board's since S2.5: a commission for
+//! what it makes, and a post for what it needs. A fresh live town asks only work and bank questions
 //! (#294), so this is what a new layer is measured on until the logs hold
 //! the rest. `capitol-town corpus` writes it as a rules-only citizen's log.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use capitol_protocol::rules::court;
+use uuid::Uuid;
+
 use super::log::{self, Fate, Log};
 use super::{Cascade, Choice, Held, Mind, Place, Question, Quote, Situation, Temperament, When, Who};
 use crate::catalog::Catalog;
 use crate::sim::plan::Holdings;
-use crate::sim::{Role, MIX};
+use crate::sim::{Role, Wanted, LOT, MIX};
 
 /// The name the corpus's citizen logs under.
 pub const CITIZEN: &str = "Percy Sawyer";
@@ -108,6 +112,34 @@ fn round(r: u32) -> Vec<Situation> {
                 if let Some(menu) = role.bid_menu(&h, item, last, false) {
                     out.push(s(Question::Buy { item: item.to_string() }, menu, 1));
                 }
+                if let Some(menu) = role.post_menu(&h, item, last.unwrap_or(4), 0) {
+                    out.push(s(Question::Buy { item: item.to_string() }, menu, 1));
+                }
+            }
+            // A commission for what it makes, at a price round its books,
+            // and every third citizen with a claim on it already
+            for (k, item) in role.answers().iter().enumerate() {
+                let wanted = Wanted {
+                    item,
+                    unclaimed: 12 * scale as i32,
+                    owed: if n.is_multiple_of(3) { 6 } else { 0 },
+                    meeting: h.count(item),
+                    day_work: LOT,
+                    can_make: true,
+                    due_soon: false,
+                };
+                let Some(menu) = role.commission_menu(&wanted) else { continue };
+                let question = Question::Commission {
+                    id: Uuid::from_u128(u128::from(n) << 8 | k as u128),
+                    item: item.to_string(),
+                    grade: "F".into(),
+                    wanted: court::deliverable(wanted.unclaimed, wanted.owed),
+                    claimed: wanted.owed,
+                    price: last.map_or(5, |l| l - 1 + (n % 4) as i64),
+                    due: 30.0,
+                };
+                let pass = menu.len() - 1;
+                out.push(s(question, menu, pass));
             }
         }
     }

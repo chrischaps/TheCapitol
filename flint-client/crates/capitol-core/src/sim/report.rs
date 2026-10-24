@@ -52,6 +52,32 @@ pub enum Entry {
         strands: i64,
         at: f64,
     },
+    /// A commission went up on the hall's board (Commons S2.5): `quantity`
+    /// of `item` at `price` each, all of it escrowed, and the court's `fee`
+    /// on top.
+    Posted {
+        item: String,
+        quantity: i32,
+        price: i64,
+        fee: i64,
+    },
+    /// A claim on a commission: `quantity` of `item` promised.
+    Promised { item: String, quantity: i32 },
+    /// Units went in on a commission and were paid for from its escrow;
+    /// `filled` when they were the last it wanted.
+    Delivered {
+        item: String,
+        quantity: i32,
+        paid: i64,
+        filled: bool,
+    },
+    /// A person filled one of the bot's commissions.
+    Filled { item: String },
+    /// One of the bot's commissions ran past its due date, and `refunded`
+    /// came back.
+    Expired { item: String, refunded: i64 },
+    /// A claim of the bot's ran out `quantity` short: a breach.
+    Lapsed { item: String, quantity: i32 },
 }
 
 /// One bot's run, as the report needs it.
@@ -88,6 +114,11 @@ impl BotRun {
                 }
                 Entry::Fee { strands } => expected -= strands,
                 Entry::Dealt { strands, .. } => expected += strands,
+                Entry::Posted {
+                    quantity, price, fee, ..
+                } => expected -= price * *quantity as i64 + fee,
+                Entry::Delivered { paid, .. } => expected += paid,
+                Entry::Expired { refunded, .. } => expected += refunded,
                 _ => {}
             }
         }
@@ -136,6 +167,67 @@ pub struct ItemLine {
     pub d5_price: Option<i64>,
 }
 
+/// What went through the hall's board (Commons S2.5), every bot together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Court {
+    /// Commissions posted
+    pub posted: usize,
+    /// What their posters put down: the price of all they asked for
+    pub escrowed: i64,
+    /// The court's fees on them, a sink
+    pub fees: i64,
+    /// Claims made, and the units they promised
+    pub claims: usize,
+    pub promised: i64,
+    /// Units delivered, and what escrow paid for them
+    pub delivered: i64,
+    pub paid: i64,
+    /// Commissions filled, whoever filled them
+    pub filled: usize,
+    /// Claims that ran out short
+    pub lapsed: usize,
+    /// Commissions that ran past their due date, and what came back
+    pub expired: usize,
+    pub refunded: i64,
+}
+
+impl Court {
+    /// Whether anything went through it.
+    pub fn busy(&self) -> bool {
+        *self != Court::default()
+    }
+
+    fn count(&mut self, entry: &Entry) {
+        match entry {
+            Entry::Posted {
+                quantity, price, fee, ..
+            } => {
+                self.posted += 1;
+                self.escrowed += price * *quantity as i64;
+                self.fees += fee;
+            }
+            Entry::Promised { quantity, .. } => {
+                self.claims += 1;
+                self.promised += *quantity as i64;
+            }
+            Entry::Delivered {
+                quantity, paid, filled, ..
+            } => {
+                self.delivered += *quantity as i64;
+                self.paid += paid;
+                self.filled += usize::from(*filled);
+            }
+            Entry::Filled { .. } => self.filled += 1,
+            Entry::Lapsed { .. } => self.lapsed += 1,
+            Entry::Expired { refunded, .. } => {
+                self.expired += 1;
+                self.refunded += refunded;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Time spent under one step label.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeLine {
@@ -172,6 +264,8 @@ pub struct Report {
     pub fees: i64,
     /// The market makers' Strands, at the start and at the end
     pub makers: Option<(i64, i64)>,
+    /// What went through the hall's board (S2.5)
+    pub court: Court,
 }
 
 /// What a market maker's [`BotRun::role`] says.
@@ -192,9 +286,11 @@ impl Report {
         // Each trade counted once, from its seller: (quantity, price)
         let mut sales: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
         let mut fees = 0;
+        let mut court = Court::default();
         for run in runs {
             *roles.entry(run.role.clone()).or_insert(0) += 1;
             for entry in &run.entries {
+                court.count(entry);
                 match entry {
                     Entry::Made {
                         item,
@@ -251,6 +347,13 @@ impl Report {
                     // The swarm trades only at the hall; a town's report
                     // counts trades in person
                     Entry::Dealt { .. } => {}
+                    // The board's, counted by the court
+                    Entry::Posted { .. }
+                    | Entry::Promised { .. }
+                    | Entry::Delivered { .. }
+                    | Entry::Filled { .. }
+                    | Entry::Expired { .. }
+                    | Entry::Lapsed { .. } => {}
                 }
             }
         }
@@ -327,6 +430,7 @@ impl Report {
                 .filter(|r| r.role == MAKER_ROLE)
                 .map(|r| (r.strands_start, r.strands_end))
                 .reduce(|a, b| (a.0 + b.0, a.1 + b.1)),
+            court,
         }
     }
 
@@ -510,6 +614,27 @@ impl Report {
             if let Some(h) = self.deed_hours(cost) {
                 let _ = writeln!(md, "- A {zone} deed ({cost}) is {h:.2} hours of grass");
             }
+        }
+        if self.court.busy() {
+            let c = &self.court;
+            let _ = writeln!(md, "\n## The hall's board\n");
+            let _ = writeln!(
+                md,
+                "- Commissions posted: {}, {} Strands put down, {} in the court's fees\n- Claims: {}, promising {} units; {} lapsed\n- Delivered: {} units, paid {} Strands from escrow\n- Filled: {}; ran out: {}, {} Strands refunded\n- Strands through the court: {} put in by these posters, {} paid out to these deliverers",
+                c.posted,
+                c.escrowed,
+                c.fees,
+                c.claims,
+                c.promised,
+                c.lapsed,
+                c.delivered,
+                c.paid,
+                c.filled,
+                c.expired,
+                c.refunded,
+                c.escrowed + c.fees,
+                c.paid
+            );
         }
         let _ = writeln!(md, "\n## Where the time went\n");
         let _ = writeln!(md, "| Step | Bot-hours | Steps | Failed |");
@@ -828,5 +953,65 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("| iron_ore | 6 | 3 | 50% |"), "{md}");
         assert!(report.to_csv().contains(",6,3\n"));
+    }
+
+    #[test]
+    fn the_board_is_counted_once_and_its_strands_in_the_books() {
+        let poster = BotRun {
+            name: "Ida".into(),
+            role: "crafter (planks)".into(),
+            entries: vec![
+                Entry::Posted {
+                    item: "log".into(),
+                    quantity: 10,
+                    price: 12,
+                    fee: 6,
+                },
+                Entry::Filled { item: "log".into() },
+                Entry::Expired {
+                    item: "stone".into(),
+                    refunded: 40,
+                },
+            ],
+            strands_start: 500,
+            strands_end: 500 - 126 + 40,
+            error: None,
+        };
+        let deliverer = BotRun {
+            name: "Percy".into(),
+            role: "gatherer (wood)".into(),
+            entries: vec![
+                Entry::Promised {
+                    item: "log".into(),
+                    quantity: 6,
+                },
+                Entry::Delivered {
+                    item: "log".into(),
+                    quantity: 6,
+                    paid: 72,
+                    filled: true,
+                },
+                Entry::Lapsed {
+                    item: "rope".into(),
+                    quantity: 2,
+                },
+            ],
+            strands_start: 100,
+            strands_end: 172,
+            error: None,
+        };
+        // Escrow, fees, pay and refunds are no tax
+        assert_eq!((poster.tax(), deliverer.tax()), (0, 0));
+        let report = Report::build(&[poster, deliverer], 1.0, 1.0, 60.0);
+        let c = report.court;
+        assert_eq!((c.posted, c.escrowed, c.fees), (1, 120, 6));
+        assert_eq!((c.claims, c.promised, c.lapsed), (1, 6, 1));
+        assert_eq!((c.delivered, c.paid, c.filled), (6, 72, 2));
+        assert_eq!((c.expired, c.refunded), (1, 40));
+        let md = report.sections();
+        assert!(md.contains("## The hall's board"), "{md}");
+        assert!(md.contains("126 put in by these posters, 72 paid out"), "{md}");
+        // A run with nothing on the board says nothing of it
+        assert!(!Report::build(&[], 1.0, 1.0, 60.0).sections().contains("hall's board"));
     }
 }

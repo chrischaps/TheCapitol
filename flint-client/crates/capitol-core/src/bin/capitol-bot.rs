@@ -11,6 +11,8 @@
 //! capitol-bot --sim 20 --hours 2               # the economy sim (E2.7), with a report
 //! capitol-bot --prefix maker --market fiber,plank,iron_ingot --fund   # a market maker (E3.8)
 //! capitol-bot --prefix newcomer --tutorial      # walk the road in and claim its deed (#450)
+//! capitol-bot --prefix poster --grant 2000 --commission log:20:9 --commission iron_ore:10:30:B
+//!                                               # a person posting on the hall's board (S2.5)
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -22,7 +24,10 @@ use std::time::{Duration, Instant};
 use capitol_core::bot::{Account, Bot, BotError, TradeOffer};
 use capitol_core::market_maker::{self, Maker, MakerConfig};
 use capitol_core::net::NetConfig;
+use capitol_core::protocol::rest::{GrantRequest, PostCommission};
+use capitol_core::protocol::rules::market::grade_floor;
 use capitol_core::protocol::tutorial;
+use capitol_core::state::StateEvent;
 use capitol_core::sim::run::{self as sim, SimConfig};
 use capitol_core::sim::{Gather, Role};
 
@@ -84,6 +89,15 @@ FLAGS:
                         once it's walked, or after --seconds, and fails if
                         the deed wasn't claimed. Its card step wants someone
                         else about: run it in a town
+    --commission <item:quantity:price[:grade]>
+                        Post a commission on the hall's board as a person
+                        (Commons S2.5): quantity of item at price Strands
+                        each, of grade A to F or better [default grade: F],
+                        due in 3 days. Repeat it for more. Then stay, printing
+                        each claim, delivery, lapse and expiry, until every
+                        one is filled or --seconds is up
+    --grant <strands>   Top up with this many Strands first, as a grant. Only
+                        a server with DEV_GRANTS=on gives one
     --sim <bots>        Run the economy sim: this many bots, each with a role
                         (gatherer, crafter or builder), gather, craft and build
                         for --hours game hours, then write a report to --out.
@@ -131,6 +145,8 @@ struct Options {
     market: Option<MakerConfig>,
     fund: bool,
     tutorial: bool,
+    commissions: Vec<PostCommission>,
+    grant: Option<i64>,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -161,6 +177,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         market: None,
         fund: false,
         tutorial: false,
+        commissions: Vec::new(),
+        grant: None,
     };
     let mut maker = MakerConfig::default();
     let mut maker_tuned = false;
@@ -268,6 +286,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 maker_tuned = true;
             }
             "--tutorial" => options.tutorial = true,
+            "--commission" => options.commissions.push(commission(&value()?)?),
+            "--grant" => options.grant = Some(number(&flag, &value()?)?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
         }
@@ -324,6 +344,27 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     Ok(Some(options))
 }
 
+/// Days a commission posted from the command line runs.
+const COMMISSION_DAYS: i64 = 3;
+
+/// `log:20:9` or `iron_ore:10:30:B`, as `--commission` takes it.
+fn commission(value: &str) -> Result<PostCommission, String> {
+    let parts: Vec<&str> = value.split(':').collect();
+    let (item, quantity, price, grade) = match parts[..] {
+        [item, quantity, price] => (item, quantity, price, "F"),
+        [item, quantity, price, grade] => (item, quantity, price, grade),
+        _ => return Err(format!("--commission: {value:?} isn't item:quantity:price[:grade]")),
+    };
+    let min_quality = grade_floor(grade).ok_or_else(|| format!("--commission: {grade:?} isn't a grade, A to F"))?;
+    Ok(PostCommission {
+        item_type: item.to_string(),
+        min_quality,
+        quantity: number("--commission", quantity)?,
+        price: number("--commission", price)?,
+        due_days: COMMISSION_DAYS,
+    })
+}
+
 fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
     value
         .parse()
@@ -352,6 +393,13 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     }
     if options.tutorial {
         return walk_the_road(bot, n, deadline);
+    }
+    if let Some(strands) = options.grant {
+        let granted = bot.grant(GrantRequest { strands, items: Vec::new() })?;
+        bot.log(format!("granted {} Strands", granted.strands));
+    }
+    if !options.commissions.is_empty() {
+        return post_commissions(&mut bot, &options.commissions, deadline);
     }
     // These loops can start over, so they carry on through a dropped
     // connection or a server restart (C0.6).
@@ -390,6 +438,76 @@ fn walk_the_road(bot: Bot, n: usize, deadline: Option<Instant>) -> Result<(), Bo
         Ok(())
     } else {
         Err(BotError::Failed("the road in ended without a claim".into()))
+    }
+}
+
+/// Posts `commissions` at the hall, as a person would, then prints what
+/// comes of them until each is filled or `deadline` (S2.5).
+fn post_commissions(bot: &mut Bot, commissions: &[PostCommission], deadline: Option<Instant>) -> Result<(), BotError> {
+    bot.go_to_exchange()?;
+    bot.record();
+    let mut open = 0;
+    for post in commissions {
+        let posted = bot.post_commission(post.clone())?;
+        bot.log(format!("fee {}, due {}", posted.fee, posted.due_at.format("%Y-%m-%d %H:%M UTC")));
+        open += 1;
+    }
+    while open > 0 && deadline.is_none_or(|d| Instant::now() < d) {
+        bot.idle(Duration::from_secs(1))?;
+        for change in bot.take_journal() {
+            let line = match change {
+                StateEvent::CommissionClaimed {
+                    item_type,
+                    claimant_name,
+                    claimant_citizen,
+                    quantity,
+                    ..
+                } => format!("{claimant_name}{} claimed {quantity} {item_type}", mark(claimant_citizen)),
+                StateEvent::CommissionDelivered {
+                    item_type,
+                    deliverer_name,
+                    deliverer_citizen,
+                    units,
+                    paid,
+                    left,
+                } => {
+                    if left == 0 {
+                        open -= 1;
+                    }
+                    format!(
+                        "{deliverer_name}{} delivered {} {item_type} for {paid} Strands; {}",
+                        mark(deliverer_citizen),
+                        units.count(),
+                        if left == 0 { "filled".to_string() } else { format!("{left} left") }
+                    )
+                }
+                StateEvent::ClaimLapsed {
+                    item_type,
+                    claimant_name,
+                    quantity,
+                    delivered,
+                    ..
+                } => format!("{claimant_name}'s claim on {quantity} {item_type} lapsed, {delivered} in"),
+                StateEvent::CommissionExpired {
+                    item_type, delivered, quantity, refunded,
+                } => {
+                    open -= 1;
+                    format!("the commission for {item_type} ran out, {delivered} of {quantity} in; {refunded} Strands back")
+                }
+                _ => continue,
+            };
+            bot.log(line);
+        }
+    }
+    bot.log(if open == 0 { "every commission is filled or done".to_string() } else { format!("{open} still open") });
+    Ok(())
+}
+
+fn mark(citizen: bool) -> &'static str {
+    if citizen {
+        " (a citizen)"
+    } else {
+        ""
     }
 }
 
@@ -506,6 +624,19 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn a_commission_is_item_quantity_price_and_a_grade() {
+        let o = parse(args("--grant 500 --commission log:20:9 --commission iron_ore:10:30:B")).unwrap().unwrap();
+        assert_eq!(o.grant, Some(500));
+        assert_eq!(o.commissions.len(), 2);
+        assert_eq!((o.commissions[0].item_type.as_str(), o.commissions[0].quantity, o.commissions[0].price), ("log", 20, 9));
+        assert_eq!(o.commissions[0].min_quality, 0);
+        assert_eq!(o.commissions[1].min_quality, 75);
+        assert!(parse(args("--commission log:20")).is_err());
+        assert!(parse(args("--commission log:20:9:Z")).is_err());
+        assert!(parse(args("--commission log:many:9")).is_err());
     }
 
     #[test]

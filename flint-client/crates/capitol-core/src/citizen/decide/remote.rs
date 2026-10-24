@@ -347,6 +347,25 @@ pub fn question(q: &Question) -> String {
                                   Deeds Office gives you a deed to a lot of your choosing. Should you take its next \
                                   step now, or go on with what you were doing?"
             .into(),
+        Question::Commission {
+            item,
+            grade,
+            wanted,
+            claimed,
+            price,
+            due,
+            ..
+        } => {
+            let grade = if grade == "F" { "of any grade".to_string() } else { format!("of grade {grade} or better") };
+            let yours = if *claimed > 0 {
+                format!(" You've claimed {claimed} of them, and a claim not kept in time is a breach on your record.")
+            } else {
+                String::new()
+            };
+            format!(
+                "A commission on the hall's board wants {wanted} {item} {grade}, at {price} Strands each, due in {due:.0}                  hours.{yours} Claim some, deliver some now, or leave it?"
+            )
+        }
     }
 }
 
@@ -377,6 +396,10 @@ pub fn label(c: &Choice) -> String {
         Choice::BuyFrom { partner, item, .. } => format!("buy {item} from {partner}"),
         Choice::SellTo { partner, item, .. } => format!("sell {item} to {partner}"),
         Choice::Road { .. } => "the road in".into(),
+        Choice::Claim { .. } => "claim".into(),
+        Choice::Deliver { .. } => "deliver".into(),
+        Choice::Pass => "pass".into(),
+        Choice::Post { item, .. } => format!("post for {item}"),
     }
 }
 
@@ -467,6 +490,26 @@ pub fn entry(c: &Choice) -> String {
             count(quantity)
         ),
         Choice::Road { does, .. } => format!("Take the road in's next step: {does}"),
+        Choice::Claim { quantity } => format!(
+            "Claim {} of them: they're held for you for a day, and you gather or make them and bring them to the hall",
+            count(quantity)
+        ),
+        Choice::Deliver { quantity } => format!(
+            "Deliver {} of them at the hall now, from what you hold at the grade, paid for each",
+            count(quantity)
+        ),
+        Choice::Pass => "Leave it".into(),
+        Choice::Post {
+            item,
+            grade,
+            price,
+            quantity,
+            due,
+        } => format!(
+            "Post a commission on the hall's board for {} {item} of grade {grade} or better, at {} Strands each,              due in {due} days, with the whole price down and the court's fee on top",
+            count(quantity),
+            range(price)
+        ),
     }
 }
 
