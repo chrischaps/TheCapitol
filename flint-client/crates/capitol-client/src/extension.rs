@@ -142,6 +142,9 @@ pub struct CapitolExtension {
     /// the camera first looks once it's there.
     node_sample: bool,
     node_sampled: Option<nodes::sample::Sample>,
+    /// `--offline-avatar` (controls T1.3): offline, you on the ground,
+    /// walked by a loopback server, once the camera has settled.
+    offline_avatar: Option<crate::offline_avatar::OfflineAvatar>,
     /// `--citizen-sample` (C0.2): offline, people and citizens in a row
     /// where the camera looks, stood there once it's settled.
     citizen_sample: Option<Option<(capitol_core::state::GameState, Vec<capitol_core::motion::Pose>)>>,
@@ -308,6 +311,7 @@ impl CapitolExtension {
             automation_sample: None,
             building_sample: None,
             node_sample: false,
+            offline_avatar: None,
             node_sampled: None,
             citizen_sample: None,
             citizen_strolls: false,
@@ -491,6 +495,15 @@ impl CapitolExtension {
 
     pub fn with_node_sample(mut self, on: bool) -> Self {
         self.node_sample = on && self.session.is_none();
+        self
+    }
+
+    /// Offline, stand you where the camera looks and walk you by a
+    /// loopback server that answers in `round_trip_ms` (`--offline-avatar`).
+    pub fn with_offline_avatar(mut self, round_trip_ms: Option<u64>) -> Self {
+        if self.session.is_none() {
+            self.offline_avatar = round_trip_ms.map(crate::offline_avatar::OfflineAvatar::new);
+        }
         self
     }
 
@@ -1288,9 +1301,9 @@ impl CapitolExtension {
 
     /// The control mode just switched (T1.1, F8 or the panel). Any walk
     /// stops where you are, so neither mode inherits the other's: a click
-    /// walk's ring goes, and camera.rhai drops its pan when it sees Click
-    /// back. A toast names the new mode. Until #321, Direct walks by click
-    /// as Click does; only the name changes.
+    /// walk's ring goes, a steer stops as a steer does (T1.3), and
+    /// camera.rhai drops its pan when it sees Click back. A toast names
+    /// the new mode.
     fn switch_controls(&mut self, ctx: &mut ExtensionCtx, mode: ControlMode, now: Instant) {
         tracing::info!("controls: {}", mode.name());
         if let Some(session) = &mut self.session {
@@ -1298,7 +1311,7 @@ impl CapitolExtension {
         }
         let body = match mode {
             ControlMode::Click => "Click the ground to walk there. F8 to switch",
-            ControlMode::Direct => "For now it walks by click too. F8 to switch",
+            ControlMode::Direct => "WASD walks the way you face; click things to use them. F8 to switch",
         };
         let mut data = toml::Table::new();
         data.insert("title".into(), mode.label().into());
@@ -1387,8 +1400,15 @@ impl PlayerExtension for CapitolExtension {
         self.chat_key |= !self.at_login() && ctx.input.is_action_just_pressed("chat");
         let station_key = !self.at_login() && ctx.input.is_action_just_pressed("station");
         let trade_key = !self.at_login() && ctx.input.is_action_just_pressed("trade");
+        // The movement keys walk you in Direct (T1.3); in Click they pan
+        // the view (camera.rhai), and the steer sees none.
+        let way = match self.control_mode() {
+            ControlMode::Direct if !self.at_login() => keys_way(ctx, &self.shared),
+            _ => (0.0, 0.0),
+        };
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
+            session.steer(now, way);
             if station_key {
                 session.open_nearest_station(now);
             }
@@ -1599,6 +1619,25 @@ impl PlayerExtension for CapitolExtension {
                     murmurs(&mut self.sound, &talk.tick(now, state, poses));
                     speak(&self.shared, |id| talk.log.bubble(id, now).map(script_api::Speech::of));
                 }
+            }
+        }
+        if let (None, Some(avatar)) = (&self.session, &mut self.offline_avatar) {
+            // Stood once the camera has settled on its shot, on the ground
+            // the offline terrain gives (T1.3).
+            if !avatar.placed() && ctx.clock.total_time > 0.5 {
+                if let Some(ground) = self.terrain.ground() {
+                    let t = ctx.camera.target;
+                    let [x, y] = crate::coords::to_server(t.x, t.z);
+                    avatar.place(now, (x, y), ground.clone());
+                }
+            }
+            let walk_to = self.shared.move_to.lock().ok().and_then(|mut m| m.take());
+            if let Some((poses, state)) = avatar.update(now, way, walk_to.map(|[x, y]| (x, y))) {
+                let dt = ctx.clock.delta_time.min(0.1) as f32;
+                self.players.update(ctx, poses, state, dt, &self.shared);
+            }
+            if let Ok(mut d) = self.shared.destination.lock() {
+                *d = avatar.destination().map(|(x, y)| crate::coords::to_world(x, y));
             }
         }
         if self.session.is_none() && self.shared.visit_hall.swap(false, Ordering::Relaxed) {
@@ -3043,6 +3082,17 @@ fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Sound
     let dt = ctx.clock.delta_time.min(0.1) as f32;
     let cues = sound.update(ears, &working, dt);
     sound.apply(ctx, &cues);
+}
+
+/// The movement keys as the way to walk (Direct mode, T1.3), in server
+/// units: against the yaw the camera rig means to have (`cap_view_yaw`),
+/// two keys held no faster than one.
+fn keys_way(ctx: &ExtensionCtx, shared: &script_api::Shared) -> (f64, f64) {
+    let held = |action| if ctx.input.is_action_pressed(action) { 1.0 } else { 0.0 };
+    let forward = held("move_forward") - held("move_backward");
+    let right = held("move_right") - held("move_left");
+    let yaw = shared.view_yaw.lock().ok().and_then(|y| *y).unwrap_or(0.0);
+    capitol_core::steering::camera_way(forward, right, yaw)
 }
 
 /// Click to move (P4.3): send the walk a script asked for (`cap_move`),

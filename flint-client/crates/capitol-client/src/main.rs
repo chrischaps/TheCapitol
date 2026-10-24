@@ -22,6 +22,7 @@ mod extension;
 mod juice_sample;
 mod labels;
 mod nodes;
+mod offline_avatar;
 mod script_api;
 mod session;
 mod settings;
@@ -283,6 +284,13 @@ struct Args {
     /// 1 s, 3 s and 5 s, a long one among them (Commons S1.2). For captures
     #[arg(long, requires = "citizen_sample")]
     talk_sample: bool,
+    /// Offline, stand you where the camera looks and walk you, with a
+    /// loopback for a server that answers in RTT_MS there and back (80 if
+    /// none). With `--controls direct` WASD walks you; in Click a click
+    /// does. Prints `[motion] corrections N` on exit (T1.3). For captures
+    #[arg(long, requires = "offline", value_name = "RTT_MS", num_args = 0..=1,
+        default_missing_value = "80")]
+    offline_avatar: Option<u64>,
 }
 
 /// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
@@ -416,6 +424,7 @@ fn main() -> Result<()> {
         .with_node_sample(args.node_sample)
         .with_citizen_sample(args.citizen_sample.as_deref())
         .with_talk_sample(args.talk_sample)
+        .with_offline_avatar(args.offline_avatar)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_controls(args.controls.or_else(|| {
             let capture = args.offline.is_some()

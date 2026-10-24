@@ -127,3 +127,29 @@ fn turn_is_the_short_way_round() {
     assert_eq!(turn(65530, 10), 16);
     assert_eq!(turn(0, 2 * QUARTER), 2 * QUARTER);
 }
+
+#[test]
+fn the_keys_walk_against_the_view_and_two_held_are_no_faster() {
+    let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+    // Yaw 0 stands the camera south, looking north: W is north (y up the
+    // screen is -y), D east.
+    assert!(near(camera_way(1.0, 0.0, 0.0), (0.0, -1.0)));
+    assert!(near(camera_way(0.0, 1.0, 0.0), EAST));
+    assert!(near(camera_way(-1.0, 0.0, 0.0), SOUTH));
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    assert!(near(camera_way(1.0, 1.0, 0.0), (h, -h)), "W+D is north-east, at one key's pace");
+    // A quarter turn round stands it east, looking west: W is west.
+    let quarter = std::f64::consts::FRAC_PI_2;
+    assert!(near(camera_way(1.0, 0.0, quarter), (-1.0, 0.0)));
+    assert!(near(camera_way(0.0, 1.0, quarter), (0.0, -1.0)), "D is north");
+    // Half a stick stays half: only a way longer than 1 is cut down.
+    assert!(near(camera_way(0.5, 0.0, 0.0), (0.0, -0.5)));
+    assert_eq!(camera_way(0.0, 0.0, 1.0), NEUTRAL_WAY);
+    // The heading it gives is the one the keys mean, through the quantiser.
+    let way = camera_way(0.0, 1.0, 0.0);
+    assert_eq!(steering_heading(way), 0);
+}
+
+fn steering_heading(way: (f64, f64)) -> u16 {
+    Steering::new().update(Instant::now(), way).map(|s| s.heading).unwrap()
+}

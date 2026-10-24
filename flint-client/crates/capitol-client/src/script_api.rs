@@ -26,6 +26,10 @@ pub struct Shared {
     pub clean: Arc<AtomicBool>,
     /// The login form is up (P4.1): the camera circles the tower behind it.
     pub at_login: Arc<AtomicBool>,
+    /// The camera rig's yaw as it means it to be (`cap_view_yaw`, controls
+    /// T1.3), radians round the point it looks at, 0 standing it south:
+    /// what Direct mode's keys walk against. `None` until the rig says.
+    pub view_yaw: Arc<Mutex<Option<f64>>>,
     /// Where you stand in world metres (P4.2), for the camera to follow.
     /// `None` offline, and until the server has said where you are.
     pub follow: Arc<Mutex<Option<[f32; 3]>>>,
@@ -632,6 +636,16 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             _ => rhai::Dynamic::UNIT,
         }
     });
+    // `cap_view_yaw(yaw)`: the camera rig's yaw as it means it to be, in
+    // radians round the point it looks at, 0 standing it south. Direct
+    // mode's keys walk against it (T1.3), not against the camera, which
+    // drifts round the keep and eases out of a shot.
+    let view_yaw = shared.view_yaw.clone();
+    engine.register_fn("cap_view_yaw", move |yaw: f64| {
+        if let Ok(mut v) = view_yaw.lock() {
+            *v = yaw.is_finite().then_some(yaw);
+        }
+    });
     // `cap_at_login() -> bool`: the login form is up, so the camera rig
     // circles the tower instead of taking input.
     let at_login = shared.at_login.clone();
@@ -796,8 +810,9 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.into()
     });
     // `cap_move(x, z)`: walk to the ground point (x, z), in world metres.
-    // It's clamped to the world's edge and sent next frame. Offline, and
-    // before the server has placed you, it does nothing.
+    // It's clamped to the world's edge and sent next frame. Offline (but
+    // for --offline-avatar), and before the server has placed you, it does
+    // nothing.
     let move_to = shared.move_to.clone();
     engine.register_fn("cap_move", move |x: f64, z: f64| {
         if let Ok(mut m) = move_to.lock() {
@@ -1377,6 +1392,17 @@ mod tests {
         register(&mut engine, &shared);
         let note: String = engine.eval("cap_spike_note()").unwrap();
         assert_eq!(note, "Ad astra");
+    }
+
+    #[test]
+    fn the_rig_says_its_yaw() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        engine.eval::<()>("cap_view_yaw(1.25)").unwrap();
+        assert_eq!(*shared.view_yaw.lock().unwrap(), Some(1.25));
+        engine.eval::<()>("cap_view_yaw(0.0 / 0.0)").unwrap();
+        assert_eq!(*shared.view_yaw.lock().unwrap(), None, "a NaN walks nowhere");
     }
 
     #[test]

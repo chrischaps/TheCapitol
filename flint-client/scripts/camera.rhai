@@ -76,6 +76,13 @@
 // Switching back to point and walk (F8, cap_setting("control_mode"), T1.1)
 // drops the pan, so the view comes back onto you.
 //
+// Over the shoulder (Direct, T1.3), WASD walks you rather than panning the
+// view: Rust reads the keys and walks against the yaw the rig means to
+// have, which it says each frame with cap_view_yaw (not the camera's, which
+// drifts round the keep). So the keys don't pan, Home doesn't reset a pan,
+// Q/E don't orbit (E acts, T1.5), and walking doesn't swing the view round
+// behind you, which would turn the way W walks as you went.
+//
 // rig_pose and the functions under it are pure, and a Rust test
 // (camera_rig.rs) drives them across every zoom, yaw and position.
 
@@ -277,8 +284,9 @@ fn on_update() {
     if you != () && !rig.at_login {
         rig.target_x = you[0] + rig.pan_x;
         rig.target_z = you[2] + rig.pan_z;
-        // Close in, walking swings the camera round behind you (E3.13)
-        if rig.last_you != () && dt > 0.0 {
+        // Close in, walking swings the camera round behind you (E3.13).
+        // Not over the shoulder, where W walks the way the view faces.
+        if rig.last_you != () && dt > 0.0 && rig.mode != "direct" {
             let vx = (you[0] - rig.last_you[0]) / dt;
             let vz = (you[2] - rig.last_you[2]) / dt;
             rig.yaw_to = follow_yaw(rig.yaw_to, vx, vz, rig.zoom, total_time() - rig.turned, dt);
@@ -353,6 +361,7 @@ fn on_update() {
     pose = rig.nudged(pose);
     set_camera_position(pose.px, pose.py, pose.pz);
     set_camera_target(pose.tx, pose.ty, pose.tz);
+    cap_view_yaw(rig.yaw_to);
 }
 
 // The water stopped your walk (input.rhai draws the splash): the view
@@ -497,15 +506,19 @@ fn eased_in(pose) {
 
 // Read this frame's camera input into the rig (`this`). Returns whether
 // there was any, which is what lets go of a fixed shot. `you` is
-// cap_follow(): with an avatar, WASD moves the pan from it.
+// cap_follow(): with an avatar, WASD moves the pan from it, or over the
+// shoulder walks you (T1.3), which lets go of a shot too.
 fn steer(dt, you) {
     let any = false;
+    let direct = this.mode == "direct";
 
     // Move the point, relative to the way the camera faces. Faster the
     // further out the camera is, so a screen's width takes the same time.
     let fwd = action_axis("move_forward", "move_backward");
     let side = action_axis("move_right", "move_left");
-    if fwd != 0.0 || side != 0.0 {
+    if (fwd != 0.0 || side != 0.0) && direct && you != () {
+        any = true;
+    } else if fwd != 0.0 || side != 0.0 {
         any = true;
         let speed = (0.6 * rig_distance(this.zoom)).max(8.0) * dt;
         let len = (fwd * fwd + side * side).sqrt();
@@ -541,7 +554,8 @@ fn steer(dt, you) {
     }
 
     // Orbit: Q turns the view left, E right, and so does dragging right.
-    let turn = action_axis("orbit_left", "orbit_right");
+    // Over the shoulder only the drag does.
+    let turn = if direct { 0.0 } else { action_axis("orbit_left", "orbit_right") };
     if turn != 0.0 {
         any = true;
         this.turned = total_time();
@@ -561,13 +575,16 @@ fn steer(dt, you) {
 
     // Home: back to the start, at street zoom, north up. The yaw unwinds
     // by the short way, never a full turn.
+    // Over the shoulder there's no pan to drop.
     if is_action_just_pressed("home") {
         any = true;
-        let home = follow_home(you);
-        this.target_x = home[0];
-        this.target_z = home[1];
-        this.pan_x = 0.0;
-        this.pan_z = 0.0;
+        if !direct || you == () {
+            let home = follow_home(you);
+            this.target_x = home[0];
+            this.target_z = home[1];
+            this.pan_x = 0.0;
+            this.pan_z = 0.0;
+        }
         this.zoom_to = street_zoom();
         this.yaw_to = this.yaw - wrap_angle(this.yaw);
     }

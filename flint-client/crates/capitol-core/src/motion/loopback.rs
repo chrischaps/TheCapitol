@@ -49,6 +49,8 @@ use crate::net::{ConnectionState, NetEvent};
 pub struct Loopback {
     ground: Arc<Ground>,
     id: Uuid,
+    /// The name the snapshots give the player.
+    name: String,
     /// Half the round trip: each way.
     half_trip: Duration,
     next_tick: Instant,
@@ -72,6 +74,7 @@ impl Loopback {
         let mut server = Self {
             ground,
             id,
+            name: "loopback".into(),
             half_trip: Duration::ZERO,
             next_tick: now,
             ticks: 0,
@@ -95,6 +98,12 @@ impl Loopback {
             *at = *at - self.half_trip + round_trip / 2;
         }
         self.half_trip = round_trip / 2;
+        self
+    }
+
+    /// The player's name, as the snapshots give it ("loopback" otherwise).
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -214,7 +223,7 @@ impl Loopback {
         }
         let players = vec![PlayerPosition {
             id: self.id,
-            name: "loopback".into(),
+            name: self.name.clone(),
             x: self.at.0,
             y: self.at.1,
             citizen: false,

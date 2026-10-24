@@ -43,6 +43,7 @@ use capitol_core::protocol::terrain::{Landmark, TerrainResponse};
 use capitol_core::protocol::ws::{Channel, ClientMessage, ItemCount};
 use capitol_core::state::{GameState, StateEvent, Trade, TradeAction, TradeEvent, Yield};
 use capitol_core::station::{self, Kit, Placing, Visit};
+use capitol_core::steering::Steering;
 use capitol_core::talk::{Line, Log};
 use capitol_core::trading::{self, Approach, Draft};
 use flint_runtime::PersistentStore;
@@ -165,6 +166,9 @@ pub struct Session {
     /// The walk under way, round the water by the walk graph (#267): a
     /// `move` a leg.
     route: Walk,
+    /// Walking on a heading (controls T1.3): the movement keys, turned
+    /// into `steer`s.
+    steering: Steering,
     /// The terrain's walk graph, once it's built.
     walks: Option<Arc<WalkGraph>>,
     /// Water you walked into since the extension last took them (P4.3).
@@ -382,7 +386,8 @@ pub struct Blocked {
     /// The ring that stopped you (`moat`, `canal_inner`, ...), empty from a
     /// server older than #74.
     pub water: String,
-    /// Where you were going when the water stopped you, if it was a click.
+    /// Where you were going when the water stopped you: the click's
+    /// destination, or a point ahead on the steer's heading (T1.3).
     pub toward: Option<(f64, f64)>,
 }
 
@@ -441,6 +446,7 @@ impl Session {
             file,
             last_move: None,
             route: Walk::default(),
+            steering: Steering::new(),
             walks: None,
             blocked: Vec::new(),
             harvest: Harvest::default(),
@@ -572,9 +578,14 @@ impl Session {
     /// Stop where the prediction has you (T1.1: the control mode switched).
     /// The server hears a `move` to that spot, so it stops where you did,
     /// and whatever the walk was for (a gather, a visit, a stall) is
-    /// dropped. Nothing while standing.
+    /// dropped. A steer stops as a steer does, with its `at` (T1.3).
+    /// Nothing while standing.
     pub fn stop_walk(&mut self, now: Instant) {
-        if self.destination().is_none() || !self.state.plays_here() {
+        if !self.moving() || !self.state.plays_here() {
+            return;
+        }
+        if self.motion.steering() {
+            self.steer(now, (0.0, 0.0));
             return;
         }
         self.harvest.walked();
@@ -591,6 +602,37 @@ impl Session {
         }
     }
 
+    /// One frame of the movement keys (controls T1.3): `way` is the way to
+    /// walk in server units, as long as the input's deflection, and (0, 0)
+    /// for none, as it always is in Click mode. Walking on a heading drops
+    /// whatever a click's walk was for, as [`Self::move_to`] does, so a
+    /// stall's legs don't fight it. While latched after an interaction, a
+    /// held key does nothing until it's let go ([`Steering::latch`]).
+    pub fn steer(&mut self, now: Instant, way: (f64, f64)) {
+        if self.auth.phase() != Phase::InWorld || !self.state.plays_here() {
+            return;
+        }
+        let walks = way.0.hypot(way.1) >= capitol_core::steering::NEUTRAL;
+        if walks && !self.steering.latched() {
+            self.harvest.walked();
+            self.visit.walked();
+            self.approach.walked();
+            self.hall.walked();
+            self.board_walk.walked();
+            self.work_walk.walked();
+            self.stall.walked();
+            self.route.stop();
+        }
+        if let Some(message) = self.steering.drive(now, way, &mut self.motion) {
+            self.net.ws(message);
+        }
+    }
+
+    /// Whether you're walking: on a heading, or to a destination.
+    pub fn moving(&self) -> bool {
+        self.motion.steering() || self.destination().is_some()
+    }
+
     /// Every walk goes round the water: by the walk graph, a leg at a time
     /// ([`Self::tend_route`] sends the rest), or straight while there's no
     /// graph or no way round.
@@ -600,6 +642,8 @@ impl Session {
         if self.auth.phase() != Phase::InWorld || !self.state.plays_here() {
             return;
         }
+        // A key held from before this walk doesn't end it (plan D5).
+        self.steering.latch();
         let Some(me) = self.state.local_player() else {
             return;
         };
@@ -669,9 +713,12 @@ impl Session {
             return;
         }
         match step {
-            Step::Extract(node) => self.net.ws(ClientMessage::Extract {
-                node_id: node.to_string(),
-            }),
+            Step::Extract(node) => {
+                self.steering.latch();
+                self.net.ws(ClientMessage::Extract {
+                    node_id: node.to_string(),
+                })
+            }
             Step::WalkTo { x, y } => self.walk(now, x, y),
             Step::Hold => {}
         }
@@ -2723,16 +2770,25 @@ impl Session {
                             y: *y,
                             reason: reason.clone(),
                             water: water.clone(),
-                            toward: self.last_move.take(),
+                            // A steer was going its own way (T1.3)
+                            toward: match self.steering.walking() {
+                                Some(walking) => {
+                                    let (dx, dy) = capitol_core::protocol::rules::steer::direction(walking.heading);
+                                    Some((x + dx, y + dy))
+                                }
+                                None => self.last_move.take(),
+                            },
                         });
                     }
                     StateEvent::ExtractionCompleted { node_id, item } => {
                         self.yields.push((*node_id, item.clone()));
                     }
                     StateEvent::CraftingCompleted { item } => self.crafted.push(item.clone()),
-                    // The server stops you to gather or craft: so does the walk
+                    // The server stops you to gather or craft: so does the
+                    // walk, and a key held through it doesn't walk you off
                     StateEvent::ExtractionStarted { .. } | StateEvent::CraftingStarted { .. } => {
-                        self.route.stop()
+                        self.route.stop();
+                        self.steering.latch();
                     }
                     StateEvent::CatalogUpdated => self.cache_catalog(),
                     StateEvent::StationPlaced { station_id, .. } => {
@@ -2987,6 +3043,7 @@ impl Session {
             self.motion = Motion::new();
             self.last_move = None;
             self.route = Walk::default();
+            self.steering = Steering::new();
             self.blocked.clear();
             self.move_refused = None;
             self.link = Link::default();
@@ -3404,6 +3461,120 @@ mod tests {
             }
         }
         wait(&mut session, "the walk to end", 5, &|s| s.route().is_empty());
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Against the local stack (controls T1.3): a steer walks you on a
+    /// heading, and letting go leaves the server where the prediction
+    /// stood, with no slide on. Held into the outer canal it stops at the
+    /// bank and slides along it, and `movement_blocked` heads the way you
+    /// were going. A steer ends a gather, but a key held through the gather
+    /// starting doesn't (the latch). Run `capitol-bot --prefix walk --gather
+    /// 0` once first for `Walk1`. Takes a minute or two of walking.
+    #[test]
+    #[ignore = "needs the local stack and the capitol-bot --prefix walk account; walks for a minute or two"]
+    fn a_steer_walks_stops_and_slides_along_the_canal() {
+        use capitol_core::protocol::rules::{CENTER_X, CENTER_Y};
+        use capitol_core::state::Activity;
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let dir = std::env::temp_dir().join(format!("capitol-steer-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in("walk1@bots.capitol.local", "walk-1-capitol-bot");
+
+        // Frames at 60 Hz with the keys at `way`, until `done` or `secs`.
+        let mut play = |session: &mut Session, secs: f64, way: (f64, f64), done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs_f64(secs);
+            while Instant::now() < deadline && !done(session) {
+                session.update(Instant::now(), &mut terrain);
+                session.steer(Instant::now(), way);
+                session.sample(Instant::now());
+                std::thread::sleep(Duration::from_millis(16));
+            }
+        };
+        let never = |_: &Session| false;
+        let me = |s: &Session| s.state().local_player().map(|p| (p.x, p.y)).unwrap();
+        let drawn = |s: &mut Session| {
+            let id = s.state().me().unwrap();
+            let pose = *s.sample(Instant::now()).0.iter().find(|p| p.id == id).unwrap();
+            (pose.x, pose.y)
+        };
+        play(&mut session, 60.0, (0.0, 0.0), &|s| s.state().local_player().is_some() && s.walks.is_some());
+        let r_of = |(x, y): (f64, f64)| (x - CENTER_X).hypot(y - CENTER_Y);
+        let polar = |r: f64, degrees: f64| {
+            let a = degrees.to_radians();
+            (CENTER_X + r * a.cos(), CENTER_Y + r * a.sin())
+        };
+
+        // Out to the outer canal's bank (r 1000) at 20°, where it has no bridge
+        let bank = polar(1060.0, 20.0);
+        session.move_to(Instant::now(), bank.0, bank.1);
+        play(&mut session, 300.0, (0.0, 0.0), &|s| (me(s).0 - bank.0).hypot(me(s).1 - bank.1) < 1.0);
+        assert!((me(&session).0 - bank.0).hypot(me(&session).1 - bank.1) < 1.0, "reached the bank");
+
+        // Along the bank, then let go: the server stands where you were drawn
+        let a = 20f64.to_radians();
+        let along = (-a.sin(), a.cos());
+        let from = me(&session);
+        play(&mut session, 1.5, along, &never);
+        let stood = drawn(&mut session);
+        play(&mut session, 0.02, (0.0, 0.0), &never);
+        play(&mut session, 1.0, (0.0, 0.0), &never);
+        let at = me(&session);
+        let walked = (at.0 - from.0).hypot(at.1 - from.1);
+        eprintln!("walked {walked:.1} along the bank; stopped {:.2} from where it was drawn", (at.0 - stood.0).hypot(at.1 - stood.1));
+        assert!((60.0..90.0).contains(&walked), "1.5 s of walking at 50 u/s: {walked}");
+        assert!((at.0 - stood.0).hypot(at.1 - stood.1) < 6.0, "stopped about where it was let go: {at:?} against {stood:?}");
+        play(&mut session, 0.5, (0.0, 0.0), &never);
+        assert_eq!(me(&session), at, "and stays");
+        assert!(!session.moving());
+
+        // Into the canal, 30° off straight in: it stops at the bank and slides
+        session.take_blocked();
+        let inward = 20f64.to_radians() + std::f64::consts::PI + 30f64.to_radians();
+        let from = me(&session);
+        play(&mut session, 3.0, (inward.cos(), inward.sin()), &never);
+        play(&mut session, 1.0, (0.0, 0.0), &never);
+        let at = me(&session);
+        let blocked = session.take_blocked();
+        eprintln!("into the canal: from r {:.1} to r {:.1}, {} blocks", r_of(from), r_of(at), blocked.len());
+        assert!(!blocked.is_empty(), "the canal stopped it");
+        let b = &blocked[0];
+        let (tx, ty) = b.toward.expect("a steer's block says which way");
+        let heading = (ty - b.y).atan2(tx - b.x);
+        let off = (heading - inward).sin().abs();
+        assert!(off < 0.05, "heading the way it steered: {heading} against {inward}");
+        assert!(r_of(at) > 1000.0, "kept out of the water: r {}", r_of(at));
+        let slid = (at.0 - from.0) * along.0 + (at.1 - from.1) * along.1;
+        assert!(slid.abs() > 20.0, "slid along the bank: {slid}");
+
+        // A gather: the key held through its start doesn't end it; a fresh
+        // press does
+        let near = session
+            .state()
+            .nodes()
+            .values()
+            .filter(|n| n.resource_type == "grass" && n.state == "available")
+            .min_by(|a, b| {
+                let d = |n: &&capitol_core::protocol::rest::ResourceNodeInfo| (n.x - at.0).hypot(n.y - at.1);
+                d(a).total_cmp(&d(b))
+            })
+            .map(|n| n.id)
+            .expect("grass somewhere");
+        session.extract(Instant::now(), near);
+        let gathering = |s: &Session| matches!(s.state().me().and_then(|id| s.state().activity(id)), Some(Activity::Extracting { .. }));
+        // Held all the way: the walk there and the gather aren't ended by it
+        play(&mut session, 240.0, along, &gathering);
+        assert!(gathering(&session), "the gather started, with the key held");
+        play(&mut session, 0.5, along, &never);
+        assert!(gathering(&session), "a key held as it started is latched");
+        play(&mut session, 0.1, (0.0, 0.0), &never);
+        play(&mut session, 0.5, along, &never);
+        assert!(!gathering(&session), "a fresh press walks off and ends it");
+        play(&mut session, 0.5, (0.0, 0.0), &never);
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }

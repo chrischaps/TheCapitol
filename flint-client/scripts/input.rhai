@@ -16,6 +16,7 @@
 //   4. alt-click a plot: select it                  (P6.4, here)
 //   5. an available resource node: extract          (P4.4, here)
 //   6. anywhere else: walk there                    (P4.3, here)
+//      but not over the shoulder, where WASD walks  (T1.3)
 //
 // Each is a function below that gets the click (#{ x, z } in world
 // metres, `shift`, `alt`) and returns true when it took it.
@@ -239,6 +240,7 @@ fn on_update() {
     if visit_hall() { return; }
     if select_plot(click) { return; }
     if extract(click) { return; }
+    if cap_setting("control_mode") == "direct" { return; }
     cap_move(click.x, click.z);
     ripples.push(#{ x: click.x, z: click.z, born: t });
 }

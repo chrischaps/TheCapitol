@@ -222,6 +222,25 @@ pub fn throttle_of(deflection: f64) -> u8 {
     }
 }
 
+/// The way to walk for movement input held against the view (T1.3):
+/// `forward` and `right` from -1 to 1, and the camera rig's `yaw` (radians
+/// round the point it looks at; 0 stands it south, looking north). In
+/// server units (y south), as [`Steering::update`] takes it: never longer
+/// than 1, so two keys held walk no faster than one.
+pub fn camera_way(forward: f64, right: f64, yaw: f64) -> (f64, f64) {
+    // Forward is from the camera to the point, (-sin, -cos) in x and y;
+    // right is (cos, -sin). Server y is world z, so the rig's are these.
+    let (s, c) = (yaw.sin(), yaw.cos());
+    let x = -s * forward + c * right;
+    let y = -c * forward - s * right;
+    let len = x.hypot(y);
+    if len > 1.0 {
+        (x / len, y / len)
+    } else {
+        (x, y)
+    }
+}
+
 /// How far apart two headings are, either way round.
 fn turn(a: u16, b: u16) -> u16 {
     let d = a.wrapping_sub(b);
