@@ -34,6 +34,8 @@ const FADE: f32 = 0.2;
 const RISE: f32 = 12.0;
 /// The panel's widest.
 const WIDTH: f32 = 520.0;
+/// Room kept at the right of a scrolled column for its handle.
+const SCROLL_ROOM: f32 = 12.0;
 /// The banner's name.
 const BANNER: f32 = 22.0;
 
@@ -218,6 +220,8 @@ impl GuildPanel {
         let mut action = None;
         let room = (ui.available_height() - 4.0).max(160.0);
         theme::scrolled(ui, "capitol_guild_yours", room, |ui| {
+            // Clear of the scroll handle, which shows at rest
+            ui.set_max_width(ui.available_width() - SCROLL_ROOM);
             banner(ui, &guild.name, &guild.tag, &guild.founder.name, &guild.leader.name, guild.founded_at, guild.members.len());
             charter(ui, &guild.charter);
             ui.add_space(10.0);
@@ -370,7 +374,8 @@ impl GuildPanel {
             ui.label(RichText::new(why).size(size::SMALL).color(theme::SHORT));
             ui.add_space(6.0);
         }
-        let ready = why_not.is_none() && checked.is_ok() && !guilds.busy() && view.online;
+        // Offline, a press queues a call that never goes: the sample shows it ready
+        let ready = why_not.is_none() && checked.is_ok() && !guilds.busy();
         if view.at_hall || !view.subscribed {
             let words = match &checked {
                 Ok(f) => format!("Found {}", f.name),
@@ -403,6 +408,8 @@ fn browse(ui: &mut egui::Ui, guilds: &mut Guilds, view: &View) -> Option<Action>
     let invites: Vec<GuildInvite> = guilds.mine().map(|m| m.invites.clone()).unwrap_or_default();
     let room = (ui.available_height() - 4.0).max(160.0);
     theme::scrolled(ui, "capitol_guild_browse", room, |ui| {
+        // Clear of the scroll handle, which shows at rest
+        ui.set_max_width(ui.available_width() - SCROLL_ROOM);
         if !invites.is_empty() {
             ui.label(theme::label("Waiting on you"));
             ui.add_space(4.0);
@@ -441,6 +448,8 @@ fn opened(ui: &mut egui::Ui, guilds: &mut Guilds, guild: &GuildDetail, view: &Vi
     ui.add_space(6.0);
     let room = (ui.available_height() - 4.0).max(160.0);
     theme::scrolled(ui, "capitol_guild_opened", room, |ui| {
+        // Clear of the scroll handle, which shows at rest
+        ui.set_max_width(ui.available_width() - SCROLL_ROOM);
         banner(ui, &guild.name, &guild.tag, &guild.founder.name, &guild.leader.name, guild.founded_at, guild.members.len());
         charter(ui, &guild.charter);
         ui.add_space(10.0);

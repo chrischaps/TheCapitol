@@ -407,7 +407,8 @@ mod tests {
 
     #[test]
     fn a_guild_line_reaches_its_members_only_wherever_they_are() {
-        let weavers = Some(Uuid::new_v4());
+        let weavers_id = Uuid::new_v4();
+        let weavers = Some(weavers_id);
         let ada = player("Ada", AT.0, AT.1);
         let far_member = player("Bram", AT.0 + 4000.0, AT.1);
         let near_outsider = player("Cass", AT.0 + 5.0, AT.1);
@@ -431,7 +432,7 @@ mod tests {
         assert!(!hears(&line, far_member.id, true, Some(&positions), None, &muted, weavers), "nor one who muted them");
         assert!(talk.backlog(&HashSet::new()).1.is_empty(), "the Capitol's backlog doesn't keep it");
         let json = serde_json::to_string(&line.message()).unwrap();
-        assert!(json.contains(r#""channel":"guild""#) && !json.contains(&weavers.unwrap().to_string()), "{json}");
+        assert!(json.contains(r#""channel":"guild""#) && !json.contains(&weavers_id.to_string()), "{json}");
     }
 
     #[test]

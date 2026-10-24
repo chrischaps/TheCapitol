@@ -464,7 +464,7 @@ fn citizen_mark(ui: &mut egui::Ui, text: f32) {
     response.on_hover_text("A citizen: an AI who lives, works and trades in the city, by the same rules as anyone");
 }
 
-/// `--chat-sample`: both tabs, a few people and citizens talking, a line
+/// `--chat-sample`: all three tabs, a few people and citizens talking, a line
 /// of yours, and one refused, back in the input with the reason under it.
 /// The log's clock is `clock` now; you are the id returned.
 pub fn sample(now: Instant, clock: f64) -> (Log, Chat, Uuid) {
@@ -479,6 +479,7 @@ pub fn sample(now: Instant, clock: f64) -> (Log, Chat, Uuid) {
         (me, "Wren Hollis", false, Channel::Local, "It is. Use it if you like, the fire's still warm."),
         (wen, "Wen Calder", true, Channel::Local, "Good morning to you both."),
         (cy, "Cy Marlowe", true, Channel::Capitol, "And clay, while the river's low."),
+        (rook, "Rook Ashdown", false, Channel::Guild, "Fiber's in the long shed. Take what you need for the order."),
         (ada, "Ada Reeder", false, Channel::Local, "Thanks! I'll bring the copper back as ingots."),
     ];
     for (i, (from, name, citizen, channel, text)) in lines.iter().enumerate() {
