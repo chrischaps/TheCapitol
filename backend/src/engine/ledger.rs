@@ -11,8 +11,9 @@
 //! or [`Committing`] where there's no transaction to hand over). Moves count
 //! nothing: trades, splits, escrow, stalls, impounds. A place that makes or
 //! destroys units and doesn't count them shows as drift when a soak
-//! reconciles two snapshots (`capitol_protocol::ledger::reconcile`). The
-//! places that count:
+//! reconciles two snapshots (`capitol_protocol::ledger::reconcile`). A
+//! snapshot and the counted writes take turns at a gate (#408), so its units
+//! and its flows always agree. The places that count:
 //!
 //! - a gather, and the tool it wears out (`tick::persist_gather`)
 //! - a craft by hand, its inputs, its outputs and its tool
@@ -35,12 +36,12 @@
 //! makes.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use capitol_protocol::ledger::{AccountBooks, Crafts, Ledger, UnitFlow};
 use sqlx::{PgPool, Postgres, Transaction};
+use tokio::sync::{RwLock, RwLockReadGuard};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -50,19 +51,20 @@ use crate::state::AppState;
 static FLOWS: LazyLock<Mutex<BTreeMap<(String, UnitFlow), i64>>> = LazyLock::new(Default::default);
 /// Crafts finished since the server started, by recipe id (D2.4)
 static CRAFTS: LazyLock<Mutex<BTreeMap<String, Crafts>>> = LazyLock::new(Default::default);
-/// Unit writes that have begun to commit, and those that have finished and
-/// been counted. While they differ a write is between its commit and its
-/// count, and the units and their flows don't agree.
-static STARTED: AtomicU64 = AtomicU64::new(0);
-static FINISHED: AtomicU64 = AtomicU64::new(0);
+/// The gate between unit writes and snapshots (#408). A write holds it shared
+/// from just before its commit until its flows are counted; a snapshot holds
+/// it alone while it reads the flows and fixes its database snapshot, a few
+/// milliseconds, so the two agree. Tokio's lock is fair: once a snapshot
+/// asks, new writes queue behind it, so a busy server can't starve it.
+static GATE: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 /// When this process first kept books: two snapshots with different boots
 /// have different flows.
 static BOOTED_MS: LazyLock<i64> = LazyLock::new(|| chrono::Utc::now().timestamp_millis());
 
-/// How many times a snapshot waits for a moment with no unit write
-/// committing, and how long between
-pub const SNAPSHOT_TRIES: u32 = 50;
-const SNAPSHOT_WAIT: Duration = Duration::from_millis(20);
+/// How long a snapshot waits for the writes committing to finish. Past it
+/// (a commit stuck on the database) it reads without the gate rather than
+/// hold every other write up, and says so (`units_settled`).
+const GATE_WAIT: Duration = Duration::from_millis(500);
 
 /// The units a transaction makes and destroys, counted once it commits.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -105,16 +107,19 @@ impl Flows {
     }
 }
 
-/// A unit write about to commit: begun now, finished when it's dropped,
-/// counted by [`done`](Self::done). Begin it just before the commit, so a
-/// snapshot never reads units its flows don't have yet.
-pub struct Committing(());
+/// A unit write about to commit: it holds the gate shared from
+/// [`begin`](Self::begin) until it's counted by [`done`](Self::done) or
+/// dropped. Begin it just before the commit, so a snapshot never reads units
+/// its flows don't have yet, and await nothing but the commit while it's
+/// open: new writes wait behind a snapshot that waits on this one.
+pub struct Committing {
+    _gate: RwLockReadGuard<'static, ()>,
+}
 
 impl Committing {
-    pub fn begin() -> Committing {
+    pub async fn begin() -> Committing {
         LazyLock::force(&BOOTED_MS);
-        STARTED.fetch_add(1, Ordering::SeqCst);
-        Committing(())
+        Committing { _gate: GATE.read().await }
     }
 
     /// The write committed: count its flows.
@@ -149,18 +154,12 @@ thread_local! {
     static TEST_CRAFTS: std::cell::RefCell<BTreeMap<String, Crafts>> = Default::default();
 }
 
-impl Drop for Committing {
-    fn drop(&mut self) {
-        FINISHED.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
 /// Commits `tx`, then counts `flows`.
 pub async fn commit(tx: Transaction<'_, Postgres>, flows: Flows) -> Result<(), sqlx::Error> {
     if flows.is_empty() {
         return tx.commit().await;
     }
-    let committing = Committing::begin();
+    let committing = Committing::begin().await;
     tx.commit().await?;
     committing.done(flows);
     Ok(())
@@ -179,12 +178,20 @@ fn flows_now() -> BTreeMap<String, BTreeMap<String, i64>> {
     by_item
 }
 
-/// The world's books now: `GET /admin/ledger`. The accounts, escrow and units
-/// are one database snapshot. The unit flows are taken just before it, at a
-/// moment when no unit write is committing, so the two agree; a server too
-/// busy to give one in a second says so (`units_settled`).
+/// The world's books now: `GET /admin/ledger`, the soak's and the
+/// sampler's. The accounts, escrow and units are one database snapshot, and
+/// the unit flows are read with it behind the gate, so the two agree. A
+/// write that holds the gate past [`GATE_WAIT`] makes it read without, and
+/// say so (`units_settled`).
 pub async fn snapshot(state: &AppState) -> Result<Ledger, sqlx::Error> {
-    snapshot_within(state, SNAPSHOT_TRIES).await
+    let db = &state.db;
+    let mut ledger = books(db).await?;
+    ledger.load = super::load::read(tick_period(state.config.sim_tick_scale));
+    ledger.load.players_in_world = state.game.read().await.players.len() as u64;
+    ledger.load.db_pool_size = db.size();
+    ledger.load.db_pool_idle = db.num_idle() as u32;
+    ledger.load.db_transactions = db_transactions(db).await?;
+    Ok(ledger)
 }
 
 /// The crafts counted so far, by recipe id.
@@ -195,48 +202,24 @@ fn crafts_now() -> BTreeMap<String, Crafts> {
     return TEST_CRAFTS.with(|mine| mine.borrow().clone());
 }
 
-/// [`snapshot`], waiting for a quiet moment at most `tries` times. Each try
-/// reads every unit again, which a busy server pays for: the sampler (D0.2)
-/// tries once, every ten seconds.
-pub async fn snapshot_within(state: &AppState, tries: u32) -> Result<Ledger, sqlx::Error> {
-    let db = &state.db;
-    let mut ledger = books_within(db, tries).await?;
-    ledger.load = super::load::read(tick_period(state.config.sim_tick_scale));
-    ledger.load.players_in_world = state.game.read().await.players.len() as u64;
-    ledger.load.db_pool_size = db.size();
-    ledger.load.db_pool_idle = db.num_idle() as u32;
-    ledger.load.db_transactions = db_transactions(db).await?;
-    Ok(ledger)
-}
-
 /// The books without the load: accounts, escrow, units and unit flows.
-#[cfg(test)]
 pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
-    books_within(db, SNAPSHOT_TRIES).await
-}
-
-/// [`books`], trying at most `most` times for a quiet moment.
-async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
-    let mut tries = 0;
-    let (mut tx, unit_flows, crafts, units, units_settled) = loop {
-        tries += 1;
-        let started = STARTED.load(Ordering::SeqCst);
-        let quiet = started == FINISHED.load(Ordering::SeqCst);
-        let unit_flows = flows_now();
-        let crafts = crafts_now();
-        let mut tx = db.begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *tx)
-            .await?;
-        // The first read takes the snapshot the rest share
-        let units = units_held(&mut tx).await?;
-        let settled = quiet && STARTED.load(Ordering::SeqCst) == started;
-        if settled || tries >= most {
-            break (tx, unit_flows, crafts, units, settled);
-        }
-        tx.rollback().await?;
-        tokio::time::sleep(SNAPSHOT_WAIT).await;
-    };
+    // The connection before the gate: a snapshot waiting on the pool with the
+    // gate shut, while the writes holding every connection wait on the gate,
+    // would wait for ever
+    let mut tx = db.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let gate = tokio::time::timeout(GATE_WAIT, GATE.write()).await.ok();
+    let units_settled = gate.is_some();
+    let unit_flows = flows_now();
+    let crafts = crafts_now();
+    // The first statement takes the snapshot the rest share. Once it has, no
+    // later commit can show, so the gate opens before the slow reads.
+    sqlx::query("SELECT 1").execute(&mut *tx).await?;
+    drop(gate);
+    let units = units_held(&mut tx).await?;
 
     let rows: Vec<(Uuid, String, bool, i64)> = sqlx::query_as(
         "SELECT p.id, p.name, a.kind = 'citizen', p.strand_balance
@@ -514,16 +497,66 @@ mod tests {
         assert_eq!(end.crafts.get("rope_basic").map(|c| c.since(&start.crafts.get("rope_basic").copied().unwrap_or_default())), Some(rope));
     }
 
-    #[test]
-    fn a_counted_write_is_finished_and_in_the_flows() {
+    #[tokio::test]
+    async fn a_counted_write_is_in_the_flows_and_opens_the_gate() {
         let mut flows = Flows::new();
         flows.add("ledger_test_widget", UnitFlow::Granted, 5);
-        let committing = Committing::begin();
+        let committing = Committing::begin().await;
+        assert!(GATE.try_write().is_err(), "shut to a snapshot while it commits");
         committing.done(flows);
         assert_eq!(flows_now()["ledger_test_widget"]["granted"], 5);
-        // Every begun write in this test has finished (others may run alongside)
-        let begun = Committing::begin();
-        drop(begun);
-        assert!(FINISHED.load(Ordering::SeqCst) >= 2);
+        // A write dropped uncounted (its commit failed) opens it too. Other
+        // tests may hold it shared for a moment, so wait for them.
+        drop(Committing::begin().await);
+        let gate = tokio::time::timeout(GATE_WAIT, GATE.write()).await;
+        assert!(gate.is_ok());
+    }
+
+    /// Unit writes that never stop while snapshots are taken (#408): every
+    /// snapshot settles, and every one agrees with the first.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn snapshots_settle_while_writes_never_stop(db: PgPool) {
+        use crate::engine::plot_sync::tests::player;
+        use capitol_protocol::ledger::reconcile;
+
+        let ada = player(&db, "ada", 100).await;
+        let bag = container(&db, "player_inventory", Some(ada), None).await;
+        let stack = put(&db, ada, bag, 0, "fiber", 1).await;
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    for _ in 0..60 {
+                        let mut tx = db.begin().await.unwrap();
+                        sqlx::query("UPDATE item_units SET count = count + 1 WHERE item_id = $1")
+                            .bind(stack)
+                            .execute(&mut *tx)
+                            .await
+                            .unwrap();
+                        let mut flows = Flows::new();
+                        flows.add("fiber", UnitFlow::Granted, 1);
+                        commit(tx, flows).await.unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        let first = books(&db).await.unwrap();
+        let mut taken = 1;
+        while !writers.iter().all(|w| w.is_finished()) {
+            let now = books(&db).await.unwrap();
+            assert!(now.units_settled, "snapshot {taken}");
+            let units = reconcile(&first, &now).units;
+            assert!(units.holds(), "snapshot {taken}: {units:#?}");
+            taken += 1;
+        }
+        for writer in writers {
+            writer.await.unwrap();
+        }
+        let last = books(&db).await.unwrap();
+        assert!(reconcile(&first, &last).units.holds());
+        assert_eq!(last.unit_flows.get("fiber").and_then(|f| f.get("granted")), Some(&240));
+        assert!(taken > 2, "only {taken} snapshots alongside the writes");
     }
 }

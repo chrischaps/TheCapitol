@@ -2,8 +2,7 @@
 //!
 //! [`run_sampler_loop`] takes a [`Sample`] every `METRICS_SAMPLE_SECS`
 //! ([`SAMPLE_SECS`] unless set; 0 turns it off): a ledger
-//! (`ledger::snapshot_within`, which doesn't wait for a quiet moment)
-//! against the one before, the window's market fills and
+//! (`ledger::snapshot`) against the one before, the window's market fills and
 //! bazaar sales, who is in the world and how far the event bus has backed up.
 //! The newest day of them sits in [`Samples`], a ring in `AppState`. One a
 //! minute is written to `metrics_samples`, covering the whole minute since
@@ -44,13 +43,6 @@ use crate::state::AppState;
 
 /// Samples a prune comes round: an hour's
 const PRUNE_EVERY: u64 = 60 * 60 / SAMPLE_SECS;
-/// Tries a sample's ledger makes for a quiet moment. A busy town has few,
-/// and each try reads every unit again: 50 of them, as `/admin/ledger`
-/// makes, doubled the tick's mean in a 224-citizen town. The flows add up
-/// either way, and `units_settled` says whether a sample's units and flows
-/// agree. A cheap way to settle would let it wait again (#408).
-const LEDGER_TRIES: u32 = 1;
-
 /// The newest day of samples, oldest first.
 #[derive(Default)]
 pub struct Samples {
@@ -103,7 +95,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
     interval.tick().await;
     // The first ledger is only the start of the first window
     let mut last = loop {
-        match ledger::snapshot_within(&state, LEDGER_TRIES).await {
+        match ledger::snapshot(&state).await {
             Ok(ledger) => break ledger,
             Err(e) => tracing::warn!("The sampler couldn't read the ledger: {e}"),
         }
@@ -183,7 +175,7 @@ async fn targets(state: &AppState) -> BTreeMap<String, f64> {
 
 /// The sample from `last` to now, the ledger it ends on, and the admins.
 async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSet<Uuid>), sqlx::Error> {
-    let now = ledger::snapshot_within(state, LEDGER_TRIES).await?;
+    let now = ledger::snapshot(state).await?;
     let admins = admins(&state.db).await?;
     let mut sample = window(&state.db, last, &now, &admins).await?;
     sample.books = books(&state.db).await?;

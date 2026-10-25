@@ -67,9 +67,9 @@ impl Watcher {
 
     fn reading(&mut self, last: &Ledger, now: &Ledger, admins: &HashSet<Uuid>, sample: &Sample, deeds: u64) -> Reading {
         let strands = reconcile(last, now).strands;
-        // Units only agree with their flows in a quiet moment, so they're
-        // judged from one such ledger to the next. In a busy town that's
-        // seldom (#408).
+        // Units only agree with their flows in a settled ledger, so they're
+        // judged from one such ledger to the next. Since #408 that's nearly
+        // every one: only a commit stuck past the gate's wait unsettles it.
         let units = if now.units_settled {
             let units = self.settled.as_ref().map(|settled| reconcile(settled, now).units);
             self.settled = Some(now.clone());
