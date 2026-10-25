@@ -34,9 +34,10 @@ use capitol_protocol::tutorial::{Chapter, Grant, Judge, Step as Lesson, Steps, T
 use capitol_protocol::ws::{Channel, ClientMessage};
 
 use super::super::plan::{self, Goal, Holdings, Step};
-use super::super::{Errand, Role};
+use super::super::{stint, Errand, Role};
 use super::{SimBot, PLOT_ZONES};
 use crate::bot::{Bot, BotError};
+use crate::citizen::calling::Calling;
 use crate::citizen::decide::{Choice, Mind, Question};
 use crate::citizen::meet;
 use crate::citizen::persona::{Persona, HOME_ZONES};
@@ -115,7 +116,7 @@ pub fn does(step: Lesson) -> &'static str {
 /// Whether `step` can be taken now, on a road with `done` behind it: its
 /// chapter has come (the road is walked in order, as the card shows it),
 /// and what it needs is there.
-fn ready(step: Lesson, progress: &TutorialProgress, role: Role, home: Option<&HomeFacts>) -> bool {
+fn ready(step: Lesson, progress: &TutorialProgress, builds: bool, home: Option<&HomeFacts>) -> bool {
     let done = progress.done;
     if done.has(step) || !done.chapter_open(step.chapter()) {
         return false;
@@ -125,8 +126,8 @@ fn ready(step: Lesson, progress: &TutorialProgress, role: Role, home: Option<&Ho
         Lesson::CollectBox => done.has(Lesson::SellOrder) && done.has(Lesson::BuyOrder),
         // The Registrar writes as People opens (#447), which chapter_open says
         Lesson::ClaimHome => progress.grant == Grant::Open,
-        // A trade that builds on its lot sets its own stations there
-        Lesson::PlaceAtHome => home.is_some_and(|h| h.room > 0) && !builds_at_home(role),
+        // A calling that builds on its lot sets its own stations there
+        Lesson::PlaceAtHome => home.is_some_and(|h| h.room > 0) && !builds,
         Lesson::SetAutomation => home.is_some_and(|h| h.crafting_station),
         _ => true,
     }
@@ -140,10 +141,12 @@ fn at_home_tonight(step: Lesson) -> bool {
     step.judge() == Judge::Client && step != Lesson::OpenOffice
 }
 
-/// A trade whose work puts stations on its lot: its first one there is its
-/// station at home, and a workbench beside them would take their room.
-fn builds_at_home(role: Role) -> bool {
-    matches!(role, Role::Crafter(_) | Role::Builder)
+/// A calling whose work puts stations on its lot (Callings D6): its first
+/// one there is its station at home, and a workbench beside them would take
+/// their room. Its calling's, not its job of the moment's, so a stint at
+/// the fiber doesn't put a workbench where its sawbench is to go.
+fn builds_at_home(calling: &Calling) -> bool {
+    !stint::lot_for(calling).is_empty()
 }
 
 /// What [`ready`] needs to know of a citizen's home.
@@ -188,7 +191,7 @@ impl SimBot {
             .filter(|s| road.blocked.get(s).is_none_or(|until| now >= *until))
             // In the night's work, from home (#276), only what takes no walk
             .filter(|&s| !self.night_shift || at_home_tonight(s))
-            .find(|&s| ready(s, &progress, self.role, home.as_ref()))
+            .find(|&s| ready(s, &progress, builds_at_home(&self.calling), home.as_ref()))
     }
 
     /// Asks the mind whether to take the road's next step, or go on with
@@ -613,8 +616,9 @@ impl SimBot {
     }
 
     /// Claims a lot with the deed the road in earned (#440, #448): in its
-    /// home zone, near its spot there, with room for its trade's stations,
-    /// the lot its trade's claim would have taken ([`SimBot::claim`]), or
+    /// home zone, near its spot there, with room for its calling's stations
+    /// (Callings D6), the lot its own claim would have taken
+    /// ([`SimBot::claim`]), or
     /// failing that in the other home zones. The deed is any lot's (D6), so
     /// it needn't afford one.
     pub(super) fn claim_deed(&mut self) -> Result<(), BotError> {
@@ -623,7 +627,7 @@ impl SimBot {
         let mut zones = vec![home.as_str()];
         zones.extend(PLOT_ZONES.iter().copied().filter(|z| *z != home.as_str()));
         zones.extend(HOME_ZONES.iter().map(|z| z.as_str()).filter(|z| !zones.contains(z)).collect::<Vec<_>>());
-        self.claim_near(&zones, spot, self.role.room_wanted(), false, |_| true, true)
+        self.claim_near(&zones, spot, stint::room_for(&self.calling), false, |_| true, true)
     }
 }
 
@@ -652,6 +656,8 @@ pub fn walk_the_road(bot: Bot, role: Role, seed: u64, deadline: Option<Instant>)
     bot.speak_with(Voice::phrasebook(&persona.temperament, seed));
     let name = bot.name().to_string();
     let mut me = SimBot::new(bot, role, seed, scale, Instant::now(), true, Mind::rules());
+    // Its lot is bought for its calling, as a citizen's is (D6)
+    me.calling = persona.calling.clone();
     me.persona = Some(persona);
     me.road = Some(Road::default());
     let mut said = Steps::NONE;
@@ -705,11 +711,14 @@ mod tests {
     }
 
     /// The first step `ready` takes, as `next_road_step` finds it
-    fn first(progress: &TutorialProgress, role: Role, home: Option<&HomeFacts>) -> Option<Lesson> {
-        Lesson::ALL.into_iter().find(|&s| ready(s, progress, role, home))
+    fn first(progress: &TutorialProgress, builds: bool, home: Option<&HomeFacts>) -> Option<Lesson> {
+        Lesson::ALL.into_iter().find(|&s| ready(s, progress, builds, home))
     }
 
-    const GATHERER: Role = Role::Gatherer(Gather::Fiber);
+    /// A calling that puts nothing on its lot: a fiber gatherer's alone
+    const GATHERER: bool = false;
+    /// One that does
+    const BUILDER: bool = true;
 
     #[test]
     fn the_road_is_walked_in_the_tours_order_a_chapter_at_a_time() {
@@ -765,9 +774,8 @@ mod tests {
             crafting_station: false,
         };
         assert!(ready(Lesson::PlaceAtHome, &p, GATHERER, Some(&home)));
-        // A trade that builds on its lot sets its own station there first
-        assert!(!ready(Lesson::PlaceAtHome, &p, Role::Builder, Some(&home)));
-        assert!(!ready(Lesson::PlaceAtHome, &p, Role::Crafter(Craft::Planks), Some(&home)));
+        // A calling that builds on its lot sets its own station there first
+        assert!(!ready(Lesson::PlaceAtHome, &p, BUILDER, Some(&home)));
         let full = HomeFacts {
             room: 0,
             crafting_station: true,
@@ -777,6 +785,29 @@ mod tests {
         assert!(ready(Lesson::SetAutomation, &p, GATHERER, Some(&full)));
         // Only the screen's step needs nothing
         assert!(ready(Lesson::ReadTax, &p, GATHERER, None));
+    }
+
+    #[test]
+    fn a_calling_builds_at_home_whatever_its_birth_trade() {
+        let fiber = Role::Gatherer(Gather::Fiber);
+        assert!(!builds_at_home(&Calling::single(fiber)));
+        assert!(builds_at_home(&Calling::single(Role::Crafter(Craft::Planks))));
+        // A fiber-born citizen that leans to the sawbench sets its own
+        // stations at home, not a workbench, whatever its stint
+        let leaner = Calling {
+            favourite: Some(fiber),
+            focus: 0.45,
+            leanings: vec![(Role::Gatherer(Gather::Wood), 0.45), (Role::Crafter(Craft::Planks), 0.1)],
+            wander: 0.0,
+        };
+        assert!(builds_at_home(&leaner));
+        // Its far leanings, under the willing share, keep no room
+        let specialist = Calling {
+            leanings: vec![(Role::Gatherer(Gather::Wood), 0.29), (Role::Crafter(Craft::Planks), 0.01)],
+            focus: 0.7,
+            ..leaner
+        };
+        assert!(!builds_at_home(&specialist));
     }
 
     #[test]

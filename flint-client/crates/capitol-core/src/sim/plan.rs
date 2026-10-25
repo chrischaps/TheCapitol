@@ -62,10 +62,17 @@ pub struct Holdings {
     pub stations: HashSet<String>,
     /// The bot's plot, if it has one: how many more stations it takes.
     pub plot_room: Option<i32>,
-    /// How much of [`plot_room`](Self::plot_room) its role doesn't want for
-    /// its own stations: a station that may stand off a plot goes on the
-    /// plot only into this (#499).
+    /// How much of [`plot_room`](Self::plot_room) its calling doesn't want
+    /// for its own stations: a station that may stand off a plot goes on
+    /// the plot only into this (#499), and so does one its calling doesn't
+    /// keep the lot for ([`lot_for`](Self::lot_for)).
     pub plot_spare: i32,
+    /// The stations its lot's room is kept for (Callings D6): its
+    /// calling's, whatever job it's at. Any other station goes on the plot
+    /// only into [`plot_spare`](Self::plot_spare), so a dabble's never
+    /// takes the room its calling wants. `None`: any station into any room,
+    /// as before callings.
+    pub lot_for: Option<HashSet<String>>,
     pub strands: i64,
     /// What a deed costs where the bot would buy one.
     pub deed_cost: i64,
@@ -85,6 +92,11 @@ pub struct Holdings {
 impl Holdings {
     pub fn count(&self, item_type: &str) -> i32 {
         self.items.get(item_type).copied().unwrap_or(0)
+    }
+
+    /// Whether its lot's room is kept for a `station` ([`lot_for`](Self::lot_for)).
+    pub fn keeps_room_for(&self, station: &str) -> bool {
+        self.lot_for.as_ref().is_none_or(|kept| kept.contains(station))
     }
 }
 
@@ -266,7 +278,7 @@ pub fn setup(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Setu
 }
 
 /// What taking `step` does to `h`, as [`setup`] reckons it.
-fn take(catalog: &Catalog, h: &mut Holdings, step: &Step) {
+pub(crate) fn take(catalog: &Catalog, h: &mut Holdings, step: &Step) {
     let add = |h: &mut Holdings, item: &str, n: i32| {
         *h.items.entry(item.to_string()).or_insert(0) += n;
     };
@@ -294,7 +306,10 @@ fn take(catalog: &Catalog, h: &mut Holdings, step: &Step) {
             h.stations.insert(station.clone());
             if *on_plot {
                 h.plot_room = h.plot_room.map(|room| room - 1);
-                h.plot_spare = (h.plot_spare - 1).max(0);
+                // One its calling keeps the lot for was wanted already
+                if h.lot_for.is_none() || !h.keeps_room_for(station) {
+                    h.plot_spare = (h.plot_spare - 1).max(0);
+                }
             }
         }
         Step::Claim => {
@@ -458,6 +473,20 @@ impl<'a> Planner<'a> {
                 station: station.to_string(),
                 on_plot: false,
             }));
+        }
+        // One its calling doesn't keep the lot for goes only into the room
+        // the calling doesn't want, and never buys a lot (D6): a deed can't
+        // be given up (#519)
+        if !self.holdings.keeps_room_for(station) {
+            return match self.holdings.plot_room {
+                Some(room) if room > 0 && self.holdings.plot_spare > 0 => Ok(Some(Step::Place {
+                    kit,
+                    station: station.to_string(),
+                    on_plot: true,
+                })),
+                Some(_) => Err(Stuck(format!("the plot's room is kept for its calling's stations, not a {station}"))),
+                None => Err(Stuck(format!("the lot it would buy is for its calling's stations, not a {station}"))),
+            };
         }
         // The plot is setup, even for a goal that's the station itself
         if self.holdings.plot_room.is_none() {

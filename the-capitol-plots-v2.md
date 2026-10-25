@@ -230,7 +230,7 @@ There's no zone rule:
 
 - **Indoors first:** a citizen places its stations indoors while there's room, then in the yard.
 - **Repairs:** it repairs a station below 50 when it's at home and holds the goods.
-- **Floors:** it builds a floor only for a station its role needs and its lot has no room for, once it holds the permit plus its float. In practice that's an urban builder, whose chain is all six types. No citizen builds outside the city. *Planned:* the stations it needs come from its calling, not its role (callings K1.3, #532).
+- **Floors:** it builds a floor only for a station its role needs and its lot has no room for, once it holds the permit plus its float. In practice that's an urban builder, whose chain is all six types. No citizen builds outside the city. Since callings K1.3 (#532) the stations its lot is kept for come from its calling, not its role (`sim::stint::lot_for`), so the floors, when citizens build them, should read that too. Meanwhile a job that doesn't fit is off its stint menu (#519).
 - **Clean-up:** a citizen that retires leaves its stations. On public land the weather clears them. On its plot they stand until the plot is released.
 
 ### 5.9 Protocol and messages

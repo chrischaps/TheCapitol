@@ -226,6 +226,11 @@ impl Trade {
 /// The stations a builder puts down, in order.
 const BUILD: [&str; 6] = ["workbench", "kiln", "forge", "sawbench", "anvil", "storage_chest"];
 
+/// The stations a builder keeps its lot's room for (#305): every station a
+/// trade puts on a lot, in the order it puts them down. Not the workbench,
+/// which may stand off one, nor the chest, which goes last where it fits.
+pub const LOT_STATIONS: [&str; 4] = ["kiln", "forge", "sawbench", "anvil"];
+
 /// The tools a tool crafter makes, in order: the stone tier, then iron.
 const TOOLS: [&str; 8] = [
     "stone_axe",
@@ -314,17 +319,35 @@ impl Role {
     /// What the role's work at `commitment` still wants set up before its
     /// first product (Callings D5): the stations, kits, tools and plot
     /// missing, and the steps they take. What a citizen choosing its
-    /// evening's work charges a job (K1.1).
+    /// evening's work charges a job (K1.1). Of the first goal that can be
+    /// reached, as its errands pass over a stuck one: a builder whose lot
+    /// has no room left for its chest still makes bricks (K1.3).
     pub fn setup(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment) -> Result<plan::Setup, plan::Stuck> {
-        let first = self.work(catalog, holdings, commitment).remove(0);
-        plan::setup(catalog, holdings, &first)
+        let mut stuck = None;
+        for goal in self.work(catalog, holdings, commitment) {
+            match plan::setup(catalog, holdings, &goal) {
+                Ok(setup) => return Ok(setup),
+                Err(e) => {
+                    stuck.get_or_insert(e);
+                }
+            }
+        }
+        Err(stuck.unwrap_or_else(|| plan::Stuck("no work".into())))
     }
 
     /// The stint menu's entry for the job (Callings K1.1): take it up at
     /// `commitment`, charged its [`setup`](Self::setup)'s steps, with `pays`
     /// from what pulls on it. `None` when it can't be reached now: leave it
     /// off the menu.
+    ///
+    /// A job whose stations don't [fit](Self::fits) is left off too (D6,
+    /// #519): a deed can't be given up, so a trade its lot can never take
+    /// isn't one it takes up. It can still work that trade for a wage at
+    /// someone else's bench.
     pub fn take(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment, pays: i64) -> Option<Choice> {
+        if !self.fits(holdings) {
+            return None;
+        }
         let setup = self.setup(catalog, holdings, commitment).ok()?;
         Some(Choice::Take {
             job: self.slug().to_string(),
@@ -391,19 +414,52 @@ impl Role {
         }
     }
 
-    /// How many stations the role puts on its lot, so the lot it buys has
-    /// the room (#419). The workbench stands off the plot. A plank crafter
-    /// needs the sawbench; an ingot crafter the forge and the kiln for its
-    /// charcoal; a tool crafter those and the anvil; a builder the kiln,
-    /// forge, sawbench and anvil (#305), its chest last, where it fits. A
-    /// role with no stations never claims, so its 1 is only a floor.
-    pub fn room_wanted(&self) -> i32 {
+    /// The stations the role's work puts on its lot (#305, #419). The
+    /// workbench stands off the plot. A plank crafter needs the sawbench; an
+    /// ingot crafter the forge and the kiln for its charcoal; a tool crafter
+    /// those and the anvil; a builder the kiln, forge, sawbench and anvil,
+    /// its chest last, where it fits. They nest within the builder's, so a
+    /// calling's lot is never kept for more than its 4 (Callings D6).
+    pub fn lot_stations(&self) -> &'static [&'static str] {
         match self {
-            Role::Crafter(Craft::Planks) => 1,
-            Role::Crafter(Craft::Ingots) => 2,
-            Role::Crafter(Craft::Tools) => 3,
-            Role::Builder => 4,
-            Role::Gatherer(_) | Role::Merchant => 1,
+            Role::Crafter(Craft::Planks) => &["sawbench"],
+            Role::Crafter(Craft::Ingots) => &["kiln", "forge"],
+            Role::Crafter(Craft::Tools) => &["kiln", "forge", "anvil"],
+            Role::Builder => &LOT_STATIONS,
+            Role::Gatherer(_) | Role::Merchant => &[],
+        }
+    }
+
+    /// How many stations the role puts on its lot, so the lot it buys has
+    /// the room (#419): its [`lot_stations`](Self::lot_stations). A role
+    /// with no stations never claims, so its 1 is only a floor. A citizen's
+    /// lot is bought for its calling's ([`stint::room_for`]), not this.
+    pub fn room_wanted(&self) -> i32 {
+        (self.lot_stations().len() as i32).max(1)
+    }
+
+    /// Whether the job's stations fit (Callings D6, #519): it owns them all,
+    /// or its lot has the room for those it lacks. Those its calling keeps
+    /// the lot for ([`Holdings::lot_for`]) may take any of the room; any
+    /// other only the room its calling doesn't want
+    /// ([`Holdings::plot_spare`]). Before it has a lot, the one it would buy
+    /// is bought for its calling, so only a job within the calling's
+    /// stations fits. An urban citizen on a lot of 1 never takes up
+    /// building unless it owns a builder's stations already.
+    pub fn fits(&self, holdings: &Holdings) -> bool {
+        let missing: Vec<&str> = self
+            .lot_stations()
+            .iter()
+            .copied()
+            .filter(|s| !holdings.stations.contains(*s))
+            .collect();
+        if missing.is_empty() {
+            return true;
+        }
+        let beyond = missing.iter().filter(|s| !holdings.keeps_room_for(s)).count() as i32;
+        match holdings.plot_room {
+            None => beyond == 0,
+            Some(room) => missing.len() as i32 <= room && beyond <= holdings.plot_spare,
         }
     }
 

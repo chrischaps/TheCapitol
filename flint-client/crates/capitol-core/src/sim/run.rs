@@ -376,8 +376,9 @@ struct Seen {
 struct SimBot {
     bot: Bot,
     /// Its birth trade: the swarm's role, a citizen's roster `role`. Its
-    /// lot, home and road in go by it until K1.3; its work goes by the job
-    /// of the moment ([`Self::job`]).
+    /// name and home zone go by it; its lot by its calling (K1.3,
+    /// [`Self::lot_for`]); its work by the job of the moment
+    /// ([`Self::job`]).
     role: Role,
     /// What it would rather be doing (K0.2): a citizen's persona's, or its
     /// role alone for a swarm bot ([`Calling::single`]).
@@ -1278,21 +1279,20 @@ impl SimBot {
         // runs out of ground first (#305). One that would take the rest of
         // its chain packed again is ([`Self::repack`], #405)
         h.plot_room = state.plots().first().map(|p| lot::room(p, &self.stations_at()));
-        // Past what its role still wants for its own, the room a workbench
-        // may take, so it stays home (#499)
-        h.plot_spare = h.plot_room.map_or(0, |room| room - self.still_wanted(catalog));
+        // Past what its calling still wants for its own, the room a
+        // workbench may take, so it stays home (#499), and a dabble's
+        // station outside its calling (D6)
+        let (lot_for, spare) = lot_kept(&self.calling, |kind| self.stations.contains_key(kind), h.plot_room);
+        h.lot_for = Some(lot_for);
+        h.plot_spare = spare;
         h.owed = self.owed();
         h
     }
 
-    /// How many of its role's stations for a lot it has yet to place.
-    fn still_wanted(&self, catalog: &Catalog) -> i32 {
-        let placed = self
-            .stations
-            .keys()
-            .filter(|kind| catalog.station_type(kind).is_some_and(|t| !t.off_plot))
-            .count() as i32;
-        (self.role.room_wanted() - placed).max(0)
+    /// How many of its calling's stations for a lot it has yet to place
+    /// ([`still_wanted`]).
+    fn still_wanted(&self) -> i32 {
+        still_wanted(&self.calling, |kind| self.stations.contains_key(kind))
     }
 
     /// Takes down its own stations on its lot, so the planner puts them back
@@ -1308,7 +1308,7 @@ impl SimBot {
         let Some(plot) = state.plots().first().cloned() else {
             return Ok(0);
         };
-        let still = self.still_wanted(state.catalog());
+        let still = self.still_wanted();
         let short = holdings.plot_room.is_some_and(|room| room < still);
         if !short || self.repacked == Some(plot.id) {
             return Ok(0);
@@ -1336,6 +1336,7 @@ impl SimBot {
             return Ok(0);
         }
         self.repacked = Some(plot.id);
+        let (began, day) = (self.now(), self.day());
         let mut down = 0;
         for (kind, s) in moving {
             self.bot.walk_to(s.x, s.y + 10.0)?;
@@ -1349,6 +1350,18 @@ impl SimBot {
                 Err(BotError::Rest { .. }) => {}
                 Err(e) => return Err(e),
             }
+        }
+        // In the report's steps, so a soak shows whether any lot was packed
+        // up, and when (K1.3: never on a change of stint)
+        if down > 0 {
+            self.entries.push(Entry::Spent {
+                label: format!("pack its lot up again ({down} down)"),
+                hours: self.now() - began,
+                ok: true,
+                activity: Activity::Building,
+                setup: true,
+                day,
+            });
         }
         Ok(down)
     }
@@ -1744,7 +1757,8 @@ impl SimBot {
     }
 
     /// Buys the nearest unclaimed plot it can afford with its [`FLOAT`] left
-    /// over (#294) and room for its role's stations (#419): for a citizen,
+    /// over (#294) and room for its calling's stations (#419, Callings D6):
+    /// for a citizen,
     /// near its home (C1.2), so the lot it builds on is the one it lives on.
     /// A citizen whose home zone has such a lot it can't afford yet saves for
     /// it rather than buying elsewhere; only a home zone with no lot that
@@ -1757,7 +1771,8 @@ impl SimBot {
             return self.claim_deed();
         }
         let strands = self.bot.state().strands().unwrap_or(0) - FLOAT;
-        let wanted = self.role.room_wanted();
+        // The room its calling wants, not its job of the moment (D6)
+        let wanted = super::stint::room_for(&self.calling);
         match self.persona.as_ref().map(|p| p.home) {
             Some(home) => {
                 let mut zones = vec![home.zone.as_str()];
@@ -1953,6 +1968,28 @@ fn ring(x: f64, y: f64, r: f64) -> Vec<(f64, f64)> {
     spots
 }
 
+/// How many of its calling's stations for a lot a citizen has yet to place
+/// (Callings D6), with `owned` the station types it owns: of the room its
+/// lot was bought for ([`stint::room_for`](super::stint::room_for)), less
+/// those of [`lot_for`](super::stint::lot_for) it has. Of the job of the
+/// moment, nothing, so a switch of stint never changes it, and never packs
+/// its lot up ([`SimBot::repack`]). A swarm bot's calling is its role, so
+/// it's its role's stations, as before callings.
+fn still_wanted(calling: &Calling, owned: impl Fn(&str) -> bool) -> i32 {
+    let placed = super::stint::lot_for(calling).into_iter().filter(|kind| owned(kind)).count() as i32;
+    (super::stint::room_for(calling) - placed).max(0)
+}
+
+/// A lot as a round's holdings see it (Callings D6): the stations its room
+/// is kept for ([`Holdings::lot_for`]) and how much of its `room` the
+/// calling doesn't want ([`Holdings::plot_spare`]), with `owned` the
+/// station types it owns.
+fn lot_kept(calling: &Calling, owned: impl Fn(&str) -> bool, room: Option<i32>) -> (std::collections::HashSet<String>, i32) {
+    let kept = super::stint::lot_for(calling).into_iter().map(String::from).collect();
+    let spare = room.map_or(0, |room| (room - still_wanted(calling, owned)).max(0));
+    (kept, spare)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2007,6 +2044,202 @@ mod tests {
         let leaving = leaving(stations, (0.0, 0.0), |_, y| y > 50.0);
         let kinds: Vec<&str> = leaving.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(kinds, ["kiln", "sawbench", "workbench"]);
+    }
+
+    /// Holdings on a lot of `room` that owns `stations`, as a round sees
+    /// them for `calling` ([`SimBot::holdings`]): rich, with a lot.
+    fn on_lot(calling: &Calling, room: i32, stations: &[&str]) -> Holdings {
+        let mut h = Holdings {
+            strands: 10_000,
+            plot_room: Some(room),
+            stations: stations.iter().map(|s| s.to_string()).collect(),
+            ..Holdings::default()
+        };
+        kept_again(calling, &mut h);
+        h
+    }
+
+    /// What a round's holdings say of the lot, again ([`lot_kept`]).
+    fn kept_again(calling: &Calling, h: &mut Holdings) {
+        let owned = h.stations.clone();
+        let (lot_for, spare) = lot_kept(calling, |k| owned.contains(k), h.plot_room);
+        h.lot_for = Some(lot_for);
+        h.plot_spare = spare;
+    }
+
+    fn wanted(calling: &Calling, h: &Holdings) -> i32 {
+        still_wanted(calling, |k| h.stations.contains(k))
+    }
+
+    /// K1.3's Verify: a citizen's stints, played out on the planner against
+    /// its lot. Whatever job it switches to, what its lot should hold stays
+    /// the same, and no job's work leaves the lot short of room for its
+    /// calling's stations, which is when it would pack its lot up
+    /// ([`SimBot::repack`]). For every birth trade in every style, on lots
+    /// of 1 to 6.
+    #[test]
+    fn a_switch_of_stint_never_changes_what_the_lot_should_hold() {
+        use crate::citizen::calling::{Mix, Style};
+        use crate::citizen::persona::Rng;
+        use crate::sim::{plan, stint, MIX};
+        let catalog = Catalog::fallback();
+        let mut rng = Rng::new(532);
+        let mut placed = 0;
+        for style in Style::ALL {
+            for role in MIX.map(|(r, _)| r) {
+                let calling = Calling::seeded(&mut rng, &Mix::only(style), role);
+                for room in [1, 2, 4, 6] {
+                    let mut h = on_lot(&calling, room, &[]);
+                    let short_at_first = room < wanted(&calling, &h);
+                    for job in stint::menu_jobs(&calling, false) {
+                        kept_again(&calling, &mut h);
+                        let commitment = stint::commitment(&calling, job);
+                        if job.take(&catalog, &h, commitment, 0).is_none() {
+                            continue;
+                        }
+                        // A stint of it, up to the planks' 500 steps or so
+                        for _ in 0..700 {
+                            kept_again(&calling, &mut h);
+                            let Ok(errands) = job.errands_at(&catalog, &h, commitment) else { break };
+                            let Some(errand) = errands.into_iter().next() else { break };
+                            let (still, room) = (wanted(&calling, &h), h.plot_room.unwrap_or(0));
+                            plan::take(&catalog, &mut h, &errand.step);
+                            if let Step::Place { station, on_plot: true, .. } = &errand.step {
+                                placed += 1;
+                                let after = (wanted(&calling, &h), h.plot_room.unwrap_or(0));
+                                assert!(
+                                    after.1 >= after.0 || short_at_first,
+                                    "{calling} on a lot of {room}: {job}'s {station} left room {} for {} wanted (was {room} for {still})",
+                                    after.1,
+                                    after.0
+                                );
+                                // Only its calling's own stations change what's wanted
+                                let kept = stint::lot_for(&calling).contains(&station.as_str());
+                                assert_eq!(after.0, if kept { (still - 1).max(0) } else { still }, "{calling}: {job}'s {station}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(placed > 50, "the stints placed {placed} stations");
+    }
+
+    /// The #519 guard: a lot that can't take a job's stations leaves the
+    /// job off the stint menu, unless it owns them already. An urban
+    /// citizen on a lot of 1 never takes up building; the sawbench, which
+    /// fits, it does once it has its kit.
+    #[test]
+    fn a_lot_of_one_never_takes_up_building_unless_it_owns_the_stations() {
+        use crate::sim::{stint, Commitment, Craft, Gather, LOT_STATIONS};
+        let catalog = Catalog::fallback();
+        let builder = Calling::single(Role::Builder);
+        let all_rounder = Calling {
+            favourite: None,
+            focus: 0.0,
+            leanings: crate::sim::ROLES.into_iter().map(|r| (r, 0.125)).collect(),
+            wander: 0.0,
+        };
+        for calling in [&builder, &all_rounder] {
+            let h = on_lot(calling, 1, &["workbench"]);
+            assert_eq!(h.plot_spare, 0, "its calling wants 4");
+            for commitment in [Commitment::Full, Commitment::Dabble] {
+                assert_eq!(Role::Builder.take(&catalog, &h, commitment, 0), None, "{calling}");
+                // Nor for what pays for it
+                assert_eq!(Role::Builder.take(&catalog, &h, commitment, 1_000), None, "{calling}");
+            }
+            let menu: Vec<Role> = stint::menu_jobs(calling, false)
+                .into_iter()
+                .filter(|&j| j.take(&catalog, &h, stint::commitment(calling, j), 0).is_some())
+                .collect();
+            assert!(!menu.contains(&Role::Builder), "{calling}: {menu:?}");
+            if calling.favourite.is_none() {
+                // The sawbench's kit wants the kiln's bricks and the forge's
+                // nails, which don't fit either, so it gathers
+                let gathers = [Role::Gatherer(Gather::Fiber), Role::Gatherer(Gather::Wood), Role::Gatherer(Gather::Ore)];
+                assert_eq!(menu, gathers);
+                // With a sawbench's kit bought in, the sawbench fits, and it saws
+                let mut kit = h.clone();
+                let sawbench = catalog.station_type("sawbench").and_then(|t| t.kit.clone()).expect("the sawbench's kit");
+                kit.items.insert(sawbench, 1);
+                kit.items.insert("log".into(), 10);
+                let planks = Role::Crafter(Craft::Planks);
+                assert!(planks.take(&catalog, &kit, stint::commitment(calling, planks), 0).is_some());
+            }
+            // Owning a builder's stations already (put down before the lot
+            // was resized, say), it builds on: no room for its chest, so
+            // bricks, with its axe
+            let mut owns: Vec<&str> = LOT_STATIONS.to_vec();
+            owns.push("workbench");
+            let mut full = on_lot(calling, 0, &owns);
+            let axe = catalog.item_type("stone_axe").and_then(|t| t.tool.clone()).expect("an axe");
+            full.tools.insert(axe.tool_type);
+            assert!(Role::Builder.take(&catalog, &full, stint::commitment(calling, Role::Builder), 0).is_some(), "{calling}");
+        }
+        // Before it has a lot, the one it would buy is its calling's
+        let homeless = Holdings {
+            strands: 10_000,
+            lot_for: Some(Default::default()),
+            ..Holdings::default()
+        };
+        assert!(!Role::Crafter(Craft::Planks).fits(&homeless), "a fiber gatherer's lot keeps no room");
+        assert!(Role::Gatherer(Gather::Wood).fits(&homeless));
+        let builds = Holdings {
+            lot_for: Some(stint::lot_for(&builder).into_iter().map(String::from).collect()),
+            ..homeless
+        };
+        assert!(Role::Builder.fits(&builds));
+    }
+
+    /// A dabble's station never takes the room its calling wants (K0.3's
+    /// note): a smelter's builder stint doesn't put a chest where its
+    /// forge is to go, but it may put one in room its calling doesn't want.
+    #[test]
+    fn a_dabbles_station_goes_only_into_room_the_calling_does_not_want() {
+        use crate::sim::{plan, Craft};
+        let catalog = Catalog::fallback();
+        let smelter = Calling::single(Role::Crafter(Craft::Ingots));
+        let chest = Goal::Station("storage_chest".into());
+        let kit = catalog.station_type("storage_chest").and_then(|t| t.kit.clone()).expect("the chest has a kit");
+        let mut h = on_lot(&smelter, 2, &["workbench"]);
+        h.items.insert(kit.clone(), 1);
+        assert!(plan::next(&catalog, &h, &chest).is_err(), "{:?}", plan::next(&catalog, &h, &chest));
+        let mut roomy = on_lot(&smelter, 3, &["workbench"]);
+        roomy.items.insert(kit, 1);
+        assert_eq!(roomy.plot_spare, 1);
+        assert!(matches!(plan::next(&catalog, &roomy, &chest), Ok(Some(Step::Place { on_plot: true, .. }))));
+        // Its own forge goes into any of it
+        let forge = Goal::Station("forge".into());
+        let kit = catalog.station_type("forge").and_then(|t| t.kit.clone()).expect("the forge has a kit");
+        h.items.insert(kit, 1);
+        assert!(matches!(plan::next(&catalog, &h, &forge), Ok(Some(Step::Place { on_plot: true, .. }))));
+    }
+
+    /// The lot is bought for the calling: a swarm bot's is its role's, as
+    /// before callings, and the stations nest within a builder's 4.
+    #[test]
+    fn the_lot_is_bought_for_the_calling_not_the_stint() {
+        use crate::sim::{stint, Craft, Gather, ROLES};
+        for role in ROLES {
+            assert_eq!(stint::room_for(&Calling::single(role)), role.room_wanted(), "{role}");
+            assert_eq!(stint::lot_for(&Calling::single(role)), role.lot_stations(), "{role}");
+        }
+        // Planks and tools want the sawbench beside the forge, kiln and anvil
+        let mixed = Calling {
+            favourite: Some(Role::Crafter(Craft::Tools)),
+            focus: 0.7,
+            leanings: vec![(Role::Crafter(Craft::Planks), 0.2), (Role::Gatherer(Gather::Fiber), 0.1)],
+            wander: 0.0,
+        };
+        assert_eq!(stint::room_for(&mixed), 4);
+        // A leaning under the willing share keeps no room
+        let fiber = Calling {
+            favourite: Some(Role::Gatherer(Gather::Fiber)),
+            leanings: vec![(Role::Gatherer(Gather::Wood), 0.29), (Role::Builder, 0.01)],
+            ..mixed
+        };
+        assert_eq!(stint::lot_for(&fiber), Vec::<&str>::new());
+        assert_eq!(stint::room_for(&fiber), 1);
     }
 
     #[test]

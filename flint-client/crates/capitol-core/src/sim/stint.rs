@@ -11,6 +11,8 @@
 //! - **The willing jobs** ([`willing`]) are those a citizen will answer for
 //!   whatever it's doing this hour: commissions, wage work, a guild's
 //!   charter. A person answers what it's able and willing to do.
+//! - **The lot** is kept for the calling's stations ([`lot_for`]), not the
+//!   job of the moment's (plan D6).
 //! - **What's kept between sessions** is a [`Kept`], in the side file beside
 //!   the roster (`town.stints.json`), so a casual citizen's half hour still
 //!   adds up to a mix.
@@ -19,7 +21,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Commitment, Role, ROLES};
+use super::{Commitment, Role, LOT_STATIONS, ROLES};
 use crate::citizen::calling::Calling;
 
 /// Game hours of work after which what a job had lately counts half. A
@@ -152,6 +154,30 @@ pub fn willing(calling: &Calling, doing: Role, trades: bool) -> Vec<Role> {
     jobs.extend(leaning.into_iter().map(|(r, _)| r));
     jobs.retain(|&r| r != Role::Merchant || trades);
     jobs
+}
+
+/// The stations a citizen's lot is kept for (plan D6): those of its
+/// favourite and of each job its calling gives [`WILLING`] or more, in the
+/// order a builder puts them down. They come from the calling, never the
+/// job of the moment, so a change of stint never changes what its lot
+/// should hold, and nothing is packed up on a switch. The station sets nest
+/// within the builder's, so it's never more than a builder's 4. A swarm
+/// bot's is its role's ([`Calling::single`]).
+pub fn lot_for(calling: &Calling) -> Vec<&'static str> {
+    let jobs: Vec<Role> = ROLES
+        .into_iter()
+        .filter(|&r| calling.favourite == Some(r) || calling.share(r) >= WILLING)
+        .collect();
+    LOT_STATIONS
+        .into_iter()
+        .filter(|s| jobs.iter().any(|j| j.lot_stations().contains(s)))
+        .collect()
+}
+
+/// How many stations the lot a citizen buys has room for: its calling's
+/// ([`lot_for`]), at least 1, as [`Role::room_wanted`] is a role's.
+pub fn room_for(calling: &Calling) -> i32 {
+    (lot_for(calling).len() as i32).max(1)
 }
 
 /// The jobs on a citizen's stint menu: every one its calling leans to at
