@@ -15,6 +15,10 @@
 
     scripts\balance.ps1 A.toml B.toml [-Hours 2] [-Citizens 20] [-Merchants 2] [-Scale 10]
 
+  -Merchants is how many more are born to trade, trading favourites
+  (Callings K2.2). Anyone leaning to trading makes a market once it has
+  its float, so -Merchants 0 still trades.
+
   The two towns live at the same time. The citizens' day runs on the real
   clock (a game day is two real hours), so two runs one after the other
   would live different hours of it: one at the market, the other asleep.
@@ -106,7 +110,7 @@ function New-BalanceTown([hashtable]$town) {
     Start-Backend
     $town.Backend = $script:backend
     $town.Admin = Read-Admin
-    Say "minting $Citizens of the sim's mix and $Merchants merchants"
+    Say "minting $Citizens of the sim's mix and $Merchants trading favourites"
     New-Citizens $town.Admin "--count" $Citizens $Merchants | Out-Host
 }
 

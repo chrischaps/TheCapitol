@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! capitol-town mint --count 20      # make twenty citizens, onto town.toml
-//! capitol-town mint --count 2 --role merchant   # and two merchants (C1.6)
+//! capitol-town mint --count 2 --role merchant   # and two trading favourites (C1.6, K2.2)
 //! capitol-town mint --count 3 --calling all-rounder   # three with no favourite (K0.2)
 //! capitol-town mint --online 20     # enough citizens that 20 are on, on average (#276)
 //! capitol-town habits               # who's on when, over the coming weeks (#276)
@@ -161,7 +161,9 @@ FLAGS:
                       crafter-ingots, crafter-tools, builder or merchant
                       [default: the sim's mix, which has no merchants].
                       It's the citizen's birth trade: its name, its home,
-                      and its calling's favourite
+                      and its calling's favourite. A merchant is a trading
+                      favourite, never an all-rounder unless --calling
+                      says; anyone else trades too once it has its float
     --calling <style> With mint, deal every one of them this style of
                       calling: specialist (about 70% of its work on its
                       favourite), leaner (about 45%) or all-rounder (no

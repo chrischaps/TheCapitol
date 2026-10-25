@@ -22,7 +22,7 @@ use super::super::wage::Job;
 use super::super::{Commitment, Role};
 use capitol_protocol::rules::DAY_LENGTH_SECS;
 use super::SimBot;
-use crate::citizen::decide::rules::stint_hours;
+use crate::citizen::decide::rules::{least_stint, stint_hours};
 use crate::citizen::decide::{Choice, Question, Why};
 use crate::citizen::detour::Detour;
 use crate::citizen::schedule::Phase;
@@ -53,6 +53,10 @@ pub(super) struct Stints {
     pub(super) made: BTreeSet<String>,
     /// The sights and parks it has been to on a detour.
     pub(super) seen: BTreeSet<String>,
+    /// Whether trading was open to it when it last looked (K2.2): a float
+    /// newly earned pulls it toward trading, so it needn't wait out the
+    /// stint it's on to be asked.
+    trading: bool,
 }
 
 impl Stints {
@@ -94,7 +98,7 @@ impl SimBot {
     /// The jobs it answers for, whatever it's at (plan §5), its favourite
     /// first.
     pub(super) fn willing(&self) -> Vec<Role> {
-        stint::willing(&self.calling, self.job(), self.merchant.is_some())
+        stint::willing(&self.calling, self.job())
     }
 
     /// What it has spare to sell, the most first (Callings K1.4,
@@ -110,9 +114,7 @@ impl SimBot {
         if self.persona.is_none() {
             spare.retain(|&(item, _)| job.product() == Some(item));
         }
-        if let Some(merchant) = &self.merchant {
-            spare.retain(|&(item, _)| !merchant.deals(item));
-        }
+        spare.retain(|&(item, _)| !self.deals(item));
         spare
     }
 
@@ -194,7 +196,21 @@ impl SimBot {
             return None;
         }
         self.credit();
+        // A float newly earned is a pull toward trading (K2.2): asked once
+        // the stint it's on has run its least, when momentum no longer
+        // holds it, rather than at the stint's end
         let now = self.now();
+        let trades = self.trades();
+        let least = least_stint(&self.mind.temperament);
+        let held = self.stints.on.is_some_and(|s| s.job != Role::Merchant && s.run(now) < least);
+        if trades && !self.stints.trading && !held {
+            if self.stints.asked && self.job() != Role::Merchant {
+                self.stints.pulled.get_or_insert((Role::Merchant, 0));
+            }
+            self.stints.trading = true;
+        } else if !trades {
+            self.stints.trading = false;
+        }
         let hours = stint_hours(&self.mind.temperament);
         let why = match self.stints.on {
             _ if !self.stints.asked => Why::Start,
@@ -208,7 +224,7 @@ impl SimBot {
         self.stints.stuck.retain(|_, at| now - *at < STUCK_AGAIN);
         let catalog = self.bot.state().catalog().clone();
         let doing = self.stints.on.map(|s| s.job);
-        let mut jobs: Vec<(Role, Choice)> = stint::menu_jobs(&self.calling, self.merchant.is_some())
+        let mut jobs: Vec<(Role, Choice)> = stint::menu_jobs(&self.calling, trades)
             .into_iter()
             .filter(|job| !self.stints.stuck.contains_key(job))
             .filter_map(|job| {
@@ -236,6 +252,7 @@ impl SimBot {
                     doing: doing.map(|d| d.slug().to_string()),
                     run: self.stints.on.map_or(0.0, |s| s.run(now)) as f32,
                     lately: self.stints.lately.question(),
+                    line: self.trade_line(),
                 };
                 let mark = self.mind.mark();
                 let menu = jobs.iter().map(|(_, c)| c.clone()).chain(detours.iter().cloned()).collect();

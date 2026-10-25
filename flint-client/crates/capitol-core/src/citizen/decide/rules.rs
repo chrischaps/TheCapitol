@@ -92,10 +92,15 @@
 //! which of them by its kind's taste ([`DetourKind::taste`]) and the whim.
 //! On the free-time menu it's one place more, weighed by `wander` and
 //! taste against the hall, the lane and the park.
+//!
+//! Trading's share rises with wealth (K2.2): past its line, trading takes
+//! up to [`RICH_RISE`](crate::sim::stint::RICH_RISE) of the rest of its
+//! calling ([`stint::target`](crate::sim::stint::target)), so a rich
+//! citizen chases trading the more.
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Span, Temperament, Verdict};
 use crate::citizen::detour::DetourKind;
-use crate::sim::wage;
+use crate::sim::{stint as stints, wage};
 use crate::sim::{Role, BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
 
 /// What "what the rules would do" is worth.
@@ -246,10 +251,7 @@ impl Decider for RulesDecider {
                 Choice::Accept | Choice::Counter { .. } | Choice::Pay { .. } | Choice::Decline => trade(s, i, choice),
                 Choice::Rest => (0.8 - 0.2 * t.sociability as f64, Decision::plain(i)),
                 Choice::Hall => (0.4 + 0.4 * t.sociability as f64, Decision::plain(i)),
-                Choice::MakeMarket { float, making, .. } => {
-                    let enough = lot(MERCHANT_FLOAT as i32, t.patience) * if *making { 0.5 } else { 1.0 };
-                    (SURE * *float as f64 / enough, Decision::plain(i))
-                }
+                Choice::MakeMarket { float, making, .. } => (SURE * *float as f64 / enough_float(t, *making), Decision::plain(i)),
                 // Idle life (C2.1): the company of the lane for the sociable,
                 // a park's quiet for the rest, a bridge at dusk and its own
                 // stall for the patient, each as the whim takes it
@@ -323,6 +325,15 @@ pub fn least_stint(t: &Temperament) -> f64 {
     stint_hours(t) / 2.0
 }
 
+/// The float a citizen makes a market with (C1.6): [`MERCHANT_FLOAT`] times
+/// 0.5 for the hasty to 1.5 for the patient, and half that for one already
+/// making a market, so it doesn't flit between the hall and the fields at
+/// the line. Trading is on the stint menu of anyone leaning to it who has
+/// this much (Callings K2.2).
+pub fn enough_float(t: &Temperament, making: bool) -> f64 {
+    lot(MERCHANT_FLOAT as i32, t.patience) * if making { 0.5 } else { 1.0 }
+}
+
 /// What a shortfall is charged for `steps` of setup still to do: 1 when the
 /// job's ready, half at [`SETUP_HALF`], saturating, so a long chain is dear
 /// but never off the menu.
@@ -338,16 +349,18 @@ pub fn setup_cost(steps: u32) -> f64 {
 ///           + pull(pays) + momentum
 /// ```
 ///
-/// `target` is the calling's share of its work for the job, and `recent`
-/// its share of the work done lately, both from the situation, so a replay
-/// answers the same. A situation with no calling chases its role alone.
+/// `target` is the calling's share of its work for the job, trading's
+/// raised by its Strands over its `line` (K2.2, [`stints::target`]), and
+/// `recent` its share of the work done lately, all from the situation, so a
+/// replay answers the same. A situation with no calling chases its role
+/// alone.
 fn stint(s: &Situation, job: &str, setup: u32, pays: i64) -> f64 {
-    let Question::Stint { doing, run, lately, .. } = &s.question else {
+    let Question::Stint { doing, run, lately, line, .. } = &s.question else {
         // A stint's answers on another question's menu fit nothing
         return 0.0;
     };
     let target = match (s.who.calling(), Role::from_slug(job)) {
-        (Some(calling), Some(role)) => calling.share(role) as f64,
+        (Some(calling), Some(role)) => stints::target(&calling, role, s.holdings.strands, *line),
         _ => 0.0,
     };
     let done: f64 = lately.values().map(|&v| v.max(0.0) as f64).sum();
@@ -1429,6 +1442,7 @@ mod tests {
             doing: doing.map(|d| d.slug().into()),
             run,
             lately: lately.clone(),
+            line: 0,
         };
         let mut s = situation(q, menu, Temperament::default());
         s.who.calling = calling;
@@ -1439,10 +1453,19 @@ mod tests {
     /// What `calling` works at over `stints` stints, every job ready: each
     /// job's share of them.
     fn lived(calling: &Calling, stints: usize) -> BTreeMap<String, f32> {
+        lived_with(calling, stints, 0, 0)
+    }
+
+    /// [`lived`], with `strands` in hand against a trading `line` (K2.2).
+    fn lived_with(calling: &Calling, stints: usize, strands: i64, line: i64) -> BTreeMap<String, f32> {
         let mut lately: BTreeMap<String, f32> = BTreeMap::new();
         let menu: Vec<Choice> = ROLES.iter().map(|&job| take(job, 0, 0)).collect();
         for _ in 0..stints {
-            let s = stint(Some(calling.clone()), None, 0.0, &lately, menu.clone());
+            let mut s = stint(Some(calling.clone()), None, 0.0, &lately, menu.clone());
+            s.holdings.strands = strands;
+            if let Question::Stint { line: l, .. } = &mut s.question {
+                *l = line;
+            }
             let Choice::Take { job, .. } = s.choice(&decide(&s).0) else { panic!() };
             *lately.entry(job.clone()).or_default() += 1.0;
         }
@@ -1470,6 +1493,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Callings K2.2: past its line, a citizen's Strands raise trading's
+    /// share of its work, and the stints follow it, so a fiber-rich
+    /// citizen's money goes into goods with no change of role.
+    #[test]
+    fn wealth_raises_trading_and_the_stints_follow() {
+        use crate::sim::stint::{rich_rise, target, RICH_RISE};
+        let fiber = Role::Gatherer(crate::sim::Gather::Fiber);
+        let line = 1200;
+        assert_eq!((rich_rise(line, line), rich_rise(0, line), rich_rise(9999, 0)), (0.0, 0.0, 0.0));
+        assert!((rich_rise(line * 3 / 2, line) - RICH_RISE / 2.0).abs() < 1e-9);
+        assert_eq!(rich_rise(line * 5, line), RICH_RISE);
+        for (k, style) in Style::ALL.into_iter().enumerate() {
+            let c = calling(fiber, style, 11 + k as u64);
+            let trading = f64::from(c.share(Role::Merchant));
+            assert!(trading > 0.0, "{c}");
+            // The shares still sum to 1, and nothing but trading rises
+            for strands in [0, line, line * 3 / 2, line * 4] {
+                let sum: f64 = ROLES.iter().map(|&j| target(&c, j, strands, line)).sum();
+                assert!((sum - 1.0).abs() < 1e-6, "{c}: {sum}");
+                for job in ROLES.into_iter().filter(|&j| j != Role::Merchant) {
+                    assert!(target(&c, job, strands, line) <= f64::from(c.share(job)) + 1e-9);
+                }
+            }
+            let rich = target(&c, Role::Merchant, line * 4, line);
+            assert!((rich - (trading + RICH_RISE * (1.0 - trading))).abs() < 1e-9);
+            // Under the line, its calling's shares; well over it, trading's
+            // raised, and the stints come out near it
+            let poor = lived_with(&c, 400, line - 1, line);
+            let got = |shares: &BTreeMap<String, f32>| f64::from(shares.get(Role::Merchant.slug()).copied().unwrap_or(0.0));
+            assert!((got(&poor) - trading).abs() < 0.02, "{style}: {} against {trading}", got(&poor));
+            let well = lived_with(&c, 400, line * 4, line);
+            assert!((got(&well) - rich).abs() < 0.02, "{style}: {} against {rich}", got(&well));
+            assert!(got(&well) > got(&poor) + 0.2, "{style}");
+        }
+        // A calling with no lean to trading keeps its shares, as a swarm
+        // bot's does
+        let one = Calling::single(fiber);
+        assert_eq!(target(&one, fiber, line * 4, line), 1.0);
+        assert_eq!(target(&one, Role::Merchant, line * 4, line), 0.0);
     }
 
     #[test]

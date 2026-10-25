@@ -118,7 +118,7 @@ fn round(r: u32) -> Vec<Situation> {
             // What it has spare at its birth trade, across its calling's
             // jobs (Callings K1.4)
             let goal = errands.first().and_then(|e| e.goal.as_ref());
-            let willing = stint::willing(&calling, role, false);
+            let willing = stint::willing(&calling, role);
             let spare = surplus::spare(&h, role, surplus::selling(role, &h, goal), &willing);
             if let Some(&(item, n)) = spare.first() {
                 if let Some(menu) = sell_menu(&h, item, n, last.map(|l| l - 1), last.map(|l| l + 2)) {
@@ -305,6 +305,7 @@ fn stint(
         doing: doing.map(|d| d.slug().to_string()),
         run,
         lately,
+        line: stint::trade_line(stint::TRADE_LINE, 0.5),
     };
     let mut situation = s(question, menu, 0);
     situation.carry_on = carry_on;

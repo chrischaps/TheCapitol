@@ -98,7 +98,7 @@ pub fn wants(calling: &Calling, doing: Role) -> Vec<&'static str> {
 /// bids are its own.
 pub fn near(calling: &Calling, doing: Role) -> Vec<Role> {
     let mut jobs = vec![doing];
-    jobs.extend(willing(calling, doing, false).into_iter().filter(|&r| r != doing).take(NEAR));
+    jobs.extend(willing(calling, doing).into_iter().filter(|&r| r != doing && r != Role::Merchant).take(NEAR));
     jobs
 }
 
@@ -199,7 +199,7 @@ mod tests {
             for role in ROLES.into_iter().filter(|&r| r != Role::Merchant) {
                 let c = Calling::seeded(&mut rng, &Mix::only(style), role);
                 for doing in ROLES.into_iter().filter(|&r| r != Role::Merchant && c.share(r) > 0.0) {
-                    let jobs = willing(&c, doing, false);
+                    let jobs = willing(&c, doing);
                     let spare = spare(&h, doing, true, &jobs);
                     for item in MARKET_ITEMS {
                         let n = spare.iter().find(|(i, _)| *i == item).map_or(0, |(_, n)| *n);

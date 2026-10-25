@@ -462,11 +462,11 @@ pub fn question(q: &Question) -> String {
                 each.join("; ")
             )
         }
-        Question::Stint { why, doing: at, run, lately } => {
+        Question::Stint { why, doing: at, run, lately, line } => {
             let why = match why {
                 Why::Start => "as your working time begins",
                 Why::Done => "now you've been at your last job a good while",
-                Why::Pull => "since there's work on offer that pays",
+                Why::Pull => "since there's work on offer that pays, or Strands enough to trade with",
             };
             let mut out = format!("Choose what to work at for the next while, {why}.");
             let done: f32 = lately.values().filter(|&&v| v > 0.0).sum();
@@ -484,6 +484,11 @@ pub fn question(q: &Question) -> String {
             }
             if let Some(job) = at {
                 out.push_str(&format!(" You've been {} for {run:.1} game hours.", doing(job)));
+            }
+            if *line > 0 {
+                out.push_str(&format!(
+                    " With more than {line} Strands in hand, you'd put more of your time into trading, the more the richer you are."
+                ));
             }
             out.push_str(" Which job do you take up?");
             out
@@ -804,6 +809,7 @@ mod tests {
                 doing: Some("gatherer-fiber".into()),
                 run: 0.5,
                 lately: BTreeMap::from([("gatherer-fiber".into(), 3.0), ("crafter-planks".into(), 1.0)]),
+                line: 1200,
             },
             menu: vec![
                 Choice::Take {
@@ -821,7 +827,8 @@ mod tests {
         };
         let text = circumstances(&s);
         for part in [
-            "Choose what to work at for the next while, since there's work on offer that pays.",
+            "Choose what to work at for the next while, since there's work on offer that pays, or Strands enough to trade with.",
+            "With more than 1200 Strands in hand, you'd put more of your time into trading",
             "Lately your work has gone on 75% cutting grass and 25% sawing planks.",
             "You've been cutting grass for 0.5 game hours.",
         ] {

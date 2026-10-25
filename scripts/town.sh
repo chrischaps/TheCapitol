@@ -16,8 +16,10 @@
 # citizens. Citizens keep human hours (#276): each signs in when its habit
 # says, a few real hours some days, in its own evenings, so the roster is
 # sized for how many are on at once: enough of the sim's mix to keep
-# --online on (18) and enough merchants to keep --merchants on (2), on
-# average. That's about 32 citizens for each one on, so about 640 in all.
+# --online on (18) and enough merchants, trading favourites, to keep
+# --merchants on (2), on average. Since Callings K2.2 anyone leaning to
+# trading makes a market once it has its float, so --merchants 0 still
+# trades. That's about 32 citizens for each one on, so about 640 in all.
 # `capitol-town habits --roster flint-client/town/town.toml` shows who's on
 # when. --always-on keeps every citizen on, whatever its habit: all of
 # them, so mind the pool's size. Later ups reuse the database, the admin and
@@ -172,7 +174,7 @@ ensure_citizens() { # ensure_citizens <online> <merchants online>
     return
   fi
   local town_bin="$root/flint-client/target/town/$(exe capitol-town)"
-  say "minting enough of the sim's mix to keep $1 on, and enough merchants to keep $2 on"
+  say "minting enough of the sim's mix to keep $1 on, and enough trading favourites to keep $2 on"
   (cd "$root/flint-client" && "$town_bin" mint --online "$1" --roster "$roster" --server "$server" | tail -n 1)
   if [[ "$2" != 0 ]]; then
     (cd "$root/flint-client" && "$town_bin" mint --online "$2" --role merchant --roster "$roster" --server "$server" | tail -n 1)

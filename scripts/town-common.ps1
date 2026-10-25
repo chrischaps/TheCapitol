@@ -166,7 +166,9 @@ function Read-Admin {
 }
 
 # Mints citizens onto the roster: -Online keeps that many on, on average,
-# by their habits; -Count makes exactly that many.
+# by their habits; -Count makes exactly that many. $merchants more are
+# born to trade, trading favourites (Callings K2.2): anyone leaning to
+# trading trades once it has its float, so 0 still trades.
 function New-Citizens([hashtable]$admin, [string]$size, [int]$citizens, [int]$merchants) {
     Push-Location (Join-Path $root "flint-client")
     try {
@@ -175,7 +177,7 @@ function New-Citizens([hashtable]$admin, [string]$size, [int]$citizens, [int]$me
             if ($LASTEXITCODE -ne 0) { Die "minting the citizens failed" }
             if ($merchants -ne 0) {
                 & $townExe mint $size $merchants --role merchant --roster $roster --server $server | Select-Object -Last 1
-                if ($LASTEXITCODE -ne 0) { Die "minting the merchants failed" }
+                if ($LASTEXITCODE -ne 0) { Die "minting the trading favourites failed" }
             }
         }
     } finally { Pop-Location }

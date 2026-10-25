@@ -23,8 +23,10 @@
   citizens. Citizens keep human hours (#276): each signs in when its habit
   says, a few real hours some days, in its own evenings, so the roster is
   sized for how many are on at once: enough of the sim's mix to keep
-  -Online on (18) and enough merchants to keep -Merchants on (2), on
-  average. That's about 32 citizens for each one on, so about 640 in all.
+  -Online on (18) and enough merchants, trading favourites, to keep
+  -Merchants on (2), on average. Since Callings K2.2 anyone leaning to
+  trading makes a market once it has its float, so -Merchants 0 still
+  trades. That's about 32 citizens for each one on, so about 640 in all.
   `capitol-town habits --roster flint-client/town/town.toml` shows who's on
   when. -AlwaysOn keeps every citizen on, whatever its habit: all of them,
   so mind the pool's size. Later ups reuse the database, the admin and the
@@ -85,7 +87,7 @@ function New-TownCitizens([hashtable]$admin, [int]$online, [int]$merchants) {
             return
         }
     }
-    Say "minting enough of the sim's mix to keep $online on, and enough merchants to keep $merchants on"
+    Say "minting enough of the sim's mix to keep $online on, and enough trading favourites to keep $merchants on"
     New-Citizens $admin "--online" $online $merchants
 }
 

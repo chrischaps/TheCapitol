@@ -55,6 +55,7 @@ use plan::{Goal, Holdings, Step, FLOAT, FLOOR};
 use capitol_protocol::rules::court;
 
 use crate::catalog::Catalog;
+use crate::citizen::calling::Calling;
 use crate::citizen::decide::{Choice, Span};
 use wage::{Hire, Job};
 
@@ -683,17 +684,66 @@ pub fn merchant_items(seed: u64) -> Vec<&'static str> {
     let mut h = seed;
     let mut picked = Vec::with_capacity(MERCHANT_ITEMS);
     while picked.len() < MERCHANT_ITEMS && !items.is_empty() {
-        // SplitMix64's step
-        h = h.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = h;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
+        let z = splitmix(&mut h);
         picked.push(items.remove((z % items.len() as u64) as usize));
     }
     // In the market's own order, so a merchant's report reads the same way
     picked.sort_by_key(|i| MARKET_ITEMS.iter().position(|m| m == i));
     picked
+}
+
+/// The goods a citizen trades in (Callings K2.2): [`MERCHANT_ITEMS`] of
+/// [`MARKET_ITEMS`], from its leanings. Each good is weighed by the shares
+/// of its calling's other jobs that make it or use it ([`Role::uses`]), and
+/// they're drawn by `seed` without putting back: a trader leaning to
+/// sawing deals mostly in planks and logs, and a town's traders still
+/// spread over the market. A calling that leans to nothing else (a
+/// merchant's [`Calling::single`]) deals in [`merchant_items`]'s, as C1.6's
+/// merchants did, and any short of goods fill from those.
+pub fn trading_goods(calling: &Calling, seed: u64) -> Vec<&'static str> {
+    let mut weighed: Vec<(&'static str, f64)> = MARKET_ITEMS
+        .iter()
+        .map(|&item| {
+            let w: f64 = ROLES
+                .iter()
+                .filter(|&&r| r != Role::Merchant && (r.product() == Some(item) || r.uses().contains(&item)))
+                .map(|&r| f64::from(calling.share(r)))
+                .sum();
+            (item, w)
+        })
+        .filter(|&(_, w)| w > 0.0)
+        .collect();
+    let mut h = seed ^ 0x7472_6164_696e_6721;
+    let mut picked: Vec<&'static str> = Vec::with_capacity(MERCHANT_ITEMS);
+    while picked.len() < MERCHANT_ITEMS && !weighed.is_empty() {
+        let total: f64 = weighed.iter().map(|(_, w)| w).sum();
+        let mut at = (splitmix(&mut h) >> 11) as f64 / (1u64 << 53) as f64 * total;
+        let mut i = weighed.len() - 1;
+        for (j, (_, w)) in weighed.iter().enumerate() {
+            if at < *w {
+                i = j;
+                break;
+            }
+            at -= w;
+        }
+        picked.push(weighed.remove(i).0);
+    }
+    for item in merchant_items(seed) {
+        if picked.len() < MERCHANT_ITEMS && !picked.contains(&item) {
+            picked.push(item);
+        }
+    }
+    picked.sort_by_key(|i| MARKET_ITEMS.iter().position(|m| m == i));
+    picked
+}
+
+/// SplitMix64's step: `h` on, and its next draw.
+fn splitmix(h: &mut u64) -> u64 {
+    *h = h.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *h;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// The menu for selling `spare` of `item` before working (E3.8, Callings
@@ -874,6 +924,54 @@ mod tests {
         // A town's merchants spread over the market
         let dealt: std::collections::HashSet<&str> = (0..8).flat_map(merchant_items).collect();
         assert_eq!(dealt.len(), MARKET_ITEMS.len());
+        // A merchant's calling alone deals in the same
+        assert_eq!(trading_goods(&Calling::single(Role::Merchant), 7), items);
+    }
+
+    #[test]
+    fn a_traders_goods_come_from_its_leanings() {
+        use crate::citizen::calling::{Mix, Style};
+        use crate::citizen::persona::Rng;
+        use std::collections::HashMap;
+        let mut rng = Rng::new(3);
+        // Over many citizens of each birth trade, the goods its favourite
+        // makes or uses are dealt in more, each, than any it doesn't
+        for role in MIX.map(|(r, _)| r) {
+            let mut dealt: HashMap<&str, u32> = HashMap::new();
+            for n in 0..200u64 {
+                let calling = Calling::seeded(&mut rng, &Mix::only(Style::Specialist), role);
+                let goods = trading_goods(&calling, n);
+                assert_eq!(goods, trading_goods(&calling, n), "the same seed, the same goods");
+                assert_eq!(goods.len(), MERCHANT_ITEMS);
+                let distinct: std::collections::HashSet<_> = goods.iter().collect();
+                assert_eq!(distinct.len(), MERCHANT_ITEMS, "{goods:?}");
+                for g in goods {
+                    *dealt.entry(g).or_default() += 1;
+                }
+            }
+            let count = |item: &str| dealt.get(item).copied().unwrap_or(0) as f64;
+            let (own, other): (Vec<&str>, Vec<&str>) = MARKET_ITEMS
+                .into_iter()
+                .partition(|&i| role.product() == Some(i) || role.uses().contains(&i));
+            if own.is_empty() {
+                continue;
+            }
+            let mean = own.iter().map(|&i| count(i)).sum::<f64>() / own.len() as f64;
+            for item in other {
+                assert!(count(item) < mean, "{role}: {item} in {dealt:?}");
+            }
+        }
+        // A sawyer-leaning trader deals in logs and planks
+        let sawyer = Calling {
+            favourite: Some(Role::Merchant),
+            focus: 0.5,
+            leanings: vec![(Role::Crafter(Craft::Planks), 0.5)],
+            wander: 0.0,
+        };
+        for n in 0..20 {
+            let goods = trading_goods(&sawyer, n);
+            assert!(goods.contains(&"log") && goods.contains(&"plank"), "{goods:?}");
+        }
     }
 
     #[test]

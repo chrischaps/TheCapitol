@@ -240,6 +240,7 @@ pub(crate) fn live(
     mut mind: Mind,
     voice: Voice,
     hire_line: i64,
+    trade_line: i64,
     town: &Tether,
 ) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
@@ -266,9 +267,9 @@ pub(crate) fn live(
     citizen.stints = stint::Stints::from_kept(&town.kept(), citizen.now());
     // Every citizen walks the road in, and earns its deed (#450)
     citizen.road = Some(road_in::Road::default());
-    if role == Role::Merchant {
-        citizen.merchant = Some(merchant::Merchant::new(seed));
-    }
+    // Its goods to trade in, from its calling (Callings K2.2): trading is a
+    // leaning anyone may take up once it has its float
+    citizen.merchant = Some(merchant::Merchant::new(&citizen.calling, seed, trade_line));
     let ended = citizen.work(None, Some(town));
     // A shift it's on ends with its session, paid for what it made, rather
     // than holding the work from others until the server sees it gone
@@ -434,7 +435,8 @@ struct SimBot {
     /// Home from the day's work, on the night's (#276): set by the walk
     /// home at dusk, until the morning's work.
     night_shift: bool,
-    /// A merchant's goods and its market (C1.6).
+    /// A citizen's goods to trade in and its market (C1.6, Callings K2.2).
+    /// Every citizen has them; a swarm bot doesn't trade.
     merchant: Option<merchant::Merchant>,
     /// Where it's lingering, and which way it looks (C2.1).
     spot: Option<((f64, f64), (f64, f64))>,
@@ -702,7 +704,16 @@ impl SimBot {
                     let (activity, setup) = Self::activity(&action, job, goal.as_ref().and_then(Option::as_ref), &catalog);
                     let day = self.day();
                     if let Some(town) = town {
-                        town.health(|h| h.doing(Standing::Working, &label));
+                        // The stint it's at now, which this round's question
+                        // may have changed, so a market spell under a stint
+                        // just taken up reads as trading
+                        let stint = self.stints.on.map(|s| s.job);
+                        town.health(|h| {
+                            if stint.is_some() {
+                                h.stint = stint;
+                            }
+                            h.doing(Standing::Working, &label);
+                        });
                     }
                     let began = self.now();
                     let result = match &action {

@@ -293,7 +293,11 @@ pub enum Question {
     /// JSON and back to the bit, as an `f64` may not: #545); `lately` each job's
     /// share of its recent work time, by slug, which the rules chase its
     /// calling's shares with. The menu's *carry on* is the job it's at, so a slow
-    /// layer never makes a citizen switch.
+    /// layer never makes a citizen switch. `line` is its line for trading
+    /// (Callings K2.2, [`stint::trade_line`](crate::sim::stint::trade_line)):
+    /// with more Strands in hand than that, trading's share of its calling
+    /// rises ([`stint::target`](crate::sim::stint::target)). 0, as in a log
+    /// from before K2.2, raises nothing.
     Stint {
         why: Why,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,6 +306,8 @@ pub enum Question {
         run: f32,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         lately: BTreeMap<String, f32>,
+        #[serde(default, skip_serializing_if = "no_line")]
+        line: i64,
     },
 }
 
@@ -314,8 +320,13 @@ pub enum Why {
     /// The stint it was at has run its length.
     Done,
     /// Something pulls on a job: a commission it could meet, a wage, a bid
-    /// well over the books.
+    /// well over the books, or a float that opens trading to it (K2.2).
     Pull,
+}
+
+/// No line for trading on a stint question, as before Callings K2.2.
+fn no_line(line: &i64) -> bool {
+    *line == 0
 }
 
 /// A guild as a citizen sees it when it asks whether to join (S4.5).
@@ -1608,6 +1619,7 @@ mod tests {
             doing: Some("builder".into()),
             run: 0.2,
             lately: BTreeMap::from([("builder".to_string(), 0.3), ("gatherer-wood".to_string(), 0.7)]),
+            line: 0,
         };
         s.menu = ["gatherer-wood", "builder", "crafter-planks"]
             .into_iter()
@@ -1627,6 +1639,7 @@ mod tests {
             doing: None,
             run: 0.0,
             lately: BTreeMap::new(),
+            line: 0,
         };
         assert_eq!(start.key(), "stint");
         // It goes through a log and back the same

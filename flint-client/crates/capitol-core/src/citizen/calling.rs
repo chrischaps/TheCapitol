@@ -128,6 +128,17 @@ impl Mix {
         Style::ALL.iter().map(|&s| self.weight(s)).sum()
     }
 
+    /// The mix for a citizen born to trade (`mint --role merchant`, Callings
+    /// K2.2): a trading favourite, so no all-rounders, unless the mix deals
+    /// nothing else (`mint --calling all-rounder`).
+    fn favouring(&self) -> Mix {
+        if self.specialist + self.leaner > 0.0 {
+            Mix { all_rounder: 0.0, ..*self }
+        } else {
+            *self
+        }
+    }
+
     /// The style a draw `u` in [0, 1) falls on. A small change to the mix
     /// moves only the citizens whose draw is near a boundary.
     fn pick(&self, u: f64) -> Style {
@@ -182,8 +193,11 @@ impl Calling {
     }
 
     /// A calling drawn from the citizen's stream, its style by `mix`, its
-    /// favourite its birth trade `role` unless it's an all-rounder.
+    /// favourite its birth trade `role` unless it's an all-rounder. One born
+    /// to trade is a trading favourite (K2.2): the mix deals it no
+    /// all-rounder unless that's all it deals.
     pub(crate) fn seeded(rng: &mut Rng, mix: &Mix, role: Role) -> Calling {
+        let mix = if role == Role::Merchant { mix.favouring() } else { *mix };
         let style = mix.pick(rng.unit());
         // As a temperament's traits: most middling, a few not
         let wander = hundredth((rng.unit() + rng.unit()) / 2.0);
@@ -548,6 +562,20 @@ mod tests {
         }
         assert_eq!(Mix { leaner: -1.0, ..mix }.check().unwrap_err(), "a style's weight in the mix is 0 or more");
         assert!(Mix { specialist: 0.0, leaner: 0.0, all_rounder: 0.0 }.check().is_err());
+    }
+
+    /// Callings K2.2: `mint --role merchant` makes a trading favourite, and
+    /// the other birth trades still deal the town's mix.
+    #[test]
+    fn one_born_to_trade_favours_trading() {
+        let mut rng = Rng::new(17);
+        let styles: Vec<Style> = (0..300).map(|_| Calling::seeded(&mut rng, &Mix::default(), Role::Merchant).style()).collect();
+        assert!(!styles.contains(&Style::AllRounder));
+        assert!(styles.contains(&Style::Specialist) && styles.contains(&Style::Leaner));
+        let asked = Calling::seeded(&mut rng, &Mix::only(Style::AllRounder), Role::Merchant);
+        assert_eq!(asked.style(), Style::AllRounder, "unless asked for an all-rounder");
+        let builders = (0..300).filter(|_| Calling::seeded(&mut rng, &Mix::default(), Role::Builder).style() == Style::AllRounder).count();
+        assert!(builders > 30, "{builders}");
     }
 
     #[test]

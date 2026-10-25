@@ -1,22 +1,35 @@
-//! A merchant (C1.6): it earns its float as a fiber gatherer does, banking
-//! fiber at the exchange, then makes a market in its goods at the hall with
-//! [`market_maker::quotes`], sized to what it holds. Its target grows with
-//! its wealth ([`market_maker::share`]). Nothing is granted (D2): its stock is
-//! what its bids bought, and its Strands what it banked and sold.
+//! Trading (C1.6, Callings K2.2): a citizen on a trading stint makes a
+//! market in its goods at the hall with [`market_maker::quotes`], sized to
+//! what it holds. Its target grows with its wealth ([`market_maker::share`]).
+//! Nothing is granted (D2): its stock is what its bids bought, and its
+//! Strands what it banked and sold.
+//!
+//! Since K2.2 trading is a leaning, not a role. Every citizen has its goods
+//! ([`trading_goods`], from its calling's leanings), and trading is on its
+//! stint menu once it has its float ([`SimBot::trades`]), or always when
+//! it's its favourite (`mint --role merchant`). A favourite short of its
+//! float earns it on its trading stint as a fiber gatherer does, banking
+//! fiber at the exchange, as C1.6's merchants did; anyone else earns it at
+//! its other jobs first.
 //!
 //! Whether to make a market is a decision ([`Question::Market`]), asked at
 //! each turn of its work: make one with its float, or go on with its errand.
 //! A spell at the hall lasts a game hour, then it's asked again. It breaks
 //! off for a trade request, which the loop answers, its town stopping, or
-//! dusk (C1.2): a merchant keeps its persona's day like anyone else.
-//! Its orders stay up between spells, as a market maker's do.
+//! dusk (C1.2): a trader keeps its persona's day like anyone else.
+//! Its orders stay up between spells and between stints, as a market
+//! maker's do. Between spells, what its bids bought and it holds in hand it
+//! may put on its stall at the bazaar ([`SimBot::stall_its_goods`]).
 
 use std::time::{Duration, Instant};
 
 use super::super::plan::Holdings;
-use super::super::{merchant_items, Errand, Trade};
+use super::super::stint::trade_line;
+use super::super::{stall_menu, trading_goods, Errand, Role, Trade};
 use super::SimBot;
 use crate::bot::BotError;
+use crate::citizen::calling::Calling;
+use crate::citizen::decide::rules::enough_float;
 use crate::citizen::decide::{Choice, Question};
 use crate::citizen::meet;
 use crate::citizen::schedule::Phase;
@@ -31,21 +44,26 @@ const RESIZE: Duration = market_maker::REQUOTE_EVERY;
 /// Strands a merchant keeps back from its quotes, for the fees.
 const RESERVE: i64 = 20;
 
-/// A merchant's goods, and its market once it has made one.
+/// A citizen's goods to trade in, its market once it has made one, and its
+/// line for trading.
 pub(super) struct Merchant {
     items: Vec<String>,
     maker: Option<Maker>,
     /// Whether it was making a market at its last turn.
     making: bool,
+    /// The town's `[trading] line` (K2.2), which its patience scales.
+    line: i64,
 }
 
 impl Merchant {
-    /// A merchant dealing in the goods `seed` picks ([`merchant_items`]).
-    pub(super) fn new(seed: u64) -> Merchant {
+    /// A trader dealing in the goods its `calling` and `seed` pick
+    /// ([`trading_goods`]), with the town's trading `line`.
+    pub(super) fn new(calling: &Calling, seed: u64, line: i64) -> Merchant {
         Merchant {
-            items: merchant_items(seed).into_iter().map(String::from).collect(),
+            items: trading_goods(calling, seed).into_iter().map(String::from).collect(),
             maker: None,
             making: false,
+            line,
         }
     }
 
@@ -64,6 +82,31 @@ impl Merchant {
 }
 
 impl SimBot {
+    /// Whether trading is on its stint menu (Callings K2.2): always for its
+    /// favourite, which earns its float on the stint if it must, and for
+    /// anyone else leaning to it once it has its float, as the rules weigh
+    /// one ([`enough_float`]: half of it while it's making a market).
+    pub(super) fn trades(&self) -> bool {
+        let Some(merchant) = &self.merchant else { return false };
+        if self.calling.favourite == Some(Role::Merchant) {
+            return true;
+        }
+        self.calling.share(Role::Merchant) > 0.0 && self.float() as f64 >= enough_float(&self.mind.temperament, merchant.making)
+    }
+
+    /// Its line for trading (K2.2): past it, wealth raises trading's share of
+    /// its calling. 0 for a bot that doesn't trade.
+    pub(super) fn trade_line(&self) -> i64 {
+        self.merchant.as_ref().map_or(0, |m| trade_line(m.line, self.mind.temperament.patience))
+    }
+
+    /// Whether `item` is its market's stock, and so never spare: a trading
+    /// favourite's always, anyone else's while it's on a trading stint.
+    pub(super) fn deals(&self, item: &str) -> bool {
+        let trading = self.calling.favourite == Some(Role::Merchant) || self.job() == Role::Merchant;
+        trading && self.merchant.as_ref().is_some_and(|m| m.deals(item))
+    }
+
     /// What the merchant has to make a market with, in Strands: its
     /// Strands, those on its bids included, and its goods, in hand, in the
     /// market box and on its asks, at its maker's references, or else its
@@ -109,7 +152,43 @@ impl SimBot {
         if let Some(m) = self.merchant.as_mut() {
             m.making = make;
         }
-        make.then_some(Trade::MakeMarket)
+        if make {
+            return Some(Trade::MakeMarket);
+        }
+        self.stall_its_goods(holdings)
+    }
+
+    /// Between spells at the hall, a stall (K2.2): of its goods, what it
+    /// holds most of in hand, bought by its bids, priced from its maker's
+    /// reference, or else its books, or else the catalog's target. Asked as a
+    /// stall question (C1.5), from half of [`STALL_AT`](super::super::STALL_AT).
+    fn stall_its_goods(&mut self, holdings: &Holdings) -> Option<Trade> {
+        if !self.people {
+            return None;
+        }
+        let merchant = self.merchant.as_ref()?;
+        let (item, held) = merchant
+            .items
+            .iter()
+            .map(|i| (i.clone(), holdings.count(i)))
+            .max_by_key(|&(_, n)| n)
+            .filter(|&(_, n)| n > 0)?;
+        let worth = merchant
+            .maker
+            .as_ref()
+            .and_then(|m| m.reference(&item))
+            .or_else(|| meet::worth(self.bot.state(), &item))
+            .or_else(|| self.bot.state().catalog().target_price(&item));
+        let keeps = self.bot.state().bazaar().my_shop().is_some();
+        let menu = stall_menu(holdings, &item, held, worth, keeps)?;
+        match self.decide(Question::Sell { item: item.clone() }, menu, 1, holdings)? {
+            (d, Choice::Stock { item, .. }) => Some(Trade::Stock {
+                item,
+                quantity: d.quantity?,
+                price: d.price?,
+            }),
+            _ => None,
+        }
     }
 
     /// A spell of making a market at the hall: to the hall, its maker

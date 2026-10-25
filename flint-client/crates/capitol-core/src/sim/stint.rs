@@ -17,12 +17,17 @@
 //!   the roster (`town.stints.json`), so a casual citizen's half hour still
 //!   adds up to a mix. Since K1.5 it keeps what a detour reads too: the
 //!   recipes it has made and the places it has been to.
+//! - **Trading** (K2.2) is a leaning like any other, open to a citizen
+//!   with its float (or whose favourite it is), and **wealth raises it**:
+//!   past its [`trade_line`], trading's [`target`] share rises by up to
+//!   [`RICH_RISE`], so a fiber-rich citizen's money goes into goods with no
+//!   change of role.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Commitment, Role, LOT_STATIONS, ROLES};
+use super::{Commitment, Role, LOT_STATIONS, MERCHANT_FLOAT, ROLES};
 use crate::citizen::calling::Calling;
 
 /// Game hours of work after which what a job had lately counts half. A
@@ -39,6 +44,52 @@ pub const WILLING: f32 = 0.05;
 /// Game hours a job whose work was stuck is left off the stint menu, so a
 /// citizen whose kiln waits for a plot doesn't take it up again at once.
 pub const STUCK_AGAIN: f64 = 1.0;
+
+/// The Strands past which a middling citizen's calling leans further to
+/// trading (Callings K2.2): twice [`MERCHANT_FLOAT`], the town's
+/// `[trading] line` unless it says. Patience scales it as it does the
+/// float ([`trade_line`]).
+pub const TRADE_LINE: i64 = 2 * MERCHANT_FLOAT;
+
+/// The most wealth adds to trading's share of a citizen's work, of the
+/// rest, at twice its line ([`rich_rise`]): a fiber specialist leaning a
+/// tenth to trading gives it about 37% when it's that rich.
+pub const RICH_RISE: f64 = 0.3;
+
+/// A citizen's line for trading (K2.2): the town's `base` times 0.5 for the
+/// hasty to 1.5 for the patient, as its float is.
+pub fn trade_line(base: i64, patience: f32) -> i64 {
+    (base as f64 * (0.5 + f64::from(patience))).round() as i64
+}
+
+/// How far wealth raises trading's share of the work (K2.2), 0 to
+/// [`RICH_RISE`]: nothing at or under the `line`, rising evenly to the
+/// whole of it at twice the line. Nothing with no line, as a stint
+/// question from before K2.2 has none.
+pub fn rich_rise(strands: i64, line: i64) -> f64 {
+    if line <= 0 || strands <= line {
+        return 0.0;
+    }
+    RICH_RISE * ((strands - line) as f64 / line as f64).min(1.0)
+}
+
+/// The share of its work `calling` gives `job` with `strands` in hand
+/// against its trading `line` (K2.2): its calling's, with trading raised by
+/// [`rich_rise`] of what's left over and every other job scaled down to make
+/// the room, so they still sum to 1. A calling with no lean to trading at
+/// all keeps its shares, so a swarm bot's never move.
+pub fn target(calling: &Calling, job: Role, strands: i64, line: i64) -> f64 {
+    let share = f64::from(calling.share(job));
+    if calling.share(Role::Merchant) <= 0.0 {
+        return share;
+    }
+    let rise = rich_rise(strands, line);
+    if job == Role::Merchant {
+        share + rise * (1.0 - share)
+    } else {
+        share * (1.0 - rise)
+    }
+}
 
 /// The job of the moment.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,10 +195,10 @@ pub fn commitment(calling: &Calling, job: Role) -> Commitment {
 
 /// The jobs a citizen will answer for, whatever it's at (plan §5): its
 /// favourite first, then the job of the moment `doing`, then each job its
-/// calling gives [`WILLING`] or more, the most first. Trading only for a
-/// merchant (`trades`): it answers nothing and crafts nothing, and making
-/// a market as a leaning is K2.2's.
-pub fn willing(calling: &Calling, doing: Role, trades: bool) -> Vec<Role> {
+/// calling gives [`WILLING`] or more, the most first. Trading among them
+/// since K2.2, a leaning like the rest: it answers no commission and does
+/// no wage work, but a traders' guild's charter is one it would join.
+pub fn willing(calling: &Calling, doing: Role) -> Vec<Role> {
     let mut jobs: Vec<Role> = calling.favourite.into_iter().collect();
     if !jobs.contains(&doing) {
         jobs.push(doing);
@@ -161,7 +212,6 @@ pub fn willing(calling: &Calling, doing: Role, trades: bool) -> Vec<Role> {
     // Stable, so a tie keeps ROLES' order
     leaning.sort_by(|a, b| b.1.total_cmp(&a.1));
     jobs.extend(leaning.into_iter().map(|(r, _)| r));
-    jobs.retain(|&r| r != Role::Merchant || trades);
     jobs
 }
 
@@ -190,7 +240,8 @@ pub fn room_for(calling: &Calling) -> i32 {
 }
 
 /// The jobs on a citizen's stint menu: every one its calling leans to at
-/// all, trading only for a merchant (`trades`), in [`ROLES`] order.
+/// all, in [`ROLES`] order, trading only when it's open to it (`trades`:
+/// its favourite, or it has its float, K2.2).
 pub fn menu_jobs(calling: &Calling, trades: bool) -> Vec<Role> {
     ROLES
         .into_iter()
@@ -266,6 +317,7 @@ mod tests {
                 doing: None,
                 run: 0.0,
                 lately: lately.question(),
+                line: 0,
             },
             menu: jobs
                 .iter()
@@ -324,7 +376,7 @@ mod tests {
     #[test]
     fn a_swarm_bot_answers_and_works_for_its_role_alone() {
         let one = Calling::single(WOOD);
-        assert_eq!(willing(&one, WOOD, false), [WOOD]);
+        assert_eq!(willing(&one, WOOD), [WOOD]);
         assert_eq!(menu_jobs(&one, false), [WOOD]);
         assert_eq!(commitment(&one, WOOD), Commitment::Full);
     }
@@ -335,23 +387,23 @@ mod tests {
         for style in crate::citizen::calling::Style::ALL {
             for role in crate::sim::ROLES {
                 let calling = Calling::seeded(&mut rng, &Mix::only(style), role);
-                let jobs = willing(&calling, PLANKS, role == Role::Merchant);
-                if let Some(favourite) = calling.favourite.filter(|&f| f != Role::Merchant || role == Role::Merchant) {
+                let jobs = willing(&calling, PLANKS);
+                if let Some(favourite) = calling.favourite {
                     assert_eq!(jobs[0], favourite, "{calling}");
                 }
                 assert!(jobs.contains(&PLANKS));
                 let distinct: std::collections::HashSet<_> = jobs.iter().collect();
                 assert_eq!(distinct.len(), jobs.len(), "{jobs:?}");
                 for job in crate::sim::ROLES {
-                    let leans = calling.share(job) >= WILLING && (job != Role::Merchant || role == Role::Merchant);
-                    if leans {
+                    if calling.share(job) >= WILLING {
                         assert!(jobs.contains(&job), "{calling}: {job} left out of {jobs:?}");
                     }
                 }
                 // Everyone answers for more than one job
                 assert!(jobs.len() >= 2, "{calling}: {jobs:?}");
-                // Only a merchant trades
-                assert_eq!(jobs.contains(&Role::Merchant), role == Role::Merchant, "{calling}");
+                // Trading is a leaning like the rest (K2.2)
+                let trades = calling.favourite == Some(Role::Merchant) || calling.share(Role::Merchant) >= WILLING;
+                assert_eq!(jobs.contains(&Role::Merchant), trades, "{calling}");
                 assert_eq!(commitment(&calling, role), if calling.favourite.is_some() { Commitment::Full } else { Commitment::Dabble });
                 assert!(menu_jobs(&calling, false).len() >= 3, "{calling}");
             }
