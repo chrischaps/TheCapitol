@@ -245,6 +245,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Resource nodes fitted to the terrain: {} moved, {} with no clear spot",
         placement.moves.len(), placement.stuck.len()
     );
+    // The planned ones are the default world's plan. A saved world that isn't
+    // the default plans its own, as a commit would have (#344).
+    let replan = {
+        let mut game = game_state.write().await;
+        let game = &mut *game;
+        engine::node_spawn::replan_saved_world(
+            &game.world_gen_params, &game.terrain, &game.resource_types, &mut game.resource_nodes,
+        )
+    };
+    if let Some(replan) = replan {
+        engine::node_spawn::save_replan(&db_pool, &replan).await?;
+        tracing::warn!(
+            "The saved world isn't the default, so its planned nodes were planned for it: {} now, {} removed, {} added",
+            replan.nodes.len(), replan.removed, replan.added
+        );
+    }
 
     // Load item types into game state
     let item_types: Vec<ItemType> =

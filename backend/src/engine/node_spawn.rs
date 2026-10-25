@@ -54,7 +54,7 @@ use crate::engine::node_placement::{LOT_MARGIN, MOVE_CLEAR};
 use crate::models::geom::SplitMix64;
 use crate::models::lot_clearance::WATER_KERB;
 use crate::models::terrain::{point_to_segment_distance, TerrainConfig};
-use crate::models::{NodeState, ResourceNodeState, ResourceType};
+use crate::models::{NodeState, ResourceNodeState, ResourceType, WorldGenParams};
 
 /// Resources the migrations seeded before E2.3. Their spawn rows describe what's
 /// there, so the planner leaves them be.
@@ -320,6 +320,32 @@ pub fn replan(
         node.y = s.y;
     }
     Replan { types, nodes: planned, removed, added }
+}
+
+/// Startup's [`replan`] for a saved world that isn't the default (#344). The
+/// node migrations write the default world's plan, and startup's
+/// `fit_to_terrain` leaves a node standing on a lot alone (#102), so another
+/// world would keep the default's nodes wherever they land, its own lots
+/// included. So it plans its own, as an admin's commit would have. `None` on
+/// the default world, whose plan the migrations wrote
+/// (`the_migration_writes_the_default_plan`), and when the plan is what the
+/// nodes already are, as it is from a world's second startup on: nothing to save.
+pub fn replan_saved_world(
+    params: &WorldGenParams,
+    terrain: &TerrainConfig,
+    resource_types: &HashMap<String, ResourceType>,
+    nodes: &mut HashMap<Uuid, ResourceNodeState>,
+) -> Option<Replan> {
+    if params.is_default() {
+        return None;
+    }
+    let before: HashMap<Uuid, (f64, f64)> =
+        planned_in(resource_types, nodes).nodes.iter().map(|s| (s.id, (s.x, s.y))).collect();
+    let replan = replan(terrain, resource_types, nodes, params.seed);
+    let unchanged = replan.removed == 0
+        && replan.added == 0
+        && replan.nodes.iter().all(|s| before.get(&s.id) == Some(&(s.x, s.y)));
+    (!unchanged).then_some(replan)
 }
 
 /// The planned resources' nodes as the game holds them, for the commit that
@@ -942,6 +968,77 @@ mod tests {
         let other = replan(&terrain, &types, &mut nodes, 2);
         assert_eq!(other.removed, first.nodes.len());
         assert!(nodes.contains_key(&grass_id), "grass isn't planned, so it stays");
+    }
+
+    fn tree_at(id: u128, (x, y): (f64, f64)) -> ResourceNodeState {
+        ResourceNodeState {
+            id: Uuid::from_u128(id),
+            resource_type: "tree".into(),
+            x,
+            y,
+            base_quality: 50,
+            state: NodeState::Available,
+            harvested_by: None,
+            regenerates_at_tick: None,
+        }
+    }
+
+    #[test]
+    fn only_a_saved_world_that_isnt_the_default_replans_at_startup() {
+        let types: HashMap<String, ResourceType> =
+            crate::content::load().unwrap().resources.iter().map(|r| (r.id.clone(), r.to_type())).collect();
+        let terrain = small_world();
+        let stale = tree_at(7, (CENTER_X + 3400.0, CENTER_Y));
+        let mut nodes = HashMap::from([(stale.id, stale.clone())]);
+
+        // The default world keeps the migrations' plan, whatever it holds
+        let default = WorldGenParams::default();
+        assert!(default.is_default());
+        assert!(replan_saved_world(&default, &terrain, &types, &mut nodes).is_none());
+        assert_eq!(nodes.len(), 1);
+
+        let other = WorldGenParams { seed: default.seed + 1, ..default };
+        assert!(!other.is_default());
+        let replan = replan_saved_world(&other, &terrain, &types, &mut nodes).expect("another world plans its own");
+        assert_eq!(replan.removed, 1);
+        assert!(!nodes.contains_key(&stale.id), "the default world's node goes");
+        assert_eq!(nodes.len(), replan.nodes.len());
+        // Its next startup finds its own plan, and has nothing to save
+        assert!(replan_saved_world(&other, &terrain, &types, &mut nodes).is_none());
+    }
+
+    /// A saved world that isn't the default, with the default's tree on one
+    /// of its lots: startup's re-plan takes it off, and the rows are the plan.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_saved_world_that_isnt_the_default_plans_its_own_nodes(db: PgPool) {
+        let content = crate::content::load().unwrap();
+        crate::content::sync(&db, &content).await.unwrap();
+        let types: HashMap<String, ResourceType> = content.resources.iter().map(|r| (r.id.clone(), r.to_type())).collect();
+        let params = WorldGenParams { arterial_width: 70.0, ..WorldGenParams::default() };
+        assert!(!params.is_default());
+        let terrain = TerrainConfig::from_params(&params);
+        let farm = terrain.terrain_plots.iter().find(|p| p.id.starts_with("farm_")).unwrap();
+        let on_the_farm = farm.corners.iter().fold((0.0, 0.0), |c, p| (c.0 + p.0 / 4.0, c.1 + p.1 / 4.0));
+        let stale = tree_at(7, on_the_farm);
+        let mut nodes = HashMap::from([(stale.id, stale.clone())]);
+        save_replan(&db, &Replan { types: vec!["tree".into()], nodes: planned_in(&types, &nodes).nodes, ..Default::default() })
+            .await
+            .unwrap();
+
+        let replan = replan_saved_world(&params, &terrain, &types, &mut nodes).unwrap();
+        save_replan(&db, &replan).await.unwrap();
+
+        let rows: Vec<(Uuid, f64, f64)> =
+            sqlx::query_as("SELECT id, position_x, position_y FROM resource_nodes WHERE resource_type = ANY($1)")
+                .bind(&replan.types)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), replan.nodes.len());
+        assert!(rows.iter().all(|r| r.0 != stale.id), "the default world's tree is gone");
+        assert!(rows.iter().all(|&(_, x, y)| terrain.lot_at(x, y).is_none()), "no planned node stands on a lot");
+        assert!(replan_saved_world(&params, &terrain, &types, &mut nodes).is_none());
     }
 
     #[test]

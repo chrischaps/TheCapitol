@@ -342,6 +342,13 @@ impl WorldGenParams {
         .filter_map(|(key, radius)| json.get(key)?.as_f64().filter(|&v| v != radius).map(|v| (key, v)))
         .collect()
     }
+
+    /// Whether these are the default world's params, so build its terrain.
+    /// Compared as the saved config is, so the radii, which aren't saved,
+    /// don't count. Cheaper than building both terrains to compare versions.
+    pub fn is_default(&self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(Self::default()).ok()
+    }
 }
 
 impl Default for WorldGenParams {
