@@ -1255,10 +1255,105 @@
     roles(d, inRange((s) => s.distribution).map((s) => s.distribution));
   }
 
-  const trade = (role) => role === "person" ? "People" : role === "citizen" ? "Citizens with no trade named" : capital(role.replace(/^([a-z]+)-(.+)$/, "$1 ($2)"));
+  // Callings K3.3: each job by its slug, as the town's report names it,
+  // with its activity (time by activity's key, K0.1) and what doing it is,
+  // as the citizens' own words have them (calling::doing)
+  const JOBS = {
+    "gatherer-fiber": { activity: "fiber", doing: "cutting grass" },
+    "gatherer-wood": { activity: "wood", doing: "felling trees" },
+    "gatherer-ore": { activity: "ore", doing: "mining ore" },
+    "crafter-planks": { activity: "planks", doing: "sawing planks" },
+    "crafter-ingots": { activity: "ingots", doing: "smelting metal" },
+    "crafter-tools": { activity: "tools", doing: "making tools" },
+    builder: { activity: "building", doing: "building" },
+    merchant: { activity: "trading", doing: "trading" },
+  };
+  // What a citizen's time goes on (K0.1), in the reports' order. Each has
+  // its ink, --a-<key>
+  const ACTIVITIES = [
+    ["fiber", "Fiber"], ["wood", "Wood"], ["ore", "Ore"], ["planks", "Planks"], ["ingots", "Ingots"], ["tools", "Tools"],
+    ["building", "Building"], ["trading", "Trading"], ["commons", "The Commons"], ["detour", "Detours"], ["road_in", "The road in"], ["free", "Free"],
+  ];
+  const ACTIVITY = Object.fromEntries(ACTIVITIES);
+  /** An activity's name inside a sentence: "wood", "the Commons" */
+  const lc = (name) => (name === "The Commons" ? "the Commons" : name.toLowerCase());
+  /** A job by its slug, as its activity: "Wood", "Building" */
+  const jobName = (slug) => ACTIVITY[JOBS[slug]?.activity] ?? capital(slug.replace(/^([a-z]+)-(.+)$/, "$1 ($2)"));
+
+  // A bucket of the wealth table: each citizen's favourite job, all-rounders
+  // together (Callings K3.3; before callings, its trade, which is the same
+  // key), and people together
+  const trade = (role) => role === "person" ? "People" : role === "citizen" ? "Citizens with no calling named" : role === "all-rounder" ? "All-rounders" : jobName(role);
   const each = (h) => h.strands / Math.max(h.accounts, 1);
-  /** One of a trade, in a sentence: "a merchant", "a person" */
-  const one = (role) => role === "person" ? "a person" : role === "citizen" ? "a citizen with no trade named" : `a ${trade(role).toLowerCase()}`;
+  /** One of a bucket, in a sentence: "a person", "an all-rounder", "a citizen who favours wood" */
+  const one = (role) => role === "person" ? "a person" : role === "citizen" ? "a citizen with no calling named" : role === "all-rounder" ? "an all-rounder" : `a citizen who favours ${jobName(role).toLowerCase()}`;
+  /** All of a bucket, to start a sentence: "People", "All-rounders", "Those who favour wood" */
+  const those = (role) => role === "person" || role === "citizen" || role === "all-rounder" ? trade(role) : `Those who favour ${jobName(role).toLowerCase()}`;
+  /** The same, after a semicolon */
+  const thoseAfter = (role) => those(role).charAt(0).toLowerCase() + those(role).slice(1);
+
+  /** A citizen's calling, briefly: "Wood, also ore and planks", "All-rounder"; its trade from a town before callings */
+  function callingShort(c) {
+    const k = c.calling;
+    if (!k) return trade(c.role);
+    if (!k.favourite) return "All-rounder";
+    const also = (k.leanings ?? []).map((l) => jobName(l.job).toLowerCase());
+    return also.length ? `${jobName(k.favourite)}, also ${andList(also)}` : jobName(k.favourite);
+  }
+
+  /** A citizen's calling in a sentence: "a wood specialist who also does ore and planks", "an all-rounder" */
+  function callingSays(c) {
+    const k = c.calling;
+    if (!k) return one(c.role);
+    if (!k.favourite) return "an all-rounder";
+    const fav = jobName(k.favourite).toLowerCase();
+    const also = andList((k.leanings ?? []).map((l) => jobName(l.job).toLowerCase()));
+    if (k.style === "specialist") return `a ${fav} specialist${also ? ` who also does ${also}` : ""}`;
+    return `a citizen who leans to ${fav}${also ? `, and to ${also} too` : ""}`;
+  }
+
+  /** The job of the moment, in words: "sawing planks"; null before its first stint */
+  const stintWords = (c) => (c.doing ? JOBS[c.doing.job]?.doing ?? c.doing.job : null);
+
+  /** A stint's game hours, in words: "40 minutes", "an hour", "2.5 hours" */
+  function stintFor(hours) {
+    const minutes = Math.round(hours * 60);
+    if (minutes < 1) return "a moment";
+    if (minutes < 55) return plural(minutes, "minute", "minutes");
+    if (minutes < 75) return "an hour";
+    return `${(Math.round(hours * 2) / 2).toLocaleString()} hours`;
+  }
+
+  /** Its work by activity: each activity's hours and share of the work, the biggest first in `sorted`, and free time's share of all of it (K0.1) */
+  function timeShares(time) {
+    const work = ACTIVITIES.filter(([k]) => k !== "free" && time?.[k] > 0).map(([k, name]) => ({ key: k, name, hours: time[k] }));
+    const total = work.reduce((n, a) => n + a.hours, 0);
+    for (const a of work) a.share = total ? a.hours / total : 0;
+    const free = time?.free ?? 0;
+    return { work, total, free: total + free > 0 ? free / (total + free) : null, sorted: [...work].sort((a, b) => b.hours - a.hours) };
+  }
+
+  /** A roster's time by activity: a bar of the work's shares in the activities' inks, and the biggest in words */
+  function timeCell(c) {
+    const t = timeShares(c.time);
+    if (!t.total) return "–";
+    const bar = document.createElement("span");
+    bar.className = "timebar";
+    for (const a of t.work) {
+      const seg = document.createElement("i");
+      seg.style.flexGrow = String(a.hours);
+      seg.style.background = `var(--a-${a.key})`;
+      bar.append(seg);
+    }
+    const said = capital(`${andList(t.sorted.map((a) => `${lc(a.name)} ${percent(a.share)}`))} of its work${t.free != null ? `; free ${percent(t.free)} of its time` : ""}`);
+    bar.title = said;
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", said);
+    const top = t.sorted[0];
+    const words = text("span", `${lc(top.name)} ${percent(top.share)}`);
+    words.className = "dim";
+    return [bar, words];
+  }
 
   // The wealth table: each trade's accounts and Strands now, against the
   // first sample in the range that has the trade (the town names them only
@@ -1269,8 +1364,8 @@
     const byEach = [...rows].sort((a, b) => each(b[1]) - each(a[1]));
     const [richest, poorest] = [byEach[0], byEach.at(-1)];
     $("roles-headline").textContent = rows.length < 2 || each(richest[1]) === each(poorest[1])
-      ? `Every trade holds ${nf.format(Math.round(each(richest[1])))} Strands each.`
-      : `${capital(one(richest[0]))} holds the most, ${nf.format(Math.round(each(richest[1])))} Strands on average; ${one(poorest[0])} the least, ${nf.format(Math.round(each(poorest[1])))}.`;
+      ? `Every calling holds ${nf.format(Math.round(each(richest[1])))} Strands each.`
+      : `${those(richest[0])} hold the most, ${nf.format(Math.round(each(richest[1])))} Strands each on average; ${thoseAfter(poorest[0])} the least, ${nf.format(Math.round(each(poorest[1])))}.`;
     $("roles").tBodies[0].replaceChildren(...rows.map(([role, h]) => {
       const before = inRange.find((d) => d.roles?.[role])?.roles[role];
       const change = before ? each(h) - each(before) : null;
@@ -2048,6 +2143,8 @@
   const TOWN_READ_MS = 15_000;
   // The roster rows shown before "Show all"
   const ROSTER_ROWS = 50;
+  // The roster's columns
+  const ROSTER_COLUMNS = 9;
   // C3's yardstick for a citizen-day: 100 decisions a game hour over a
   // 14-hour working day (the-capitol-citizens.md, C3.3)
   const C3_DAY_DECISIONS = 1400;
@@ -2143,11 +2240,15 @@
 
   const ROSTER_SORT = {
     name: (c) => c.name.toLowerCase(),
-    role: (c) => c.role,
+    // By favourite, the all-rounders together, then by what else it does
+    role: (c) => `${c.role} ${callingShort(c)}`,
     standing: (c) => STANDINGS.indexOf(c.standing),
     phase: (c) => c.phase ?? "~",
     strands: (c) => c.strands ?? -Infinity,
-    activity: (c) => c.activity.toLowerCase(),
+    activity: (c) => `${stintWords(c) ?? ""} ${c.activity}`.toLowerCase(),
+    // The most single-minded first: its biggest activity's share of its
+    // work (K0.1)
+    time: (c) => -(timeShares(c.time).sorted[0]?.share ?? -1),
     // Furthest along the road in last, a claimed deed counting past the steps
     road: (c) => (c.road_in ? c.road_in.done + (c.road_in.grant === "spent" ? 0.5 : 0) : -1),
     // Sorted up, the newest failure comes first
@@ -2195,21 +2296,22 @@
         ? `This server has made ${plural(made.length, "citizen", "citizens")}, but no town has reported in, so there's no more to say of them yet.`
         : "This server has made no citizens.";
       $("roster-dek").textContent = "Every citizen this server has made, oldest first. Their trades and days come with the town's first report.";
-      return void body.replaceChildren(...(made.length ? made.map(madeRow) : [emptyRow(8, "No citizens yet. scripts/town.sh up makes a town of them.")]));
+      return void body.replaceChildren(...(made.length ? made.map(madeRow) : [emptyRow(ROSTER_COLUMNS, "No citizens yet. scripts/town.sh up makes a town of them.")]));
     }
     $("roster-dek").textContent = `Every citizen on the town's roster, as its report of ${clockSecs(t.report.at_ms)} has them. Click a heading to sort, or a name for that citizen's page.`;
     const find = townView.find.trim().toLowerCase();
     const key = ROSTER_SORT[townView.sort] ?? ROSTER_SORT.name;
     const rows = t.report.citizens
       .filter(ROSTER_SHOW[townView.show])
-      .filter((c) => !find || [c.name, c.role, c.activity, c.failure?.why ?? ""].some((f) => f.toLowerCase().includes(find)))
+      .filter((c) => !find || [c.name, callingShort(c), stintWords(c) ?? "", c.activity, c.failure?.why ?? ""].some((f) => f.toLowerCase().includes(find)))
       .sort((a, b) => {
         const [x, y] = [key(a), key(b)];
         const by = x < y ? -1 : x > y ? 1 : 0;
         return (townView.desc ? -by : by) || a.name.localeCompare(b.name);
       });
     const shown = townView.every ? rows : rows.slice(0, ROSTER_ROWS);
-    body.replaceChildren(...(rows.length ? shown.map(rosterRow) : [emptyRow(8, "No citizen on the roster matches.")]));
+    timeLegend();
+    body.replaceChildren(...(rows.length ? shown.map(rosterRow) : [emptyRow(ROSTER_COLUMNS, "No citizen on the roster matches.")]));
     if (shown.length < rows.length) body.append(moreRow(rows.length));
     const n = t.report.citizens.length;
     let line = rows.length === n
@@ -2218,7 +2320,7 @@
     const failed = t.report.citizens.filter((c) => c.failure && c.failure.at_ms > rangeFrom()).length;
     if (failed) line += ` For ${plural(failed, "of them", "of them")}, something went wrong in ${window_()}.`;
     const richest = t.report.citizens.filter((c) => c.strands != null).sort((a, b) => b.strands - a.strands)[0];
-    if (richest) line += ` The richest is ${richest.name}, ${one(richest.role)}, with ${plural(richest.strands, "Strand", "Strands")}.`;
+    if (richest) line += ` The richest is ${richest.name}, ${callingSays(richest)}, with ${plural(richest.strands, "Strand", "Strands")}.`;
     const roads = t.report.citizens.filter((c) => c.road_in);
     if (roads.length) {
       const deeds = roads.filter((c) => c.road_in.grant === "spent").length;
@@ -2235,17 +2337,37 @@
     const when = text("span", `${ago(c.failure?.at_ms ?? 0)}${c.restarts ? `, ${plural(c.restarts, "restart", "restarts")}` : ""}`);
     when.className = "dim";
     const failure = c.failure ? [c.failure.why, " ", when] : c.restarts ? plural(c.restarts, "restart", "restarts") : "–";
+    // The job of the moment before the step, while it's at work; resting
+    // or away, what it says of itself
+    const stint = c.standing === "working" && stintWords(c);
+    const doing = stint ? [Object.assign(text("span", `${capital(stint)}: `), { className: "stint" }), c.activity] : c.activity;
+    const calling = cell(callingShort(c), "trade");
+    if (c.calling?.favourite) calling.title = `${capital(c.calling.style)}: its calling gives its favourite ${percent(c.calling.focus)} of its time`;
     tr.append(
       cell(["◇ ", citizenLink(c.name)]),
-      cell(trade(c.role), "trade"),
+      calling,
       cell(standing),
       cell(c.phase ?? "–", "dim"),
       cell(c.strands == null ? "–" : nf.format(c.strands), "num"),
-      cell(c.activity),
+      cell(doing),
+      cell(timeCell(c), "time"),
       cell(roadIn(c.road_in), c.road_in ? "" : "dim"),
       cell(failure, c.failure ? "failure" : "dim"),
     );
     return tr;
+  }
+
+  /** The key to the roster's time bars: each activity's ink */
+  function timeLegend() {
+    const legend = $("roster-legend");
+    if (legend.childElementCount) return;
+    legend.append(text("span", "Time by activity, since the town started: "));
+    for (const [k, name] of ACTIVITIES.filter(([k]) => k !== "free")) {
+      const item = text("span", name);
+      item.className = "key";
+      item.style.setProperty("--c", `var(--a-${k})`);
+      legend.append(item);
+    }
   }
 
   /** The row under a cut roster, which shows the rest */
@@ -2257,7 +2379,7 @@
     b.className = "quiet";
     b.addEventListener("click", () => { townView.every = true; rosterTable(); });
     const td = cell([`The first ${nf.format(ROSTER_ROWS)} of ${nf.format(n)}. `, b]);
-    td.colSpan = 8;
+    td.colSpan = ROSTER_COLUMNS;
     tr.append(td);
     return tr;
   }
@@ -2272,6 +2394,7 @@
       cell("–", "dim"),
       cell("–", "num dim"),
       cell(c.key?.last_used_at ? `signed in ${ago(Date.parse(c.key.last_used_at))}` : "–", "dim"),
+      cell("–", "dim"),
       cell("–", "dim"),
       cell("–", "dim"),
     );
@@ -2611,10 +2734,14 @@
 
     // The headline: who, and what they're at
     if (c) {
-      let line = `${name}, ${one(c.role)}, ${STANDING_SAYS[c.standing] ?? `is ${c.standing}`}`;
+      let line = `${name}, ${callingSays(c)}, ${STANDING_SAYS[c.standing] ?? `is ${c.standing}`}`;
+      // The job of the moment, while it's at work (Callings K3.3)
+      const stint = stintWords(c);
+      if (stint && c.standing === "working") line += `, ${stintFor(c.doing.hours)} into ${stint}`;
       // "is away" and "away until 19:00" read as one
       const at = c.activity.trim();
       line += !at ? "." : at.toLowerCase().startsWith(c.standing) ? `${at.slice(c.standing.length).replace(/^[:,]?\s*/, " ").trimEnd()}.` : `: ${at}.`;
+      if (stint && c.standing !== "working") line += ` It was last ${stint}.`;
       if (townView.latest && !townView.latest.up) line += ` The town is down, so that's as its last report had it, ${ago(townView.latest.received_ms)}.`;
       h.textContent = line;
     } else {
@@ -2623,8 +2750,22 @@
         : `${name} is a person, not a citizen: nobody's report speaks for them.`;
     }
 
-    // The dek: their day, their troubles
+    // The dek: their calling against their time, their day, their troubles
     const parts = [];
+    const k = c?.calling;
+    const t = timeShares(c?.time);
+    if (k?.favourite) {
+      const fav = jobName(k.favourite).toLowerCase();
+      const had = t.work.find((a) => a.key === JOBS[k.favourite]?.activity);
+      parts.push(`Its calling gives ${fav} ${percent(k.focus)} of its time${t.total ? `, and so far ${fav} has had ${percent(had?.share ?? 0)} of its work` : ""}.`);
+    } else if (k) {
+      parts.push("Its calling spreads its time over every job, none much above the rest.");
+    }
+    if (t.total) {
+      const top = t.sorted.slice(0, 4).map((a) => `${lc(a.name)} ${percent(a.share)}`);
+      const rest = t.sorted.length > 4 ? ", and the rest on more" : "";
+      parts.push(`Since the town started its work has gone on ${andList(top)}${rest}${t.free != null ? `, and ${percent(t.free)} of its time was free` : ""}.`);
+    }
     if (c?.phase) parts.push(`It's the ${c.phase} part of ${possessive(name)} day.`);
     if (c?.failure) parts.push(`The last thing that went wrong, ${ago(c.failure.at_ms)}: ${c.failure.why}`);
     if (c?.restarts) parts.push(`${capital(plural(c.restarts, "restart", "restarts"))} since the town started.`);

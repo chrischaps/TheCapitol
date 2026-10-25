@@ -148,12 +148,12 @@
       </article>
 
       <article class="story">
-        <h2 class="head">Wealth by trade</h2>
+        <h2 class="head">Wealth by calling</h2>
         <p class="headline" id="roles-headline">Waiting for the first sample.</p>
-        <p class="dek">Each citizen's trade is the one the town's report names; people are counted together. The change each is since the first sample in the range that has the trade, as the soak report's table of trades has it.</p>
+        <p class="dek">Each citizen is counted under its favourite job, as the town's report names it, and the all-rounders, who have none, together; people are counted together too. A sample from before callings counted each citizen under its trade, which is the same row. The change each is since the first sample in the range that has the row, as the soak report's table of trades has it.</p>
         <div class="table-wrap">
           <table class="ledger" id="roles">
-            <thead><tr><th>Trade</th><th class="num">Accounts</th><th class="num">Strands</th><th class="num">Each</th><th class="num">Change each</th><th class="num">Share</th></tr></thead>
+            <thead><tr><th>Calling</th><th class="num">Accounts</th><th class="num">Strands</th><th class="num">Each</th><th class="num">Change each</th><th class="num">Share</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -279,24 +279,26 @@
             <button type="button" data-show="failed" aria-pressed="false">Failed</button>
           </div>
           <label class="roster-find"><span class="sr">Find a citizen</span>
-            <input type="search" id="roster-find" placeholder="Find by name, trade or what they're doing" autocomplete="off">
+            <input type="search" id="roster-find" placeholder="Find by name, calling or what they're doing" autocomplete="off">
           </label>
         </div>
         <div class="table-wrap">
           <table class="ledger roster" id="roster">
             <thead><tr>
               <th data-sort="name" aria-sort="ascending"><button type="button">Citizen</button></th>
-              <th data-sort="role"><button type="button">Trade</button></th>
+              <th data-sort="role"><button type="button">Calling</button></th>
               <th data-sort="standing"><button type="button">Standing</button></th>
               <th data-sort="phase"><button type="button">Day</button></th>
               <th data-sort="strands" class="num"><button type="button">Strands</button></th>
               <th data-sort="activity"><button type="button">Doing</button></th>
+              <th data-sort="time"><button type="button">Time by activity</button></th>
               <th data-sort="road"><button type="button">Road in</button></th>
               <th data-sort="failure"><button type="button">Last went wrong</button></th>
             </tr></thead>
             <tbody></tbody>
           </table>
         </div>
+        <p class="legend" id="roster-legend"></p>
       </article>
 
       <article class="story">

@@ -48,7 +48,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::ledger::Ledger;
-use capitol_protocol::metrics::{CitizenReport, RoadInReport, TownFailure, TownReport, TOWN_FAILURES};
+use capitol_protocol::metrics::{
+    CitizenReport, DecisionBrief, RoadInReport, StintReport, TownFailure, TownReport, TOWN_FAILURES,
+};
 use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
@@ -66,7 +68,7 @@ use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
 use crate::sim::report::{BotRun, Entry};
 use crate::sim::stint::Kept;
-use crate::sim::{self, Role};
+use crate::sim::{self, Activity, Role};
 
 /// The roster, beside wherever the town is run from.
 pub const ROSTER: &str = "town.toml";
@@ -743,11 +745,17 @@ impl fmt::Display for Standing {
 #[derive(Debug, Clone)]
 pub struct Health {
     pub name: String,
+    /// Its birth trade: the roster's role
     pub role: Role,
-    /// Its calling's style (Callings K0.2), once known.
-    pub style: Option<Style>,
+    /// Its calling (Callings K0.2), once known.
+    pub calling: Option<Calling>,
     /// The job of the moment (K1.2): its stint's, once it has one.
     pub stint: Option<Role>,
+    /// Game hours the stint has run, over its sessions, as last seen.
+    pub stint_hours: f64,
+    /// Game hours on each activity since the town started (K0.1), free
+    /// time among them, for the report to the server (K3.3).
+    pub time: BTreeMap<Activity, f64>,
     pub standing: Standing,
     /// Where in its day it is, by the clock (C1.2).
     pub phase: Option<Phase>,
@@ -769,8 +777,10 @@ impl Health {
         Health {
             name: name.to_string(),
             role,
-            style: None,
+            calling: None,
             stint: None,
+            stint_hours: 0.0,
+            time: BTreeMap::new(),
             standing: Standing::Starting,
             phase: None,
             strands: None,
@@ -792,18 +802,68 @@ impl Health {
         self.failures += 1;
     }
 
+    /// The bucket its reports count it in (Callings K3.3): its calling's,
+    /// its favourite job's slug or `all-rounder`; its role's slug until its
+    /// calling is known.
+    pub fn bucket(&self) -> &'static str {
+        self.calling.as_ref().map_or(self.role.slug(), Calling::bucket)
+    }
+
+    /// Adds the time in `entries` to its time by activity.
+    fn spent(&mut self, entries: &[Entry]) {
+        for entry in entries {
+            let (activity, hours) = match entry {
+                Entry::Spent { activity, hours, .. } => (*activity, *hours),
+                Entry::Idle { hours, .. } => (Activity::Free, *hours),
+                _ => continue,
+            };
+            *self.time.entry(activity).or_insert(0.0) += hours;
+        }
+    }
+
+    /// What the town's report to the server says of it (D4.1): its health
+    /// line's parts, and since Callings K3.3 its calling, its stint and its
+    /// time by activity.
+    fn report(&self, failure: Option<TownFailure>, decisions: Vec<DecisionBrief>) -> CitizenReport {
+        // Two places is plenty for the console, and keeps the report small
+        let two = |v: f64| (v * 100.0).round() / 100.0;
+        CitizenReport {
+            name: self.name.clone(),
+            role: self.bucket().to_string(),
+            standing: self.standing.to_string(),
+            phase: self.phase.map(|p| p.as_str().to_string()),
+            strands: self.strands,
+            activity: self.activity.clone(),
+            restarts: self.restarts,
+            failure,
+            decisions,
+            road_in: self.road_in.clone(),
+            calling: self.calling.as_ref().map(Calling::report),
+            doing: self.stint.map(|job| StintReport {
+                job: job.slug().to_string(),
+                hours: two(self.stint_hours),
+            }),
+            time: self
+                .time
+                .iter()
+                .filter(|(_, h)| **h > 0.0)
+                .map(|(a, h)| (a.slug().to_string(), two(*h)))
+                .collect(),
+        }
+    }
+
     /// One line: who, what role and calling, where its life stands and
     /// where in its day, Strands, the job of the moment and what it's doing
     /// at it, and the last failure.
     pub fn line(&self, now: Instant) -> String {
         let strands = self.strands.map_or_else(|| "–".to_string(), |s| format!("{s} S"));
         let phase = self.phase.map_or("–", |p| p.as_str());
-        let style = self.style.map_or("–", |s| s.as_str());
+        let style = self.calling.as_ref().map_or("–", |c| c.style().as_str());
         let stint = self.stint.map_or(String::new(), |job| format!("{}: ", calling::doing(job)));
         let mut line = format!(
             "{:<20} {:<17} {:<11} {:<8} {:<6} {:>9}  {stint}{}",
             self.name,
-            self.role.to_string(),
+            self.bucket(),
             style,
             self.standing.to_string(),
             phase,
@@ -907,8 +967,10 @@ impl Tether<'_> {
         self.book.lock().unwrap_or_else(|e| e.into_inner()).saw_strands(strands);
     }
 
-    /// Writes down what the citizen did since it last did, for the report.
+    /// Writes down what the citizen did since it last did, for the report,
+    /// and its time for the report to the server.
     pub(crate) fn record(&self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>) {
+        self.health.lock().unwrap_or_else(|e| e.into_inner()).spent(&entries);
         self.book.lock().unwrap_or_else(|e| e.into_inner()).record(entries, rulings);
     }
 
@@ -1004,8 +1066,9 @@ impl Town {
         for citizen in &roster.citizens {
             let kept = stints.remove(&citizen.name).unwrap_or_default();
             let mut health = Health::new(&citizen.name, citizen.role);
-            health.style = Some(citizen.persona.calling.style());
+            health.calling = Some(citizen.persona.calling.clone());
             health.stint = kept.job.as_deref().and_then(Role::from_slug);
+            health.stint_hours = kept.run.max(0.0);
             let health = Arc::new(Mutex::new(health));
             let book = Arc::new(Mutex::new(Book::default()));
             let kept = Arc::new(Mutex::new(kept));
@@ -1039,7 +1102,7 @@ impl Town {
             .map(|(health, book)| {
                 let (name, role) = {
                     let h = health.lock().unwrap_or_else(|e| e.into_inner());
-                    (h.name.clone(), h.role)
+                    (h.name.clone(), h.bucket())
                 };
                 let book = book.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let run = BotRun {
@@ -1352,18 +1415,7 @@ impl Reporter {
             for (by, n) in beat.rulings {
                 *report.rulings.entry(by).or_insert(0) += n;
             }
-            report.citizens.push(CitizenReport {
-                name: h.name.clone(),
-                role: h.role.slug().to_string(),
-                standing: h.standing.to_string(),
-                phase: h.phase.map(|p| p.as_str().to_string()),
-                strands: h.strands,
-                activity: h.activity.clone(),
-                restarts: h.restarts,
-                failure,
-                decisions: beat.decisions,
-                road_in: h.road_in.clone(),
-            });
+            report.citizens.push(h.report(failure, beat.decisions));
         }
         // A layer's cost so far is every citizen's together
         for (name, total) in spent {
@@ -1794,14 +1846,20 @@ key = "j"
         let now = Instant::now();
         let line = h.line(now);
         assert!(line.starts_with("Ada Reeder"), "{line}");
-        for part in ["gatherer (fiber)", "working", "market", "312 S", "gather fiber"] {
+        for part in ["gatherer-fiber", "working", "market", "312 S", "gather fiber"] {
             assert!(line.contains(part), "{line} lacks {part}");
         }
         // Its calling's style and the job of the moment (Callings K1.2)
-        h.style = Some(Style::Leaner);
+        let mut leaner = Calling::single(Role::Gatherer(Gather::Fiber));
+        leaner.focus = 0.45;
+        leaner.leanings = vec![(Role::Crafter(Craft::Planks), 0.55)];
+        h.calling = Some(leaner);
         h.stint = Some(Role::Crafter(Craft::Planks));
         let line = h.line(now);
         assert!(line.contains("leaner") && line.contains("sawing planks: gather fiber"), "{line}");
+        // An all-rounder goes by its bucket, as the reports do (K3.3)
+        h.calling = Some(Calling { favourite: None, focus: 0.0, ..h.calling.clone().unwrap() });
+        assert!(h.line(now).starts_with("Ada Reeder           all-rounder "), "{}", h.line(now));
         assert!(!line.contains("failure"));
         h.failure = Some((now, "extract refused".into()));
         h.restarts = 1;
@@ -1857,6 +1915,67 @@ key = "j"
         for _ in 0..n {
             mind.ask(&s);
         }
+    }
+
+    /// Callings K3.3: each citizen's bucket, calling, stint and time by
+    /// activity, as the console reads them.
+    #[test]
+    fn a_report_says_each_citizens_calling_stint_and_time() {
+        use crate::sim::{Activity, ROLES};
+        let wood = Role::Gatherer(Gather::Wood);
+        let planks = Role::Crafter(Craft::Planks);
+        let ada = Arc::new(Mutex::new(Health::new("Ada Reeder", wood)));
+        let cora = Arc::new(Mutex::new(Health::new("Cora Vane", planks)));
+        let view = TownView { health: vec![ada.clone(), cora.clone()], pulses: vec![Pulse::shared(), Pulse::shared()] };
+        let mut reporter = Reporter::new(view, 1_000);
+        let report = reporter.report(2_000, false);
+        assert_eq!(report.citizens[1].role, "crafter-planks", "its role until its calling is known");
+        assert!(report.citizens[1].calling.is_none() && report.citizens[1].doing.is_none() && report.citizens[1].time.is_empty());
+
+        {
+            let mut a = ada.lock().unwrap();
+            a.calling = Some(Calling {
+                favourite: Some(wood),
+                focus: 0.7,
+                leanings: vec![
+                    (Role::Gatherer(Gather::Fiber), 0.04),
+                    (Role::Gatherer(Gather::Ore), 0.03),
+                    (planks, 0.14),
+                    (Role::Builder, 0.09),
+                ],
+                wander: 0.3,
+            });
+            a.stint = Some(planks);
+            a.stint_hours = 0.756;
+            let spent = |activity, hours| Entry::Spent { label: "x".into(), hours, ok: true, activity, setup: false, day: 0 };
+            a.spent(&[spent(Activity::Wood, 1.5), Entry::Idle { hours: 0.5, day: 0 }, spent(Activity::Planks, 0.25), Entry::Stuck { reason: "no".into() }]);
+            a.spent(&[spent(Activity::Wood, 0.5)]);
+        }
+        cora.lock().unwrap().calling = Some(Calling {
+            favourite: None,
+            focus: 0.0,
+            leanings: ROLES.into_iter().map(|r| (r, 0.125)).collect(),
+            wander: 0.5,
+        });
+        let report = reporter.report(7_000, false);
+        let a = &report.citizens[0];
+        assert_eq!(a.role, "gatherer-wood");
+        let calling = a.calling.as_ref().unwrap();
+        assert_eq!((calling.style.as_str(), calling.favourite.as_deref(), calling.focus), ("specialist", Some("gatherer-wood"), 0.7));
+        // Its top leanings, the most first, none under 5%
+        let leans: Vec<(&str, f64)> = calling.leanings.iter().map(|l| (l.job.as_str(), l.share)).collect();
+        assert_eq!(leans, [("crafter-planks", 0.14), ("builder", 0.09)]);
+        let doing = a.doing.as_ref().unwrap();
+        assert_eq!((doing.job.as_str(), doing.hours), ("crafter-planks", 0.76));
+        assert_eq!(a.time, BTreeMap::from([("free".to_string(), 0.5), ("planks".to_string(), 0.25), ("wood".to_string(), 2.0)]));
+        let c = &report.citizens[1];
+        assert_eq!(c.role, "all-rounder");
+        let calling = c.calling.as_ref().unwrap();
+        assert_eq!((calling.style.as_str(), calling.favourite.as_deref(), calling.focus), ("all-rounder", None, 0.0));
+        assert_eq!(calling.leanings.len(), 3, "the top three of eight even ones");
+        assert!(c.doing.is_none(), "no stint yet");
+        // The health line buckets it the same way
+        assert!(cora.lock().unwrap().line(Instant::now()).contains(" all-rounder "));
     }
 
     #[test]

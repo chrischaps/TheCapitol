@@ -16,7 +16,8 @@
 //! the sampler also looks whether the town has gone quiet, and marks it down.
 //!
 //! Since D2.2 each sample says how people's and citizens' Strands are spread
-//! (`Distribution`), by the trades the town's newest report names.
+//! (`Distribution`), by the trades the town's newest report names: since
+//! Callings K3.3, each citizen's favourite job, or `all-rounder`.
 //!
 //! Since D2.3 each sample carries the market's books as it was taken: the
 //! units resting on each side of each item and the best price either side.

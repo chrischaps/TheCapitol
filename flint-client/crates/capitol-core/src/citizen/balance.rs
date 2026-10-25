@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use super::report::TownReport;
 use crate::sim::report::ActivityTime;
+use crate::sim::ROLES;
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -162,6 +163,10 @@ pub struct Balance {
 /// A trade's Strands, all its citizens together.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TradeMoney {
+    /// Its bucket: the favourite job's slug (`gatherer-wood`) or
+    /// `all-rounder` (Callings K3.3). A file from before named the role as
+    /// `gatherer (wood)`, which reads as its slug, so the two compare.
+    #[serde(deserialize_with = "bucket")]
     pub role: String,
     pub citizens: usize,
     pub start: i64,
@@ -175,6 +180,17 @@ pub struct TradeMoney {
     pub failed_steps: usize,
     #[serde(default)]
     pub stuck: usize,
+}
+
+/// A trade's name as a balance file has it, as its bucket: the role's
+/// slug for a role's old name (`gatherer (wood)` before K3.3), anything
+/// else as it was.
+fn bucket<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let name = String::deserialize(d)?;
+    Ok(ROLES
+        .into_iter()
+        .find(|role| role.to_string() == name)
+        .map_or(name, |role| role.slug().to_string()))
 }
 
 /// An item's price on the market over a run.
@@ -956,5 +972,23 @@ mod tests {
         let a = run("a", 0.2, 10);
         let json = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Balance>(&json).unwrap(), a);
+    }
+
+    /// Before Callings K3.3 a balance named its trades as `gatherer
+    /// (fiber)`: they read as their slugs, so an old run compares with a
+    /// new one trade by trade.
+    #[test]
+    fn a_balance_naming_trades_the_old_way_reads_as_their_slugs() {
+        let a = run("a", 0.2, 10);
+        let json = serde_json::to_string(&a)
+            .unwrap()
+            .replace("\"gatherer-fiber\"", "\"gatherer (fiber)\"")
+            .replace("\"crafter-planks\"", "\"crafter (planks)\"");
+        assert!(json.contains("gatherer (fiber)"));
+        assert_eq!(serde_json::from_str::<Balance>(&json).unwrap(), a);
+        let mut b = a.clone();
+        b.trades.push(money("all-rounder", 3, 300, 330));
+        let json = serde_json::to_string(&b).unwrap();
+        assert_eq!(serde_json::from_str::<Balance>(&json).unwrap().trades[2].role, "all-rounder");
     }
 }

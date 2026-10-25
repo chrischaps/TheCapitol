@@ -21,13 +21,16 @@
 //! handed back by a retired lot, two held.
 //! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
 //! seconds of a 20-citizen town, with its wealth pooling (D2.5), its two
-//! reports' summary (D4.1), its wealth by trade (D2.2), and the books in logs
+//! reports' summary (D4.1), its wealth by trade (D2.2, all-rounders among
+//! them since Callings K3.3), and the books in logs
 //! and planks (D2.3), planks with nobody bidding, and its deed grants (#440).
 //! `fixtures/rest/admin_feed.json` is one of each of the rest of what
 //! `GET /admin/stream` sends (D0.3); the sample is `sample.json`.
 //! `fixtures/rest/town_report.json` is `POST /admin/town/report` (D4.1): a
 //! citizen at work with two decisions, a merchant resting after a failure,
-//! and one away.
+//! and one away. The one at work is a wood specialist on a stint of planks,
+//! the one away an all-rounder last at ore, each with its time by activity
+//! (Callings K3.3); the merchant is in the shape from before callings.
 //! `fixtures/rest/admin_walkers.json` is `GET /admin/walkers` (D5.3): a
 //! citizen walking to its next leg, a person gathering, one crafting. It's
 //! also what `GET /admin/positions` (D1.3) sends, for every player.
@@ -88,7 +91,7 @@ use capitol_protocol::rest::{
     MarketListingsResponse, MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
-use capitol_protocol::metrics::{Feed, Sample, TownReport, ROLE_PERSON};
+use capitol_protocol::metrics::{Feed, Sample, TownReport, ROLE_ALL_ROUNDER, ROLE_PERSON};
 use capitol_protocol::watch::{Watch, WatchKind};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
@@ -331,6 +334,7 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(spread.roles.values().map(|h| h.strands).sum::<i64>(), sample.strands.citizens + sample.strands.people);
     assert_eq!(spread.roles.values().map(|h| h.accounts).sum::<u64>(), spread.accounts);
     assert_eq!(spread.roles[ROLE_PERSON].accounts, sample.players.people);
+    assert_eq!(spread.roles[ROLE_ALL_ROUNDER].accounts, 3, "all-rounders together (Callings K3.3)");
     assert_eq!(sample.grants.returned, 1);
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
 }
@@ -359,7 +363,36 @@ fn a_town_report_round_trips_with_its_decisions() {
     assert_eq!(report.layers["jev"].mean_ms(), Some(212.4));
     assert_eq!(report.standing()["away"], 1);
     assert!(!report.stopping);
+    // Callings K3.3: the calling, the stint and the time
+    let ada = &report.citizens[0];
+    let calling = ada.calling.as_ref().unwrap();
+    assert_eq!((calling.style.as_str(), calling.favourite.as_deref()), ("specialist", Some("gatherer-wood")));
+    assert_eq!(calling.leanings[0].job, "crafter-planks");
+    assert_eq!(ada.doing.as_ref().unwrap().job, "crafter-planks");
+    assert_eq!(ada.time.values().sum::<f64>(), 5.25);
+    let cora = &report.citizens[2];
+    assert_eq!(cora.role, ROLE_ALL_ROUNDER);
+    assert_eq!(cora.calling.as_ref().unwrap().favourite, None);
+    // A citizen from a town before callings has none of them
+    let bram = &report.citizens[1];
+    assert!(bram.calling.is_none() && bram.doing.is_none() && bram.time.is_empty());
     assert_eq!(serde_json::to_string(&report).unwrap(), json);
+}
+
+#[test]
+fn a_town_report_from_before_callings_still_reads() {
+    let json = fixture("town_report.json");
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    for citizen in value["citizens"].as_array_mut().unwrap() {
+        let citizen = citizen.as_object_mut().unwrap();
+        for key in ["calling", "doing", "time"] {
+            citizen.remove(key);
+        }
+    }
+    let old: TownReport = serde_json::from_value(value).unwrap();
+    assert!(old.citizens.iter().all(|c| c.calling.is_none() && c.doing.is_none() && c.time.is_empty()));
+    let again = serde_json::to_string(&old).unwrap();
+    assert!(!again.contains("\"calling\"") && !again.contains("\"doing\"") && !again.contains("\"time\""));
 }
 
 #[test]

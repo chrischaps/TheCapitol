@@ -666,7 +666,7 @@ mod tests {
         vec![
             run(
                 "Percy Sawyer",
-                "gatherer (wood)",
+                "gatherer-wood",
                 vec![
                     made("log", 12),
                     made("log", 8),
@@ -680,7 +680,7 @@ mod tests {
             ),
             run(
                 "Ada Wright",
-                "crafter (planks)",
+                "crafter-planks",
                 vec![traded("log", false, 10, 6), Entry::Claimed { cost: 250 }],
                 400,
                 90,
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(report.sim.hours, 10.0);
         assert_eq!(report.day_hours, 12.0);
         let md = report.to_markdown();
-        assert!(md.contains("| Percy Sawyer | gatherer (wood) | 100 → 160 | 20 (20 log) | 10 (60) | 0 (0) | 0 | 0 | 3 (no logs near) |"), "{md}");
+        assert!(md.contains("| Percy Sawyer | gatherer-wood | 100 → 160 | 20 (20 log) | 10 (60) | 0 (0) | 0 | 0 | 3 (no logs near) |"), "{md}");
         assert!(md.contains("| rules | 18 | 90.0% |"), "{md}");
         assert!(md.contains("## Production"), "the sim's sections follow");
         assert!(!md.contains("## Conservation"), "no soak, no books");
@@ -730,14 +730,14 @@ mod tests {
         let runs = vec![
             run(
                 "Percy Sawyer",
-                "gatherer (wood)",
+                "gatherer-wood",
                 vec![spent(3.0, Activity::Wood, 5), spent(1.0, Activity::Commons, 5), Entry::Idle { hours: 4.0, day: 5 }],
                 0,
                 0,
             ),
             run(
                 "Ada Wright",
-                "gatherer (wood)",
+                "gatherer-wood",
                 vec![spent(2.0, Activity::Wood, 5), spent(2.0, Activity::RoadIn, 6)],
                 0,
                 0,
@@ -750,12 +750,12 @@ mod tests {
             md.contains("| Trade | Work hours | Wood | Commons | Road in | Free | Setup | Jobs a day (fewest) | Activities a day (fewest) |"),
             "only the activities that had time: {md}"
         );
-        assert!(md.contains("| gatherer (wood) | 8.0 | 62% | 12% | 25% | 33% |  | 0.7 (0) | 1.3 (1) |"), "{md}");
-        assert!(md.contains("| Percy Sawyer | gatherer (wood) | 4.0 | 75% | 25% |  | 50% |  | 1.0 (1) | 2.0 (2) |"), "{md}");
+        assert!(md.contains("| gatherer-wood | 8.0 | 62% | 12% | 25% | 33% |  | 0.7 (0) | 1.3 (1) |"), "{md}");
+        assert!(md.contains("| Percy Sawyer | gatherer-wood | 4.0 | 75% | 25% |  | 50% |  | 1.0 (1) | 2.0 (2) |"), "{md}");
         let csv = report.activity_csv();
         assert_eq!(csv.lines().count(), 4, "a header and three citizen-days: {csv}");
         assert!(csv.starts_with("citizen,role,day,fiber_hours,"), "{csv}");
-        assert!(csv.contains("\nAda Wright,gatherer (wood),6,"), "{csv}");
+        assert!(csv.contains("\nAda Wright,gatherer-wood,6,"), "{csv}");
         assert!(csv.trim_end().ends_with(",2.000,0.000,0,1"), "{csv}");
     }
 
@@ -837,7 +837,7 @@ mod tests {
             ("property_tax".to_string(), -1),
         ]);
         end.escrow_strands = 9;
-        let runs = vec![run("Percy Sawyer", "gatherer (wood)", vec![], 100, 149)];
+        let runs = vec![run("Percy Sawyer", "gatherer-wood", vec![], 100, 149)];
         assert_eq!(runs[0].0.tax(), -49, "the residue counts what isn't tax");
         let soak = Soak {
             start: start.clone(),
@@ -866,7 +866,7 @@ mod tests {
         let targets = BTreeMap::from([("log".to_string(), 5)]);
         let run = Balance::of(&report, "tax-20pct.toml", knobs.clone(), &targets).unwrap();
         assert_eq!((run.preset.as_str(), &run.tunables, run.citizens), ("tax-20pct.toml", &knobs, 2));
-        let percy = run.trades.iter().find(|t| t.role == "gatherer (wood)").unwrap();
+        let percy = run.trades.iter().find(|t| t.role == "gatherer-wood").unwrap();
         assert_eq!((percy.start, percy.end), (100, 160));
         assert_eq!(run.flows["exchange_deposit"], 60);
         assert_eq!((run.faucets, run.sinks), (60, 0));

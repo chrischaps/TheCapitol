@@ -33,7 +33,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use capitol_protocol::metrics::{CallingReport, Leaning, ROLE_ALL_ROUNDER};
+
 use super::persona::Rng;
+use crate::sim::stint::WILLING;
 use crate::sim::{Craft, Gather, Role, ROLES};
 
 /// An all-rounder's favourite, as the roster and the log write it.
@@ -304,6 +307,49 @@ impl Calling {
             return Err("gives no time to anything; a calling needs a focus or a lean more than 0".into());
         }
         Ok(())
+    }
+}
+
+impl Calling {
+    /// The bucket a report counts it in (K3.3): its favourite's slug
+    /// (`gatherer-wood`), or `all-rounder`. The town's report to the
+    /// server, its own report, `compare` and the health line all use it.
+    pub fn bucket(&self) -> &'static str {
+        self.favourite.map_or(ROLE_ALL_ROUNDER, |job| job.slug())
+    }
+
+    /// Its other jobs it leans to most, the most first: those it's willing
+    /// to work at ([`WILLING`]), at most `most`. A tie keeps [`ROLES`]'
+    /// order.
+    pub fn leaning_most(&self, most: usize) -> Vec<(Role, f32)> {
+        let mut leaning: Vec<(Role, f32)> = ROLES
+            .into_iter()
+            .filter(|&r| Some(r) != self.favourite)
+            .map(|r| (r, self.share(r)))
+            .filter(|&(_, share)| share >= WILLING)
+            .collect();
+        leaning.sort_by(|a, b| b.1.total_cmp(&a.1));
+        leaning.truncate(most);
+        leaning
+    }
+
+    /// As the town's report to the server has it (K3.3): its style, its
+    /// favourite and its top three leanings, each share to two places.
+    pub fn report(&self) -> CallingReport {
+        let two = |v: f32| (f64::from(v) * 100.0).round() / 100.0;
+        CallingReport {
+            style: self.style().as_str().to_string(),
+            favourite: self.favourite.map(|job| job.slug().to_string()),
+            focus: self.favourite.map_or(0.0, |job| two(self.share(job))),
+            leanings: self
+                .leaning_most(3)
+                .into_iter()
+                .map(|(job, share)| Leaning {
+                    job: job.slug().to_string(),
+                    share: two(share),
+                })
+                .collect(),
+        }
     }
 }
 

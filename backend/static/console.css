@@ -109,6 +109,22 @@
   --n-tin_vein: #8d9aa6;
   --n-iron_vein: #6d3b33;
   --n-other: #6b6150;
+  /* a citizen's time by activity (Callings K0.1, K3.3): the gatherers in
+     their nodes' inks, the crafts in their materials', building in clay,
+     trading in the accent's gold, the Commons in the fees' violet. Defined
+     once, so each theme's inks carry through */
+  --a-fiber: var(--n-grass);
+  --a-wood: var(--n-tree);
+  --a-ore: var(--n-iron_vein);
+  --a-planks: var(--n-fallen_branches);
+  --a-ingots: var(--n-tin_vein);
+  --a-tools: var(--s2);
+  --a-building: var(--n-clay_bank);
+  --a-trading: var(--accent);
+  --a-commons: var(--fl-fees);
+  --a-detour: var(--fl-tax);
+  --a-road_in: var(--fl-newcomers);
+  --a-free: var(--hair);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -658,12 +674,27 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
 .roster .standing-retired::before, .roster .standing-stopped::before { color: var(--down); }
 .roster .standing-away, .roster .standing-retired, .roster .standing-stopped { color: var(--ink-dim); }
 .roster td.trade { white-space: nowrap; }
+.roster .stint { color: var(--ink-dim); }
+/* Time by activity (K3.3): the work's shares as one bar, the biggest named after it */
+.roster td.time { white-space: nowrap; font-size: 13px; }
+.timebar {
+  display: inline-flex; width: 88px; height: 9px; margin-right: 8px; vertical-align: -1px;
+  border-radius: 2px; overflow: hidden; background: var(--well); box-shadow: inset 0 0 0 1px var(--hair);
+}
+.timebar i { display: block; flex: 0 1 0; min-width: 1px; }
+.legend { margin: 8px 0 0; font-size: 12px; color: var(--ink-dim); line-height: 1.8; }
+.legend:empty { display: none; }
+.legend .key { white-space: nowrap; margin-right: 12px; }
+.legend .key::before {
+  content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 5px; vertical-align: -1px;
+  border-radius: 1px; background: var(--c);
+}
 .roster td.failure { color: var(--down); min-width: 16em; max-width: 28em; }
 .roster td.failure .dim { display: block; font-size: 12px; }
 @media (max-width: 640px) {
   .roster th:nth-child(2), .roster td:nth-child(2),
   .roster th:nth-child(4), .roster td:nth-child(4),
-  .roster th:nth-child(7), .roster td:nth-child(7) { display: none; }
+  .roster th:nth-child(8), .roster td:nth-child(8) { display: none; }
   #town-layers th:nth-child(4), #town-layers td:nth-child(4),
   #town-layers th:nth-child(6), #town-layers td:nth-child(6) { display: none; }
 }

@@ -19,7 +19,9 @@
 //!
 //! Since D2.2 the newest report also names each citizen's trade
 //! ([`Town::roles`]), for the wealth by role in each sample's
-//! `Distribution`.
+//! `Distribution`. Since Callings K3.3 that's its calling's bucket: its
+//! favourite job's slug, or `all-rounder`. A town from before callings
+//! names the trade's slug, which is the same key.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -133,8 +135,9 @@ impl Town {
         Some(TownLatest { received_ms: *received_ms, up: inner.up, report })
     }
 
-    /// Each citizen's trade, by name, from the newest report: empty until
-    /// a town reports. It holds after the town goes down, since the trades
+    /// Each citizen's trade, by name, from the newest report: its
+    /// favourite job's slug or `all-rounder` (Callings K3.3). Empty until a
+    /// town reports. It holds after the town goes down, since callings
     /// don't change while it's away.
     pub fn roles(&self) -> HashMap<String, String> {
         let inner = self.inner();
@@ -241,6 +244,12 @@ mod tests {
         assert_eq!((roles["Ada"].as_str(), roles["Bo"].as_str()), ("merchant", "gatherer-wood"));
         town.quiet(1_000 + TOWN_QUIET_MS);
         assert_eq!(town.roles().len(), 2, "kept while the town is down");
+        // Callings K3.3: an all-rounder is counted with the all-rounders
+        let mut later = report(1, &[("Ada", &[]), ("Bo", &[])]);
+        later.citizens[0].role = "merchant".into();
+        later.citizens[1].role = capitol_protocol::metrics::ROLE_ALL_ROUNDER.into();
+        town.receive(later, 70_000);
+        assert_eq!(town.roles()["Bo"], "all-rounder");
     }
 
     #[test]

@@ -194,7 +194,7 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
                         Ok(bot) => SimBot::new(bot, role, i as u64, scale, started, trading, Mind::rules()).play(config.hours),
                         Err(e) => BotRun {
                             name: account.name.clone(),
-                            role: role.to_string(),
+                            role: role.slug().to_string(),
                             entries: Vec::new(),
                             strands_start: 0,
                             strands_end: 0,
@@ -520,7 +520,7 @@ impl SimBot {
         self.journal();
         BotRun {
             name: self.bot.name().to_string(),
-            role: self.role.to_string(),
+            role: self.role.slug().to_string(),
             strands_start,
             strands_end: self.bot.state().strands().unwrap_or(0),
             entries: self.entries,
@@ -742,11 +742,17 @@ impl SimBot {
                 town.record(std::mem::take(&mut self.entries), self.mind.take_rulings());
                 let strands = self.bot.state().strands();
                 let road = self.road_progress().map(|p| RoadInReport::of(&p));
-                let stint = self.stints.on.map(|s| s.job);
+                let now = self.now();
+                let stint = self.stints.on.map(|s| (s.job, s.run(now)));
                 town.health(|h| {
                     h.strands = strands;
                     h.road_in = road.or(h.road_in.take());
-                    h.stint = stint;
+                    if let Some((job, run)) = stint {
+                        h.stint = Some(job);
+                        h.stint_hours = run;
+                    } else {
+                        h.stint = None;
+                    }
                 });
                 // Its stint and what it did lately, for its next session
                 self.credit();

@@ -121,7 +121,9 @@ pub enum Entry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BotRun {
     pub name: String,
-    /// `gatherer (wood)`, `builder`.
+    /// The bucket its report counts it in: its role's slug
+    /// (`gatherer-wood`, `builder`), a citizen's calling's (its favourite's
+    /// slug or `all-rounder`, Callings K3.3), or [`MAKER_ROLE`].
     pub role: String,
     pub entries: Vec<Entry>,
     pub strands_start: i64,

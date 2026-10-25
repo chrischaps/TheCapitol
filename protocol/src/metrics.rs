@@ -321,6 +321,9 @@ pub const ROLE_PERSON: &str = "person";
 /// The role of a citizen the town hasn't named a trade for: no town has
 /// reported, or it isn't on the roster
 pub const ROLE_CITIZEN: &str = "citizen";
+/// The role of a citizen with no favourite job (Callings K3.3): an
+/// all-rounder. Every other citizen's is its favourite's slug.
+pub const ROLE_ALL_ROUNDER: &str = "all-rounder";
 
 /// How the Strands people and citizens hold are spread (D2.2). Admins'
 /// aren't counted, as the Gini watch doesn't count them, nor is escrow.
@@ -335,8 +338,10 @@ pub struct Distribution {
     /// The share the richest tenth of them hold ([`top_tenth_share`])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_tenth: Option<f64>,
-    /// Their Strands by role: each citizen's trade from the town's report
-    /// (`gatherer-wood`, `merchant`), [`ROLE_CITIZEN`] for one it doesn't
+    /// Their Strands by role: each citizen's from the town's report, its
+    /// favourite job's slug (`gatherer-wood`, `merchant`) or
+    /// [`ROLE_ALL_ROUNDER`] (Callings K3.3; before callings, its trade's
+    /// slug, which reads the same), [`ROLE_CITIZEN`] for one it doesn't
     /// name, and [`ROLE_PERSON`] for people
     pub roles: BTreeMap<String, Holding>,
 }
@@ -595,7 +600,9 @@ impl TownReport {
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct CitizenReport {
     pub name: String,
-    /// `gatherer-wood`, `merchant`
+    /// The bucket its wealth and time are counted in: its favourite job's
+    /// slug (`gatherer-wood`, `merchant`), or [`ROLE_ALL_ROUNDER`]
+    /// (Callings K3.3). Before callings, its trade's slug.
     pub role: String,
     /// Where its life stands: `starting`, `working`, `resting`, `offline`,
     /// `waiting`, `away`, `retired` or `stopped`
@@ -620,6 +627,58 @@ pub struct CitizenReport {
     /// Where it is on the road in (#450), once it has signed in and heard
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub road_in: Option<RoadInReport>,
+    /// Who it is, as work goes (Callings K3.3): its style, favourite and
+    /// top leanings. `None` from a town before callings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calling: Option<CallingReport>,
+    /// The job of the moment, its stint (Callings K1.2), and how long it's
+    /// run. Kept while it's away: the job it was last at. `None` before its
+    /// first stint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doing: Option<StintReport>,
+    /// Game hours on each activity since the town started (Callings K0.1),
+    /// by the activity's slug: `fiber`, `wood`, …, `trading`, `commons`,
+    /// `detour`, `road_in`, and `free` for time with nothing to do
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub time: BTreeMap<String, f64>,
+}
+
+/// A citizen's calling, briefly (Callings K3.3): what the console's roster
+/// says of it ("Wood, also ore and planks", "All-rounder").
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CallingReport {
+    /// `specialist`, `leaner` or `all-rounder`
+    pub style: String,
+    /// Its favourite job's slug (`gatherer-wood`); none for an all-rounder
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favourite: Option<String>,
+    /// The favourite's share of its work time, 0 to 1; 0 without one
+    pub focus: f64,
+    /// Its other jobs it leans to most, the most first: at most three, each
+    /// a share it's willing to work at (5% and over)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leanings: Vec<Leaning>,
+}
+
+/// One of the jobs a calling leans to.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Leaning {
+    /// The job's slug: `crafter-planks`
+    pub job: String,
+    /// Its share of the work time, 0 to 1
+    pub share: f64,
+}
+
+/// A citizen's stint (Callings K1.2): the job it's at, and for how long.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct StintReport {
+    /// The job's slug: `crafter-planks`
+    pub job: String,
+    /// Game hours it has run, over its sessions
+    pub hours: f64,
 }
 
 /// Where a citizen is on the road in (#450), briefly: the console's
