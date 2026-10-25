@@ -172,7 +172,8 @@ pub struct Session {
     /// Where the last leg sent you, in server units (P4.3).
     last_move: Option<(f64, f64)>,
     /// The walk under way, round the water by the walk graph (#267): a
-    /// `move` a leg.
+    /// `move` a leg. One that can't go straight is planned on a thread of
+    /// its own first (#348).
     route: Walk,
     /// Walking on a heading (controls T1.3): the movement keys, turned
     /// into `steer`s.
@@ -676,7 +677,10 @@ impl Session {
 
     /// Every walk goes round the water: by the walk graph, a leg at a time
     /// ([`Self::tend_route`] sends the rest), or straight while there's no
-    /// graph or no way round.
+    /// graph or no way round. A walk that can't go straight is planned off
+    /// the main thread, so a click into the ranges doesn't hold the frame
+    /// (#348): [`Self::tend_route`] sends its first leg when the plan is
+    /// back, a frame or two later in the city.
     fn walk(&mut self, now: Instant, x: f64, y: f64) {
         // Another device plays the avatar (E0.8): nothing to predict, and the
         // server would refuse the move.
@@ -689,8 +693,9 @@ impl Session {
             return;
         };
         let from = (me.x, me.y);
-        let (lx, ly) = self.route.plan(self.walks.as_deref(), from, (x, y), now);
-        self.leg(now, lx, ly);
+        if let Some((lx, ly)) = self.route.request(self.walks.clone(), from, (x, y), now) {
+            self.leg(now, lx, ly);
+        }
     }
 
     /// Sends one straight leg: the prediction starts at once and the server
@@ -701,7 +706,8 @@ impl Session {
         self.last_move = Some((x, y));
     }
 
-    /// Each frame: the walk's next leg, as the last one ends.
+    /// Each frame: the walk's first leg once it's planned, and its next as
+    /// the last one ends.
     fn tend_route(&mut self, now: Instant) {
         if !self.route.is_walking() {
             return;
@@ -3742,6 +3748,8 @@ mod tests {
         // Outside the outer canal (r 1000) and inside it, at 20°, where it has no bridge
         for (what, to) in [("the canal's outer bank", polar(1100.0, 20.0)), ("over the canal", polar(900.0, 20.0))] {
             session.move_to(Instant::now(), to.0, to.1);
+            // A walk that can't go straight is planned on a thread (#348)
+            wait(&mut session, "the plan", 10, &|s| !s.route.is_planning());
             let corners = session.route();
             let started = Instant::now();
             wait(&mut session, what, 300, &|s| {

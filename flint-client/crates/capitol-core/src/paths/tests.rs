@@ -369,6 +369,21 @@ fn a_pocket_walled_by_crests_has_no_way_in_or_out() {
 }
 
 #[test]
+fn a_plan_nobody_wants_is_given_up() {
+    let (_, graph) = world();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    let vein = (15329.1, 11083.0);
+    let asked = std::cell::Cell::new(0);
+    let gone = || {
+        asked.set(asked.get() + 1);
+        true
+    };
+    assert_eq!(graph.plan_unless(hall, vein, &gone), None);
+    assert!(asked.get() > 0);
+    assert_eq!(graph.plan_unless(hall, vein, &|| false), Some(Err(NoWay::Unreachable)));
+}
+
+#[test]
 fn walks_go_round_the_ponds_of_the_rural_ring() {
     // C1.2's citizen walking home was stopped by a rural lake (#280): from
     // one side of each pond to the other, both ways.
@@ -471,4 +486,38 @@ fn print_join_reaches() {
             &sizes[..sizes.len().min(8)]
         );
     }
+}
+
+/// How long a click into the wilds takes to plan, from the Exchange hall
+/// (#348): the median, the slowest tenth and the slowest, and the pocket of
+/// #347. Run in release.
+#[test]
+#[ignore]
+fn print_click_times() {
+    let (_, graph) = world();
+    let land = graph.ground.land().clone();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    let mut rng = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut times = Vec::new();
+    while times.len() < 200 {
+        let to = polar(6200.0 + 2000.0 * next(), 360.0 * next());
+        if land::slope_at(to.0, to.1, &land) > 0.6 || graph.ground.water_at(to.0, to.1).is_some() {
+            continue;
+        }
+        let start = Instant::now();
+        let _ = graph.plan(hall, to);
+        times.push(start.elapsed());
+    }
+    times.sort();
+    let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+    eprintln!("{} clicks: median {:?}, p90 {:?}, max {:?}", times.len(), at(0.5), at(0.9), at(1.0));
+    let start = Instant::now();
+    let _ = graph.plan(hall, (15329.1, 11083.0));
+    eprintln!("the pocket: {:?}", start.elapsed());
 }

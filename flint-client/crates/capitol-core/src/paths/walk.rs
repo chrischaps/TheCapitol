@@ -10,13 +10,22 @@
 //! never puts it in a canal by a bridge. With no graph, or no way round,
 //! the walk is one straight leg, and the bank answers it with
 //! `movement_blocked` as before.
+//!
+//! [`Walk::request`] is the Flint client's way in (#348): a walk that can't
+//! go straight is planned on a thread of its own ([`Planning`]), since a
+//! click into the ranges can take most of a second to plan, and
+//! [`Walk::next`] sends its first leg when the plan comes back.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rules::PLAYER_SPEED;
 
-use super::{distance, Point, WalkGraph};
+use super::{distance, NoWay, Point, WalkGraph};
 
 /// The server is at a corner within this: the next leg goes even when the
 /// straight line from where it stands can't be checked.
@@ -27,36 +36,54 @@ const LEG_SLACK: f64 = 1.5;
 const LEG_GRACE: Duration = Duration::from_secs(5);
 
 /// The legs of a walk still to go.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Walk {
     /// The leg sent, not yet walked: where it ends, and when it has stalled.
     leg: Option<(Point, Instant)>,
     /// The legs after it, in order. The last is the destination.
     ahead: VecDeque<Point>,
+    /// The walk being planned, before it has a leg ([`Self::request`]).
+    planning: Option<Planning>,
 }
 
 impl Walk {
     /// Plans a walk from `from` (where the server has you) to `to`, and
     /// returns the first leg to send. Any walk under way is dropped.
     pub fn plan(&mut self, graph: Option<&WalkGraph>, from: Point, to: Point, now: Instant) -> Point {
-        let legs = match graph.map(|g| g.route(from, to)) {
-            Some(Some(legs)) => legs,
-            Some(None) => {
-                tracing::info!("walk: no way round to ({:.0}, {:.0}); going straight", to.0, to.1);
-                vec![to]
+        let planned = graph.map_or_else(|| Ok(vec![to]), |g| g.plan(from, to));
+        self.stop();
+        self.follow(graph, from, from, to, planned, now)
+    }
+
+    /// Starts a walk from `from` (where the server has you) to `to`,
+    /// dropping any under way. A walk that can go straight, or that has no
+    /// graph to go round by, goes at once: the first leg to send. Any other
+    /// is planned on a thread of its own, and [`Self::next`] gives its first
+    /// leg when the plan comes back: in a frame or two in the city, and in
+    /// most of a second for a walk into the ranges, which held the frame
+    /// while it was planned here (#348).
+    pub fn request(&mut self, graph: Option<Arc<WalkGraph>>, from: Point, to: Point, now: Instant) -> Option<Point> {
+        self.stop();
+        match graph {
+            Some(graph) if !graph.walkable(from, to) => {
+                self.planning = Some(Planning::start(graph, from, to));
+                None
             }
-            None => vec![to],
-        };
-        self.ahead = legs.into();
-        let first = self.ahead.pop_front().unwrap_or(to);
-        self.leg = Some((first, now + leg_time(graph, from, first)));
-        first
+            graph => Some(self.follow(graph.as_deref(), from, from, to, Ok(vec![to]), now)),
+        }
     }
 
     /// Each frame while walking: the next leg to send, if it's time.
     /// `predicted` is false while the prediction is still walking its leg,
-    /// `server` is where the server last had you.
+    /// `server` is where the server last had you. A walk being planned
+    /// sends its first leg once the plan is back.
     pub fn next(&mut self, graph: Option<&WalkGraph>, predicted: bool, server: Point, now: Instant) -> Option<Point> {
+        if let Some(planning) = &self.planning {
+            let planned = planning.answer()?;
+            let (from, to) = (planning.from, planning.to);
+            self.planning = None;
+            return Some(self.follow(graph, from, server, to, planned, now));
+        }
         let (corner, stalls) = self.leg?;
         let Some(&next) = self.ahead.front() else {
             // The last leg: done once walked, as a straight walk is
@@ -78,26 +105,119 @@ impl Walk {
         None
     }
 
+    /// Follows the walk planned from `from`, setting out from `server`,
+    /// where the server has you now, and returns the first leg to send. If
+    /// you walked on while it was planned (on the leg you were on when you
+    /// clicked) and the first leg isn't walkable from where you've got to,
+    /// it goes back to `from` first. With no way round it goes straight.
+    fn follow(
+        &mut self,
+        graph: Option<&WalkGraph>,
+        from: Point,
+        server: Point,
+        to: Point,
+        planned: Result<Vec<Point>, NoWay>,
+        now: Instant,
+    ) -> Point {
+        let mut legs = match planned {
+            Ok(legs) => legs,
+            Err(_) => {
+                tracing::info!("walk: no way round to ({:.0}, {:.0}); going straight", to.0, to.1);
+                vec![to]
+            }
+        };
+        if let (Some(g), Some(&first)) = (graph, legs.first()) {
+            if distance(server, from) >= AT_CORNER && !g.walkable(server, first) {
+                legs.insert(0, from);
+            }
+        }
+        self.ahead = legs.into();
+        let first = self.ahead.pop_front().unwrap_or(to);
+        self.leg = Some((first, now + leg_time(graph, server, first)));
+        first
+    }
+
     /// The walk is over: you went elsewhere, the water stopped you, or you
-    /// started to gather or craft.
+    /// started to gather or craft. A plan still being made is given up.
     pub fn stop(&mut self) {
         self.leg = None;
         self.ahead.clear();
+        self.planning = None;
     }
 
+    /// Walking, or about to: the walk is being planned.
     pub fn is_walking(&self) -> bool {
-        self.leg.is_some()
+        self.leg.is_some() || self.planning.is_some()
     }
 
-    /// Where the walk ends, while it's under way.
+    /// The walk is being planned, and has no leg yet.
+    pub fn is_planning(&self) -> bool {
+        self.planning.is_some()
+    }
+
+    /// Where the walk ends, while it's under way or being planned.
     pub fn destination(&self) -> Option<Point> {
-        self.leg.map(|(corner, _)| self.ahead.back().copied().unwrap_or(corner))
+        match &self.planning {
+            Some(planning) => Some(planning.to),
+            None => self.leg.map(|(corner, _)| self.ahead.back().copied().unwrap_or(corner)),
+        }
     }
 
     /// The corners still to pass, the one being walked to first, ending at
-    /// the destination. Empty when standing.
+    /// the destination. Empty when standing, and while the walk is planned.
     pub fn corners(&self) -> impl Iterator<Item = Point> + '_ {
         self.leg.map(|(corner, _)| corner).into_iter().chain(self.ahead.iter().copied())
+    }
+}
+
+/// A walk planned on a thread of its own (#348), from where the server had
+/// you to where you clicked. Dropping it gives the plan up: a newer click,
+/// a steer or a gather doesn't wait on the old one, and its thread stops
+/// within a few dozen of the grid's cells ([`WalkGraph::plan_unless`]).
+#[derive(Debug)]
+pub struct Planning {
+    from: Point,
+    to: Point,
+    answer: Receiver<Result<Vec<Point>, NoWay>>,
+    gone: Arc<AtomicBool>,
+}
+
+impl Planning {
+    /// Starts planning the walk from `from` to `to` on `graph`.
+    pub fn start(graph: Arc<WalkGraph>, from: Point, to: Point) -> Self {
+        let (tell, answer) = mpsc::channel();
+        let gone = Arc::new(AtomicBool::new(false));
+        let asked = gone.clone();
+        let spawned = thread::Builder::new().name("walk-plan".into()).spawn(move || {
+            if let Some(planned) = graph.plan_unless(from, to, &|| asked.load(Ordering::Relaxed)) {
+                let _ = tell.send(planned);
+            }
+        });
+        // With no thread the answer is "no way", and the walk goes straight
+        if let Err(e) = spawned {
+            tracing::warn!("walk: couldn't start planning: {e}");
+        }
+        Planning { from, to, answer, gone }
+    }
+
+    /// Where the walk is to.
+    pub fn to(&self) -> Point {
+        self.to
+    }
+
+    /// The plan, once it's back. A thread that ended without one is no way.
+    pub fn answer(&self) -> Option<Result<Vec<Point>, NoWay>> {
+        match self.answer.try_recv() {
+            Ok(planned) => Some(planned),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(NoWay::Unreachable)),
+        }
+    }
+}
+
+impl Drop for Planning {
+    fn drop(&mut self) {
+        self.gone.store(true, Ordering::Relaxed);
     }
 }
 
@@ -193,5 +313,61 @@ mod tests {
         assert_eq!(walk.corners().count(), 1);
         walk.stop();
         assert_eq!(walk.destination(), None);
+    }
+
+    #[test]
+    fn a_walk_that_cant_go_straight_is_planned_on_a_thread_of_its_own() {
+        let graph = Arc::new(WalkGraph::new(&one_canal()));
+        let now = Instant::now();
+        let mut walk = Walk::default();
+        // On the same side it goes at once
+        assert_eq!(walk.request(Some(graph.clone()), FROM, (6950.0, 7950.0), now), Some((6950.0, 7950.0)));
+        assert!(!walk.is_planning());
+        assert_eq!(walk.request(None, FROM, TO, now), Some(TO), "with no graph, straight");
+
+        // Over the canal it's planned, and has no leg until the plan is back
+        assert_eq!(walk.request(Some(graph.clone()), FROM, TO, now), None);
+        assert!(walk.is_walking() && walk.is_planning());
+        assert_eq!(walk.destination(), Some(TO));
+        assert_eq!(walk.corners().count(), 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let first = loop {
+            if let Some(first) = walk.next(Some(&graph), false, FROM, now) {
+                break first;
+            }
+            assert!(Instant::now() < deadline, "the plan never came back");
+            thread::sleep(Duration::from_millis(1));
+        };
+        let planned = graph.route(FROM, TO).unwrap();
+        assert_eq!(first, planned[0]);
+        assert_eq!(walk.corners().collect::<Vec<_>>(), planned);
+        assert!(walk.is_walking() && !walk.is_planning());
+
+        // Stopping gives a plan up
+        walk.request(Some(graph.clone()), FROM, TO, now);
+        walk.stop();
+        assert!(!walk.is_walking());
+        assert_eq!(walk.destination(), None);
+    }
+
+    #[test]
+    fn walked_on_while_it_was_planned_it_goes_back_by_where_it_was_planned_from() {
+        let graph = WalkGraph::new(&one_canal());
+        let now = Instant::now();
+        let mut walk = Walk::default();
+        let planned = graph.route(FROM, TO).unwrap();
+        // Walking east when you clicked: from there the canal is in the way
+        // of the plan's first corner, by the bridge
+        let east = (7300.0, 7800.0);
+        assert!(!graph.walkable(east, planned[0]), "{planned:?}");
+        let first = walk.follow(Some(&graph), FROM, east, TO, Ok(planned.clone()), now);
+        assert_eq!(first, FROM);
+        assert_eq!(walk.corners().skip(1).collect::<Vec<_>>(), planned);
+
+        // A step on, with the first corner still in sight, it goes straight there
+        let near = (6905.0, 7900.0);
+        assert_eq!(walk.follow(Some(&graph), FROM, near, TO, Ok(planned.clone()), now), planned[0]);
+        // No way round goes straight
+        assert_eq!(walk.follow(Some(&graph), FROM, FROM, TO, Err(NoWay::Unreachable), now), TO);
     }
 }

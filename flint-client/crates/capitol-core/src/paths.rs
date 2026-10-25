@@ -58,7 +58,7 @@ use capitol_protocol::tutorial::stops;
 use crate::citizen::idle::Places;
 
 mod walk;
-pub use walk::Walk;
+pub use walk::{Planning, Walk};
 
 /// The longest stretch of road between two nodes. A street that ends on a
 /// long arterial segment has a node of it within half of this.
@@ -122,9 +122,12 @@ const GRID_SIGHT: f64 = 30.0;
 const GRID_TARGETS: usize = 16;
 /// The most cells it looks at before it gives up: a pocket of ground walled
 /// by crests, say (#347). A way out of the ranges takes at most about 9000.
-/// Giving up takes about half a second, on the Flint client's main thread
-/// when it's a click ([#348](https://github.com/chrischaps/TheCapitol/issues/348)).
+/// Giving up can take most of a second, which is why the Flint client plans
+/// a click on a thread of its own ([`Planning`], #348).
 const GRID_CELLS: usize = 20_000;
+/// How many of the grid's cells it looks at between asking whether the walk
+/// is still wanted ([`WalkGraph::plan_unless`]).
+const GRID_ASK: usize = 64;
 /// The slowest the cost lets a leg go, as a share of full speed.
 const SLOWEST: f64 = 0.05;
 
@@ -163,6 +166,10 @@ pub enum NoWay {
     /// the crests ([#347](https://github.com/chrischaps/TheCapitol/issues/347)).
     Unreachable,
 }
+
+/// A plan given up because nobody wants it any more ([`WalkGraph::plan_unless`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Gone;
 
 /// Which way an access leg runs: from a point onto the graph, or off it to one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,19 +433,35 @@ impl WalkGraph {
     /// can't be reached from, or `to` somewhere it can't reach (in a lake,
     /// up a crag, in a pocket of ground walled by crests).
     pub fn plan(&self, from: Point, to: Point) -> Result<Vec<Point>, NoWay> {
+        self.planned(from, to, &|| false).unwrap_or(Err(NoWay::Unreachable))
+    }
+
+    /// [`Self::plan`], given up (`None`) as soon as `gone` says nobody wants
+    /// it: a click's plan that a newer click replaced (#348). A walk over the
+    /// grid in the ranges can take most of a second.
+    pub fn plan_unless(&self, from: Point, to: Point, gone: &dyn Fn() -> bool) -> Option<Result<Vec<Point>, NoWay>> {
+        self.planned(from, to, gone).ok()
+    }
+
+    fn planned(&self, from: Point, to: Point, gone: &dyn Fn() -> bool) -> Result<Result<Vec<Point>, NoWay>, Gone> {
         if self.walkable(from, to) {
-            return Ok(vec![to]);
+            return Ok(Ok(vec![to]));
         }
-        let ons = self.access(from, Way::On);
+        let ons = self.access(from, Way::On, gone)?;
         if ons.is_empty() {
-            return Err(NoWay::Stranded);
+            return Ok(Err(NoWay::Stranded));
         }
-        let offs = self.access(to, Way::Off);
+        let offs = self.access(to, Way::Off, gone)?;
         if offs.is_empty() {
-            return Err(NoWay::Unreachable);
+            return Ok(Err(NoWay::Unreachable));
         }
-        let points = self.search(from, to, &ons, &offs).ok_or(NoWay::Unreachable)?;
-        Ok(self.pull(&points))
+        let Some(points) = self.search(from, to, &ons, &offs) else {
+            return Ok(Err(NoWay::Unreachable));
+        };
+        if gone() {
+            return Err(Gone);
+        }
+        Ok(Ok(self.pull(&points)))
     }
 
     /// Whether the server lets a straight walk from `a` to `b` through: it
@@ -593,7 +616,7 @@ impl WalkGraph {
 
     /// The ways between `p` and the graph, running `way`: straight lines to
     /// the nodes in sight, or one over the grid when none is.
-    fn access(&self, p: Point, way: Way) -> Vec<Access> {
+    fn access(&self, p: Point, way: Way, gone: &dyn Fn() -> bool) -> Result<Vec<Access>, Gone> {
         for radius in ACCESS_RADII {
             let found: Vec<Access> = self
                 .candidates(p, radius)
@@ -604,10 +627,10 @@ impl WalkGraph {
                 })
                 .collect();
             if !found.is_empty() {
-                return found;
+                return Ok(found);
             }
         }
-        self.access_by_grid(p, way).into_iter().collect()
+        Ok(self.access_by_grid(p, way, gone)?.into_iter().collect())
     }
 
     /// The nodes within `radius` worth trying from `p`: the nearest few, and
@@ -635,8 +658,9 @@ impl WalkGraph {
     /// [`GRID_CELL`] within [`GRID_REACH`]: round the bend of a lake shore,
     /// say, or down off a scree and along a valley to its trail. The search
     /// is A*, heading for the nearest nodes, and ends at the first cell with
-    /// a node in sight within [`GRID_SIGHT`].
-    fn access_by_grid(&self, p: Point, way: Way) -> Option<Access> {
+    /// a node in sight within [`GRID_SIGHT`]. Every [`GRID_ASK`] cells it
+    /// asks `gone` whether the walk is still wanted.
+    fn access_by_grid(&self, p: Point, way: Way, gone: &dyn Fn() -> bool) -> Result<Option<Access>, Gone> {
         let targets: Vec<Point> = self
             .near(p, GRID_REACH)
             .into_iter()
@@ -645,7 +669,7 @@ impl WalkGraph {
             .map(|k| self.nodes[k as usize])
             .collect();
         if targets.is_empty() {
-            return None;
+            return Ok(None);
         }
         let reach = (GRID_REACH / GRID_CELL) as i64;
         let at = |(i, j): (i64, i64)| (p.0 + i as f64 * GRID_CELL, p.1 + j as f64 * GRID_CELL);
@@ -666,7 +690,10 @@ impl WalkGraph {
             }
             looked += 1;
             if looked > GRID_CELLS {
-                return None;
+                return Ok(None);
+            }
+            if looked % GRID_ASK == 0 && gone() {
+                return Err(Gone);
             }
             for k in self.near(here, GRID_SIGHT) {
                 if self.edges[k as usize].is_empty() {
@@ -683,7 +710,7 @@ impl WalkGraph {
                     if way == Way::On {
                         via.reverse();
                     }
-                    return Some(Access { node: k, cost: g + self.cost(a, b), via });
+                    return Ok(Some(Access { node: k, cost: g + self.cost(a, b), via }));
                 }
             }
             for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
@@ -709,7 +736,7 @@ impl WalkGraph {
                 open.push(Open { f: through + h(there), node: id });
             }
         }
-        None
+        Ok(None)
     }
 
     /// A* from the `ons` to the `offs`, as every point of the walk: `from`,
@@ -780,8 +807,13 @@ impl WalkGraph {
 
     /// The walk's points pulled tight into legs, without `points[0]` (where
     /// the walker stands). A leg runs on past a point while the straight line
-    /// is walkable, no slower than the way round, and within [`DEVIATION`] of
-    /// every point it skips.
+    /// is within [`DEVIATION`] of every point it skips, no slower than the
+    /// way round, and walkable.
+    ///
+    /// Each leg's end is found by galloping out from its start, a point, two,
+    /// four, and halving back from the first that isn't tight. Trying every
+    /// point in turn tested a line as long as the leg at each, and down a
+    /// straight arterial that was most of a click's plan (#348).
     fn pull(&self, points: &[Point]) -> Vec<Point> {
         let mut along = vec![0.0];
         for w in points.windows(2) {
@@ -790,21 +822,30 @@ impl WalkGraph {
         let tight = |i: usize, k: usize| {
             let (a, b) = (points[i], points[k]);
             points[i + 1..k].iter().all(|&p| off_line(a, b, p) <= DEVIATION)
-                && self.walkable(a, b)
                 && self.cost(a, b) <= along[k] - along[i] + 1e-6
+                && self.walkable(a, b)
         };
+        let last = points.len() - 1;
         let mut legs = Vec::new();
-        let (mut anchor, mut end) = (0, 1);
-        while end + 1 < points.len() {
-            if tight(anchor, end + 1) {
-                end += 1;
-            } else {
-                legs.push(points[end]);
-                anchor = end;
-                end += 1;
+        let mut anchor = 0;
+        while anchor < last {
+            // The next point is a leg already, and past the last isn't one
+            let (mut good, mut bad) = (anchor + 1, last + 1);
+            let mut step = 1;
+            let mut galloping = true;
+            while good + 1 < bad {
+                let probe = if galloping { (good + step).min(bad - 1) } else { good + (bad - good) / 2 };
+                if tight(anchor, probe) {
+                    good = probe;
+                    step *= 2;
+                } else {
+                    bad = probe;
+                    galloping = false;
+                }
             }
+            legs.push(points[good]);
+            anchor = good;
         }
-        legs.push(points[points.len() - 1]);
         legs.dedup();
         legs
     }
