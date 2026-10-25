@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use capitol_protocol::rules::ground::CLIFF_SLOPE;
 use capitol_protocol::rules::{ARRIVAL_EPSILON, SPAWN_X, SPAWN_Y, TICK_SECS};
 use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType};
 
@@ -361,6 +362,8 @@ fn a_pocket_walled_by_crests_has_no_way_in_or_out() {
     // A copper vein the backend planted where the crests wall it in (#280).
     // Since Plots v2's flip (#459) moved the ranges out, it's a spot in a
     // pocket of the east-south-east massif, found by searching the wilds.
+    // Since #347 the backend's flood doesn't reach it either
+    // (`wilds::tests::a_pocket_walled_by_crests_is_not_reached`).
     let (_, graph) = world();
     let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
     let vein = (15329.1, 11083.0);
@@ -520,4 +523,61 @@ fn print_click_times() {
     let start = Instant::now();
     let _ = graph.plan(hall, (15329.1, 11083.0));
     eprintln!("the pocket: {:?}", start.elapsed());
+}
+
+/// How many of the backend's wild nodes a walker gets to from the Exchange
+/// hall and back, walked by the server's own step (#347): every `WILD_EVERY`th
+/// (3) of the nodes a migration inserts, `NODES_SQL` (the wilds' last
+/// re-plan, by default; not the reeds, which are gathered from a bank). The
+/// fixture must be the world the plan is of:
+/// `cargo test -p capitol-core --release --lib print_wild_node_reach -- --ignored --nocapture`.
+/// At #347, 4439 of 4511, all but 4 of the rest given up on by the grid
+/// (#521), and 4 a leg the server slides on (#520).
+#[test]
+#[ignore]
+fn print_wild_node_reach() {
+    let sql = std::env::var("NODES_SQL").unwrap_or_else(|_| {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../backend/migrations/post-content");
+        dir.join("20261224_001_wilds_reached_nodes.sql").to_string_lossy().into_owned()
+    });
+    let every: usize = std::env::var("WILD_EVERY").ok().and_then(|n| n.parse().ok()).unwrap_or(3);
+    let (_, graph) = world();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    let nodes: Vec<(String, Point)> = std::fs::read_to_string(&sql)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let row = line.trim().strip_prefix("('")?.trim_end_matches([',', ';']).strip_suffix(')')?;
+            let f: Vec<&str> = row.split(',').map(|f| f.trim().trim_matches('\'')).collect();
+            Some((f[1].to_string(), (f[2].parse().ok()?, f[3].parse().ok()?)))
+        })
+        .filter(|(kind, _)| kind != "reed_bed")
+        .step_by(every)
+        .collect();
+    let start = Instant::now();
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let outcomes: Vec<Result<(), String>> = std::thread::scope(|scope| {
+        let parts: Vec<_> = nodes
+            .chunks(nodes.len().div_ceil(cores).max(1))
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|(kind, node)| {
+                            let there = graph.plan(hall, *node).map_err(|e| format!("{kind} at {node:?}: there, {e:?}"))?;
+                            server_walk(graph, hall, &there).map_err(|e| format!("{kind} at {node:?}: there, {e}"))?;
+                            let back = graph.plan(*node, hall).map_err(|e| format!("{kind} at {node:?}: back, {e:?}"))?;
+                            server_walk(graph, *node, &back).map_err(|e| format!("{kind} at {node:?}: back, {e}"))?;
+                            Ok(())
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        parts.into_iter().flat_map(|p| p.join().unwrap()).collect()
+    });
+    let failed: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
+    for f in failed.iter().take(30) {
+        eprintln!("{f}");
+    }
+    eprintln!("{} of {} wild nodes there and back, {} not, in {:?}", nodes.len() - failed.len(), nodes.len(), failed.len(), start.elapsed());
 }

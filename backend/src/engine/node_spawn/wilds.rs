@@ -19,13 +19,14 @@
 //! On top of [`Ground::open`] (roads and trails, lots, parks), every wild node
 //! is [`MOVE_CLEAR`] from the wild water (clay [`BANK_CLEAR`]) and from the
 //! world's edge, [`MIN_GAP`] past the rural edge ([`Land::from`]), on ground no steeper than `ground::CLIFF_SLOPE`, and on
-//! ground a walker can reach from the rural edge ([`Land::reached`]).
+//! ground a walker can reach from the rural edge ([`Land::reached`]): by
+//! straight lines the server walks, tested as the Flint client's walk graph
+//! tests them (`ground::slope_lets_through`), so no node stands in a pocket
+//! walled by crests (#347).
 //!
 //! **Quality.** A wild node's base quality is drawn from its spawn row's floor
 //! up to a ceiling that rises with depth and height, by `wilds.toml`'s
 //! quality table (`WildQualityDef::ceiling`).
-
-use std::collections::VecDeque;
 
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::land::{height_at, massif_at, slope_at, Relief};
@@ -86,6 +87,7 @@ struct LandCell {
 /// on other rings has its nodes follow them (PV2, #454).
 pub struct Land<'a> {
     terrain: &'a TerrainConfig,
+    relief: Relief,
     cells: Vec<LandCell>,
     cols: usize,
     /// The banks of every river and stream, and every lake's shore.
@@ -96,7 +98,14 @@ pub struct Land<'a> {
 impl<'a> Land<'a> {
     pub fn new(terrain: &'a TerrainConfig) -> Self {
         let cols = (terrain.land.frame.world_size() / CELL).ceil() as usize;
-        let mut land = Self { terrain, cells: vec![LandCell::default(); cols * cols], cols, water: SegmentGrid::new(), lakes: Vec::new() };
+        let mut land = Self {
+            terrain,
+            relief: Relief::new(&terrain.land),
+            cells: vec![LandCell::default(); cols * cols],
+            cols,
+            water: SegmentGrid::new(),
+            lakes: Vec::new(),
+        };
         land.sample();
         land.index_water();
         land.block_water();
@@ -131,13 +140,12 @@ impl<'a> Land<'a> {
     /// Heights at every cell from just inside the rural edge out, and the
     /// slope there from its neighbours' (central differences over two cells).
     fn sample(&mut self) {
-        let relief = Relief::new(&self.terrain.land);
         let (lo, hi) = (self.frame().rural_edge() - 2.0 * CELL, self.frame().world_edge() + 2.0 * CELL);
         for k in 0..self.cells.len() {
             let (x, y) = self.centre(k);
             let r = self.radius(x, y);
             if (lo..=hi).contains(&r) {
-                self.cells[k].height = relief.height(x, y) as f32;
+                self.cells[k].height = self.relief.height(x, y) as f32;
                 self.cells[k].sampled = true;
             }
         }
@@ -227,31 +235,58 @@ impl<'a> Land<'a> {
         }
     }
 
-    /// Floods out from the rural edge through every cell a walker can stand
-    /// in (not under the water, no steeper than `CLIFF_SLOPE`), eight ways.
+    /// Whether the slope lets a walker through on the straight line from `a`
+    /// to `b`, as the server's steps would ([`ground::slope_lets_through`]).
+    fn climbs(&self, a: (f64, f64), b: (f64, f64)) -> bool {
+        ground::slope_lets_through(a, b, |x, y| self.relief.slope(x, y))
+    }
+
+    /// Whether a walker can stand at cell `k`'s centre, for the flood.
+    fn standable(&self, k: usize) -> bool {
+        let (x, y) = self.centre(k);
+        self.cells[k].sampled && !self.cells[k].blocked && self.radius(x, y) <= self.frame().world_edge()
+    }
+
+    /// Floods out from the rural edge through the cells a walker can stand
+    /// in (not under the water, nor past the world's edge, round which a
+    /// flood would get out of a pocket the edge closes), eight ways, along each line between two
+    /// cells' centres that the slope lets through. A cell's own slope says
+    /// nothing of the crests between: the ridged land has crests steeper
+    /// than the cliff for under a unit, and where they close round a hollow
+    /// nothing walks in (#347).
+    ///
+    /// What's reached doesn't hang on the order the cells are looked at, so
+    /// it goes a ring of cells at a time, with each ring's lines tested on
+    /// every core: the lines cost a hundred times the grid's sampling.
     fn flood(&mut self) {
-        let walkable = |c: &LandCell| c.sampled && !c.blocked && (c.slope as f64) <= CLIFF_SLOPE;
-        let mut queue = VecDeque::new();
+        let mut ring = Vec::new();
         for k in 0..self.cells.len() {
             let (x, y) = self.centre(k);
             let r = self.radius(x, y);
-            if r < self.frame().rural_edge() && walkable(&self.cells[k]) {
+            if r < self.frame().rural_edge() && self.standable(k) {
                 self.cells[k].reached = true;
-                queue.push_back(k);
+                ring.push(k);
             }
         }
         let cols = self.cols as i64;
-        while let Some(k) = queue.pop_front() {
-            let (i, j) = ((k as i64) % cols, (k as i64) / cols);
-            for (di, dj) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
-                let (a, b) = (i + di, j + dj);
-                if !(0..cols).contains(&a) || !(0..cols).contains(&b) {
-                    continue;
-                }
-                let n = (b * cols + a) as usize;
-                if !self.cells[n].reached && walkable(&self.cells[n]) {
+        while !ring.is_empty() {
+            let steps: Vec<(usize, usize)> = ring
+                .iter()
+                .flat_map(|&k| {
+                    let (i, j) = ((k as i64) % cols, (k as i64) / cols);
+                    NEIGHBOURS.into_iter().filter_map(move |(di, dj)| {
+                        let (a, b) = (i + di, j + dj);
+                        ((0..cols).contains(&a) && (0..cols).contains(&b)).then_some((k, (b * cols + a) as usize))
+                    })
+                })
+                .filter(|&(_, n)| !self.cells[n].reached && self.standable(n))
+                .collect();
+            let climbs = on_every_core(&steps, |&(k, n)| self.climbs(self.centre(k), self.centre(n)));
+            ring.clear();
+            for (&(_, n), climbs) in steps.iter().zip(climbs) {
+                if climbs && !self.cells[n].reached {
                     self.cells[n].reached = true;
-                    queue.push_back(n);
+                    ring.push(n);
                 }
             }
         }
@@ -270,9 +305,23 @@ impl<'a> Land<'a> {
         self.radius(at.0, at.1) >= self.frame().rural_edge()
     }
 
-    /// Whether a walker from the rural edge can reach the cell `at` is in.
+    /// Whether a walker from the rural edge can reach `at`: its cell is
+    /// reached, and the slope lets a walker through from the centre of that
+    /// cell or of a reached one beside it.
     pub fn reached(&self, at: (f64, f64)) -> bool {
-        self.cell_at(at).is_some_and(|k| self.cells[k].reached)
+        let Some(k) = self.cell_at(at) else { return false };
+        if !self.cells[k].reached {
+            return false;
+        }
+        let cols = self.cols as i64;
+        let (i, j) = ((k as i64) % cols, (k as i64) / cols);
+        std::iter::once((0, 0)).chain(NEIGHBOURS).any(|(di, dj)| {
+            let (a, b) = (i + di, j + dj);
+            (0..cols).contains(&a)
+                && (0..cols).contains(&b)
+                && self.cells[(b * cols + a) as usize].reached
+                && self.climbs(self.centre((b * cols + a) as usize), at)
+        })
     }
 
     /// How far `at` is from the wild water's edge, up to [`MOVE_CLEAR`];
@@ -303,6 +352,23 @@ impl<'a> Land<'a> {
             .map(|(_, p)| p)
             .collect()
     }
+}
+
+/// A cell's eight neighbours, as steps along the grid.
+const NEIGHBOURS: [(i64, i64); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+
+/// `f` of each of `items`, in order, shared out over the cores.
+fn on_every_core<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if cores == 1 || items.len() < 256 {
+        return items.iter().map(f).collect();
+    }
+    let chunk = items.len().div_ceil(cores);
+    std::thread::scope(|scope| {
+        let f = &f;
+        let parts: Vec<_> = items.chunks(chunk).map(|part| scope.spawn(move || part.iter().map(f).collect::<Vec<R>>())).collect();
+        parts.into_iter().flat_map(|part| part.join().expect("a flood's thread")).collect()
+    })
 }
 
 fn nearest_on_segment(a: (f64, f64), b: (f64, f64), p: (f64, f64)) -> (f64, f64) {
@@ -400,7 +466,6 @@ impl Placing<'_, '_> {
         let water = if bank { BANK_CLEAR } else { MOVE_CLEAR };
         let fits = (self.land.from()..=frame.world_edge() - MOVE_CLEAR).contains(&r)
             && frame.zone_at(at.0, at.1) == Zone::Wilderness
-            && self.land.reached(at)
             && self.ground.open(at, MOVE_CLEAR, false)
             && self.land.water_clearance(at) >= water
             && self.taken.clear_of(at, MIN_GAP)
@@ -409,7 +474,9 @@ impl Placing<'_, '_> {
                 slope <= CLIFF_SLOPE && self.habitat.suits(r - frame.rural_edge(), height_at(at.0, at.1, land), slope)
             }
             && (self.habitat.massifs.is_none() || self.habitat.on_massif(massif_at(at.0, at.1, land)))
-            && (self.land_test)(self.table, Zone::Wilderness, at);
+            && (self.land_test)(self.table, Zone::Wilderness, at)
+            // Last, as it walks lines over the land (#347).
+            && self.land.reached(at);
         fits.then(|| {
             self.taken.insert(at);
             at
@@ -431,12 +498,12 @@ impl Placing<'_, '_> {
             && (at.0 - bank.0).stable_hypot(at.1 - bank.1) <= EXTRACTION_RANGE
             && self.land.in_the_water(at)
             && !self.land.in_the_water(bank)
-            && self.land.reached(bank)
             && slope_at(bank.0, bank.1, land) <= CLIFF_SLOPE
             && self.ground.open(at, MOVE_CLEAR, false)
             && self.taken.clear_of(at, MIN_GAP)
             && self.habitat.suits(r - frame.rural_edge(), height_at(at.0, at.1, land), slope_at(at.0, at.1, land))
-            && (self.land_test)(self.table, Zone::Wilderness, at);
+            && (self.land_test)(self.table, Zone::Wilderness, at)
+            && self.land.reached(bank);
         fits.then(|| {
             self.taken.insert(at);
             at
@@ -670,6 +737,49 @@ mod tests {
         }
         let in_lakes = plan.iter().filter(|s| s.resource_type == "reed_bed" && terrain.lakes.iter().any(|l| l.contains(s.x, s.y))).count();
         println!("reed beds in lakes: {in_lakes}, the rest in rivers");
+    }
+
+    /// A pocket of the east-south-east massif, walled by crests steeper than
+    /// the cliff for under a unit: the Flint client's walk graph finds no way
+    /// in or out (`a_pocket_walled_by_crests_has_no_way_in_or_out`), and the
+    /// land's flood, along the lines between its cells, doesn't reach it
+    /// (#347). Before, it tested only the cells' centres and stepped over the
+    /// crests.
+    #[test]
+    fn a_pocket_walled_by_crests_is_not_reached() {
+        let terrain = TerrainConfig::default_world();
+        let land = Land::new(terrain);
+        let pocket = (15329.1, 11083.0);
+        assert!(!land.reached(pocket), "{pocket:?} is in a pocket");
+        let k = land.cell_at(pocket).unwrap();
+        assert!(land.cells[k].sampled && !land.cells[k].blocked && land.cells[k].slope as f64 <= CLIFF_SLOPE);
+        assert!(!land.cells[k].reached);
+    }
+
+    /// The flood's lines are the walk graph's: a reached cell has a line
+    /// the slope lets through from a reached neighbour, or is inside the
+    /// rural edge, where the flood starts.
+    #[test]
+    fn every_reached_cell_is_reached_by_a_line() {
+        let terrain = TerrainConfig::default_world();
+        let land = Land::new(terrain);
+        let cols = land.cols as i64;
+        let mut checked = 0;
+        for k in (0..land.cells.len()).step_by(37).filter(|&k| land.cells[k].reached) {
+            let (x, y) = land.centre(k);
+            if land.radius(x, y) < land.frame().rural_edge() {
+                continue;
+            }
+            let (i, j) = ((k as i64) % cols, (k as i64) / cols);
+            let by_a_line = NEIGHBOURS.into_iter().any(|(di, dj)| {
+                let (a, b) = (i + di, j + dj);
+                let n = (b * cols + a) as usize;
+                (0..cols).contains(&a) && (0..cols).contains(&b) && land.cells[n].reached && land.climbs(land.centre(n), (x, y))
+            });
+            assert!(by_a_line, "cell at ({x}, {y}) is reached by no line");
+            checked += 1;
+        }
+        assert!(checked > 1000, "{checked}");
     }
 
     /// On rings off the table (PV2, #454), here RW1's from before Plots v2's

@@ -56,6 +56,43 @@ const BUCKET: f64 = 60.0;
 const COS_30: f64 = 0.866_025_403_784_438_6;
 /// The turns a slide tries, nearest first, as (cos, sin): 30° and 60°.
 const SLIDE: [(f64, f64); 2] = [(COS_30, 0.5), (0.5, COS_30)];
+/// How far apart [`slope_lets_through`] tests a line: on gentle ground, and
+/// where the slope is over [`STEEP`]. The server's step can stop anywhere
+/// along the line, and a crest can be steeper than [`CLIFF_SLOPE`] for under
+/// a unit (#280).
+const SLOPE_SAMPLE: f64 = 2.0;
+const STEEP_SAMPLE: f64 = 0.5;
+const STEEP: f64 = 0.8;
+/// How far under [`CLIFF_SLOPE`] a rising slope already stops a line, so a
+/// crest that peaks between two tests can't slip through. Over 20,000 lines
+/// in the ranges, these let none through that a test every 0.05 stops.
+const STEEP_MARGIN: f64 = 0.03;
+
+/// Whether the slope lets a straight walk from `a` to `b` through, given the
+/// land's slope at a point (`land::slope_at`, or `land::Relief::slope`, the
+/// same to the bit). [`Ground::step`] stops a step that ends on ground
+/// steeper than [`CLIFF_SLOPE`] and steeper than where it starts, so a line
+/// stops where the slope rises past a little under it: the server's steps
+/// fall between the samples, wherever on the line its walk began. A walk
+/// that starts on a crag may climb down off it.
+///
+/// The Flint client's walk graph tests its lines with it (#280), and the
+/// backend plants wild nodes only where its lines reach (#347).
+pub fn slope_lets_through(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64, f64) -> f64) -> bool {
+    let length = (b.0 - a.0).stable_hypot(b.1 - a.1);
+    let mut slope = slope_at(a.0, a.1);
+    let mut along = 0.0;
+    while along < length {
+        along = (along + if slope > STEEP { STEEP_SAMPLE } else { SLOPE_SAMPLE }).min(length);
+        let t = along / length;
+        let here = slope_at(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+        if here > CLIFF_SLOPE - STEEP_MARGIN && here > slope {
+            return false;
+        }
+        slope = here;
+    }
+    true
+}
 
 /// The share of your speed the slope leaves you. `slope` is the rise over
 /// run along the way you're heading: positive uphill, negative downhill.
@@ -663,6 +700,20 @@ mod tests {
         assert!(land_speed(-0.5) < 1.0);
         assert!(land_speed(1.0) < land_speed(0.5));
         assert!((land_speed(0.5) - 1.0 / 1.75).abs() < 1e-12);
+    }
+
+    /// A crest steeper than the cliff for under a unit stops a line that
+    /// climbs to it, either way across, though both ends stand on easy
+    /// ground; a line that starts on a crag may climb down off it (#347).
+    #[test]
+    fn a_thin_crest_stops_a_line_and_a_crag_can_be_left() {
+        // Slope 0.9 everywhere, but 1.5 over the 0.8 either side of x = 50.
+        let crest = |x: f64, _: f64| if (x - 50.0).abs() < 0.4 { 1.5 } else { 0.9 };
+        assert!(!slope_lets_through((10.0, 0.0), (90.0, 0.0), crest));
+        assert!(!slope_lets_through((90.0, 0.0), (10.0, 0.0), crest));
+        assert!(slope_lets_through((10.0, 0.0), (40.0, 0.0), crest));
+        assert!(slope_lets_through((50.0, 0.0), (90.0, 0.0), crest));
+        assert!(slope_lets_through((10.0, 0.0), (90.0, 0.0), |_, _| 0.3));
     }
 
     #[test]

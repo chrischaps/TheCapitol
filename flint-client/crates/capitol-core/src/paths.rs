@@ -4,7 +4,7 @@
 //! The server walks a player in a straight line to where it was sent, and
 //! stops it at the water: the moat and canals except on their bridges, a
 //! river or lake except at a ford or on a road, and ground steeper than
-//! [`CLIFF_SLOPE`]. It has no pathfinding, so a bot sent across a canal
+//! [`CLIFF_SLOPE`](ground::CLIFF_SLOPE). It has no pathfinding, so a bot sent across a canal
 //! stands on the bank. [`WalkGraph::route`] plans a walk the server lets
 //! through, as waypoints to send one `move` each.
 //!
@@ -50,7 +50,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use capitol_protocol::land;
-use capitol_protocol::rules::ground::{Footing, Ground, CLIFF_SLOPE};
+use capitol_protocol::rules::ground::{self, Footing, Ground};
 use capitol_protocol::rules::{self, Frame, Zone, PLAYER_SPEED};
 use capitol_protocol::terrain::{Landmark, LandmarkKind, TerrainPlot, TerrainResponse, WaterRing};
 use capitol_protocol::tutorial::stops;
@@ -88,17 +88,6 @@ const JOIN_TRIES: usize = 3;
 const WATER_SAMPLE: f64 = 0.25;
 /// How far apart the water is searched where a line goes in or out of it.
 const FINE: f64 = 0.05;
-/// How far apart a line's slope tests are: on gentle ground, and where the
-/// slope is over [`STEEP`]. The server's step can stop anywhere along the
-/// line, and a crest can be steeper than [`CLIFF_SLOPE`] for under a unit
-/// (#280).
-const SLOPE_SAMPLE: f64 = 2.0;
-const STEEP_SAMPLE: f64 = 0.5;
-const STEEP: f64 = 0.8;
-/// How far under [`CLIFF_SLOPE`] a rising slope already stops a line, so a
-/// crest that peaks between two tests can't slip through. Over 20,000 lines
-/// in the ranges, these let none through that a test every 0.05 stops.
-const STEEP_MARGIN: f64 = 0.03;
 /// How far apart a leg's speed is sampled for its cost.
 const COST_SAMPLE: f64 = 10.0;
 /// The side of the node index's buckets.
@@ -121,9 +110,12 @@ const GRID_SIGHT: f64 = 30.0;
 /// them all against the ridge.
 const GRID_TARGETS: usize = 16;
 /// The most cells it looks at before it gives up: a pocket of ground walled
-/// by crests, say (#347). A way out of the ranges takes at most about 9000.
-/// Giving up can take most of a second, which is why the Flint client plans
-/// a click on a thread of its own ([`Planning`], #348).
+/// by crests, say, where since #347 no wild node is planted. Most ways out
+/// of the ranges take under 9000, but about one wild node in 60 is far
+/// round the crests from a trail and takes more, so it's given up on
+/// ([#521](https://github.com/chrischaps/TheCapitol/issues/521)). Giving up
+/// can take most of a second, which is why the Flint client plans a click
+/// on a thread of its own ([`Planning`], #348).
 const GRID_CELLS: usize = 20_000;
 /// How many of the grid's cells it looks at between asking whether the walk
 /// is still wanted ([`WalkGraph::plan_unless`]).
@@ -159,11 +151,13 @@ pub struct WalkGraph {
 pub enum NoWay {
     /// No way from where the walk starts onto the graph: a pocket of ground
     /// walled by crests, which a walker can't get into, so only a respawn or
-    /// a regenerate puts one there. Nothing walks it out yet (#347).
+    /// a regenerate puts one there. Nothing walks it out yet
+    /// ([#522](https://github.com/chrischaps/TheCapitol/issues/522)).
     Stranded,
-    /// No way from the graph to where it ends. About one wild node in 25
-    /// stands in such a pocket, where the backend's reach test steps over
-    /// the crests ([#347](https://github.com/chrischaps/TheCapitol/issues/347)).
+    /// No way from the graph to where it ends: in such a pocket, where since
+    /// #347 no wild node is planted, or too far round the crests for the
+    /// grid's search, as about one wild node in 60 is
+    /// ([#521](https://github.com/chrischaps/TheCapitol/issues/521)).
     Unreachable,
 }
 
@@ -467,7 +461,7 @@ impl WalkGraph {
     /// Whether the server lets a straight walk from `a` to `b` through: it
     /// stays in the world, crosses the moat and canals only on their bridges,
     /// keeps out of rivers and lakes away from their fords and roads, and
-    /// climbs nothing steeper than [`CLIFF_SLOPE`]. A walk that starts in the
+    /// climbs nothing steeper than [`CLIFF_SLOPE`](ground::CLIFF_SLOPE). A walk that starts in the
     /// water, or on a crag, may leave it, as on the server.
     pub fn walkable(&self, a: Point, b: Point) -> bool {
         rules::in_world(b.0, b.1) && self.rings_let_through(a, b) && self.ground_lets_through(a, b)
@@ -525,26 +519,11 @@ impl WalkGraph {
         true
     }
 
-    /// The slope along the line. [`Ground::step`] stops a step that ends on
-    /// ground steeper than [`CLIFF_SLOPE`] and steeper than where it starts,
-    /// so a line stops where the slope rises past a little under it: the
-    /// server's steps fall between the samples, wherever on the line its
-    /// walk began. A walk that starts on a crag may climb down off it.
+    /// The slope along the line, by the rule the backend plants wild nodes
+    /// by ([`ground::slope_lets_through`], #347).
     fn slope_lets_through(&self, a: Point, b: Point) -> bool {
         let land = self.ground.land();
-        let length = distance(a, b);
-        let mut slope = land::slope_at(a.0, a.1, land);
-        let mut along = 0.0;
-        while along < length {
-            along = (along + if slope > STEEP { STEEP_SAMPLE } else { SLOPE_SAMPLE }).min(length);
-            let p = lerp(a, b, along / length);
-            let here = land::slope_at(p.0, p.1, land);
-            if here > CLIFF_SLOPE - STEEP_MARGIN && here > slope {
-                return false;
-            }
-            slope = here;
-        }
-        true
+        ground::slope_lets_through(a, b, |x, y| land::slope_at(x, y, land))
     }
 
     /// Whether the water stops a walk between two samples of a line, `a`
