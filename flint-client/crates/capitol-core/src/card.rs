@@ -8,7 +8,8 @@
 //! mark) is shown, so the card opens at once and fills in.
 //!
 //! The words a card says are here too, so they're tested without egui:
-//! how long someone has been in the city, and where they live. On your own
+//! how long someone has been in the city, where they live, and what they've
+//! been busy with lately (K3.1, `lately_words`). On your own
 //! card, the number under your standing's words, its trend over the week and
 //! your history (S3.1): `score_words`, `trend_words`, `when_words`,
 //! `history_line`.
@@ -166,6 +167,13 @@ pub fn time_in_city(since: i64, today: i64) -> String {
     }
 }
 
+/// What they've been busy with these last few game days, after "Lately"
+/// (K3.1): "felling trees and sawing planks, and selling at the bazaar".
+/// `None` when the card has nothing to say, or they keep out of the papers.
+pub fn lately_words(card: &PlayerCard) -> Option<String> {
+    card.lately.as_ref().filter(|l| !l.is_empty()).map(rules::lately::words)
+}
+
 /// Where someone lives: the zone of their oldest plot.
 pub fn home_words(home: Option<&str>, mine: bool) -> String {
     let Some(zone) = home else {
@@ -233,6 +241,7 @@ mod tests {
             home: None,
             standing: standing::NEW_IN_TOWN.into(),
             guild: None,
+            lately: None,
             mine: false,
             muted: false,
             own: None,
@@ -241,6 +250,17 @@ mod tests {
 
     fn hint(name: &str) -> Option<Hint> {
         Some(Hint { name: name.into(), citizen: true })
+    }
+
+    #[test]
+    fn a_card_says_what_theyve_been_busy_with_only_when_theres_something() {
+        use capitol_protocol::rules::lately::{Lately, Venue};
+        assert_eq!(lately_words(&card(1, "Ada")), None);
+        let quiet = PlayerCard { lately: Some(Lately::default()), ..card(1, "Ada") };
+        assert_eq!(lately_words(&quiet), None);
+        let busy = Lately { doing: vec!["digging clay".into(), "firing bricks".into()], sells: vec![Venue::Exchange] };
+        let busy = PlayerCard { lately: Some(busy), ..card(1, "Ada") };
+        assert_eq!(lately_words(&busy).as_deref(), Some("digging clay and firing bricks, and selling on the Exchange"));
     }
 
     #[test]

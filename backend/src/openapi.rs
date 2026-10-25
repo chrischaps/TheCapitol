@@ -261,6 +261,8 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         OwnStanding,
         capitol_protocol::rules::standing::Record,
         capitol_protocol::rules::standing::Deed,
+        capitol_protocol::rules::lately::Lately,
+        capitol_protocol::rules::lately::Venue,
         MutesResponse,
         capitol_protocol::tutorial::TutorialProgress,
         capitol_protocol::tutorial::Grant,

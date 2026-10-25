@@ -38,7 +38,8 @@
 //! `fixtures/rest/admin_player.json` is `GET /admin/player` (D4.3): a citizen's
 //! hour, a deposit, a buy order's escrow and a sale less its fee, out walking.
 //! `fixtures/rest/player_card.json` is `GET /players/{id}/card` (S0.3): a
-//! citizen with a farm, a week in the city, in no guild, seen by someone else.
+//! citizen with a farm, a week in the city, in no guild, seen by someone else,
+//! lately felling trees and sawing planks and selling at the bazaar (K3.1).
 //! `fixtures/rest/my_card.json` is your own card (S3.1): your standing's
 //! number, its trend and the history under the words, which only you see.
 //! `fixtures/rest/mutes.json` is `GET /player/mutes` (S1.4): a citizen and a
@@ -445,13 +446,19 @@ fn a_sample_stored_before_the_lag_counts_still_reads() {
 #[test]
 fn a_card_round_trips_leaving_out_what_isnt_so() {
     use capitol_protocol::rest::PlayerCard;
-    use capitol_protocol::rules::{standing, Zone};
+    use capitol_protocol::rules::{lately, standing, Zone};
     let json = fixture("player_card.json");
     let card: PlayerCard = serde_json::from_str(&json).unwrap();
     assert!(card.citizen && !card.mine);
     assert_eq!(card.home.as_deref().and_then(Zone::from_str), Some(Zone::Rural));
     assert_eq!((card.standing.as_str(), card.guild.as_deref()), (standing::NEW_IN_TOWN, None));
+    let lately = card.lately.as_ref().expect("what they've been busy with (K3.1)");
+    assert_eq!(lately::words(lately), "felling trees and sawing planks, and selling at the bazaar");
+    assert_eq!(lately::items_of(&lately.doing[0]), ["log"]);
     assert_eq!(serde_json::to_string(&card).unwrap(), json);
+    // A card from before K3.1 has nothing to say of them
+    let old: PlayerCard = serde_json::from_str(&json.replace(r#","lately":{"doing":["felling trees","sawing planks"],"sells":["bazaar"]}"#, "")).unwrap();
+    assert_eq!(old.lately, None);
 }
 
 #[test]

@@ -670,6 +670,11 @@ pub struct PlayerCard {
     /// Their guild's name (S4.1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guild: Option<String>,
+    /// What they've been busy with these last `rules::lately::DAYS` game
+    /// days, in words (callings K3.1). Left off another's card when they
+    /// keep their name out of the papers, and when there's nothing to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lately: Option<rules::lately::Lately>,
     /// The card is your own
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mine: bool,

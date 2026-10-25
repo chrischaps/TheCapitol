@@ -255,7 +255,7 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 
 | WP | What | Size | Depends |
 |---|---|---|---|
-| K3.1 #539 | `PlayerCard.lately` from `production_tally` and sales, with the byline opt-out; the card in the Flint client (`fc:backend-prereq`) | M | – |
+| K3.1 #539 | `PlayerCard.lately` from `production_tally` and sales, with the byline opt-out; the card in the Flint client (`fc:backend-prereq`). *As built:* `lately` is `rules::lately::Lately { doing, sells }`: up to 3 activities, most first, and the venues sold at (`bazaar`, `exchange`), never a number. Each item belongs to one activity in `rules::lately::ACTIVITIES` (logs are "felling trees", every tool head "forging tool heads"; an unknown item is "making" it, and a backend test holds every content item to the table). The weight is the units at the item's target price (its last trade, else 1), as the maker board counts, over today and the 2 game days before; an activity under 10% of the whole is left off, but the first never is. `rules::lately::words` makes the line ("felling trees and sawing planks, and selling at the bazaar"), drawn under the standing as "Lately …". `items_of` turns an activity back into goods, for K3.2. | M | – |
 | K3.2 #540 | Citizens read cards, not surnames; `trade_of` retired | S | K3.1, K1.2 |
 | K3.3 #541 | `CitizenReport.calling` and `doing`; the console's roster, wealth and time by activity (`fc:backend-prereq`) | M | K0.1, K1.2 |
 

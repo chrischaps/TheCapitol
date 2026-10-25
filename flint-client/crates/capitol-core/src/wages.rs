@@ -893,6 +893,7 @@ mod tests {
             home: None,
             standing: "new in town".into(),
             guild: None,
+            lately: None,
             mine: false,
             muted: false,
             own: None,

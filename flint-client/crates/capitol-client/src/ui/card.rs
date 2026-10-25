@@ -7,7 +7,10 @@
 //!
 //! It says what anyone in the city could know: the name, with the lozenge
 //! for a citizen; how long they've been here; where they live; what's said
-//! of them (standing in words, D8) and their guild (S4.1). Your own card
+//! of them (standing in words, D8), what they've been busy with lately
+//! (callings K3.1: "Lately felling trees and sawing planks, and selling at
+//! the bazaar", left off for someone who keeps out of the papers) and their
+//! guild (S4.1). Your own card
 //! adds the number under your words, which nobody else sees, how the week
 //! moved it, and your last records (S3.1). Then Trade, as T or a shift-click asks,
 //! and Write, a letter to them (S1.5); under them a quiet Mute (S1.4):
@@ -17,7 +20,9 @@
 //! lantern, a citizen's pale one, and gold for your own, the colour of
 //! what's yours. The words are `capitol_core::card`'s.
 
-use capitol_core::card::{history_line, home_words, score_words, time_in_city, trend_words, when_words, Hint, Shown, Trend};
+use capitol_core::card::{
+    history_line, home_words, lately_words, score_words, time_in_city, trend_words, when_words, Hint, Shown, Trend,
+};
 use capitol_core::catalog::Catalog;
 use capitol_core::protocol::rest::{Correspondent, OwnStanding, PlayerCard};
 use egui::{Align2, Color32, Id, RichText};
@@ -64,7 +69,7 @@ pub struct View<'a> {
 #[derive(Debug, Clone, PartialEq)]
 enum Drawn {
     Asking(Option<Hint>),
-    Card(PlayerCard),
+    Card(Box<PlayerCard>),
     Missing,
     Failed,
 }
@@ -83,7 +88,7 @@ impl CardPanel {
         let now = match view.shown {
             Shown::Closed => None,
             Shown::Asking(hint) => Some(Drawn::Asking(hint.cloned())),
-            Shown::Card(card) => Some(Drawn::Card(card.clone())),
+            Shown::Card(card) => Some(Drawn::Card(Box::new(card.clone()))),
             Shown::Missing => Some(Drawn::Missing),
             Shown::Failed => Some(Drawn::Failed),
         };
@@ -187,6 +192,9 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
         ui.label(theme::dim("Spoken of as"));
         ui.label(RichText::new(&card.standing).font(theme::body(size::BODY)).color(GOLD).italics());
     });
+    if let Some(words) = lately_words(card) {
+        lately(ui, &words);
+    }
     if card.mine {
         ui.add_space(4.0);
         ui.label(theme::dim("This is how the city sees you.").size(size::SMALL));
@@ -227,6 +235,17 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
     action
 }
 
+/// What they've been busy with: a quiet "Lately" and the words after it,
+/// one paragraph that wraps under itself.
+fn lately(ui: &mut egui::Ui, words: &str) {
+    let format = |size, color| egui::TextFormat { font_id: theme::body(size), color, ..Default::default() };
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    job.append("Lately", 0.0, format(size::SMALL, DIM));
+    job.append(words, 4.0, format(size::BODY, TEXT.gamma_multiply(0.86)));
+    ui.label(job);
+}
+
 /// Your own standing, in a well: the number and its week, then your history.
 fn yours(ui: &mut egui::Ui, own: &OwnStanding, view: &View) {
     theme::well().show(ui, |ui| {
@@ -265,7 +284,10 @@ fn yours(ui: &mut egui::Ui, own: &OwnStanding, view: &View) {
 /// shows, the server's answer already in. `muted` is the person, muted.
 pub fn sample(which: &str) -> (capitol_core::card::Cards, i64, Catalog) {
     use capitol_core::card::{Cards, Who};
-    use capitol_core::protocol::rules;
+    use capitol_core::protocol::rules::{self, lately::{Lately, Venue}};
+    let lately = |doing: &[&str], sells: &[Venue]| {
+        Some(Lately { doing: doing.iter().map(|d| d.to_string()).collect(), sells: sells.to_vec() })
+    };
     let today = rules::GAZETTE_FIRST_DAY + 30;
     let mut card: PlayerCard = capitol_core::serde_json::from_str(include_str!(
         "../../../../../protocol/tests/fixtures/rest/player_card.json"
@@ -279,6 +301,7 @@ pub fn sample(which: &str) -> (capitol_core::card::Cards, i64, Catalog) {
                 citizen: false,
                 since: today - 3,
                 home: Some("suburban".into()),
+                lately: lately(&["cutting reeds", "twisting rope"], &[Venue::Exchange]),
                 muted: which == "muted",
                 ..card
             }
@@ -298,7 +321,9 @@ pub fn sample(which: &str) -> (capitol_core::card::Cards, i64, Catalog) {
                     record.at += shift;
                 }
             }
-            card = PlayerCard { name: "You".into(), since: today - 4, ..mine }
+            // Busy at the forge: the longest line a card says
+            let busy = lately(&["mining ore", "smelting metal", "forging tool heads"], &[Venue::Bazaar, Venue::Exchange]);
+            card = PlayerCard { name: "You".into(), since: today - 4, lately: busy, ..mine }
         }
         _ => {}
     }
@@ -431,8 +456,30 @@ mod tests {
     }
 
     #[test]
+    fn every_sample_says_what_theyve_been_busy_with_and_a_card_without_it_is_shorter() {
+        for which in ["citizen", "person", "muted", "mine"] {
+            assert!(lately_words(&sample_card(which)).is_some(), "{which}");
+        }
+        assert_eq!(
+            lately_words(&sample_card("citizen")).as_deref(),
+            Some("felling trees and sawing planks, and selling at the bazaar")
+        );
+        // Out of the papers, the line is left off and the card closes up
+        let (cards, today, _) = sample("person");
+        let with = run(&cards, today, 1280.0, None).1.expect("drawn").height();
+        let mut quiet = Cards::default();
+        let card = PlayerCard { lately: None, ..sample_card("person") };
+        let who = Who::Id(card.id);
+        quiet.open(who.clone(), None);
+        quiet.sent(who);
+        quiet.answered(card);
+        let without = run(&quiet, today, 1280.0, None).1.expect("drawn").height();
+        assert!(with > without + 10.0, "{with} against {without}");
+    }
+
+    #[test]
     fn the_card_is_edged_in_its_persons_light() {
-        let card = |citizen, mine| Drawn::Card(PlayerCard { citizen, mine, ..sample_card("citizen") });
+        let card = |citizen, mine| Drawn::Card(Box::new(PlayerCard { citizen, mine, ..sample_card("citizen") }));
         assert_eq!(edge(&card(true, false)), theme::CITIZEN_LANTERN);
         assert_eq!(edge(&card(false, false)), theme::LANTERN);
         assert_eq!(edge(&card(false, true)), GOLD);

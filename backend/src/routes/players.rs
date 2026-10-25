@@ -2,9 +2,10 @@
 //!
 //! `/player` is you; `/players` is everyone. A card says only what anyone
 //! in the city could know: the name, whether they're a citizen, how long
-//! they've been here, where they live and what's said of them. Nothing of
-//! their Strands or goods. Your own card adds your standing's number, its
-//! trend and your history (S3.1), which nobody else's shows.
+//! they've been here, where they live, what's said of them and what they've
+//! been busy with lately (K3.1, [`lately`]), in words. Nothing of their
+//! Strands or goods. Your own card adds your standing's number, its trend
+//! and your history (S3.1), which nobody else's shows.
 //!
 //! Mutes (S1.4) are here too: `PUT` and `DELETE /players/{id}/mute`, and
 //! `GET /player/mutes` beside the rest of you. `crate::mutes` keeps them.
@@ -15,11 +16,12 @@ use axum::{
     Extension, Json, Router,
 };
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use capitol_protocol::rest::{MutesResponse, PlayerCard};
 use capitol_protocol::rules;
+use capitol_protocol::rules::lately::{self, Lately, Venue};
 
 use crate::engine::standing;
 use crate::engine::tutorial::{self, Did};
@@ -162,9 +164,10 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
                 EXISTS (SELECT 1 FROM player_mutes m JOIN players me ON me.id = m.player_id
                         WHERE me.account_id = $2 AND m.muted_id = p.id),
                 (SELECT g.name FROM guild_members gm JOIN guilds g ON g.id = gm.guild_id
-                 WHERE gm.player_id = p.id)
+                 WHERE gm.player_id = p.id),
+                p.gazette_named
          FROM players p JOIN accounts a ON a.id = p.account_id";
-    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>, bool, Option<String>);
+    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>, bool, Option<String>, bool);
     let row: Option<Row> = match who {
         Who::Id(id) => {
             sqlx::query_as(&format!("{CARD} WHERE p.id = $1"))
@@ -184,7 +187,7 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
             .await?
         }
     };
-    let (id, name, citizen, created, mine, home, muted, guild) =
+    let (id, name, citizen, created, mine, home, muted, guild, named) =
         row.ok_or_else(|| AppError::NotFound("No one goes by that".into()))?;
     // Anyone sees the words; only you, your number and how it got there (S3.1)
     let now = Utc::now();
@@ -194,6 +197,8 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
         Some(own) => own.words.clone(),
         None => standing::words_for(&mut conn, id, now).await?,
     };
+    // What they've been busy with keeps out of sight with their byline
+    let lately = if mine || named { lately(&mut conn, id, now).await? } else { None };
     Ok(PlayerCard {
         id,
         name,
@@ -202,10 +207,50 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
         home,
         standing: words,
         guild,
+        lately,
         mine,
         muted,
         own,
     })
+}
+
+/// What `player` has been busy with these last `lately::DAYS` game days,
+/// today among them (K3.1): what they made (`production_tally`), each unit
+/// at its item's target price, or its last trade where it has none, as the
+/// maker board counts it (S3.2); and whether they sold at the bazaar or on
+/// the Exchange. `None` when there's nothing to say.
+pub async fn lately(conn: &mut PgConnection, player: Uuid, now: DateTime<Utc>) -> Result<Option<Lately>, AppError> {
+    let first = rules::day_number(now.timestamp_millis()) - lately::DAYS + 1;
+    let since = DateTime::from_timestamp_millis(rules::day_start_ms(first)).unwrap_or(now);
+    let made: Vec<(String, String, f64)> = sqlx::query_as(
+        "SELECT pt.item_type, COALESCE(it.name, pt.item_type),
+                SUM(pt.quantity * COALESCE(it.target_price, l.price, 1))::FLOAT8
+         FROM production_tally pt
+         LEFT JOIN item_types it ON it.id = pt.item_type
+         LEFT JOIN LATERAL (SELECT t.price FROM market_trades t WHERE t.item_type = pt.item_type
+                            ORDER BY t.at DESC LIMIT 1) l ON TRUE
+         WHERE pt.player_id = $1 AND pt.day >= $2
+         GROUP BY 1, 2
+         ORDER BY 3 DESC, 1",
+    )
+    .bind(player)
+    .bind(first)
+    .fetch_all(&mut *conn)
+    .await?;
+    let (bazaar, exchange): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM bazaar_sales s WHERE s.merchant_id = $1 AND s.at >= $2),
+                EXISTS (SELECT 1 FROM market_trades t JOIN market_orders o ON o.id = t.sell_order_id
+                        WHERE o.player_id = $1 AND t.at >= $2)",
+    )
+    .bind(player)
+    .bind(since)
+    .fetch_one(&mut *conn)
+    .await?;
+    let sells: Vec<Venue> = [(bazaar, Venue::Bazaar), (exchange, Venue::Exchange)]
+        .into_iter()
+        .filter_map(|(did, venue)| did.then_some(venue))
+        .collect();
+    Ok(lately::from_work(made.iter().map(|(item, name, value)| (item.as_str(), name.as_str(), *value)), &sells))
 }
 
 /// These need the local Postgres (`docker-compose up -d`). Each runs in a fresh
@@ -346,5 +391,109 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(card(&db, me, Who::Name("Ada Reeder")).await.unwrap().id, ada);
+    }
+
+    #[test]
+    fn every_good_in_the_content_has_an_activity_for_the_card() {
+        let content = crate::content::load().unwrap();
+        let missing: Vec<&str> =
+            content.items.iter().map(|i| i.id.as_str()).filter(|id| lately::activity_of(id).is_none()).collect();
+        assert!(missing.is_empty(), "add these to rules::lately::ACTIVITIES: {missing:?}");
+    }
+
+    /// `quantity` of `item` tallied to `who` on `day`
+    async fn made(db: &PgPool, who: Uuid, day: i64, item: &str, quantity: i64) {
+        sqlx::query("INSERT INTO production_tally (day, player_id, item_type, quantity) VALUES ($1, $2, $3, $4)")
+            .bind(day)
+            .bind(who)
+            .bind(item)
+            .bind(quantity)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    /// A fill of fiber from `seller` to `buyer` at `at`
+    async fn sold(db: &PgPool, seller: Uuid, buyer: Uuid, at: DateTime<Utc>) {
+        let mut ids = Vec::new();
+        for (side, who) in [("sell", seller), ("buy", buyer)] {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO market_orders (id, player_id, side, item_type, min_grade, grade_rule, price,
+                     quantity_total, quantity_remaining, status, fee, expires_at)
+                 VALUES ($1, $2, $3, 'fiber', $4, $5, 2, 5, 0, 'filled', 1, NOW() + INTERVAL '7 days')",
+            )
+            .bind(id)
+            .bind(who)
+            .bind(side)
+            .bind((side == "buy").then_some("F"))
+            .bind((side == "buy").then_some("average"))
+            .execute(db)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        sqlx::query(
+            "INSERT INTO market_trades (id, buy_order_id, sell_order_id, item_type, grade, quality, min_quality, price, quantity, at)
+             VALUES ($1, $2, $3, 'fiber', 'C', 50, 50, 2, 5, $4)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(ids[1])
+        .bind(ids[0])
+        .bind(at)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_card_says_what_theyve_been_busy_with_unless_they_keep_out_of_the_papers(db: PgPool) {
+        let ada = player(&db, "Ada", 100).await;
+        let bea = player(&db, "Bea", 100).await;
+        let (ada_acc, bea_acc) = (account_of(&db, ada).await, account_of(&db, bea).await);
+        let today = rules::day_number(Utc::now().timestamp_millis());
+        let first = DateTime::from_timestamp_millis(rules::day_start_ms(today - lately::DAYS + 1)).unwrap();
+
+        // Nothing done yet: nothing to say
+        assert_eq!(card(&db, bea_acc, Who::Id(ada)).await.unwrap().lately, None);
+        assert_eq!(card(&db, ada_acc, Who::Id(ada)).await.unwrap().lately, None);
+
+        // Planks most, logs too, a pinch of fiber; a pile of fiber too long ago to count
+        made(&db, ada, today, "plank", 30).await;
+        made(&db, ada, today - 2, "log", 10).await;
+        made(&db, ada, today, "fiber", 1).await;
+        made(&db, ada, today - lately::DAYS, "fiber", 500).await;
+        // A stall's sale today; a fill on the Exchange from before the three days
+        sqlx::query(
+            "INSERT INTO bazaar_sales (id, listing_id, stall_id, shop_name, merchant_id, buyer_id, item_type, quality, price, quantity)
+             VALUES ($1, $2, 'stall_0', 'Ada''s', $3, $4, 'fiber', 50, 2, 3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(ada)
+        .bind(bea)
+        .execute(&db)
+        .await
+        .unwrap();
+        sold(&db, ada, bea, first - chrono::Duration::minutes(1)).await;
+
+        let seen = card(&db, bea_acc, Who::Id(ada)).await.unwrap().lately.expect("Ada has been busy");
+        assert_eq!(seen.doing, ["sawing planks", "felling trees"]);
+        assert_eq!(seen.sells, [Venue::Bazaar]);
+        assert_eq!(lately::words(&seen), "sawing planks and felling trees, and selling at the bazaar");
+        assert_eq!(card(&db, ada_acc, Who::Id(ada)).await.unwrap().lately.as_ref(), Some(&seen), "the same on her own");
+
+        // Bea bought; only a seller sells. Then she sells on the Exchange, at the first moment that counts
+        assert_eq!(card(&db, ada_acc, Who::Id(bea)).await.unwrap().lately, None);
+        sold(&db, bea, ada, first).await;
+        let hers = card(&db, ada_acc, Who::Id(bea)).await.unwrap().lately.expect("Bea has sold");
+        assert_eq!((hers.doing.len(), hers.sells.as_slice()), (0, [Venue::Exchange].as_slice()));
+
+        // Out of the papers: off everyone's card but her own
+        sqlx::query("UPDATE players SET gazette_named = FALSE WHERE id = $1").bind(ada).execute(&db).await.unwrap();
+        assert_eq!(card(&db, bea_acc, Who::Id(ada)).await.unwrap().lately, None);
+        assert_eq!(card(&db, bea_acc, Who::Name("ada")).await.unwrap().lately, None);
+        assert_eq!(card(&db, ada_acc, Who::Id(ada)).await.unwrap().lately, Some(seen));
     }
 }

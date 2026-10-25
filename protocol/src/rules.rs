@@ -210,6 +210,9 @@ pub mod court;
 /// Standing in words: only the first band's until S3.1 (D8, S0.3).
 pub mod standing;
 
+/// What someone has been busy with lately, in words: the card's line (callings D8, K3.1).
+pub mod lately;
+
 /// Guilds: names and tags, the fees, and each role's rights (D10, S4.1).
 pub mod guild;
 /// Piece-rate wages: an offer's bounds, its pay and why a shift ends (D7, S2.6).

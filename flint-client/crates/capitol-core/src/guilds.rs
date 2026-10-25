@@ -659,6 +659,7 @@ mod tests {
             home: None,
             standing: "New in town".into(),
             guild: None,
+            lately: None,
             mine: false,
             muted: false,
             own: None,
