@@ -30,7 +30,12 @@
 //! trade any player makes: nothing is granted (D2).
 //!
 //! **Asking** (#295, [`ask`]). A citizen lingering among others knows the
-//! citizens near it by their trade names ([`trade_of`]), as anyone could.
+//! citizens near it by their cards (Callings K3.2, [`Neighbour::read_card`]),
+//! as anyone could: what the card says they've lately been busy with
+//! (`PlayerCard.lately`, K3.1) is the goods they make, and the recipes
+//! anyone can read say what those take. A card that says nothing (nothing
+//! made lately, or someone who keeps out of the papers) says nothing to
+//! ask them about, so they aren't asked. A surname is only a name.
 //! When one makes what it wants and nobody is selling it at the hall, or
 //! needs what it has spare and nobody is bidding, it may ask them
 //! ([`ask_menu`], [`Question::Ask`]). It walks over and asks, and the window
@@ -42,6 +47,8 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use capitol_protocol::rest::RecipeInfo;
+use capitol_protocol::rules::lately::{self, Lately};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::TradeOfferItem;
 use uuid::Uuid;
@@ -49,11 +56,10 @@ use uuid::Uuid;
 use super::decide::rules::worth_in;
 use super::decide::log::Fate;
 use super::decide::{Choice, Held, Lot, Mind, Place, Question, Quote, Situation, Span, When, Who};
-use super::persona::trade_of;
 use super::phrases::Occasion;
 use crate::bot::{Bot, BotError, TRADE_THINK};
 use crate::sim::plan::Holdings;
-use crate::sim::{Role, LOT, MARKET_ITEMS, SELL_AT};
+use crate::sim::{LOT, MARKET_ITEMS, SELL_AT};
 use crate::state::{Container, GameState, Offer, OpenTrade, StateEvent, Trade, TradeEvent};
 
 /// How long a window may stand with nothing offered before it's closed.
@@ -616,20 +622,73 @@ fn haggle(
     }
 }
 
-/// A citizen near an asker, as it sees them (#295): who, where, and the
-/// trade their name names.
+/// A citizen near an asker, as it sees them (#295): who and where, and
+/// what their card says they deal in (Callings K3.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Neighbour {
     pub id: Uuid,
     pub name: String,
     pub at: (f64, f64),
-    pub trade: Role,
+    /// The goods their card says they've lately made: every good of each
+    /// activity on it ([`lately::items_of`]), most first. A grouped
+    /// activity names them all ("mining ore" is iron, copper and tin), so
+    /// an asker knows the trade, not the exact good.
+    pub makes: Vec<&'static str>,
+    /// What those goods take, by the recipes anyone can read, less what they
+    /// make themselves: what they'd buy.
+    pub needs: Vec<String>,
 }
 
-/// The citizens within `reach` of `about` whose names name a trade, the
-/// nearest to the bot first, [`ASK_AMONG`] at most. People aren't asked:
-/// a person's name says nothing of what they do.
-pub fn neighbours(state: &GameState, about: (f64, f64), reach: f64) -> Vec<Neighbour> {
+impl Neighbour {
+    /// Who's near, as an asker sees them before it has read their card:
+    /// nothing yet known of what they make.
+    pub fn seen(id: Uuid, name: &str, at: (f64, f64)) -> Self {
+        Neighbour {
+            id,
+            name: name.to_string(),
+            at,
+            makes: Vec::new(),
+            needs: Vec::new(),
+        }
+    }
+
+    /// What their card's `lately` says of them (K3.2), the goods its
+    /// activities make and what `recipes` say those take. `None` when it
+    /// says nothing made: a quiet card (nothing made these three game days,
+    /// or someone who keeps out of the papers, which reads the same), or
+    /// only activities the table doesn't know. They aren't asked then.
+    pub fn read_card(mut self, card: Option<&Lately>, recipes: &[RecipeInfo]) -> Option<Self> {
+        let mut makes: Vec<&'static str> = Vec::new();
+        for activity in &card?.doing {
+            for &item in lately::items_of(activity) {
+                if !makes.contains(&item) {
+                    makes.push(item);
+                }
+            }
+        }
+        if makes.is_empty() {
+            return None;
+        }
+        let mut needs: Vec<String> = Vec::new();
+        for recipe in recipes.iter().filter(|r| r.outputs.iter().any(|o| makes.contains(&o.item_type.as_str()))) {
+            for input in &recipe.inputs {
+                let item = input.item_type.as_str();
+                if !makes.contains(&item) && !needs.iter().any(|n| n == item) {
+                    needs.push(item.to_string());
+                }
+            }
+        }
+        self.makes = makes;
+        self.needs = needs;
+        Some(self)
+    }
+}
+
+/// The citizens within `reach` of `about`, the nearest to the bot first,
+/// [`ASK_AMONG`] at most, as [seen](Neighbour::seen): whose cards to read.
+/// People aren't asked: K3.2 kept #295's rule, though a person's card now says
+/// what they do too ([#546](https://github.com/chrischaps/TheCapitol/issues/546)).
+pub fn near(state: &GameState, about: (f64, f64), reach: f64) -> Vec<Neighbour> {
     let Some(me) = state.local_player() else {
         return Vec::new();
     };
@@ -638,14 +697,7 @@ pub fn neighbours(state: &GameState, about: (f64, f64), reach: f64) -> Vec<Neigh
         .players()
         .values()
         .filter(|p| p.citizen && p.id != me.id && (p.x - about.0).hypot(p.y - about.1) <= reach)
-        .filter_map(|p| {
-            Some(Neighbour {
-                id: p.id,
-                name: p.name.clone(),
-                at: (p.x, p.y),
-                trade: trade_of(&p.name)?,
-            })
-        })
+        .map(|p| Neighbour::seen(p.id, &p.name, (p.x, p.y)))
         .collect();
     near.sort_by(|a, b| (a.at.0 - mx).hypot(a.at.1 - my).total_cmp(&(b.at.0 - mx).hypot(b.at.1 - my)));
     near.truncate(ASK_AMONG);
@@ -657,17 +709,17 @@ pub fn neighbours(state: &GameState, about: (f64, f64), reach: f64) -> Vec<Neigh
 /// goods and has `spare` of those (Callings K1.4,
 /// [`surplus`](crate::sim::surplus)):
 ///
-/// - **buy from** one who makes what it wants, when nobody is selling it
-///   at the hall, it can put a worth to it, and it can afford some (up to
+/// - **buy from** one whose card says they make what it wants (the first
+///   of its wants they make), when nobody is selling it at the hall, it can put a worth to it, and it can afford some (up to
 ///   half again the worth, up to two lots), keeping a deed's price back
 ///   until it has a plot, as a bid does;
-/// - **sell to** one whose trade needs what it has spare, when nobody is
+/// - **sell to** one whose goods take what it has spare, when nobody is
 ///   bidding for it at the hall, it can put a worth to it, and it has half
 ///   of [`SELL_AT`] or more spare: the most it has spare of what they
 ///   need;
 ///
-/// and **rest**, last: leave them be. Until K3.2 a neighbour's trade is
-/// read from their name.
+/// and **rest**, last: leave them be. What a neighbour makes and needs is
+/// what their card says ([`Neighbour::read_card`], K3.2).
 pub fn ask_menu(
     wants: &[&str],
     spare: &[(&str, i32)],
@@ -682,8 +734,11 @@ pub fn ask_menu(
     let budget = holdings.strands - reserve;
     let mut menu = Vec::new();
     for n in neighbours {
-        let wanted = n.trade.product().filter(|item| wants.contains(item) && !selling(item));
-        if let Some((item, worth)) = wanted.and_then(|item| Some((item, worth_in(market, item)?.max(1)))) {
+        let wanted = wants
+            .iter()
+            .filter(|item| n.makes.contains(item) && !selling(item))
+            .find_map(|&item| Some((item, worth_in(market, item)?.max(1))));
+        if let Some((item, worth)) = wanted {
             let top = worth + (worth / 2).max(1);
             let afford = (budget / top).min(2 * LOT as i64) as i32;
             if afford > 0 {
@@ -696,7 +751,7 @@ pub fn ask_menu(
             }
         }
         let needed = spare.iter().find(|&&(item, n_spare)| {
-            n_spare >= SELL_AT / 2 && n.trade.needs().contains(&item) && !bidding(&item) && worth_in(market, item).is_some()
+            n_spare >= SELL_AT / 2 && n.needs.iter().any(|n| n == item) && !bidding(&item) && worth_in(market, item).is_some()
         });
         if let Some(&(item, n_spare)) = needed {
             menu.push(Choice::SellTo {
@@ -948,13 +1003,65 @@ mod tests {
         assert_eq!(choice, Choice::Decline);
     }
 
-    fn neighbour(n: u128, name: &str) -> Neighbour {
-        Neighbour {
-            id: Uuid::from_u128(n),
-            name: name.into(),
-            at: (0.0, 0.0),
-            trade: trade_of(name).unwrap(),
+    /// A card's `lately` busy with `doing`.
+    fn busy(doing: &[&str]) -> Lately {
+        Lately {
+            doing: doing.iter().map(|d| d.to_string()).collect(),
+            sells: Vec::new(),
         }
+    }
+
+    /// `name`, whose card says they've lately been busy with `doing`.
+    fn neighbour(n: u128, name: &str, doing: &[&str]) -> Neighbour {
+        let recipes = crate::catalog::Catalog::fallback();
+        Neighbour::seen(Uuid::from_u128(n), name, (0.0, 0.0))
+            .read_card(Some(&busy(doing)), recipes.recipes())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_card_says_what_someone_makes_and_what_that_takes() {
+        let catalog = crate::catalog::Catalog::fallback();
+        let read = |doing: &[&str]| {
+            Neighbour::seen(Uuid::from_u128(1), "Ada Woodward", (0.0, 0.0)).read_card(Some(&busy(doing)), catalog.recipes())
+        };
+        // Felling trees: logs, and nothing anyone makes logs from
+        let ada = read(&["felling trees"]).unwrap();
+        assert_eq!(ada.makes, vec!["log"]);
+        assert!(ada.needs.is_empty());
+        // A grouped activity names every good of it: the trade, not the item
+        let ore = read(&["mining ore"]).unwrap();
+        assert_eq!(ore.makes, vec!["iron_ore", "copper_ore", "tin_ore"]);
+        // Smelting takes ore and charcoal, iron and bronze alike
+        let smith = read(&["smelting metal"]).unwrap();
+        for item in ["iron_ore", "charcoal", "copper_ore", "tin_ore"] {
+            assert!(smith.needs.iter().any(|n| n == item), "{item}: {:?}", smith.needs);
+        }
+        // What they make themselves isn't what they'd buy: a sawyer making
+        // handles from its own planks wants logs, sticks and rope
+        let joiner = read(&["sawing planks", "making handles"]).unwrap();
+        assert_eq!(joiner.makes, vec!["plank", "tool_handle"]);
+        assert!(!joiner.needs.iter().any(|n| n == "plank"), "{:?}", joiner.needs);
+        for item in ["log", "sticks", "rope"] {
+            assert!(joiner.needs.iter().any(|n| n == item), "{item}: {:?}", joiner.needs);
+        }
+        // A quiet card (nothing lately, or kept out of the papers) and one
+        // the table doesn't know say nothing to ask about
+        assert_eq!(read(&[]), None);
+        assert_eq!(
+            Neighbour::seen(Uuid::from_u128(1), "Ada", (0.0, 0.0)).read_card(None, catalog.recipes()),
+            None
+        );
+        assert_eq!(read(&["making lace"]), None);
+        // Selling and nothing made: nothing to ask about either
+        let selling = Lately {
+            doing: Vec::new(),
+            sells: vec![lately::Venue::Bazaar],
+        };
+        assert_eq!(
+            Neighbour::seen(Uuid::from_u128(1), "Ada", (0.0, 0.0)).read_card(Some(&selling), catalog.recipes()),
+            None
+        );
     }
 
     #[test]
@@ -962,9 +1069,9 @@ mod tests {
         // A sawyer at its sawing: it wants logs, and has its planks spare
         let wants = ["log"];
         let spare = [("plank", 14)];
-        let ada = neighbour(1, "Ada Woodward");
-        let ivor = neighbour(2, "Ivor Mason");
-        let hazel = neighbour(3, "Hazel Reeder");
+        let ada = neighbour(1, "Ada Woodward", &["felling trees"]);
+        let ivor = neighbour(2, "Ivor Mason", &["building workshops"]);
+        let hazel = neighbour(3, "Hazel Reeder", &["cutting grass"]);
         let mut holdings = Holdings {
             strands: 500,
             plot_room: Some(2),
@@ -999,6 +1106,14 @@ mod tests {
         );
         // A fiber gatherer makes nothing it needs, nor needs what it makes
         assert_eq!(ask_menu(&wants, &spare, &holdings, &market, std::slice::from_ref(&hazel)), None);
+        // A surname is only a name (K3.2): a Woodward whose card says she's
+        // been sawing planks has no logs to sell, and takes the planks' logs
+        let sawing = neighbour(1, "Ada Woodward", &["sawing planks"]);
+        assert_eq!(ask_menu(&wants, &spare, &holdings, &market, std::slice::from_ref(&sawing)), None);
+        // and a Reeder felling trees is asked for logs
+        let felling = neighbour(3, "Hazel Reeder", &["cutting grass", "felling trees"]);
+        let menu = ask_menu(&wants, &spare, &holdings, &market, std::slice::from_ref(&felling)).unwrap();
+        assert!(matches!(&menu[0], Choice::BuyFrom { partner, item, .. } if partner == "Hazel Reeder" && item == "log"), "{menu:?}");
         // Someone selling logs at the hall, someone bidding for planks: the
         // book first
         let mut booked = market.clone();
@@ -1020,7 +1135,7 @@ mod tests {
         // On a wood stint after an ore one (Callings K1.4): it wants nothing
         // of Ada, and offers a smith its spare ore, the most it has spare
         // of what a smith needs
-        let ida = neighbour(4, "Ida Smith");
+        let ida = neighbour(4, "Ida Smith", &["smelting metal"]);
         market.push(Quote {
             item: "iron_ore".into(),
             bid: None,

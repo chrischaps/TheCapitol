@@ -282,7 +282,9 @@ const GIVEN: [&str; 48] = [
     "Reginald", "Rose", "Ruth", "Sidney", "Stanley", "Vera", "Walter", "Winifred",
 ];
 
-/// Trade surnames for each role: what the work would have called you.
+/// Trade surnames for each role: what the work would have called you. Only
+/// a name: nobody reads a trade from it (a citizen reads cards, Callings
+/// K3.2), and a citizen's calling and work are free to differ from it.
 fn surnames(role: Role) -> &'static [&'static str] {
     match role {
         Role::Gatherer(Gather::Fiber) => &["Reeder", "Roper", "Fielding", "Hayward", "Rushton", "Flaxman"],
@@ -294,14 +296,6 @@ fn surnames(role: Role) -> &'static [&'static str] {
         Role::Builder => &["Mason", "Tyler", "Slater", "Bricker", "Thatcher", "Builder"],
         Role::Merchant => &["Chapman", "Mercer", "Marchant", "Packman", "Spicer", "Draper"],
     }
-}
-
-/// The trade a name's surname names, if it's one of the trade names: how
-/// one citizen tells what another makes, as anyone in the town could, from
-/// the name over its head (#295). Each surname belongs to one trade.
-pub fn trade_of(name: &str) -> Option<Role> {
-    let surname = name.rsplit(' ').next()?;
-    crate::sim::ROLES.into_iter().find(|role| surnames(*role).contains(&surname))
 }
 
 /// The `n`th name for a citizen of `role`. Given names step through the
@@ -423,18 +417,6 @@ mod tests {
         let (given, surname) = ada.split_once(' ').unwrap();
         assert!(GIVEN.contains(&given));
         assert!(surnames(Role::Builder).contains(&surname));
-    }
-
-    #[test]
-    fn a_trade_name_says_the_trade_and_belongs_to_one() {
-        for role in ROLES {
-            for n in 0..40 {
-                assert_eq!(trade_of(&name(role, n)), Some(role));
-            }
-        }
-        assert_eq!(trade_of("Ada Lovelace"), None);
-        assert_eq!(trade_of("Sawyer"), Some(Role::Crafter(Craft::Planks)));
-        assert_eq!(trade_of(""), None);
     }
 
     #[test]

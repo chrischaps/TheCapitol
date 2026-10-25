@@ -53,6 +53,12 @@
                    its run (default capitol_balance)
     BALANCE_REDIS  town a's Redis db index; b's is the next, each flushed
                    before its run (default 2)
+    BALANCE_TOWN_A a capitol-town exe for town a in place of this checkout's,
+                   to hold two builds up against each other under the same
+                   preset (say master's in a and a branch's in b, K3.2).
+                   Town b, and compare, run this checkout's build
+    BALANCE_LOG_MB each citizen's decision log, in MB, to town.decisions/
+                   beside its roster (default 0: none)
 
   Exits 1 if either run's books drifted.
 
@@ -81,6 +87,8 @@ $baseRedis = if ($env:BALANCE_REDIS) { [int]$env:BALANCE_REDIS } else { 2 }
 $runs = Join-Path $root ("flint-client\balance\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 $backendExe = Join-Path $root "target\balance\capitol-backend.exe"
 $townExe = Join-Path $root "flint-client\target\balance\capitol-town.exe"
+$townExeA = if ($env:BALANCE_TOWN_A) { (Resolve-Path -LiteralPath $env:BALANCE_TOWN_A).Path } else { $townExe }
+$logMb = if ($env:BALANCE_LOG_MB) { [int]$env:BALANCE_LOG_MB } else { 0 }
 $backendEnv = @{ SIM_TICK_SCALE = "$Scale"; RATE_LIMITS = "off" }
 $sayAs = "balance"
 # town-common.ps1 works on one town at a time: Use-Town points it at one
@@ -117,11 +125,11 @@ function New-BalanceTown([hashtable]$town) {
 # Starts the town's soak, its output to soak.log beside its roster.
 function Start-Soak([hashtable]$town) {
     Use-Town $town
-    $soakArgs = @("soak", "--hours", "$Hours", "--always-on", "--log-mb", "0",
+    $soakArgs = @("soak", "--hours", "$Hours", "--always-on", "--log-mb", "$logMb",
         "--tunables", "`"$($town.Preset)`"", "--roster", "`"$roster`"", "--server", $server)
     $town.Log = Join-Path $dir "soak.log"
     $town.Soak = Invoke-WithEnv $town.Admin {
-        Start-Process $townExe -ArgumentList $soakArgs -WorkingDirectory (Join-Path $root "flint-client") `
+        Start-Process $town.Exe -ArgumentList $soakArgs -WorkingDirectory (Join-Path $root "flint-client") `
             -RedirectStandardOutput $town.Log -RedirectStandardError (Join-Path $dir "soak.err") -NoNewWindow -PassThru
     }
     # Without its handle held, a process started this way forgets its exit code
@@ -140,8 +148,8 @@ foreach ($preset in @($A, $B)) {
     if (-not (Test-Path -LiteralPath $preset)) { Die "no preset at $preset" }
 }
 $towns = @(
-    @{ Name = "a"; Preset = (Resolve-Path -LiteralPath $A).Path; Port = $basePort; Db = "${dbPrefix}_a"; Redis = $baseRedis },
-    @{ Name = "b"; Preset = (Resolve-Path -LiteralPath $B).Path; Port = $basePort + 1; Db = "${dbPrefix}_b"; Redis = $baseRedis + 1 }
+    @{ Name = "a"; Preset = (Resolve-Path -LiteralPath $A).Path; Port = $basePort; Db = "${dbPrefix}_a"; Redis = $baseRedis; Exe = $townExeA },
+    @{ Name = "b"; Preset = (Resolve-Path -LiteralPath $B).Path; Port = $basePort + 1; Db = "${dbPrefix}_b"; Redis = $baseRedis + 1; Exe = $townExe }
 )
 if (-not (Test-Path -LiteralPath (Join-Path $root "backend\.env"))) {
     Die "backend/.env is missing: copy backend/.env.example (the servers read its JWT_SECRET)"

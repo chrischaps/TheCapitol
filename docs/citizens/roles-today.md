@@ -141,5 +141,5 @@ Each entry gives the spirit of the role (what it was meant to be), then what it 
 - **Tools never trade.** The tool crafter makes tools nobody can buy, so every citizen climbs the tool tree itself.
 - **The book waits on merchants.** A town with no merchant has no book (#410), and a new town's merchants spend their first hours earning a float (#501).
 - **Gatherers never buy, and sellers never diversify.** A gatherer has no needs, and a crafter sells one product. Whatever is left from a prerequisite stays in the pack.
-- **Trades are read from surnames.** Citizens read each other's trade from their surnames (`persona::trade_of`), which only works because nobody ever changes trade.
+- **Trades are read from surnames.** Citizens read each other's trade from their surnames (`persona::trade_of`), which only works because nobody ever changes trade. *(Since K3.2, #540, they read each other's cards.)*
 - **A day of one citizen looks like a loop.** The road in, its free time and its detours to the wilds are the only variety.

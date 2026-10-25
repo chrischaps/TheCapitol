@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::PlaceOrder;
 use capitol_protocol::rules::bazaar::{RENT_DAY_SECS, MAX_SHOP_NAME};
+use capitol_protocol::rules::lately::Lately;
 use capitol_protocol::rules::market::OrderSide;
 use uuid::Uuid;
 
@@ -22,6 +23,7 @@ use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Question, Who};
 use crate::citizen::meet::{self, Answering, Asking, Met, Neighbour};
 use crate::citizen::town::{Standing, Tether};
+use crate::net::{RestError, RestRequest, RestResponse};
 
 /// A standing bid is taken down and thought over again after this many
 /// game seconds, at the citizen's next visit to the hall.
@@ -55,10 +57,11 @@ impl SimBot {
     }
 
     /// While it lingers `about` a spot among others, whether to ask a
-    /// citizen near it to trade (#295): the mind's answer from
-    /// [`meet::ask_menu`], and if it says ask, over beside them and the
-    /// asking. Each is asked once in [`ASK_AGAIN`] at most. `true` if it
-    /// asked someone.
+    /// citizen near it to trade (#295): it reads the cards of the nearest
+    /// it hasn't asked lately (Callings K3.2, [`card_of`](Self::card_of)),
+    /// then the mind's answer from [`meet::ask_menu`], and if it says ask,
+    /// over beside them and the asking. Each is asked once in [`ASK_AGAIN`]
+    /// at most. `true` if it asked someone.
     pub(super) fn ask_around(&mut self, about: (f64, f64), town: Option<&Tether>) -> Result<bool, BotError> {
         if !self.people {
             return Ok(false);
@@ -66,10 +69,17 @@ impl SimBot {
         let now = Instant::now();
         let again = self.wall(ASK_AGAIN);
         self.asked.retain(|_, at| now.duration_since(*at) < again);
-        let neighbours: Vec<Neighbour> = meet::neighbours(self.bot.state(), about, ASK_REACH)
+        let seen: Vec<Neighbour> = meet::near(self.bot.state(), about, ASK_REACH)
             .into_iter()
             .filter(|n| !self.asked.contains_key(&n.id))
             .collect();
+        let mut neighbours = Vec::with_capacity(seen.len());
+        for n in seen {
+            let card = self.card_of(n.id)?;
+            if let Some(n) = n.read_card(card.as_ref(), self.bot.state().catalog().recipes()) {
+                neighbours.push(n);
+            }
+        }
         let holdings = self.holdings();
         let market = meet::quotes(self.bot.state());
         let spare = self.spare(&holdings, self.goal_now(&holdings).as_ref());
@@ -112,6 +122,34 @@ impl SimBot {
         let met = self.step_up_to(them).and_then(|()| meet::ask(&mut self.bot, &mut self.mind, &me, them, &asking));
         self.after_trade(mark, town, met, true, true)?;
         Ok(true)
+    }
+
+    /// What `them`'s card says they've lately been busy with (Callings
+    /// K3.2), as anyone reading it would see: `GET /players/{id}/card`,
+    /// read once a game day each, since a card looks three game days back
+    /// and changes slowly. `None` is a card with nothing on it, or one the
+    /// server wouldn't show (an HTTP refusal, kept for the day like a quiet
+    /// card). A call that went unanswered isn't kept, so the next beat tries
+    /// again; a key revoked or the server lost is the bot's to deal with.
+    pub(super) fn card_of(&mut self, them: Uuid) -> Result<Option<Lately>, BotError> {
+        let day = self.day();
+        if let Some((read, lately)) = self.cards.get(&them) {
+            if *read == day {
+                return Ok(lately.clone());
+            }
+        }
+        let lately = match self.bot.call("reading a card", RestRequest::PlayerCard { player_id: them }) {
+            Ok(RestResponse::Card(card)) => card.lately,
+            Ok(_)
+            | Err(BotError::Rest {
+                source: RestError::Http { .. },
+                ..
+            }) => None,
+            Err(BotError::Rest { .. } | BotError::Timeout { .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        self.cards.insert(them, (day, lately.clone()));
+        Ok(lately)
     }
 
     /// Over to beside the player `them`, near enough to trade, turned

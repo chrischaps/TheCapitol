@@ -444,6 +444,9 @@ struct SimBot {
     noon_day: Option<i64>,
     /// The citizens it has asked to trade lately, and when (#295).
     asked: HashMap<Uuid, Instant>,
+    /// The cards it has read of those it thought of asking, and the game
+    /// day it read each (Callings K3.2): `lately`, or `None` for a quiet one.
+    cards: HashMap<Uuid, (i64, Option<capitol_protocol::rules::lately::Lately>)>,
     /// A citizen walks the road in (#450): the steps it's waiting on. A
     /// swarm bot doesn't, so the E2.7 sim's numbers stay comparable.
     road: Option<road_in::Road>,
@@ -527,6 +530,7 @@ impl SimBot {
             spot: None,
             noon_day: None,
             asked: HashMap::new(),
+            cards: HashMap::new(),
             road: None,
             on_road: false,
             board: board::Board::new(),
