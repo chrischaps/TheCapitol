@@ -22,6 +22,12 @@
 //! Since a step is taken before the next is planned, the inputs a craft uses
 //! up (the rope a handle takes, say) are simply missing next time, and made
 //! again.
+//!
+//! **Setup (Callings D5, #529).** [`setup`] looks further: it plays the steps
+//! out against a copy of the holdings, to the goal, and counts what was only
+//! on the way. That's the stations, kits, tools and plot still missing, and
+//! the steps they take. Taking up a job that isn't your favourite can be all
+//! prerequisites, and a citizen choosing its evening's work charges it.
 
 use capitol_protocol::tunables::Fees;
 use capitol_protocol::tutorial::Grant;
@@ -163,16 +169,147 @@ pub struct Stuck(pub String);
 
 /// The next step toward `goal`, or `None` once it's met.
 pub fn next(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Option<Step>, Stuck> {
+    Ok(step(catalog, holdings, goal)?.map(|(step, _)| step))
+}
+
+/// The next step toward `goal`, and whether it's setup: a step toward a
+/// station, a tool or a plot the goal's own work needs, not that work.
+fn step(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Option<(Step, bool)>, Stuck> {
     let mut planner = Planner {
         catalog,
         holdings,
         visiting: Vec::new(),
+        setting_up: false,
     };
-    match goal {
+    let step = match goal {
         Goal::Hold { item, n } => planner.obtain(item, *n),
         Goal::Station(station) => planner.station(station),
         Goal::Strands(n) if holdings.strands >= *n => Ok(None),
         Goal::Strands(n) => planner.strands(n - holdings.strands).map(Some),
+    }?;
+    Ok(step.map(|step| (step, planner.setting_up)))
+}
+
+/// The most steps [`setup`] plays out before it calls a goal out of reach.
+/// A builder's whole chain from empty hands, the deed's fiber among it, is
+/// well under it.
+pub const SETUP_HORIZON: u32 = 4000;
+
+/// The room [`setup`] gives a plot it claims: a builder's.
+pub const CLAIMED_ROOM: i32 = 4;
+
+/// What a goal still wants set up before its own work (Callings D5): the
+/// stations, kits and tools still missing on the way, and the plot, with a
+/// rough cost in steps. A step is one planner step: a gather, a craft, a
+/// placing, a claim or a deposit. Walking isn't counted.
+///
+/// What the goal is itself isn't setup: a builder's `own a kiln` counts the
+/// kiln's kit as its work, and the workbench the kit is made at as setup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Setup {
+    /// Stations it would place on the way, in order.
+    pub stations: Vec<String>,
+    /// Kits it would make for them.
+    pub kits: Vec<String>,
+    /// Tools it would make on the way (item types), in order.
+    pub tools: Vec<String>,
+    /// It would claim a plot on the way.
+    pub plot: bool,
+    /// Steps the setup takes.
+    pub steps: u32,
+    /// Steps to the goal, the setup's among them.
+    pub total: u32,
+}
+
+impl Setup {
+    /// Nothing is missing: the goal's own work can start.
+    pub fn is_ready(&self) -> bool {
+        self.steps == 0
+    }
+}
+
+/// What `goal` still wants set up (Callings D5, #529). Pure: it plays the
+/// planner's steps out against a copy of `holdings`, to the goal. A gather
+/// yields its least, a craft makes its least, tools don't wear and a plot it
+/// claims has [`CLAIMED_ROOM`], so it's an estimate, not a forecast. What the
+/// bot owns already is met, so going back to a job picks up where it left
+/// off. `Err` when no step leads there, or not within [`SETUP_HORIZON`].
+pub fn setup(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Setup, Stuck> {
+    let mut h = holdings.clone();
+    let mut setup = Setup::default();
+    while setup.total < SETUP_HORIZON {
+        let Some((step, setting_up)) = step(catalog, &h, goal)? else {
+            return Ok(setup);
+        };
+        setup.total += 1;
+        if setting_up {
+            setup.steps += 1;
+            match &step {
+                Step::Place { station, .. } => setup.stations.push(station.clone()),
+                Step::Claim => setup.plot = true,
+                Step::Craft { recipe, .. } => {
+                    let made = catalog.recipes().iter().filter(|r| &r.id == recipe).flat_map(|r| &r.outputs);
+                    for made in made {
+                        if catalog.station_for_kit(&made.item_type).is_some() {
+                            setup.kits.push(made.item_type.clone());
+                        } else if catalog.item_type(&made.item_type).is_some_and(|t| t.tool.is_some()) {
+                            setup.tools.push(made.item_type.clone());
+                        }
+                    }
+                }
+                Step::Gather { .. } | Step::Deposit => {}
+            }
+        }
+        take(catalog, &mut h, &step);
+    }
+    Err(Stuck(format!("{} is more than {SETUP_HORIZON} steps off", goal.label())))
+}
+
+/// What taking `step` does to `h`, as [`setup`] reckons it.
+fn take(catalog: &Catalog, h: &mut Holdings, step: &Step) {
+    let add = |h: &mut Holdings, item: &str, n: i32| {
+        *h.items.entry(item.to_string()).or_insert(0) += n;
+    };
+    match step {
+        Step::Gather { resource, item } => {
+            let n = catalog.resource_type(resource).map_or(1, |r| r.yield_quantity_min.max(1));
+            add(h, item, n);
+        }
+        Step::Craft { recipe, .. } => {
+            let Some(recipe) = catalog.recipes().iter().find(|r| &r.id == recipe) else {
+                return;
+            };
+            for input in &recipe.inputs {
+                add(h, &input.item_type, -input.quantity);
+            }
+            for output in &recipe.outputs {
+                add(h, &output.item_type, output.quantity_min.max(1));
+                if let Some(tool) = catalog.item_type(&output.item_type).and_then(|t| t.tool.as_ref()) {
+                    h.tools.insert(tool.tool_type.clone());
+                }
+            }
+        }
+        Step::Place { kit, station, on_plot } => {
+            add(h, kit, -1);
+            h.stations.insert(station.clone());
+            if *on_plot {
+                h.plot_room = h.plot_room.map(|room| room - 1);
+                h.plot_spare = (h.plot_spare - 1).max(0);
+            }
+        }
+        Step::Claim => {
+            if h.road_deed == Some(Grant::Open) {
+                h.road_deed = Some(Grant::Spent);
+            } else {
+                h.strands -= h.deed_cost;
+            }
+            h.plot_room = Some(CLAIMED_ROOM);
+            h.plot_spare = 0;
+        }
+        Step::Deposit => {
+            let fiber = h.items.remove(FIBER).unwrap_or(0);
+            h.strands += h.fees.deposit_quote(fiber as i64).1;
+        }
     }
 }
 
@@ -181,6 +318,9 @@ struct Planner<'a> {
     holdings: &'a Holdings,
     /// The items being obtained further up, so a cycle is caught.
     visiting: Vec<String>,
+    /// The step found is setup: it's toward a station, tool or plot that
+    /// something further up needs (D5).
+    setting_up: bool,
 }
 
 impl<'a> Planner<'a> {
@@ -210,7 +350,8 @@ impl<'a> Planner<'a> {
         {
             if let Some(tool_type) = &resource.required_tool {
                 if !self.holdings.tools.contains(tool_type) {
-                    return self.tool(tool_type);
+                    let step = self.tool(tool_type);
+                    return self.set_up(step);
                 }
             }
             return Ok(Step::Gather {
@@ -223,14 +364,16 @@ impl<'a> Planner<'a> {
             .ok_or_else(|| Stuck(format!("nothing yields or makes {item}")))?;
         if let Some(station) = &recipe.required_station_type {
             if !self.holdings.stations.contains(station) {
-                return self.station(station)?.ok_or_else(|| {
+                let step = self.station(station)?.ok_or_else(|| {
                     Stuck(format!("the {station} is owned but not counted"))
                 });
+                return self.set_up(step);
             }
         }
         if let Some(tool_type) = &recipe.tool_type {
             if !self.holdings.tools.contains(tool_type) {
-                return self.tool(tool_type);
+                let step = self.tool(tool_type);
+                return self.set_up(step);
             }
         }
         for input in &recipe.inputs {
@@ -242,6 +385,12 @@ impl<'a> Planner<'a> {
             recipe: recipe.id.clone(),
             station: recipe.required_station_type.clone(),
         })
+    }
+
+    /// Marks a step found as setup (D5).
+    fn set_up(&mut self, step: Result<Step, Stuck>) -> Result<Step, Stuck> {
+        self.setting_up |= step.is_ok();
+        step
     }
 
     /// The recipe that makes `item`: one at a station the bot has (or by
@@ -309,6 +458,10 @@ impl<'a> Planner<'a> {
                 station: station.to_string(),
                 on_plot: false,
             }));
+        }
+        // The plot is setup, even for a goal that's the station itself
+        if self.holdings.plot_room.is_none() {
+            self.setting_up = true;
         }
         match self.holdings.plot_room {
             Some(room) if room > 0 => Ok(Some(Step::Place {
@@ -571,6 +724,215 @@ mod tests {
                 "{} starts with {step:?}",
                 item.id
             );
+        }
+    }
+
+    // Setup and the dabble (Callings D5, #529)
+
+    use crate::sim::{Commitment, Craft, Gather, Role, BUILD, ROLES, TOOLS};
+
+    fn set_up(h: &Holdings, goal: Goal) -> Setup {
+        setup(&Catalog::fallback(), h, &goal).unwrap()
+    }
+
+    /// A builder's full set: every station, a tool of each type, and a lot
+    /// with no room left.
+    fn builders_set() -> Holdings {
+        let mut h = with(holding(&[]), &["axe", "pickaxe", "hammer", "sickle"], &BUILD);
+        h.plot_room = Some(0);
+        h
+    }
+
+    #[test]
+    fn setup_counts_what_is_only_on_the_way() {
+        // A log from empty hands: a workbench from its kit, a stone axe at it
+        let s = set_up(&holding(&[]), Goal::hold("log", 1));
+        assert_eq!(s.stations, ["workbench"]);
+        assert_eq!(s.kits, ["workbench_kit"]);
+        assert_eq!(s.tools, ["stone_axe"]);
+        assert!(!s.plot);
+        assert_eq!(s.total, s.steps + 1, "the gather is the work");
+        // With the bench it's only the axe; with the axe, nothing
+        let bench = set_up(&with(holding(&[]), &[], &["workbench"]), Goal::hold("log", 1));
+        assert!(bench.stations.is_empty() && bench.kits.is_empty());
+        assert_eq!(bench.tools, ["stone_axe"]);
+        assert!(bench.steps < s.steps);
+        let axe = set_up(&with(holding(&[]), &["axe"], &[]), Goal::hold("log", 1));
+        assert!(axe.is_ready());
+        assert_eq!(axe.total, 1);
+        // The planner's own step is unchanged by the counting
+        assert_eq!(plan(&holding(&[]), Goal::hold("log", 1)), gather("fiber"));
+    }
+
+    #[test]
+    fn a_goal_met_needs_no_setup() {
+        assert_eq!(set_up(&holding(&[("fiber", 5)]), Goal::hold("fiber", 5)), Setup::default());
+        let kiln = with(holding(&[]), &[], &["kiln"]);
+        assert_eq!(set_up(&kiln, Goal::Station("kiln".into())), Setup::default());
+    }
+
+    #[test]
+    fn a_station_is_its_own_work_and_its_plot_is_setup() {
+        let goal = || Goal::Station("kiln".into());
+        // Its kit is a builder's work; the plot it stands on isn't
+        let kit = holding(&[("kiln_kit", 1)]);
+        let s = set_up(&kit, goal());
+        assert!(s.plot);
+        assert!(s.stations.is_empty() && s.kits.is_empty());
+        assert_eq!(s.total, s.steps + 1, "placing it is the work");
+        // On a lot with room, it's ready
+        let mut owner = kit.clone();
+        owner.plot_room = Some(3);
+        assert_eq!(set_up(&owner, goal()), Setup { total: 1, ..Setup::default() });
+        // The road in's deed is a claim, with nothing saved for it
+        let mut road = kit;
+        road.road_deed = Some(Grant::Open);
+        let s = set_up(&road, goal());
+        assert!(s.plot);
+        assert_eq!((s.steps, s.total), (1, 2));
+        // Waiting on the road's deed, no step leads there
+        road.road_deed = Some(Grant::Unearned);
+        assert!(setup(&Catalog::fallback(), &road, &goal()).is_err());
+    }
+
+    #[test]
+    fn setup_for_every_job_from_empty_hands() {
+        let catalog = Catalog::fallback();
+        let empty = holding(&[]);
+        let of = |role: Role| {
+            role.setup(&catalog, &empty, Commitment::Full)
+                .unwrap_or_else(|e| panic!("{role}: {}", e.0))
+        };
+        // Fiber is by hand, and a builder's first workbench is its own work
+        for role in [Role::Gatherer(Gather::Fiber), Role::Merchant, Role::Builder] {
+            assert!(of(role).is_ready(), "{role}: {:?}", of(role));
+        }
+        // Wood and ore want a bench and a stone tool
+        assert_eq!(of(Role::Gatherer(Gather::Wood)).tools, ["stone_axe"]);
+        assert_eq!(of(Role::Gatherer(Gather::Ore)).tools, ["stone_pickaxe"]);
+        // A tool crafter's first axe wants the bench, not another tool
+        let tools = of(Role::Crafter(Craft::Tools));
+        assert_eq!(tools.stations, ["workbench"]);
+        assert!(tools.tools.is_empty());
+        // Planks and ingots want a plot and the chain to the forge
+        let wood = of(Role::Gatherer(Gather::Wood)).steps;
+        for role in [Role::Crafter(Craft::Planks), Role::Crafter(Craft::Ingots)] {
+            let s = of(role);
+            assert!(s.plot, "{role}");
+            assert!(s.stations.iter().any(|s| s == "forge"), "{role}: {:?}", s.stations);
+            assert!(s.steps > wood, "{role}");
+        }
+        assert!(of(Role::Crafter(Craft::Planks)).stations.iter().any(|s| s == "sawbench"));
+    }
+
+    #[test]
+    fn setup_for_every_job_from_a_builders_full_set() {
+        let catalog = Catalog::fallback();
+        let h = builders_set();
+        for role in ROLES {
+            for commitment in [Commitment::Full, Commitment::Dabble] {
+                let s = role.setup(&catalog, &h, commitment).unwrap();
+                assert!(s.is_ready(), "{role} {commitment:?}: {s:?}");
+                assert!(s.total > 0, "{role}: there's still the work");
+            }
+        }
+    }
+
+    #[test]
+    fn a_dabbling_tool_crafter_plans_a_handle_not_the_iron_pickaxe() {
+        let catalog = Catalog::fallback();
+        let tools = Role::Crafter(Craft::Tools);
+        let empty = holding(&[]);
+        assert_eq!(tools.work(&catalog, &empty, Commitment::Full).len(), TOOLS.len() + 1);
+        assert_eq!(tools.work(&catalog, &empty, Commitment::Dabble), [Goal::hold("tool_handle", 1)]);
+        // Going back picks up where it left off: the bench stayed, so the
+        // handle is nearer
+        let bench = with(holding(&[]), &[], &["workbench"]);
+        let there = tools.setup(&catalog, &bench, Commitment::Dabble).unwrap();
+        assert!(there.is_ready());
+        assert!(there.total < tools.setup(&catalog, &empty, Commitment::Dabble).unwrap().total);
+        // Its promises and its float still come first
+        let mut owing = bench;
+        owing.owed = vec![("rope".into(), 2)];
+        let goals = tools.goals_at(&catalog, &owing, Commitment::Dabble);
+        assert_eq!(goals, [Goal::hold("rope", 2), Goal::Strands(FLOAT), Goal::hold("tool_handle", 1)]);
+    }
+
+    #[test]
+    fn a_dabbling_builder_plans_bricks_at_its_kiln() {
+        let catalog = Catalog::fallback();
+        let mut h = with(holding(&[]), &["axe"], &["workbench", "kiln"]);
+        h.plot_room = Some(2);
+        assert_eq!(Role::Builder.work(&catalog, &h, Commitment::Full)[0], Goal::Station("forge".into()));
+        assert_eq!(Role::Builder.work(&catalog, &h, Commitment::Dabble), [Goal::hold("brick", 1)]);
+        // Without an axe for the charcoal's log, a chest of fiber is nearer
+        h.tools.clear();
+        assert_eq!(Role::Builder.work(&catalog, &h, Commitment::Dabble), [Goal::Station("storage_chest".into())]);
+        // And with no room for one, the bricks again
+        h.plot_room = Some(0);
+        assert_eq!(Role::Builder.work(&catalog, &h, Commitment::Dabble), [Goal::hold("brick", 1)]);
+        // From empty hands, the workbench is nearest
+        let empty = holding(&[]);
+        assert_eq!(Role::Builder.work(&catalog, &empty, Commitment::Dabble), [Goal::Station("workbench".into())]);
+    }
+
+    #[test]
+    fn a_dabble_plans_no_longer_than_full() {
+        let catalog = Catalog::fallback();
+        let mut cases = 0;
+        for role in ROLES {
+            for stations in 0..=BUILD.len() {
+                for (strands, room) in [(0, None), (400, None), (100, Some(4)), (FLOAT, Some(0))] {
+                    let mut h = with(holding(&[("fiber", 12)]), &[], &BUILD[..stations]);
+                    h.strands = strands;
+                    h.plot_room = room;
+                    let full = role.work(&catalog, &h, Commitment::Full);
+                    let dabble = role.work(&catalog, &h, Commitment::Dabble);
+                    let case = format!("{role} with {stations} stations, {strands} Strands, room {room:?}");
+                    assert!(!dabble.is_empty() && dabble.len() <= full.len(), "{case}: {dabble:?}");
+                    let total = |goals: &[Goal]| setup(&catalog, &h, &goals[0]).map(|s| s.total);
+                    if let Ok(full) = total(&full) {
+                        assert!(total(&dabble).unwrap() <= full, "{case}");
+                    }
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, ROLES.len() * (BUILD.len() + 1) * 4);
+    }
+
+    /// Full commitment is the ladder every role worked before callings, so
+    /// the swarm's tests and today's citizens hold.
+    #[test]
+    fn full_plans_todays_ladder() {
+        let catalog = Catalog::fallback();
+        let empty = holding(&[]);
+        let full = |role: Role, h: &Holdings| role.work(&catalog, h, Commitment::Full);
+        let tools: Vec<Goal> = TOOLS.iter().map(|t| Goal::hold(t, 1)).chain([Goal::hold("tool_handle", 1)]).collect();
+        assert_eq!(full(Role::Crafter(Craft::Tools), &empty), tools);
+        let build: Vec<Goal> = BUILD.iter().map(|s| Goal::Station(s.to_string())).chain([Goal::hold("brick", 1)]).collect();
+        assert_eq!(full(Role::Builder, &empty), build);
+        assert_eq!(full(Role::Builder, &builders_set()), [Goal::hold("brick", 1)]);
+        for (role, item) in [
+            (Role::Gatherer(Gather::Fiber), "fiber"),
+            (Role::Merchant, "fiber"),
+            (Role::Gatherer(Gather::Wood), "log"),
+            (Role::Gatherer(Gather::Ore), "iron_ore"),
+            (Role::Crafter(Craft::Planks), "plank"),
+            (Role::Crafter(Craft::Ingots), "iron_ingot"),
+        ] {
+            assert_eq!(full(role, &empty), [Goal::hold(item, 1)], "{role}");
+        }
+        // What every caller reads today is full's
+        let mut owing = builders_set();
+        owing.owed = vec![("plank".into(), 3)];
+        owing.strands = 500;
+        for role in ROLES {
+            for h in [&empty, &builders_set(), &owing] {
+                assert_eq!(role.goals(&catalog, h), role.goals_at(&catalog, h, Commitment::Full), "{role}");
+                assert_eq!(role.errands(&catalog, h), role.errands_at(&catalog, h, Commitment::Full), "{role}");
+                assert_eq!(role.goal(&catalog, h), role.goals_at(&catalog, h, Commitment::Full)[0], "{role}");
+            }
         }
     }
 }

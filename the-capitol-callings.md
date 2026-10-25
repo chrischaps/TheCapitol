@@ -213,6 +213,14 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 - **The side file.** It sits beside the roster (like `town.presence.csv`) and keeps each citizen's current job, `lately`, and later its drift (K5.1). The roster writer only appends, so it never rewrites `town.toml`.
 - **Reports.** `Activity` is time accounting: the eight jobs plus commons, detour, road in and free. A citizen's report bucket is its favourite's slug, or `all-rounder`. `CitizenReport` gains `calling` and `doing`; old samples keep their slugs.
 - **The swarm.** `capitol-bot --sim` bots have no persona, so their calling is focus 1.0 on their `MIX` role, which is exactly today's behaviour.
+- **Setup and the commitment (K0.3, built).** Both are in `sim/plan.rs` and `sim/mod.rs`. Nothing calls them with a dabble yet, so citizens plan as they did:
+  - `plan::setup(catalog, holdings, goal) -> Result<Setup, Stuck>` plays the planner's steps out against a copy of the holdings, to the goal. It counts the steps that were only on the way: those toward a station, a tool or a plot that something further up needs. `Setup` lists the `stations`, `kits` and `tools` it would make, whether it would claim a `plot`, the setup's `steps` and the goal's `total`. `is_ready()` means `steps == 0`.
+  - It's an estimate. A gather yields its least, a craft makes its least, tools don't wear, a claimed plot has room for 4 (`CLAIMED_ROOM`), and walking isn't counted. Past 4000 steps (`SETUP_HORIZON`) it's `Err`.
+  - What the goal is itself isn't setup. A builder's `own a kiln` counts the kiln's kit as its work, and the workbench it's made at and the plot as setup.
+  - From empty hands, fiber and a builder's first workbench are ready. Wood and ore want 28 steps (a bench and a stone tool), a tool crafter's first axe 12 (the bench), and planks and ingots about 500, since the sawbench and forge need a plot and the kiln's bricks. With a builder's full set, every job is ready.
+  - `sim::Commitment { Full, Dabble }` (default `Full`) is taken by `Role::work`, `goals_at`, `errands_at` and `Role::setup`, which is the setup of the work's first goal: what K1.1's `Choice::Take { setup }` charges. `goal`, `goals` and `errands` are `Full`, today's ladder.
+  - A **dabble** is one goal: of the job's products, the fewest steps away. For a tool crafter those are its eight tools and a handle; for a builder, its six stations and bricks. Ties go to the ladder's order. The other jobs have one product, so their dabble is their ladder. A tool crafter from empty hands dabbles a handle. A builder with a workbench, a kiln and an axe makes bricks, but without the axe, a storage chest of fiber is nearer. Promises and the float still come first.
+  - **For K1.3:** a dabble may place a station, and that takes lot room. D6 keeps the lot for the calling, so K1.3 should leave a dabble's station off unless there's room the calling doesn't want (`Holdings::plot_spare`).
 
 ## 6. Phases and work packages
 
@@ -222,7 +230,7 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 |---|---|---|---|
 | K0.1 #527 | Time by activity in the town report and `compare`; a baseline soak of today's roles (#403's recipe), the "before" for §10 | S | – |
 | K0.2 #528 | `Calling` in the persona, drawn last; `[callings] mix`; the roster's `calling`, with `role` as the birth trade; `mint --calling`; old rosters draw one | M | – |
-| K0.3 #529 | `plan::setup` and the dabble commitment | M | – |
+| K0.3 #529 | `plan::setup` and the dabble commitment. *Built: `plan::setup` returns a `Result`, and `Commitment` is on `Role::work`, `goals_at`, `errands_at` and `Role::setup`; see §5* | M | – |
 
 ### K1: Stints (`cg:K1-stints`)
 

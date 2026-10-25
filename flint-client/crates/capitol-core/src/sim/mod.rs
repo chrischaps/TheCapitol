@@ -82,6 +82,24 @@ pub enum Role {
     Merchant,
 }
 
+/// How far a citizen takes a job (Callings D5, #529). Taking up a job that
+/// isn't your favourite can be all prerequisites, so a person trying a trade
+/// starts with the cheapest thing it can make with what it has. Stations and
+/// tools it owns stay owned at either, so going back to a job picks up where
+/// it left off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Commitment {
+    /// The role's whole ladder, as every role worked before callings: for a
+    /// citizen's favourite, and for a job it has kept up.
+    #[default]
+    Full,
+    /// The job's cheapest product within reach: a tool handle rather than
+    /// the iron pickaxe, the nearest station or bricks rather than a
+    /// builder's whole chain. A gatherer's, a sawyer's and a smelter's are
+    /// their ladder, which is one product already.
+    Dabble,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gather {
     Fiber,
@@ -243,6 +261,11 @@ impl Role {
         self.goals(catalog, holdings).remove(0)
     }
 
+    /// [`goals`](Self::goals) at full commitment: the role's whole ladder.
+    pub fn goals(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
+        self.goals_at(catalog, holdings, Commitment::Full)
+    }
+
     /// What the role is after, first things first. A tool crafter's tools
     /// and a builder's stations come in order, those it lacks, then more of
     /// what it makes once it has them all. Never empty.
@@ -254,8 +277,11 @@ impl Role {
     ///
     /// What its claims on commissions still want of it comes before
     /// anything (S2.5): a promise is kept first.
-    pub fn goals(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
-        let mut goals = self.work(catalog, holdings);
+    ///
+    /// The work between them is taken at `commitment` (Callings D5): the
+    /// whole ladder, or a dabble's one cheap product.
+    pub fn goals_at(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment) -> Vec<Goal> {
+        let mut goals = self.work(catalog, holdings, commitment);
         if !self.banks() && holdings.strands < FLOOR {
             goals.insert(0, Goal::Strands(FLOAT));
         }
@@ -268,8 +294,55 @@ impl Role {
         goals
     }
 
-    /// What the role works at: [`goals`](Self::goals) less its float.
-    fn work(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
+    /// What the role works at, at `commitment`: [`goals_at`](Self::goals_at)
+    /// less its float and its promises. Never empty.
+    pub fn work(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment) -> Vec<Goal> {
+        match commitment {
+            Commitment::Full => self.ladder(catalog, holdings),
+            Commitment::Dabble => self.dabble(catalog, holdings).unwrap_or_else(|| self.ladder(catalog, holdings)),
+        }
+    }
+
+    /// What the role's work at `commitment` still wants set up before its
+    /// first product (Callings D5): the stations, kits, tools and plot
+    /// missing, and the steps they take. What a citizen choosing its
+    /// evening's work charges a job (K1.1).
+    pub fn setup(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment) -> Result<plan::Setup, plan::Stuck> {
+        let first = self.work(catalog, holdings, commitment).remove(0);
+        plan::setup(catalog, holdings, &first)
+    }
+
+    /// A dabble's work (Callings D5): of the role's products, the one the
+    /// fewest steps away, with what it holds and owns. A tool crafter makes
+    /// a handle at a workbench rather than climb to the iron pickaxe; a
+    /// builder, the station or the bricks nearest to hand. Ties go to the
+    /// ladder's order. `None` for a role with one product, whose dabble is
+    /// its ladder, and when no product can be reached, so the ladder's
+    /// errands say why.
+    fn dabble(&self, catalog: &Catalog, holdings: &Holdings) -> Option<Vec<Goal>> {
+        let more = |item: &str| Goal::hold(item, holdings.count(item) + 1);
+        let products: Vec<Goal> = match self {
+            Role::Crafter(Craft::Tools) => TOOLS.iter().map(|t| Goal::hold(t, 1)).chain([more("tool_handle")]).collect(),
+            Role::Builder => BUILD.iter().map(|s| Goal::Station(s.to_string())).chain([more("brick")]).collect(),
+            _ => return None,
+        };
+        let mut best: Option<(u32, Goal)> = None;
+        for goal in products {
+            let Ok(setup) = plan::setup(catalog, holdings, &goal) else { continue };
+            // Met already, as an owned station is
+            if setup.total == 0 {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(steps, _)| setup.total < *steps) {
+                best = Some((setup.total, goal));
+            }
+        }
+        best.map(|(_, goal)| vec![goal])
+    }
+
+    /// The role's whole ladder, today's work: a tool crafter's tools and a
+    /// builder's stations, those it lacks, then more of what it makes.
+    fn ladder(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
         let more = |item: &str| Goal::hold(item, holdings.count(item) + 1);
         let unmet = |goal: &Goal| plan::next(catalog, holdings, goal) != Ok(None);
         let then = |lacking: Vec<Goal>, more: Goal| -> Vec<Goal> { lacking.into_iter().filter(unmet).chain([more]).collect() };
@@ -323,6 +396,12 @@ impl Role {
     /// step it starts with. Goals already met, and goals no step leads to,
     /// are left off. `Err` names why, when every goal is stuck.
     pub fn errands(&self, catalog: &Catalog, holdings: &Holdings) -> Result<Vec<Errand>, plan::Stuck> {
+        self.errands_at(catalog, holdings, Commitment::Full)
+    }
+
+    /// [`errands`](Self::errands), with the work taken at `commitment`
+    /// (Callings D5).
+    pub fn errands_at(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment) -> Result<Vec<Errand>, plan::Stuck> {
         let mut errands = Vec::new();
         if self.banks() && holdings.count(crate::exchange::FIBER) >= BANK_FIBER_AT / 4 {
             errands.push(Errand {
@@ -331,7 +410,7 @@ impl Role {
             });
         }
         let mut stuck = None;
-        for goal in self.goals(catalog, holdings) {
+        for goal in self.goals_at(catalog, holdings, commitment) {
             match plan::next(catalog, holdings, &goal) {
                 Ok(Some(step)) => errands.push(Errand { goal: Some(goal), step }),
                 Ok(None) => {}
