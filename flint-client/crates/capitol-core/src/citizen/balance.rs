@@ -24,6 +24,7 @@ use capitol_protocol::tunables::{Knob, TunableError, TunablesResponse, TunablesU
 use serde::{Deserialize, Serialize};
 
 use super::report::TownReport;
+use crate::sim::report::ActivityTime;
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -148,6 +149,14 @@ pub struct Balance {
     pub units_hold: bool,
     pub units_void: bool,
     pub unit_drift: Vec<(String, i64)>,
+    /// Strands paid out of the court's escrow to citizens for commissions
+    /// delivered, and for wage work, from their own entries (Callings
+    /// K0.1): the books file both as `court_payout`. `None` in a file from
+    /// before.
+    #[serde(default)]
+    pub commissions_paid: Option<i64>,
+    #[serde(default)]
+    pub wages_paid: Option<i64>,
 }
 
 /// A trade's Strands, all its citizens together.
@@ -157,6 +166,15 @@ pub struct TradeMoney {
     pub citizens: usize,
     pub start: i64,
     pub end: i64,
+    /// What its citizens' time went on (Callings K0.1). A file from before
+    /// has none, and neither do the counts after it.
+    #[serde(default)]
+    pub time: ActivityTime,
+    /// Steps that failed, and times a citizen found no way to its goal
+    #[serde(default)]
+    pub failed_steps: usize,
+    #[serde(default)]
+    pub stuck: usize,
 }
 
 /// An item's price on the market over a run.
@@ -220,6 +238,9 @@ impl Balance {
                     citizens: t.citizens,
                     start: t.strands_start,
                     end: t.strands_end,
+                    time: t.time.clone(),
+                    failed_steps: t.failed_steps,
+                    stuck: t.stuck,
                 })
                 .collect(),
             gini_start: gini(&start),
@@ -235,6 +256,8 @@ impl Balance {
             units_hold: books.units.holds(),
             units_void: books.units.void,
             unit_drift: books.units.drift.clone(),
+            commissions_paid: Some(report.sim.court.paid),
+            wages_paid: Some(report.sim.wages.earned),
         })
     }
 
@@ -277,6 +300,73 @@ impl Balance {
     fn strands(&self) -> (i64, i64) {
         self.trades.iter().fold((0, 0), |(s, e), t| (s + t.start, e + t.end))
     }
+
+    fn flow(&self, kind: &str) -> i64 {
+        self.flows.get(kind).copied().unwrap_or(0)
+    }
+
+    /// The faucets' Strands a citizen a game hour (§10 of the callings
+    /// plan): what a citizen's work brings into the world.
+    pub fn faucet_per_citizen_hour(&self) -> Option<f64> {
+        let hours = self.citizens as f64 * self.tick_hours;
+        (hours > 0.0).then(|| self.faucets as f64 / hours)
+    }
+
+    /// The Strands that changed hands for goods, commissions, wages and
+    /// rent over the run (§10's circulation).
+    pub fn circulation(&self) -> Circulation {
+        // A sale is counted once, by what its seller was paid
+        let goods = self.flow("market_sale") + self.flow("bazaar_sale") + self.flow("trade_received");
+        let (commissions, wages) = match (self.commissions_paid, self.wages_paid) {
+            (Some(c), Some(w)) => (c, Some(w)),
+            // From before K0.1: the books' payouts, both together
+            _ => (self.flow("court_payout"), None),
+        };
+        Circulation {
+            goods,
+            commissions,
+            wages,
+            rent: -self.flow("bazaar_rent"),
+        }
+    }
+
+    /// The share of the citizens' Strands at the end held by the trades
+    /// whose name says fiber (§10: under 30%, from 93% in #403).
+    pub fn fiber_share(&self) -> Option<f64> {
+        let (_, end) = self.strands();
+        let fiber: i64 = self.trades.iter().filter(|t| t.role.contains("fiber")).map(|t| t.end).sum();
+        (end > 0).then(|| fiber as f64 / end as f64)
+    }
+
+    /// Every trade's time together, and whether there is any: a run from
+    /// before K0.1 has none.
+    fn time(&self) -> Option<ActivityTime> {
+        let mut all = ActivityTime::default();
+        for t in &self.trades {
+            all.add(&t.time);
+        }
+        (all.total() > 0.0).then_some(all)
+    }
+}
+
+/// Strands that changed hands over a run (§10's circulation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Circulation {
+    /// Paid to sellers: the hall's fills, the bazaar's sales and trade windows
+    pub goods: i64,
+    /// Paid out of the court's escrow for commissions delivered; with no
+    /// split, for wage work too
+    pub commissions: i64,
+    /// Paid for wage work, when the run split it out
+    pub wages: Option<i64>,
+    /// Paid as bazaar rent
+    pub rent: i64,
+}
+
+impl Circulation {
+    pub fn total(&self) -> i64 {
+        self.goods + self.commissions + self.wages.unwrap_or(0) + self.rent
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,9 +408,121 @@ pub fn compare(a: &Balance, b: &Balance) -> String {
     books_md(&mut md, a, b);
     trades_md(&mut md, a, b);
     spread_md(&mut md, a, b);
+    money_md(&mut md, a, b);
     flows_md(&mut md, a, b);
     prices_md(&mut md, a, b);
+    time_md(&mut md, a, b);
+    steps_md(&mut md, a, b);
     md
+}
+
+/// The money moving (Callings §10): the faucet a citizen-hour, what changed
+/// hands a game hour, and fiber's share of the wealth.
+fn money_md(md: &mut String, a: &Balance, b: &Balance) {
+    let _ = writeln!(md, "## The money moving\n");
+    let (ca, cb) = (a.circulation(), b.circulation());
+    let per_hour = |x: i64, run: &Balance| {
+        if run.tick_hours > 0.0 {
+            format!("{:.0}", x as f64 / run.tick_hours)
+        } else {
+            "—".into()
+        }
+    };
+    let of_faucet = |c: &Circulation, run: &Balance| {
+        if run.faucets > 0 {
+            format!("{:.0}%", 100.0 * c.total() as f64 / run.faucets as f64)
+        } else {
+            "—".into()
+        }
+    };
+    let _ = writeln!(
+        md,
+        "Strands spent on goods, commissions, wages and rent came to {} of the faucets' Strands in A and {} in B. A game hour is an hour of ticks.\n",
+        of_faucet(&ca, a),
+        of_faucet(&cb, b)
+    );
+    let num = |x: Option<f64>, digits: usize| x.map_or("—".to_string(), |x| format!("{x:.digits$}"));
+    let pct = |x: Option<f64>| x.map_or("—".to_string(), |x| format!("{:.0}%", x * 100.0));
+    let wages = |c: &Circulation, run: &Balance| c.wages.map_or("— (in commissions)".to_string(), |w| per_hour(w, run));
+    let _ = writeln!(md, "| | A | B |");
+    let _ = writeln!(md, "|---|---:|---:|");
+    let _ = writeln!(md, "| Faucets a citizen-hour | {} | {} |", num(a.faucet_per_citizen_hour(), 1), num(b.faucet_per_citizen_hour(), 1));
+    let _ = writeln!(md, "| Goods a game hour | {} | {} |", per_hour(ca.goods, a), per_hour(cb.goods, b));
+    let _ = writeln!(md, "| Commissions a game hour | {} | {} |", per_hour(ca.commissions, a), per_hour(cb.commissions, b));
+    let _ = writeln!(md, "| Wages a game hour | {} | {} |", wages(&ca, a), wages(&cb, b));
+    let _ = writeln!(md, "| Rent a game hour | {} | {} |", per_hour(ca.rent, a), per_hour(cb.rent, b));
+    let _ = writeln!(md, "| **Spent a game hour** | {} | {} |", per_hour(ca.total(), a), per_hour(cb.total(), b));
+    let _ = writeln!(md, "| Spent, of the faucets | {} | {} |", of_faucet(&ca, a), of_faucet(&cb, b));
+    let _ = writeln!(md, "| Fiber trades' share of the Strands at the end | {} | {} |", pct(a.fiber_share()), pct(b.fiber_share()));
+    md.push('\n');
+}
+
+/// Time by activity (Callings K0.1): each trade's in each run.
+fn time_md(md: &mut String, a: &Balance, b: &Balance) {
+    let _ = writeln!(md, "## Time by activity\n");
+    let (ta, tb) = (a.time(), b.time());
+    if ta.is_none() && tb.is_none() {
+        let _ = writeln!(md, "Neither run logged its time by activity: both are from before it was kept.\n");
+        return;
+    }
+    let mut times: Vec<&ActivityTime> = a.trades.iter().chain(&b.trades).map(|t| &t.time).collect();
+    times.extend(ta.iter().chain(&tb));
+    let columns = ActivityTime::columns(times);
+    let _ = writeln!(
+        md,
+        "What each trade's work went on, as a share of its work time, in each run (the town report says how each is counted).{}\n",
+        match (&ta, &tb) {
+            (None, _) => " A is from before time by activity was kept.",
+            (_, None) => " B is from before time by activity was kept.",
+            _ => "",
+        }
+    );
+    let heads = ActivityTime::heads(&columns);
+    let _ = writeln!(md, "| Trade | Run | Work hours | {} |", heads.join(" | "));
+    let _ = writeln!(md, "|---|---|{}", "---:|".repeat(heads.len() + 1));
+    let row = |md: &mut String, trade: &str, run: &str, time: &ActivityTime| {
+        let _ = writeln!(md, "| {trade} | {run} | {:.1} | {} |", time.work(), time.cells(&columns).join(" | "));
+    };
+    let roles: BTreeSet<&String> = a.trades.iter().chain(&b.trades).map(|t| &t.role).collect();
+    for role in roles {
+        for (name, run) in [("A", a), ("B", b)] {
+            if let Some(t) = run.trades.iter().find(|t| &t.role == role).filter(|t| t.time.total() > 0.0) {
+                row(md, role, name, &t.time);
+            }
+        }
+    }
+    for (name, time) in [("A", &ta), ("B", &tb)] {
+        if let Some(time) = time {
+            row(md, "**Every citizen**", name, time);
+        }
+    }
+    md.push('\n');
+}
+
+/// Steps that failed, and times a citizen was stuck.
+fn steps_md(md: &mut String, a: &Balance, b: &Balance) {
+    let _ = writeln!(md, "## Failed and stuck\n");
+    if a.time().is_none() && b.time().is_none() {
+        let _ = writeln!(md, "Neither run counted them: both are from before they were kept.\n");
+        return;
+    }
+    let count = |run: &Balance, n: fn(&TradeMoney) -> usize| -> String {
+        if run.time().is_none() {
+            return "—".into();
+        }
+        let n: usize = run.trades.iter().map(n).sum();
+        let hours = run.citizens as f64 * run.tick_hours;
+        if hours > 0.0 {
+            format!("{n} ({:.2} a citizen-hour)", n as f64 / hours)
+        } else {
+            n.to_string()
+        }
+    };
+    let _ = writeln!(md, "| | A | B |");
+    let _ = writeln!(md, "|---|---:|---:|");
+    let _ = writeln!(md, "| Steps that failed | {} | {} |", count(a, |t| t.failed_steps), count(b, |t| t.failed_steps));
+    let _ = writeln!(md, "| Times stuck, with no way to a goal | {} | {} |", count(a, |t| t.stuck), count(b, |t| t.stuck));
+    md.push('\n');
 }
 
 fn knobs_md(md: &mut String, a: &Balance, b: &Balance) {
@@ -613,10 +815,7 @@ mod tests {
             scale: 10.0,
             started_ms: 0,
             ended_ms: 600_000,
-            trades: vec![
-                TradeMoney { role: "gatherer-fiber".into(), citizens: 4, start: 400, end: 1200 },
-                TradeMoney { role: "crafter-planks".into(), citizens: 2, start: 200, end: 150 },
-            ],
+            trades: vec![money("gatherer-fiber", 4, 400, 1200), money("crafter-planks", 2, 200, 150)],
             gini_start: Some(0.0),
             gini_end: Some(0.41),
             top_tenth_end: Some(0.3),
@@ -633,7 +832,77 @@ mod tests {
             units_hold: true,
             units_void: false,
             unit_drift: vec![],
+            commissions_paid: None,
+            wages_paid: None,
         }
+    }
+
+    fn money(role: &str, citizens: usize, start: i64, end: i64) -> TradeMoney {
+        TradeMoney {
+            role: role.into(),
+            citizens,
+            start,
+            end,
+            time: ActivityTime::default(),
+            failed_steps: 0,
+            stuck: 0,
+        }
+    }
+
+    /// Callings K0.1: the money moving, time by activity, and what failed,
+    /// and a file from before them still reads
+    #[test]
+    fn two_runs_compare_their_money_moving_and_their_time() {
+        use crate::sim::report::Entry;
+        use crate::sim::Activity;
+        let spent = |hours: f64, activity: Activity| Entry::Spent {
+            label: "a step".into(),
+            hours,
+            ok: true,
+            activity,
+            setup: false,
+            day: 3,
+        };
+        let a = run("before.toml", 0.02, 1);
+        let mut b = run("after.toml", 0.02, 1);
+        b.flows.insert("market_sale".into(), 300);
+        b.flows.insert("bazaar_rent".into(), -40);
+        b.flows.insert("court_payout".into(), 100);
+        (b.commissions_paid, b.wages_paid) = (Some(80), Some(20));
+        let entries = |fiber: f64, commons: f64| vec![spent(fiber, Activity::Fiber), spent(commons, Activity::Commons)];
+        b.trades[0].time = ActivityTime::of(&entries(3.0, 1.0));
+        b.trades[0].failed_steps = 8;
+        b.trades[1].time = ActivityTime::of(&entries(1.0, 1.0));
+        b.trades[1].stuck = 4;
+        let md = compare(&a, &b);
+        assert!(md.contains("| Faucets a citizen-hour | 2.2 | 2.2 |"), "900 over 20 citizens for 20 hours: {md}");
+        assert!(md.contains("| Goods a game hour | 0 | 15 |"), "{md}");
+        assert!(md.contains("| Commissions a game hour | 0 | 4 |"), "{md}");
+        assert!(md.contains("| Wages a game hour | — (in commissions) | 1 |"), "{md}");
+        assert!(md.contains("| Rent a game hour | 0 | 2 |"), "{md}");
+        assert!(md.contains("| Spent, of the faucets | 0% | 49% |"), "440 of 900: {md}");
+        assert!(md.contains("| Fiber trades' share of the Strands at the end | 89% | 89% |"), "{md}");
+        assert!(md.contains("A is from before time by activity was kept."), "{md}");
+        assert!(md.contains("| Trade | Run | Work hours | Fiber | Commons | Setup | Jobs a day (fewest) | Activities a day (fewest) |"), "{md}");
+        assert!(md.contains("| gatherer-fiber | B | 4.0 | 75% | 25% |  | 1.0 (1) | 2.0 (2) |"), "{md}");
+        assert!(md.contains("| **Every citizen** | B | 6.0 | 67% | 33% |  | 1.0 (1) | 2.0 (2) |"), "{md}");
+        assert!(md.contains("| Steps that failed | — | 8 (0.02 a citizen-hour) |"), "{md}");
+        assert!(md.contains("| Times stuck, with no way to a goal | — | 4 (0.01 a citizen-hour) |"), "{md}");
+
+        // A balance written before K0.1 has none of it, and reads
+        let mut old = serde_json::to_value(&a).unwrap();
+        let fields = old.as_object_mut().unwrap();
+        fields.remove("commissions_paid");
+        fields.remove("wages_paid");
+        for trade in fields["trades"].as_array_mut().unwrap() {
+            let trade = trade.as_object_mut().unwrap();
+            for key in ["time", "failed_steps", "stuck"] {
+                trade.remove(key);
+            }
+        }
+        let read: Balance = serde_json::from_value(old).unwrap();
+        assert_eq!(read, a);
+        assert!(compare(&read, &read).contains("Neither run logged its time by activity"));
     }
 
     #[test]

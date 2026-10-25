@@ -5,6 +5,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use serde::{Deserialize, Serialize};
+
+use super::Activity;
+
 /// One thing a bot saw or did. Times are game hours since the run began.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
@@ -22,8 +26,22 @@ pub enum Entry {
     /// A tool used its last durability.
     ToolBroke { item: String, at: f64 },
     /// A step and how long it took, in game hours. `ok` is false when it
-    /// failed (a refusal, a timeout, a blocked walk).
-    Spent { label: String, hours: f64, ok: bool },
+    /// failed (a refusal, a timeout, a blocked walk). `activity` is what it
+    /// was for, `setup` whether it was a tool, kit, station or deed on the
+    /// way to something else (Callings K0.1), and `day` the day's clock's
+    /// day it began in ([`rules::day_number`](capitol_protocol::rules::day_number)).
+    Spent {
+        label: String,
+        hours: f64,
+        ok: bool,
+        activity: Activity,
+        setup: bool,
+        day: i64,
+    },
+    /// Free time: game hours with nothing to do, rested or passed at the
+    /// hall, a park or a bridge (K0.1). Not a step, so not in the step
+    /// times.
+    Idle { hours: f64, day: i64 },
     /// Why a step failed: the server's refusal, or what timed out.
     Failed { label: String, why: String },
     /// The planner found no way to the bot's goal.
@@ -328,6 +346,202 @@ pub struct TimeLine {
     pub failed: usize,
 }
 
+/// One day of a bot's time, by activity (Callings K0.1).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DayTime {
+    /// Game hours on each activity, free time among them
+    pub hours: BTreeMap<Activity, f64>,
+    /// Hours of the work that were setup
+    pub setup: f64,
+}
+
+impl DayTime {
+    /// Hours of work: everything but free time.
+    pub fn work(&self) -> f64 {
+        self.hours.iter().filter(|(a, _)| a.is_work()).map(|(_, h)| h).sum()
+    }
+
+    /// The jobs (D2's eight) it gave any time to.
+    pub fn jobs(&self) -> usize {
+        self.hours.iter().filter(|(a, h)| a.is_job() && **h > 0.0).count()
+    }
+
+    /// The activities it gave any work time to: the jobs, the Commons,
+    /// detours and the road in.
+    pub fn activities(&self) -> usize {
+        self.hours.iter().filter(|(a, h)| a.is_work() && **h > 0.0).count()
+    }
+}
+
+/// A bot's time by activity, a day at a time, by
+/// [`rules::day_number`](capitol_protocol::rules::day_number).
+pub fn days(entries: &[Entry]) -> BTreeMap<i64, DayTime> {
+    let mut days: BTreeMap<i64, DayTime> = BTreeMap::new();
+    for entry in entries {
+        match entry {
+            Entry::Spent {
+                hours,
+                activity,
+                setup,
+                day,
+                ..
+            } => {
+                let d = days.entry(*day).or_default();
+                *d.hours.entry(*activity).or_insert(0.0) += hours;
+                if *setup {
+                    d.setup += hours;
+                }
+            }
+            Entry::Idle { hours, day } => *days.entry(*day).or_default().hours.entry(Activity::Free).or_insert(0.0) += hours,
+            _ => {}
+        }
+    }
+    days
+}
+
+/// How many things a bot did on one day it worked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DayCount {
+    /// Jobs (D2's eight)
+    pub jobs: usize,
+    /// Activities: the jobs, the Commons, detours and the road in
+    pub activities: usize,
+}
+
+/// Time by activity over one bot's run, or many taken together (Callings
+/// K0.1): what the work went on, and how many things a day. A balance run
+/// keeps it in its JSON, so each field defaults for a file written before.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActivityTime {
+    /// Game hours on each activity, by [`Activity::slug`], free time among
+    /// them
+    #[serde(default)]
+    pub hours: BTreeMap<String, f64>,
+    /// Hours of the work that were setup: tools, kits, stations and deeds
+    /// on the way to something else
+    #[serde(default)]
+    pub setup: f64,
+    /// Each day a bot did any work, how many things it did
+    #[serde(default)]
+    pub days: Vec<DayCount>,
+}
+
+impl ActivityTime {
+    pub fn of(entries: &[Entry]) -> ActivityTime {
+        let mut time = ActivityTime::default();
+        for day in days(entries).into_values() {
+            for (activity, hours) in &day.hours {
+                *time.hours.entry(activity.slug().to_string()).or_insert(0.0) += hours;
+            }
+            time.setup += day.setup;
+            if day.work() > 0.0 {
+                time.days.push(DayCount {
+                    jobs: day.jobs(),
+                    activities: day.activities(),
+                });
+            }
+        }
+        time
+    }
+
+    /// Another's time added to this: a trade's, from its citizens'.
+    pub fn add(&mut self, other: &ActivityTime) {
+        for (activity, hours) in &other.hours {
+            *self.hours.entry(activity.clone()).or_insert(0.0) += hours;
+        }
+        self.setup += other.setup;
+        self.days.extend_from_slice(&other.days);
+    }
+
+    pub fn hours_on(&self, activity: Activity) -> f64 {
+        self.hours.get(activity.slug()).copied().unwrap_or(0.0)
+    }
+
+    /// Hours of work: everything but free time. An activity this build
+    /// doesn't know counts as work.
+    pub fn work(&self) -> f64 {
+        self.hours
+            .iter()
+            .filter(|(a, _)| Activity::from_slug(a).is_none_or(Activity::is_work))
+            .map(|(_, h)| h)
+            .sum()
+    }
+
+    /// Work and free time together.
+    pub fn total(&self) -> f64 {
+        self.hours.values().sum()
+    }
+
+    /// An activity's share of the work, or for free time its share of all
+    /// the time. `None` with no time to share.
+    pub fn share(&self, activity: Activity) -> Option<f64> {
+        let of = if activity.is_work() { self.work() } else { self.total() };
+        (of > 0.0).then(|| self.hours_on(activity) / of)
+    }
+
+    /// Setup's share of the work.
+    pub fn setup_share(&self) -> Option<f64> {
+        let work = self.work();
+        (work > 0.0).then(|| self.setup / work)
+    }
+
+    /// Jobs a day it worked, the mean and the fewest.
+    pub fn jobs_a_day(&self) -> Option<(f64, usize)> {
+        self.per_day(|d| d.jobs)
+    }
+
+    /// Activities a day it worked, the mean and the fewest.
+    pub fn activities_a_day(&self) -> Option<(f64, usize)> {
+        self.per_day(|d| d.activities)
+    }
+
+    fn per_day(&self, n: impl Fn(&DayCount) -> usize) -> Option<(f64, usize)> {
+        let fewest = self.days.iter().map(&n).min()?;
+        Some((self.days.iter().map(&n).sum::<usize>() as f64 / self.days.len() as f64, fewest))
+    }
+
+    /// The job it gave the most time to.
+    pub fn top_job(&self) -> Option<Activity> {
+        Activity::JOBS
+            .into_iter()
+            .filter(|a| self.hours_on(*a) > 0.0)
+            .max_by(|a, b| self.hours_on(*a).total_cmp(&self.hours_on(*b)))
+    }
+
+    /// The activities any of `times` gave time to, in [`Activity::ALL`]'s
+    /// order: a table's columns.
+    pub fn columns<'a>(times: impl IntoIterator<Item = &'a ActivityTime>) -> Vec<Activity> {
+        let times: Vec<&ActivityTime> = times.into_iter().collect();
+        Activity::ALL
+            .into_iter()
+            .filter(|a| times.iter().any(|t| t.hours_on(*a) > 0.0))
+            .collect()
+    }
+
+    /// A table row's cells for `columns`, then setup, then jobs and
+    /// activities a day: `62%`, blank for none, `2.0 (1)` for a mean and
+    /// the fewest.
+    pub fn cells(&self, columns: &[Activity]) -> Vec<String> {
+        let pct = |x: Option<f64>| match x {
+            Some(x) if x > 0.0 => format!("{:.0}%", x * 100.0),
+            _ => String::new(),
+        };
+        let a_day = |x: Option<(f64, usize)>| x.map_or(String::new(), |(mean, fewest)| format!("{mean:.1} ({fewest})"));
+        let mut cells: Vec<String> = columns.iter().map(|a| pct(self.share(*a))).collect();
+        cells.push(pct(self.setup_share()));
+        cells.push(a_day(self.jobs_a_day()));
+        cells.push(a_day(self.activities_a_day()));
+        cells
+    }
+
+    /// The heads for [`cells`](Self::cells)' columns.
+    pub fn heads(columns: &[Activity]) -> Vec<String> {
+        let mut heads: Vec<String> = columns.iter().map(|a| a.title().to_string()).collect();
+        heads.extend(["Setup", "Jobs a day (fewest)", "Activities a day (fewest)"].map(String::from));
+        heads
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub bots: usize,
@@ -414,7 +628,7 @@ impl Report {
                         p.1 += 1;
                     }
                     Entry::ToolBroke { item, .. } => *tools_broke.entry(item.clone()).or_insert(0) += 1,
-                    Entry::Spent { label, hours, ok } => {
+                    Entry::Spent { label, hours, ok, .. } => {
                         let line = time.entry(label.clone()).or_insert_with(|| TimeLine {
                             label: label.clone(),
                             hours: 0.0,
@@ -425,6 +639,8 @@ impl Report {
                         line.steps += 1;
                         line.failed += usize::from(!ok);
                     }
+                    // Time by activity's, not a step's
+                    Entry::Idle { .. } => {}
                     Entry::Stuck { reason } => *stuck.entry(reason.clone()).or_insert(0) += 1,
                     Entry::Failed { label, why } => {
                         *failures.entry(format!("{label}: {}", mask(why))).or_insert(0) += 1
@@ -917,6 +1133,67 @@ mod tests {
         }
     }
 
+    fn spent(label: &str, hours: f64, activity: Activity, day: i64) -> Entry {
+        Entry::Spent {
+            label: label.into(),
+            hours,
+            ok: true,
+            activity,
+            setup: false,
+            day,
+        }
+    }
+
+    /// Callings K0.1: a day's work by what it was for, free time apart, and
+    /// how many things a day
+    #[test]
+    fn time_goes_by_activity_a_day_at_a_time() {
+        let mut entries = vec![
+            spent("gather fiber", 3.0, Activity::Fiber, 7),
+            spent("deposit fiber", 1.0, Activity::Fiber, 7),
+            spent("claim at the board", 2.0, Activity::Commons, 7),
+            Entry::Spent {
+                label: "craft stone_sickle".into(),
+                hours: 2.0,
+                ok: true,
+                activity: Activity::Tools,
+                setup: true,
+                day: 7,
+            },
+            Entry::Idle { hours: 4.0, day: 7 },
+            spent("gather fiber", 2.0, Activity::Fiber, 8),
+            // A day of nothing but free time isn't a day it worked
+            Entry::Idle { hours: 3.0, day: 9 },
+        ];
+        let time = ActivityTime::of(&entries);
+        assert_eq!(time.work(), 10.0);
+        assert_eq!(time.total(), 17.0);
+        assert_eq!(time.share(Activity::Fiber), Some(0.6));
+        assert_eq!(time.share(Activity::Free), Some(7.0 / 17.0), "free time is a share of all of it");
+        assert_eq!(time.setup_share(), Some(0.2));
+        assert_eq!(time.days, vec![DayCount { jobs: 2, activities: 3 }, DayCount { jobs: 1, activities: 1 }]);
+        assert_eq!(time.jobs_a_day(), Some((1.5, 1)));
+        assert_eq!(time.activities_a_day(), Some((2.0, 1)));
+        assert_eq!(time.top_job(), Some(Activity::Fiber));
+        let columns = ActivityTime::columns([&time]);
+        assert_eq!(columns, vec![Activity::Fiber, Activity::Tools, Activity::Commons, Activity::Free]);
+        assert_eq!(time.cells(&columns), vec!["60%", "20%", "20%", "41%", "20%", "1.5 (1)", "2.0 (1)"]);
+        assert_eq!(ActivityTime::heads(&columns)[4], "Setup");
+
+        // A trade's is its citizens' together
+        entries.truncate(1);
+        let mut trade = time.clone();
+        trade.add(&ActivityTime::of(&entries));
+        assert_eq!((trade.hours_on(Activity::Fiber), trade.days.len()), (9.0, 3));
+
+        // A balance run's JSON from before K0.1 has none, and reads as none
+        let none: ActivityTime = serde_json::from_str("{}").unwrap();
+        assert_eq!(none, ActivityTime::default());
+        assert_eq!((none.share(Activity::Fiber), none.jobs_a_day()), (None, None));
+        let json = serde_json::to_string(&time).unwrap();
+        assert_eq!(serde_json::from_str::<ActivityTime>(&json).unwrap(), time);
+    }
+
     #[test]
     fn masking_folds_ids_and_numbers() {
         assert_eq!(
@@ -1021,16 +1298,17 @@ mod tests {
                 vec![
                     made("fiber", 2, 50, true, 0.01),
                     made("fiber", 3, 60, true, 0.02),
-                    Entry::Spent {
-                        label: "gather fiber".into(),
-                        hours: 0.01,
-                        ok: true,
-                    },
+                    spent("gather fiber", 0.01, Activity::Fiber, 0),
                     Entry::Spent {
                         label: "gather fiber".into(),
                         hours: 0.01,
                         ok: false,
+                        activity: Activity::Fiber,
+                        setup: false,
+                        day: 0,
                     },
+                    // Free time isn't a step
+                    Entry::Idle { hours: 1.0, day: 0 },
                 ],
                 0,
                 0,

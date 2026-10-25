@@ -5,6 +5,10 @@
 //! - **Trades** and **citizens**: for each role and each citizen, its wealth
 //!   at each end, what it made, what it sold and bought, its deeds, and what
 //!   held it up.
+//! - **Time by activity** (Callings K0.1): for each role and each citizen,
+//!   the share of its work on each activity, setup's share, and how many
+//!   jobs and activities a day. The day by day is
+//!   [`activity_csv`](TownReport::activity_csv).
 //! - **How questions were settled**: how often each layer of the cascade
 //!   answered (D4).
 //! - **Conservation**, in a soak: the world's Strands and units at each end,
@@ -23,7 +27,8 @@ use std::fmt::Write as _;
 
 use capitol_protocol::ledger::{reconcile, Ledger, LoadWindow, Reconciliation};
 
-use crate::sim::report::{BotRun, Entry, Report};
+use crate::sim::report::{days, ActivityTime, BotRun, DayTime, Entry, Report};
+use crate::sim::Activity;
 
 /// What a soak read from the server: the ledger at each end, and the ledger
 /// every minute between, for its load.
@@ -122,6 +127,9 @@ pub struct CitizenLine {
     /// Times it found no way to its goal, and the commonest reason
     pub stuck: usize,
     pub why_stuck: Option<String>,
+    /// What its time went on (K0.1), over the run and a day at a time
+    pub time: ActivityTime,
+    pub days: BTreeMap<i64, DayTime>,
 }
 
 impl CitizenLine {
@@ -143,6 +151,8 @@ impl CitizenLine {
             failed_steps: 0,
             stuck: 0,
             why_stuck: None,
+            time: ActivityTime::of(&run.entries),
+            days: days(&run.entries),
         };
         for entry in &run.entries {
             match entry {
@@ -192,6 +202,10 @@ pub struct TradeLine {
     pub bought_for: i64,
     pub deeds: usize,
     pub stuck: usize,
+    /// Steps that failed
+    pub failed_steps: usize,
+    /// Its citizens' time, together (K0.1)
+    pub time: ActivityTime,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +289,8 @@ impl TownReport {
                 bought_for: 0,
                 deeds: 0,
                 stuck: 0,
+                failed_steps: 0,
+                time: ActivityTime::default(),
             });
             t.citizens += 1;
             t.strands_start += c.strands_start;
@@ -286,6 +302,8 @@ impl TownReport {
             t.bought_for += c.bought_for;
             t.deeds += c.deeds;
             t.stuck += c.stuck;
+            t.failed_steps += c.failed_steps;
+            t.time.add(&c.time);
         }
         let trades = trades.into_values().collect();
         let tick_hours = wall_secs * scale / 3600.0;
@@ -338,6 +356,7 @@ impl TownReport {
             p.with_people, p.between_citizens, p.strands
         );
         self.citizens_md(&mut md);
+        self.time_md(&mut md);
         self.rulings_md(&mut md);
         md.push('\n');
         md.push_str(&self.sim.sections());
@@ -392,6 +411,54 @@ impl TownReport {
             );
         }
         md.push('\n');
+    }
+
+    /// Time by activity (Callings K0.1): each trade's, then each citizen's.
+    fn time_md(&self, md: &mut String) {
+        let _ = writeln!(md, "## Time by activity\n");
+        let columns = ActivityTime::columns(self.citizens.iter().map(|c| &c.time));
+        if columns.is_empty() {
+            let _ = writeln!(md, "No time was logged.\n");
+            return;
+        }
+        let _ = writeln!(
+            md,
+            "What each trade's and each citizen's work went on, as a share of its work time. Free is the share of all its time that had nothing to do in it, market hours with nothing to trade among it. Setup is the share of the work on tools, kits, stations and deeds on the way to something else. A day is the day's clock's: jobs are the eight a citizen can lean over, and activities those and the Commons, detours and the road in, for each day it worked (the mean, and the fewest).\n"
+        );
+        let heads = ActivityTime::heads(&columns);
+        let rule = |first: &str| format!("|{first}{}", "---:|".repeat(heads.len() + 1));
+        let _ = writeln!(md, "| Trade | Work hours | {} |", heads.join(" | "));
+        let _ = writeln!(md, "{}", rule("---|"));
+        for t in &self.trades {
+            let _ = writeln!(md, "| {} | {:.1} | {} |", t.role, t.time.work(), t.time.cells(&columns).join(" | "));
+        }
+        let _ = writeln!(md, "\n| Citizen | Trade | Work hours | {} |", heads.join(" | "));
+        let _ = writeln!(md, "{}", rule("---|---|"));
+        for c in &self.citizens {
+            let _ = writeln!(md, "| {} | {} | {:.1} | {} |", c.name, c.role, c.time.work(), c.time.cells(&columns).join(" | "));
+        }
+        md.push('\n');
+    }
+
+    /// Each citizen's time by activity, a row a day it has time in
+    /// (K0.1): game hours on each activity, setup's, and how many jobs and
+    /// activities, for a spreadsheet.
+    pub fn activity_csv(&self) -> String {
+        let mut csv = String::from("citizen,role,day");
+        for a in Activity::ALL {
+            let _ = write!(csv, ",{}_hours", a.slug());
+        }
+        csv.push_str(",work_hours,setup_hours,jobs,activities\n");
+        for c in &self.citizens {
+            for (day, time) in &c.days {
+                let _ = write!(csv, "{},{},{day}", c.name.replace(',', " "), c.role.replace(',', " "));
+                for a in Activity::ALL {
+                    let _ = write!(csv, ",{:.3}", time.hours.get(&a).copied().unwrap_or(0.0));
+                }
+                let _ = writeln!(csv, ",{:.3},{:.3},{},{}", time.work(), time.setup, time.jobs(), time.activities());
+            }
+        }
+        csv
     }
 
     fn rulings_md(&self, md: &mut String) {
@@ -643,6 +710,53 @@ mod tests {
         assert!(md.contains("- Spent on tax: not measured"), "no books, no tax: {md}");
         assert!(report.conserved());
         assert!(report.load_csv().is_none());
+    }
+
+    fn spent(hours: f64, activity: Activity, day: i64) -> Entry {
+        Entry::Spent {
+            label: "a step".into(),
+            hours,
+            ok: true,
+            activity,
+            setup: false,
+            day,
+        }
+    }
+
+    /// Callings K0.1: each trade's and each citizen's work by activity, in
+    /// the report, and a row a citizen-day in the CSV
+    #[test]
+    fn time_by_activity_is_a_table_by_trade_and_citizen() {
+        let runs = vec![
+            run(
+                "Percy Sawyer",
+                "gatherer (wood)",
+                vec![spent(3.0, Activity::Wood, 5), spent(1.0, Activity::Commons, 5), Entry::Idle { hours: 4.0, day: 5 }],
+                0,
+                0,
+            ),
+            run(
+                "Ada Wright",
+                "gatherer (wood)",
+                vec![spent(2.0, Activity::Wood, 5), spent(2.0, Activity::RoadIn, 6)],
+                0,
+                0,
+            ),
+        ];
+        let report = TownReport::build(&runs, 3600.0, 10.0, None);
+        let md = report.to_markdown();
+        assert!(md.contains("## Time by activity"), "{md}");
+        assert!(
+            md.contains("| Trade | Work hours | Wood | Commons | Road in | Free | Setup | Jobs a day (fewest) | Activities a day (fewest) |"),
+            "only the activities that had time: {md}"
+        );
+        assert!(md.contains("| gatherer (wood) | 8.0 | 62% | 12% | 25% | 33% |  | 0.7 (0) | 1.3 (1) |"), "{md}");
+        assert!(md.contains("| Percy Sawyer | gatherer (wood) | 4.0 | 75% | 25% |  | 50% |  | 1.0 (1) | 2.0 (2) |"), "{md}");
+        let csv = report.activity_csv();
+        assert_eq!(csv.lines().count(), 4, "a header and three citizen-days: {csv}");
+        assert!(csv.starts_with("citizen,role,day,fiber_hours,"), "{csv}");
+        assert!(csv.contains("\nAda Wright,gatherer (wood),6,"), "{csv}");
+        assert!(csv.trim_end().ends_with(",2.000,0.000,0,1"), "{csv}");
     }
 
     fn ledger(at_ms: i64, percy: i64, ticks: u64, logs: i64, gathered: i64) -> Ledger {

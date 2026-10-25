@@ -195,7 +195,9 @@ town.status, and who was where in their day is appended to
 town.presence.csv. Each citizen logs its decisions, and what came of them,
 to town.decisions/<name>.jsonl. Reports go beside it too, as
 town.report-<when>.md, and a soak's as town.soak-<when>.md with its load,
-a minute a row, in town.soak-<when>.csv, and every reading of the
+a minute a row, in town.soak-<when>.csv, each citizen's time by
+activity, a day a row, in town.soak-<when>.activity.csv (and
+town.report-<when>.activity.csv), and every reading of the
 server's books, as it's taken, in town.soak-<when>.ledgers.jsonl, and
 what a balance run compares in town.soak-<when>.balance.json. A
 running town also reports to the server each game minute, for its admin
@@ -743,6 +745,8 @@ fn run(options: &Options) -> Result<(), String> {
         let report = TownReport::build(&town.runs(), wall.as_secs_f64(), tick_scale(&server), None);
         let path = beside(&roster.path, "report", "md");
         std::fs::write(&path, report.to_markdown()).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        let csv = path.with_extension("activity.csv");
+        std::fs::write(&csv, report.activity_csv()).map_err(|e| format!("writing {}: {e}", csv.display()))?;
         println!("capitol-town: the report is in {}", path.display());
     }
     Ok(())
@@ -817,6 +821,8 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
         let path = md.with_extension("csv");
         std::fs::write(&path, csv).map_err(|e| format!("writing {}: {e}", path.display()))?;
     }
+    let path = md.with_extension("activity.csv");
+    std::fs::write(&path, report.activity_csv()).map_err(|e| format!("writing {}: {e}", path.display()))?;
     let books = report.soak.as_ref().map(Soak::reconciliation);
     if let Some(books) = &books {
         println!(

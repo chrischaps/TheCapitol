@@ -42,8 +42,9 @@ use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
 use uuid::Uuid;
 
+use super::activity::{self, Activity};
 use super::lot;
-use super::plan::{Holdings, Step, FLOAT};
+use super::plan::{Goal, Holdings, Step, FLOAT};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError, NO_WAY};
@@ -603,6 +604,13 @@ impl SimBot {
             // At market hours a citizen trades what it has, and otherwise
             // keeps its market rather than its work. The errand stays what
             // it carries on with after.
+            // What its errand is for, which its step's and its trade's time
+            // are filed under (Callings K0.1)
+            let goal = errand.as_ref().ok().and_then(Option::as_ref).map(|e| e.goal.clone());
+            let job = match &goal {
+                Some(goal) => Activity::of_goal(&catalog, goal.as_ref(), self.role),
+                None => Activity::of_role(self.role),
+            };
             let step = errand.map(|e| e.map(|e| e.step));
             let errand_label = step.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.label(&catalog));
             let action = match (board, wage, road, step, trade) {
@@ -616,6 +624,8 @@ impl SimBot {
             match action {
                 Ok(Some(action)) => {
                     let label = self.label(&action, &catalog);
+                    let (activity, setup) = Self::activity(&action, job, goal.as_ref().and_then(Option::as_ref), &catalog);
+                    let day = self.day();
                     if let Some(town) = town {
                         town.health(|h| h.doing(Standing::Working, &label));
                     }
@@ -640,6 +650,9 @@ impl SimBot {
                         label: label.clone(),
                         hours: self.now() - began,
                         ok,
+                        activity,
+                        setup,
+                        day,
                     });
                     if let (Some(town), Err(e)) = (town, &result) {
                         // Being asked to trade is no failure
@@ -687,12 +700,12 @@ impl SimBot {
                     }
                 }
                 Ok(None) => {
-                    self.free_time(town);
+                    self.idle(town);
                     self.settle(mark, None, &Ok(()));
                 }
                 Err(stuck) => {
                     self.entries.push(Entry::Stuck { reason: stuck.0 });
-                    self.free_time(town);
+                    self.idle(town);
                     self.settle(mark, None, &Ok(()));
                 }
             }
@@ -733,6 +746,42 @@ impl SimBot {
             Action::Wage(act) => act.label(),
             Action::Guild(act) => act.label(),
         }
+    }
+
+    /// What the report files `action`'s time under (Callings K0.1, plan
+    /// D2), and whether it's setup. A step, a sale, a buy and a bid are its
+    /// errand's `job`; a stall and a market are trading; the board, posts and
+    /// wages are the Commons; market hours with nothing to trade are free.
+    fn activity(action: &Action, job: Activity, goal: Option<&Goal>, catalog: &Catalog) -> (Activity, bool) {
+        match action {
+            Action::Step(step) => (job, activity::is_setup(catalog, goal, step)),
+            Action::Trade(Trade::Sell { .. } | Trade::Buy { .. } | Trade::Bid { .. }) => (job, false),
+            Action::Trade(Trade::Stock { .. } | Trade::MakeMarket) => (Activity::Trading, false),
+            Action::Trade(Trade::Post { .. }) | Action::Board(_) | Action::Wage(_) | Action::Guild(_) => (Activity::Commons, false),
+            Action::Road(_) => (Activity::RoadIn, false),
+            Action::Market => (Activity::Free, false),
+        }
+    }
+
+    /// The day's clock's day now ([`rules::day_number`]), by the server's
+    /// clock once it's known.
+    fn day(&self) -> i64 {
+        let now = self.bot.state().server_time_ms().unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64)
+        });
+        capitol_protocol::rules::day_number(now)
+    }
+
+    /// Its free time, and an entry for how long it took (K0.1).
+    fn idle(&mut self, town: Option<&Tether>) {
+        let (began, day) = (self.now(), self.day());
+        self.free_time(town);
+        self.entries.push(Entry::Idle {
+            hours: self.now() - began,
+            day,
+        });
     }
 
     /// Its guild's business, if any is due (S4.5): the decision to join is

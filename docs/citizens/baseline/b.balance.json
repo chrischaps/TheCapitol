@@ -1,0 +1,436 @@
+{
+  "preset": "roles-today-b.toml",
+  "tunables": {},
+  "citizens": 20,
+  "day_hours": 14.014272482333332,
+  "tick_hours": 11.678560401944443,
+  "scale": 10.0,
+  "started_ms": 1792908016066,
+  "ended_ms": 1792912225520,
+  "trades": [
+    {
+      "role": "builder",
+      "citizens": 3,
+      "start": 300,
+      "end": 121,
+      "time": {
+        "hours": {
+          "building": 17.58773158638889,
+          "free": 16.189185913888902,
+          "road_in": 0.2628572761111114
+        },
+        "setup": 0.06720164805555828,
+        "days": [
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          }
+        ]
+      },
+      "failed_steps": 10,
+      "stuck": 832
+    },
+    {
+      "role": "crafter (ingots)",
+      "citizens": 3,
+      "start": 300,
+      "end": 189,
+      "time": {
+        "hours": {
+          "free": 15.263467146944425,
+          "ingots": 17.83192974833333,
+          "road_in": 0.4841057055555519
+        },
+        "setup": 0.43783609527778433,
+        "days": [
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          }
+        ]
+      },
+      "failed_steps": 58,
+      "stuck": 843
+    },
+    {
+      "role": "crafter (planks)",
+      "citizens": 2,
+      "start": 200,
+      "end": 153,
+      "time": {
+        "hours": {
+          "free": 17.474978137777804,
+          "planks": 5.308913169999983,
+          "road_in": 0.11946196249999247
+        },
+        "setup": 0.21803406277777737,
+        "days": [
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          }
+        ]
+      },
+      "failed_steps": 2,
+      "stuck": 679
+    },
+    {
+      "role": "crafter (tools)",
+      "citizens": 2,
+      "start": 200,
+      "end": 49,
+      "time": {
+        "hours": {
+          "free": 1.4411991686111154,
+          "road_in": 0.12911742194444292,
+          "tools": 21.247719389166626
+        },
+        "setup": 0.2093098338888873,
+        "days": [
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          }
+        ]
+      },
+      "failed_steps": 29,
+      "stuck": 0
+    },
+    {
+      "role": "gatherer (fiber)",
+      "citizens": 4,
+      "start": 400,
+      "end": 34639,
+      "time": {
+        "hours": {
+          "fiber": 41.85834250555551,
+          "free": 2.5592008358333453,
+          "road_in": 0.6051046300000057
+        },
+        "setup": 0.0,
+        "days": [
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          },
+          {
+            "jobs": 1,
+            "activities": 2
+          }
+        ]
+      },
+      "failed_steps": 1493,
+      "stuck": 0
+    },
+    {
+      "role": "gatherer (ore)",
+      "citizens": 3,
+      "start": 300,
+      "end": 262,
+      "time": {
+        "hours": {
+          "ore": 31.586458409999924,
+          "road_in": 0.7126347438888787,
+          "trading": 1.3190300708333265
+        },
+        "setup": 0.43297225638888287,
+        "days": [
+          {
+            "jobs": 2,
+            "activities": 3
+          },
+          {
+            "jobs": 2,
+            "activities": 3
+          },
+          {
+            "jobs": 2,
+            "activities": 3
+          }
+        ]
+      },
+      "failed_steps": 64,
+      "stuck": 0
+    },
+    {
+      "role": "gatherer (wood)",
+      "citizens": 3,
+      "start": 300,
+      "end": 335,
+      "time": {
+        "hours": {
+          "free": 1.552329167499975,
+          "road_in": 0.30161964833333865,
+          "trading": 2.0245118800000137,
+          "wood": 26.982975503055577
+        },
+        "setup": 0.6312609230555524,
+        "days": [
+          {
+            "jobs": 2,
+            "activities": 3
+          },
+          {
+            "jobs": 2,
+            "activities": 3
+          },
+          {
+            "jobs": 2,
+            "activities": 3
+          }
+        ]
+      },
+      "failed_steps": 1158,
+      "stuck": 0
+    }
+  ],
+  "gini_start": 0.0,
+  "gini_end": 0.7972893588452501,
+  "top_tenth_end": 0.5660176793107307,
+  "flows": {
+    "bazaar_rent": -240,
+    "exchange_deposit": 34273,
+    "market_escrow": -2112,
+    "market_fee": -280,
+    "market_refund": 1626,
+    "market_sale": 481,
+    "trade_received": 14,
+    "trade_sent": -14
+  },
+  "faucets": 34273,
+  "sinks": -520,
+  "deeds": 20,
+  "prices": [
+    {
+      "item": "anvil_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 320
+    },
+    {
+      "item": "brick",
+      "traded": 0,
+      "mean": null,
+      "target": 8
+    },
+    {
+      "item": "charcoal",
+      "traded": 0,
+      "mean": null,
+      "target": 5
+    },
+    {
+      "item": "chest_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 12
+    },
+    {
+      "item": "clay",
+      "traded": 0,
+      "mean": null,
+      "target": 4
+    },
+    {
+      "item": "fiber",
+      "traded": 4,
+      "mean": 1.0,
+      "target": 1
+    },
+    {
+      "item": "forge_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 150
+    },
+    {
+      "item": "iron_axe",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_axe_head",
+      "traded": 0,
+      "mean": null,
+      "target": 110
+    },
+    {
+      "item": "iron_hammer",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_hammer_head",
+      "traded": 0,
+      "mean": null,
+      "target": 110
+    },
+    {
+      "item": "iron_ingot",
+      "traded": 0,
+      "mean": null,
+      "target": 50
+    },
+    {
+      "item": "iron_nails",
+      "traded": 0,
+      "mean": null,
+      "target": 6
+    },
+    {
+      "item": "iron_ore",
+      "traded": 9,
+      "mean": 19.22222222222222,
+      "target": 20
+    },
+    {
+      "item": "iron_pickaxe",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_pickaxe_head",
+      "traded": 0,
+      "mean": null,
+      "target": 110
+    },
+    {
+      "item": "iron_sickle",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_sickle_blade",
+      "traded": 0,
+      "mean": null,
+      "target": 60
+    },
+    {
+      "item": "kiln_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 90
+    },
+    {
+      "item": "knapped_stone",
+      "traded": 0,
+      "mean": null,
+      "target": 13
+    },
+    {
+      "item": "log",
+      "traded": 38,
+      "mean": 8.0,
+      "target": 8
+    },
+    {
+      "item": "plank",
+      "traded": 0,
+      "mean": null,
+      "target": 5
+    },
+    {
+      "item": "rope",
+      "traded": 0,
+      "mean": null,
+      "target": 3
+    },
+    {
+      "item": "sawbench_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 150
+    },
+    {
+      "item": "sticks",
+      "traded": 0,
+      "mean": null,
+      "target": 3
+    },
+    {
+      "item": "stone",
+      "traded": 0,
+      "mean": null,
+      "target": 5
+    },
+    {
+      "item": "stone_axe",
+      "traded": 0,
+      "mean": null,
+      "target": 50
+    },
+    {
+      "item": "stone_hammer",
+      "traded": 0,
+      "mean": null,
+      "target": 50
+    },
+    {
+      "item": "stone_pickaxe",
+      "traded": 0,
+      "mean": null,
+      "target": 50
+    },
+    {
+      "item": "stone_sickle",
+      "traded": 0,
+      "mean": null,
+      "target": 50
+    },
+    {
+      "item": "tool_handle",
+      "traded": 0,
+      "mean": null,
+      "target": 13
+    },
+    {
+      "item": "workbench_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 12
+    }
+  ],
+  "strand_drift": 0,
+  "strands_hold": true,
+  "units_hold": true,
+  "units_void": false,
+  "unit_drift": [],
+  "commissions_paid": 0,
+  "wages_paid": 0
+}

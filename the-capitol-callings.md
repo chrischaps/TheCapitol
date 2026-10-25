@@ -92,6 +92,36 @@ The question this plan answers: **can the town's people be read as people?** You
 
 **The record a card could read.** `production_tally` keeps one row per player, day and item (`backend/migrations/20261115_001_gazette.sql:30`). The Gazette's Busy Hands is built from it.
 
+### The baseline (K0.1, #527)
+
+The "before" for §10, measured on master as it stood plus K0.1's reporting alone, so the citizens are one role for life. #403's recipe, run through `scripts/balance.ps1` as two towns at once with both presets empty (every knob on its default). Each town had 20 of the sim's mix (4 fiber, 3 wood, 3 ore, 2 planks, 3 ingots, 2 tools, 3 builders) and no merchants, fresh, `--always-on`, at 10×. It ran for 14 hours of the day's clock, game 00:03 to 14:05, which is 11.7 hours of ticks. A and B are the two towns, so the gap between them is the town's own noise. The comparison, both balances, both soak reports and the citizen-day CSVs are in [`docs/citizens/baseline/`](docs/citizens/baseline/balance.md). K4.1 compares against them: `capitol-town compare docs/citizens/baseline/a.balance.json <its run>.balance.json`. Both towns' books held, with drift 0 and units conserved.
+
+| Measure | A | B |
+|---|---:|---:|
+| Citizens' Strands, start → end | 2,000 → 36,091 | 2,000 → 35,748 |
+| Held by the 4 fiber gatherers at the end | 34,933 (97%) | 34,639 (97%) |
+| Change each: fiber, wood, ore | +8,633, +33, −19 | +8,560, +12, −13 |
+| Change each: planks, ingots, tools, builders | −11, −50, −32, −82 | −24, −37, −76, −60 |
+| Gini of the citizens' Strands at the end (top tenth's share) | 0.79 (55%) | 0.80 (57%) |
+| Faucet a citizen-hour (all of it `exchange_deposit`) | 147.8 | 146.7 |
+| Circulation a game hour: goods, commissions, wages, rent | 42, 0, 0, 17 | 42, 0, 0, 21 |
+| Circulation as a share of the faucet | 2% | 2% |
+| Every citizen's work: fiber, wood, ore, planks, ingots, tools, building | 26, 16, 15, 3, 11, 13, 11% | 25, 16, 19, 3, 11, 13, 10% |
+| Every citizen's work: trading, road in, commons; setup | 2, 2, 0%; 1% | 2, 2, 0%; 1% |
+| Free, as a share of all logged time | 25% | 24% |
+| Jobs a citizen-day, mean (fewest) | 1.4 (1) | 1.3 (1) |
+| Activities a citizen-day, mean (fewest) | 2.4 (2) | 2.3 (2) |
+| Steps that failed (a citizen-hour) | 5,050 (21.6) | 2,814 (12.1) |
+| Times stuck (a citizen-hour) | 2,343 (10.0) | 2,354 (10.1) |
+
+What it says:
+- **One job each.** Every role spends 92 to 99% of its work on its own job. The rest is the road in, plus a little trading for the wood and ore gatherers (their stalls) and a sliver of fiber when a float runs low. Jobs a day are 1 for everyone but the wood and ore gatherers, whose stall counts as trading.
+- **The makers wait.** The plank crafters were free 75% of their time, and the ingot crafters and builders 44 to 48%. Most of it was stuck: "the kiln waits for a plot, and the plot for the road in's deed" (about 300 times each), and no logs to saw. The fiber, ore and tools trades were rarely free.
+- **Nothing goes through the Commons.** In 14 hours nobody posted, claimed or delivered a commission, and nobody took a wage. Commons time and commission payouts are both 0. Only goods (logs, ore and a little fiber, at or near their targets) and stall rent moved.
+- **Setup is small,** 0 to 5% of the work, because today's roles climb only their own chains.
+- **The failures are a few loops.** A wood gatherer restocks a shop that's already full, about 1,000 times a town ([#544](https://github.com/chrischaps/TheCapitol/issues/544)). Fiber gatherers find the grass taken or spent, about 1,600 times. In A one ore gatherer was walled in by a slope ("Too steep", about 2,000 times; probably #522), which is most of the gap between A's failures and B's.
+- **A day is one day.** The run sat inside one day of the day's clock, so "a day" here is 14 hours of it. Detours were 0, since they don't exist yet (K1.5).
+
 ## 4. Design decisions
 
 ### D1. A calling, and the job of the moment
@@ -118,7 +148,7 @@ A citizen leans over eight **job activities**, the grain the menus already have:
 | Trading | market making, stalls | open once it has its float (K2.2) |
 
 Two more kinds of time aren't leanings:
-- **The Commons pulls.** A commission it could meet, a wage, or a hire interrupts a stint (D4). Its time is filed under the item's activity.
+- **The Commons pulls.** A commission it could meet, a wage, or a hire interrupts a stint (D4). Its time is filed under the item's activity. (The reports, since K0.1, file the board's and wages' own rounds as `commons`: the walk to the hall, a claim, a delivery, a post, a unit of a shift. Making what a claim owes is the item's job, since the claim is its goal. So the table shows how much the Commons pulls. The stint question may still count a pull toward the item's job when it chases its shares.)
 - **Detours** are the unrelated things, each about a quarter hour, set by `wander`:
   - an untried recipe;
   - a wild lake, ford or ridge top;
@@ -228,7 +258,7 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 
 | WP | What | Size | Depends |
 |---|---|---|---|
-| K0.1 #527 | Time by activity in the town report and `compare`; a baseline soak of today's roles (#403's recipe), the "before" for §10 | S | – |
+| K0.1 #527 | Time by activity in the town report and `compare`; a baseline soak of today's roles (#403's recipe), the "before" for §10. **Built:** `sim::Activity` (`sim/activity.rs`) on every `Entry::Spent`, with `setup` and the day; free time as `Entry::Idle`; `report::ActivityTime`; the town report's table and `.activity.csv`; `compare`'s money moving, time by activity, and failed and stuck. The baseline is in §3 | S | – |
 | K0.2 #528 | `Calling` in the persona, drawn last; `[callings] mix`; the roster's `calling`, with `role` as the birth trade; `mint --calling`; old rosters draw one. *As built:* `citizen/calling.rs`. The jobs are the eight `sim::ROLES`, `merchant` standing for trading. A `Style` isn't stored but read off the calling: no favourite is an all-rounder, a focus of 0.575 or more a specialist (drawn 0.62 to 0.78), less a leaner (0.38 to 0.52). A specialist puts 75 to 85% of the rest on two or three of its favourite's three kin jobs (`calling::kin`, either side of it in the chain), the others at least 0.01 each; a leaner spreads the rest over all seven, its kin ×1.6; an all-rounder weighs all eight 0.7 to 1, so none is over 17%. `wander` is two draws averaged, as a trait. Each share is written to two places, so `Calling::share` scales them to sum to 1. The roster line is `calling = { favourite = "builder", focus = 0.71, wander = 0.4, leanings = { crafter-planks = 0.12, ... } }`, `favourite = "none"` and `focus = 0.0` for an all-rounder; the favourite must be the role or none. `Calling::single(role)` is the swarm's: focus 1.0, no leanings, no wander. `mint --calling specialist\|leaner\|all-rounder`. Measured: `Role::assign(1000)` deals 38.2 / 42.2 / 19.6%. | M | – |
 | K0.3 #529 | `plan::setup` and the dabble commitment. *Built: `plan::setup` returns a `Result`, and `Commitment` is on `Role::work`, `goals_at`, `errands_at` and `Role::setup`; see §5* | M | – |
 
@@ -320,7 +350,7 @@ K4.1 runs K0.1's soak again on callings: 20 citizens at 10× for 14 to 17 game h
 | Favourite's share of work time | specialists 60–80%, leaners 35–55%, no all-rounder job over 35% |
 | Distinct activities a game day | every citizen at least 3, all-rounders at least 5 |
 | Detours | at least 70% of citizens take one a game day |
-| Setup (kits, tools, placing) | no more than baseline + 10 points of work time |
+| Setup (kits, tools, placing) | no more than baseline + 10 points of work time (the reports' setup, K0.1's `activity::is_setup`) |
 | Stuck and failed steps | no more than the baseline's |
 | Markets | tools trade, at least one hire a day per 20 citizens, citizens who aren't crafters post |
 | "Lately busy with" | matches the activity with the most time for at least 80% of citizens |
