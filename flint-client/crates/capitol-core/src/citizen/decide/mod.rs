@@ -26,7 +26,8 @@
 //! so a layer can be a function, a subprocess or an HTTP call, and C3.1's
 //! log can keep them as JSONL.
 //!
-//! - [`rules`]: the rules layer, a utility pick weighted by temperament.
+//! - [`rules`]: the rules layer, a utility pick weighted by temperament,
+//!   and for the stint question (Callings K1.1) by the calling.
 //! - [`log`]: the decision log, each decision and what came of it (C3.1).
 //! - [`pulse`]: what a citizen's decisions tell the server's console, live
 //!   (D4.1).
@@ -56,7 +57,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::calling::Calling;
 use crate::sim::plan::Holdings;
+use crate::sim::Role;
 use log::{Fate, Log, Record};
 use pulse::SharedPulse;
 pub use rules::RulesDecider;
@@ -114,9 +117,22 @@ pub struct Situation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Who {
     pub name: String,
-    /// [`Role::slug`](crate::sim::Role::slug)
+    /// [`Role::slug`](crate::sim::Role::slug): its birth trade
     pub role: String,
     pub temperament: Temperament,
+    /// What it would rather be doing (Callings K0.2), which the stint
+    /// question chases (K1.1). `None` in a log from before callings and for
+    /// a swarm bot, whose calling is its role alone
+    /// ([`Calling::single`](crate::citizen::calling::Calling::single)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calling: Option<Calling>,
+}
+
+impl Who {
+    /// Its calling: the one it has, else its role's alone.
+    pub fn calling(&self) -> Option<Calling> {
+        self.calling.clone().or_else(|| Role::from_slug(&self.role).map(Calling::single))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,6 +271,36 @@ pub enum Question {
     /// (Commons S4.5). Asked once a game day of a citizen in no guild, and
     /// at once when a guild invites it.
     Guild { guilds: Vec<GuildSeen> },
+    /// What to work at for the next while (Callings K1.1, D4): which job to
+    /// take up for a stint, one [`Choice::Take`] each. Asked `why`. `doing`
+    /// is the job it's at ([`Role::slug`]), `None` before its first stint;
+    /// `run` the game hours it's been at it (an `f32`, which goes through
+    /// JSON and back to the bit, as an `f64` may not: #545); `lately` each job's
+    /// share of its recent work time, by slug, which the rules chase its
+    /// calling's shares with. The menu's *carry on* is the job it's at, so a slow
+    /// layer never makes a citizen switch.
+    Stint {
+        why: Why,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        doing: Option<String>,
+        #[serde(default)]
+        run: f32,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        lately: BTreeMap<String, f32>,
+    },
+}
+
+/// Why the stint question is asked (Callings D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Why {
+    /// A session starts.
+    Start,
+    /// The stint it was at has run its length.
+    Done,
+    /// Something pulls on a job: a commission it could meet, a wage, a bid
+    /// well over the books.
+    Pull,
 }
 
 /// A guild as a citizen sees it when it asks whether to join (S4.5).
@@ -289,6 +335,7 @@ impl Question {
             Question::Commission { id, .. } => format!("commission {id}"),
             Question::Wage { id, .. } => format!("wage {id}"),
             Question::Guild { .. } => "guild".into(),
+            Question::Stint { .. } => "stint".into(),
         }
     }
 }
@@ -444,6 +491,19 @@ pub enum Choice {
     /// Stay out of the guilds on the menu, for today, and decline any that
     /// invited it.
     Stay,
+    /// Take up `job` ([`Role::slug`]) for a stint (Callings K1.1). `setup`
+    /// is the planner's steps still to take before its first product
+    /// ([`Setup::steps`](crate::sim::plan::Setup::steps)), 0 when it's
+    /// ready. `pays` is what a pull on it pays a game hour over what its
+    /// goods fetch at the books, in Strands: a commission, a wage, a bid
+    /// well over them. 0 when nothing pulls.
+    Take {
+        job: String,
+        #[serde(default)]
+        setup: u32,
+        #[serde(default)]
+        pays: i64,
+    },
 }
 
 impl Choice {
@@ -1216,6 +1276,7 @@ mod tests {
                 name: "Ada Reeder".into(),
                 role: "gatherer-wood".into(),
                 temperament: Temperament::default(),
+                calling: None,
             },
             at: Place {
                 x: 0.0,
@@ -1501,6 +1562,43 @@ mod tests {
         let ruling = cascade.ask(&situation(2), t0 + Duration::from_millis(10));
         assert!(matches!(ruling.trail[0].asked, Asked::OffMenu { .. }));
         assert_eq!(ruling.by, By::Rules);
+    }
+
+    #[test]
+    fn while_a_layer_thinks_a_stint_carries_on_at_the_job_its_at() {
+        // Pulled away from its builder's work early, with a model to ask
+        let mut s = situation(0);
+        s.question = Question::Stint {
+            why: Why::Pull,
+            doing: Some("builder".into()),
+            run: 0.2,
+            lately: BTreeMap::from([("builder".to_string(), 0.3), ("gatherer-wood".to_string(), 0.7)]),
+        };
+        s.menu = ["gatherer-wood", "builder", "crafter-planks"]
+            .into_iter()
+            .map(|job| Choice::Take {
+                job: job.into(),
+                setup: 0,
+                pays: if job == "crafter-planks" { 900 } else { 0 },
+            })
+            .collect();
+        s.carry_on = Some(1);
+        let mut stack = Stack::new().layer("model", Verdict::Pending(Ticket(3)), 0.6);
+        let ruling = stack.cascade().ask(&s, Instant::now());
+        assert_eq!(ruling.by, By::Waiting { name: "model".into() });
+        assert_eq!(ruling.decision, Some(Decision::plain(1)), "it stays at the builder's work");
+        let start = Question::Stint {
+            why: Why::Start,
+            doing: None,
+            run: 0.0,
+            lately: BTreeMap::new(),
+        };
+        assert_eq!(start.key(), "stint");
+        // It goes through a log and back the same
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""question":{"kind":"stint","why":"pull","doing":"builder","run":0.2,"lately":{"#), "{json}");
+        assert!(json.contains(r#"{"kind":"take","job":"crafter-planks","setup":0,"pays":900}"#), "{json}");
+        assert_eq!(serde_json::from_str::<Situation>(&json).unwrap(), s);
     }
 
     #[test]

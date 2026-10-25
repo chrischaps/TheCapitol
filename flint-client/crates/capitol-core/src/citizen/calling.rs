@@ -21,18 +21,27 @@
 //! `wander`. The favourite is the citizen's birth trade, the roster's
 //! `role`, unless it's an all-rounder.
 //!
-//! Nothing reads the calling yet: the stint question (K1.1) will chase its
-//! [`share`](Calling::share)s. The `capitol-bot --sim` swarm has no persona,
-//! so its calling is [`Calling::single`]: focus 1.0 on its `MIX` role,
-//! exactly today's one job.
+//! The stint question (K1.1, [`decide`](super::decide)) chases its
+//! [`share`](Calling::share)s, and a model reads it in words. It travels on
+//! a situation's `Who` and a decision log's `start` in the roster's form
+//! ([`Wire`]). The `capitol-bot --sim` swarm has no persona, so its calling
+//! is [`Calling::single`]: focus 1.0 on its `MIX` role, exactly today's one
+//! job.
 
+use std::collections::BTreeMap;
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 use super::persona::Rng;
 use crate::sim::{Craft, Gather, Role, ROLES};
 
+/// An all-rounder's favourite, as the roster and the log write it.
+pub const NO_FAVOURITE: &str = "none";
+
 /// How a citizen keeps to its favourite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Style {
     Specialist,
     Leaner,
@@ -143,7 +152,8 @@ const LEAST: f64 = 0.01;
 
 /// Who a citizen is, as work goes: what it would rather be doing, and how
 /// much.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(into = "Wire", try_from = "Wire")]
 pub struct Calling {
     /// Its favourite job: its birth trade, or none for an all-rounder.
     pub favourite: Option<Role>,
@@ -307,6 +317,81 @@ impl fmt::Display for Calling {
     }
 }
 
+/// A calling as the roster writes it, and so a decision log (K1.1):
+/// `{"favourite": "builder", "focus": 0.71, "wander": 0.4, "leanings":
+/// {"crafter-planks": 0.12, ...}}`, the favourite [`NO_FAVOURITE`] for an
+/// all-rounder. Read back, the leanings go in [`ROLES`] order, as a
+/// roster's and a seeded calling's are, so a replay's shares are the same
+/// to the bit.
+#[derive(Serialize, Deserialize)]
+struct Wire {
+    favourite: String,
+    focus: f32,
+    wander: f32,
+    leanings: BTreeMap<String, f32>,
+}
+
+impl From<Calling> for Wire {
+    fn from(c: Calling) -> Wire {
+        Wire {
+            favourite: c.favourite.map_or(NO_FAVOURITE, |r| r.slug()).to_string(),
+            focus: c.focus,
+            wander: c.wander,
+            leanings: c.leanings.iter().map(|(job, w)| (job.slug().to_string(), *w)).collect(),
+        }
+    }
+}
+
+impl TryFrom<Wire> for Calling {
+    type Error = String;
+
+    fn try_from(w: Wire) -> Result<Calling, String> {
+        let job = |slug: &str| Role::from_slug(slug).ok_or_else(|| format!("{slug:?} is no job"));
+        let favourite = match w.favourite.as_str() {
+            NO_FAVOURITE => None,
+            slug => Some(job(slug)?),
+        };
+        let mut leanings = w.leanings.iter().map(|(slug, lean)| Ok((job(slug)?, *lean))).collect::<Result<Vec<_>, String>>()?;
+        leanings.sort_by_key(|(r, _)| ROLES.iter().position(|o| o == r));
+        Ok(Calling {
+            favourite,
+            focus: w.focus,
+            leanings,
+            wander: w.wander,
+        })
+    }
+}
+
+/// Doing `job`, in words, as a card's line has it
+/// ([`lately`](capitol_protocol::rules::lately)): `cutting grass`, `felling
+/// trees`.
+pub fn doing(job: Role) -> &'static str {
+    match job {
+        Role::Gatherer(Gather::Fiber) => "cutting grass",
+        Role::Gatherer(Gather::Wood) => "felling trees",
+        Role::Gatherer(Gather::Ore) => "mining ore",
+        Role::Crafter(Craft::Planks) => "sawing planks",
+        Role::Crafter(Craft::Ingots) => "smelting metal",
+        Role::Crafter(Craft::Tools) => "making tools",
+        Role::Builder => "building",
+        Role::Merchant => "trading",
+    }
+}
+
+/// [`doing`] as a verb: `cut grass`, `fell trees`.
+pub fn to_do(job: Role) -> &'static str {
+    match job {
+        Role::Gatherer(Gather::Fiber) => "cut grass",
+        Role::Gatherer(Gather::Wood) => "fell trees",
+        Role::Gatherer(Gather::Ore) => "mine ore",
+        Role::Crafter(Craft::Planks) => "saw planks",
+        Role::Crafter(Craft::Ingots) => "smelt metal",
+        Role::Crafter(Craft::Tools) => "make tools",
+        Role::Builder => "build",
+        Role::Merchant => "trade",
+    }
+}
+
 /// The jobs kin to `role`'s: the ones it would be good for, either side of
 /// it in the chain, or that use what it has. A specialist takes up two or
 /// three of them.
@@ -430,6 +515,26 @@ mod tests {
             assert_eq!(one.wander, 0.0);
         }
         assert_eq!(Calling::single(Role::Builder).to_string(), "specialist in builder, 100%");
+    }
+
+    #[test]
+    fn a_calling_goes_through_json_to_the_bit() {
+        for (_, calling) in town(200, &Mix::default()) {
+            let json = serde_json::to_string(&calling).unwrap();
+            let back: Calling = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, calling, "{json}");
+            for job in ROLES {
+                assert_eq!(back.share(job).to_bits(), calling.share(job).to_bits(), "{json}");
+            }
+        }
+        let json = serde_json::to_string(&Calling::single(Role::Builder)).unwrap();
+        assert_eq!(json, r#"{"favourite":"builder","focus":1.0,"wander":0.0,"leanings":{}}"#);
+        let all = r#"{"favourite":"none","focus":0.0,"wander":0.3,"leanings":{"merchant":0.5,"builder":0.5}}"#;
+        let all: Calling = serde_json::from_str(all).unwrap();
+        assert_eq!(all.leanings, [(Role::Builder, 0.5), (Role::Merchant, 0.5)], "in ROLES order");
+        assert_eq!(all.style(), Style::AllRounder);
+        assert!(serde_json::from_str::<Calling>(r#"{"favourite":"juggler","focus":1.0,"wander":0.0,"leanings":{}}"#).is_err());
+        assert_eq!(serde_json::to_string(&Style::AllRounder).unwrap(), r#""all-rounder""#);
     }
 
     #[test]

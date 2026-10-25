@@ -189,6 +189,8 @@ u = base + w·max(0, target_share − recent_share)   // chase the calling's sha
 
 Chasing target shares rather than drawing at random makes the shares converge to the calling, so they can be measured (§10).
 
+*As built (K1.1, #530):* `decide::rules::stint`. The weights are `STINT` 0.5, `CHASE` 2.0 a point of shortfall, the setup cost `150 / (150 + steps)` (`setup_cost`: 28 steps take a sixth off the shortfall, about 500 three quarters, and nothing is barred), the pull `0.6 · pays / (pays + 150)` (`pays` is Strands a game hour over the books), and `MOMENTUM` 0.5 until `least_stint`, half of `stint_hours` (1.5 game hours times 0.5 to 1.5 by patience). One term was added: `LEAN` 0.01 times the target, so with every share met the calling still breaks the tie, and a job it has no lean to never ties one it has. At 0.04 it kept a specialist's 1% jobs from ever coming up (its favourite ran 7 points over); at 0.01, 400 stints come within 2 points of every job's share, in every style and birth trade (`stints_chase_the_callings_shares_in_every_style`). `Question::Stint { why: start | done | pull, doing, run, lately }` carries what the score reads, with `lately` and `doing` by `Role::slug` and `run` an `f32`, because serde_json doesn't read every `f64` back to the bit (#545). A situation with no calling (a swarm bot, a log from before callings) chases its role alone (`Who::calling()`).
+
 **Replay holds:**
 - everything the score reads travels in the `Situation`: the current job, how long it's run, `lately` (recent shares), and the calling on `Who`, all `#[serde(default)]`;
 - **carry-on is the current job**, so a slow layer never makes a citizen switch;
@@ -266,7 +268,7 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 
 | WP | What | Size | Depends |
 |---|---|---|---|
-| K1.1 #530 | `Question::Stint` and `Choice::Take`: rules scoring, carry-on, prose, corpus, log, replay | M | K0.2, K0.3 |
+| K1.1 #530 | `Question::Stint` and `Choice::Take`: rules scoring, carry-on, prose, corpus, log, replay. *As built:* the score is in D4's note. `Role::take(catalog, holdings, commitment, pays)` makes a job's entry, `None` when its setup can't be reached. `Calling` and `Style` are serde, in the roster's form (`favourite`, `focus`, `wander`, `leanings` by slug, read back in `ROLES` order so shares replay to the bit). They're on `Who.calling` and on the log's `start`, both optional, so the town's 639 old logs (99,723 decisions) replay at 100%. The persona sentence reads the calling ("you'd rather be cutting grass, and you'll saw planks and trade too", plus wander), with `calling::doing` and `to_do` in K3.1's words. The stint question gives the reason, the recent shares and the job it's at. The corpus deals each of the eight birth trades in each style and asks each a stint question, so it's no longer over `MIX`. Nothing asks the question live yet: that's K1.2 | M | K0.2, K0.3 |
 | K1.2 #531 | `SimBot::job()`; stints start and end; the side file; the union of willing jobs; banking on a fiber stint | L | K1.1 |
 | K1.3 #532 | Lot, home and the road in by calling; jobs that can't fit left off (#519) | M | K1.2 |
 | K1.4 #533 | Surplus and needs across jobs: sell what no willing job uses, bid for what's coming | M | K1.2 |

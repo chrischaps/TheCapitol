@@ -138,6 +138,7 @@ impl SimBot {
                 name: self.bot.name().to_string(),
                 role: self.role.slug().to_string(),
                 temperament: self.mind.temperament,
+                calling: self.persona.as_ref().map(|p| p.calling.clone()),
             },
             product: self.role.product(),
             hours: self.now(),

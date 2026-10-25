@@ -294,6 +294,7 @@ mod tests {
                 sociability: 0.9,
                 ..Temperament::default()
             },
+            calling: None,
         }
     }
 

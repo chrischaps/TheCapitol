@@ -483,6 +483,7 @@ fn kind(q: &Question) -> &'static str {
         Question::Commission { .. } => "commission",
         Question::Wage { .. } => "wage",
         Question::Guild { .. } => "guild",
+        Question::Stint { .. } => "stint",
     }
 }
 
@@ -682,7 +683,7 @@ mod tests {
         let situations = situations();
         let questions: std::collections::BTreeSet<_> = situations.iter().map(|s| kind(&s.question)).collect();
         assert!(situations.len() >= 60, "{}", situations.len());
-        assert_eq!(questions.len(), 7, "work, free time, sell, buy, commission, wage and guild: {questions:?}");
+        assert_eq!(questions.len(), 8, "work, free time, sell, buy, commission, wage, guild and stint: {questions:?}");
         record(&path, &situations);
         let report = replay(&path, Cascade::rules);
         assert_eq!(report.decisions, situations.len());
@@ -700,6 +701,44 @@ mod tests {
         assert!(report.escalation() > 0.0 && report.escalation() < 1.0, "{report}");
         let text = report.to_string();
         assert!(text.contains("100.0%") && text.contains("differences  none"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_logged_stint_replays_to_the_bit() {
+        use super::super::{Decider, RulesDecider, Verdict};
+        let dir = temp("stint");
+        let path = log::file_for(&dir, "Percy Sawyer");
+        let stints: Vec<Situation> = corpus::town(3).into_iter().filter(|s| kind(&s.question) == "stint").collect();
+        assert!(stints.len() >= 90, "{}", stints.len());
+        // Every style, and some with a job to carry on with
+        assert!(stints.iter().any(|s| s.carry_on.is_some()) && stints.iter().any(|s| s.carry_on.is_none()));
+        let styles: BTreeSet<_> = stints.iter().filter_map(|s| s.who.calling.as_ref().map(|c| c.style())).collect();
+        assert_eq!(styles.len(), 3);
+        record(&path, &stints);
+        let report = replay(&path, Cascade::rules);
+        assert_eq!(report.questions["stint"], (stints.len(), stints.len()), "{report}");
+        // Read back, each situation is the one logged, and the rules weigh it
+        // the same to the last bit of their confidence
+        let mut n = 0;
+        for record in log::read(&path).unwrap() {
+            let Record::Decision { situation, ruling, .. } = record.unwrap() else { continue };
+            // What the stint's score reads (an f64 like the hours of `when`
+            // may come back a hair off, which nothing here reads: #545)
+            let logged = &stints[n];
+            assert_eq!((&situation.who, &situation.question, &situation.menu), (&logged.who, &logged.question, &logged.menu));
+            let Some(Turn {
+                asked: Asked::Settled { confidence, choice } | Asked::Unsure { confidence, choice },
+                ..
+            }) = ruling.trail.first()
+            else {
+                panic!("{:?}", ruling.trail)
+            };
+            let Verdict::Decided { choice: again, confidence: sure } = RulesDecider.decide(&situation) else { panic!() };
+            assert_eq!((again, sure.to_bits()), (*choice, confidence.to_bits()), "#{n}");
+            n += 1;
+        }
+        assert_eq!(n, stints.len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -921,7 +960,7 @@ mod tests {
     fn outcomes_and_fills_are_logged_against_their_decisions() {
         let dir = temp("outcomes");
         let path = log::file_for(&dir, "Percy Sawyer");
-        let log = Log::open(&path, "Percy Sawyer", "builder", &["rules".into()], log::LOG_LIMIT, log::LOG_KEEP).unwrap();
+        let log = Log::open(&path, "Percy Sawyer", "builder", None, &["rules".into()], log::LOG_LIMIT, log::LOG_KEEP).unwrap();
         let mut mind = Mind::new(Cascade::rules(), Temperament::default()).with_log(Arc::new(Mutex::new(log)));
         mind.set_scale(10.0);
         let mut s = situations().into_iter().find(|s| s.question == Question::FreeTime).unwrap();

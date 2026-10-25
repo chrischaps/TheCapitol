@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{Choice, Lot, Question, Situation, Span, Temperament, Ticket, Verdict, Who};
+use super::{Choice, Lot, Question, Situation, Span, Temperament, Ticket, Verdict, Who, Why};
+use crate::citizen::calling::{self, Calling, Style};
+use crate::sim::{Role, ROLES};
 
 /// How long one request may take before it's dropped. Past a layer's time
 /// budget its answer is late anyway.
@@ -161,6 +163,7 @@ pub fn state(s: &Situation) -> Value {
         "you": {
             "name": s.who.name,
             "role": s.who.role,
+            "calling": s.who.calling,
             "temperament": temperament(&s.who.temperament),
         },
         "where": s.at.zone,
@@ -184,16 +187,64 @@ pub fn prose(s: &Situation) -> String {
     )
 }
 
-/// Who the citizen is: its name, its role and its temperament. It's the
-/// same at every decision a citizen makes, so a model layer can cache it
-/// (C3.2).
+/// Who the citizen is: its name, its calling (or its role, with none) and
+/// its temperament. It's the same at every decision a citizen makes, so a
+/// model layer can cache it (C3.2).
 pub fn persona(s: &Situation) -> String {
     persona_of(&s.who)
 }
 
 /// [`persona`] from the citizen alone, for what it says (#311).
 pub fn persona_of(who: &Who) -> String {
-    format!("You are {}, {}. {}", who.name, role(&who.role), character(&who.temperament))
+    match &who.calling {
+        Some(c) => format!("You are {}; {} {}", who.name, work(c), character(&who.temperament)),
+        None => format!("You are {}, {}. {}", who.name, role(&who.role), character(&who.temperament)),
+    }
+}
+
+/// The least share of its work a job takes for a persona to name it.
+const NAMED: f32 = 0.08;
+/// The most jobs besides its favourite a persona names.
+const NAMES: usize = 3;
+
+/// What a calling would rather be doing, as a sentence or two (Callings
+/// K1.1): "you'd rather be cutting grass, and you'll saw planks and trade
+/// too."
+fn work(c: &Calling) -> String {
+    let mut others: Vec<(Role, f32)> = ROLES
+        .into_iter()
+        .filter(|&job| Some(job) != c.favourite)
+        .map(|job| (job, c.share(job)))
+        .filter(|&(_, share)| share >= NAMED)
+        .collect();
+    // Most first, and in the chain's order on a tie
+    others.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let others: Vec<&str> = others.iter().take(NAMES).map(|&(job, _)| calling::to_do(job)).collect();
+    let mut out = match c.favourite {
+        None if others.is_empty() => "you have no favourite work, and turn your hand to anything".to_string(),
+        None => format!("you have no favourite work: you'll {} as readily as anything", list(&others)),
+        Some(f) => {
+            let rather = if c.style() == Style::Specialist { " than anything" } else { "" };
+            let mut out = format!("you'd rather be {}{rather}", calling::doing(f));
+            if !others.is_empty() {
+                out.push_str(&format!(", and you'll {} too", list(&others)));
+            }
+            out
+        }
+    };
+    out.push('.');
+    if c.wander >= 0.67 {
+        out.push_str(" You like to wander off from your work now and then.");
+    } else if c.wander <= 0.33 {
+        out.push_str(" You keep to your work.");
+    }
+    out
+}
+
+/// A job's [`calling::doing`], from its slug; the slug itself if it names
+/// no job.
+fn doing(job: &str) -> String {
+    Role::from_slug(job).map_or_else(|| job.to_string(), |r| calling::doing(r).to_string())
 }
 
 /// The rest of [`prose`]: where and when, what the citizen holds, the
@@ -402,6 +453,32 @@ pub fn question(q: &Question) -> String {
                 each.join("; ")
             )
         }
+        Question::Stint { why, doing: at, run, lately } => {
+            let why = match why {
+                Why::Start => "as your working time begins",
+                Why::Done => "now you've been at your last job a good while",
+                Why::Pull => "since there's work on offer that pays",
+            };
+            let mut out = format!("Choose what to work at for the next while, {why}.");
+            let done: f32 = lately.values().filter(|&&v| v > 0.0).sum();
+            if done > 0.0 {
+                let mut shares: Vec<(&String, f32)> = lately
+                    .iter()
+                    .filter(|(_, &v)| v > 0.0)
+                    .map(|(job, &v)| (job, v / done))
+                    .collect();
+                shares.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let each: Vec<String> = shares.iter().map(|(job, share)| format!("{:.0}% {}", share * 100.0, doing(job))).collect();
+                out.push_str(&format!(" Lately your work has gone on {}.", list(&each)));
+            } else {
+                out.push_str(" You've done no work lately.");
+            }
+            if let Some(job) = at {
+                out.push_str(&format!(" You've been {} for {run:.1} game hours.", doing(job)));
+            }
+            out.push_str(" Which job do you take up?");
+            out
+        }
     }
 }
 
@@ -439,6 +516,7 @@ pub fn label(c: &Choice) -> String {
         Choice::TakeWork => "take the work".into(),
         Choice::Apply { guild } => format!("join {guild}"),
         Choice::Stay => "stay out".into(),
+        Choice::Take { job, .. } => doing(job),
     }
 }
 
@@ -552,6 +630,17 @@ pub fn entry(c: &Choice) -> String {
         Choice::TakeWork => "Take the work: walk there and work the shift through your working hours, paid for each unit as it's made".into(),
         Choice::Apply { guild } => format!("Ask to join {guild}, or accept its invitation: an officer takes you in"),
         Choice::Stay => "Stay out of these guilds for today, and decline any invitation".into(),
+        Choice::Take { job, setup, pays } => {
+            let setup = match setup {
+                0 => ", ready to start".to_string(),
+                n => format!(", after about {n} steps setting up the stations, tools or plot it needs"),
+            };
+            let pays = match pays {
+                p if *p > 0 => format!("; there's work on offer that pays about {p} Strands a game hour over the books for it"),
+                _ => String::new(),
+            };
+            format!("Take up {} for the next while{setup}{pays}", doing(job))
+        }
     }
 }
 
@@ -596,6 +685,7 @@ mod tests {
                     sociability: 0.5,
                     patience: 0.5,
                 },
+                calling: None,
             },
             at: Place {
                 x: 0.0,
@@ -632,6 +722,101 @@ mod tests {
         ] {
             assert!(text.contains(part), "{part:?} in {text}");
         }
+    }
+
+    #[test]
+    fn a_calling_and_a_stint_read_as_sentences() {
+        use super::super::{Held, Place, When};
+        use crate::sim::{Craft, Gather};
+        use std::collections::BTreeMap;
+        let fiber = Role::Gatherer(Gather::Fiber);
+        let calling = Calling {
+            favourite: Some(fiber),
+            focus: 0.45,
+            leanings: vec![(Role::Crafter(Craft::Planks), 0.2), (Role::Builder, 0.03), (Role::Merchant, 0.15)],
+            wander: 0.8,
+        };
+        let mut who = Who {
+            name: "Ada Reeder".into(),
+            role: fiber.slug().into(),
+            temperament: Temperament::default(),
+            calling: Some(calling.clone()),
+        };
+        let words = persona_of(&who);
+        assert!(
+            words.starts_with("You are Ada Reeder; you'd rather be cutting grass, and you'll saw planks and trade too. You like to wander"),
+            "{words}"
+        );
+        who.calling = Some(Calling {
+            focus: 0.7,
+            wander: 0.2,
+            ..calling
+        });
+        let words = persona_of(&who);
+        assert!(
+            words.contains("you'd rather be cutting grass than anything, and you'll saw planks and trade too. You keep to your work."),
+            "{words}"
+        );
+        who.calling = Some(Calling {
+            favourite: None,
+            focus: 0.0,
+            leanings: crate::sim::ROLES.iter().map(|&r| (r, 0.125)).collect(),
+            wander: 0.5,
+        });
+        let words = persona_of(&who);
+        assert!(words.contains("no favourite work: you'll cut grass, fell trees and mine ore as readily as anything."), "{words}");
+        // With none, as before callings
+        who.calling = None;
+        assert!(persona_of(&who).starts_with("You are Ada Reeder, a fiber gatherer."));
+
+        let s = Situation {
+            who,
+            at: Place {
+                x: 0.0,
+                y: 0.0,
+                zone: "rural".into(),
+            },
+            when: When {
+                time_of_day: Some(0.5),
+                hours: 3.0,
+            },
+            holdings: Held::default(),
+            market: Vec::new(),
+            question: Question::Stint {
+                why: Why::Pull,
+                doing: Some("gatherer-fiber".into()),
+                run: 0.5,
+                lately: BTreeMap::from([("gatherer-fiber".into(), 3.0), ("crafter-planks".into(), 1.0)]),
+            },
+            menu: vec![
+                Choice::Take {
+                    job: "gatherer-fiber".into(),
+                    setup: 0,
+                    pays: 0,
+                },
+                Choice::Take {
+                    job: "crafter-planks".into(),
+                    setup: 480,
+                    pays: 120,
+                },
+            ],
+            carry_on: Some(0),
+        };
+        let text = circumstances(&s);
+        for part in [
+            "Choose what to work at for the next while, since there's work on offer that pays.",
+            "Lately your work has gone on 75% cutting grass and 25% sawing planks.",
+            "You've been cutting grass for 0.5 game hours.",
+        ] {
+            assert!(text.contains(part), "{part:?} in {text}");
+        }
+        assert_eq!(labels(&s.menu), ["cutting grass", "sawing planks"]);
+        assert_eq!(
+            entry_in(&s, 0),
+            "Take up cutting grass for the next while, ready to start (carry on with what you were doing)"
+        );
+        let planks = entry(&s.menu[1]);
+        assert!(planks.contains("after about 480 steps") && planks.contains("about 120 Strands a game hour"), "{planks}");
     }
 
     #[test]

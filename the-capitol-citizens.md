@@ -91,7 +91,8 @@ Rules alone, a model alone, or any stack in between all work behind the same int
 - what to sell, and at what price;
 - what to buy;
 - whether to accept, counter or decline a trade;
-- where to spend free time.
+- where to spend free time;
+- what to work at for the next while: the stint question (Callings K1.1, `the-capitol-callings.md` D4). `Question::Stint { why, doing, run, lately }` is asked when a session starts, when a stint ends and when a pull arrives, with one `Choice::Take { job, setup, pays }` for each job the calling leans to that can be reached. Its *carry on* is the job the citizen is at, so a slow layer never makes it switch. The rules chase the calling's shares, which `Who.calling` carries (none in a log from before callings: then it's the role alone).
 
 A layer picks one choice from the menu and fills in its parameters (a price, a quantity), or it escalates. A model layer gets the menu as a tool schema that admits only the listed choices. An off-menu answer is treated as an escalation, so no layer can make a citizen do something illegal or invented.
 

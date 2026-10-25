@@ -860,6 +860,7 @@ mod tests {
                 name: "Percy Sawyer".into(),
                 role: "gatherer-wood".into(),
                 temperament: Temperament::default(),
+                calling: None,
             },
             at: Place {
                 x: 0.0,

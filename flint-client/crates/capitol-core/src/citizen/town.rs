@@ -52,7 +52,7 @@ use serde::Deserialize;
 use super::decide::log::{self, Log};
 use super::decide::pulse::{Pulse, SharedPulse};
 use super::decide::{self, Cascade, Mind, SharedLog};
-use super::calling::{self, Calling, Style};
+use super::calling::{self, Calling, Style, NO_FAVOURITE};
 use super::habit::{Habit, Kind, Mix, Presence};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
@@ -143,9 +143,6 @@ struct CallingFile {
     wander: f32,
     leanings: BTreeMap<String, f32>,
 }
-
-/// An all-rounder's favourite, as the roster writes it.
-const NO_FAVOURITE: &str = "none";
 
 /// `{ kind = "casual", zone = -5 }`: the zone in hours from UTC.
 #[derive(Debug, Deserialize)]
@@ -1061,7 +1058,7 @@ impl Town {
 /// said and done without: a citizen never stops for its log.
 fn open_log(citizen: &Citizen, logs: &Logs) -> Option<SharedLog> {
     let path = log::file_for(&logs.dir, &citizen.name);
-    match Log::open(&path, &citizen.name, citizen.role.slug(), &citizen.layers, logs.limit, logs.keep) {
+    match Log::open(&path, &citizen.name, citizen.role.slug(), Some(&citizen.persona.calling), &citizen.layers, logs.limit, logs.keep) {
         Ok(log) => Some(Arc::new(Mutex::new(log))),
         Err(e) => {
             eprintln!("{}: no decision log: {}: {e}", citizen.name, path.display());
@@ -1176,6 +1173,7 @@ fn one_life(
         name: citizen.name.clone(),
         role: citizen.role.slug().to_string(),
         temperament: citizen.persona.temperament,
+        calling: Some(citizen.persona.calling.clone()),
     };
     // The roster checked the voice
     let voice = voice::voice(&citizen.voice, who, seed(&citizen.name)).map_err(BotError::Failed)?;
@@ -1736,7 +1734,7 @@ key = "j"
     fn decide(pulse: &SharedPulse, n: usize) {
         use decide::{Choice, Held, Place, Question, Situation, When, Who};
         let s = Situation {
-            who: Who { name: "Ada Reeder".into(), role: "gatherer-wood".into(), temperament: Temperament::default() },
+            who: Who { name: "Ada Reeder".into(), role: "gatherer-wood".into(), temperament: Temperament::default(), calling: None },
             at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
             when: When { time_of_day: Some(0.5), hours: 1.0 },
             holdings: Held::default(),

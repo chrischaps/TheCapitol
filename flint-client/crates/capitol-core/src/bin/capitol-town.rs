@@ -1188,6 +1188,7 @@ fn audition(name: &str) -> Result<(), String> {
                 thrift,
                 ..Default::default()
             },
+            calling: None,
         };
         println!("── {citizen}, {role}, sociability {sociability}");
         let mut speaker = voice::speaker(name, who, n as u64)?;

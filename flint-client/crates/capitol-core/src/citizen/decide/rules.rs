@@ -65,9 +65,18 @@
 //! trade the more readily the more sociable, and one that invited it more
 //! readily still. A middling citizen joins its trade's guild; a reserved
 //! one stays out unless it's asked. Staying out is a steady [`PASS`].
+//!
+//! Stints (Callings K1.1, D4, [`stint`]): a job is worth a steady
+//! [`STINT`], a little more the more its calling leans to it ([`LEAN`]),
+//! and more the further its share of the citizen's recent work falls short
+//! of its calling's share, by [`CHASE`]. Chasing the shares
+//! rather than drawing at random makes them converge to the calling. A job
+//! with setup still to do has its shortfall charged by [`setup_cost`], a
+//! pull on it adds up to [`PULL`], and the job it's at is worth
+//! [`MOMENTUM`] more until its stint's least length ([`least_stint`]).
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Temperament, Verdict};
-use crate::sim::{BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
+use crate::sim::{Role, BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
 
 /// What "what the rules would do" is worth.
 const SURE: f64 = 0.9;
@@ -90,6 +99,32 @@ const PUT_OFF: f64 = 0.6;
 const DELIVER: f64 = 1.0;
 /// What leaving a commission be is worth.
 const PASS: f64 = 0.5;
+/// What any job on the stint menu is worth before its share is chased.
+const STINT: f64 = 0.5;
+/// What each point of a job's share in the calling adds, whatever it has
+/// done lately: so with every share met, the calling's own order breaks the
+/// tie, and a job it has no lean to never ties one it has. Small, so the
+/// shares a citizen keeps still come within a point or so of its calling's.
+const LEAN: f64 = 0.01;
+/// What each point of a job's shortfall against its calling's share adds:
+/// a specialist starting its day with nothing done lately is sure of its
+/// favourite, and a job 10 points short beats one 5 points short clearly.
+const CHASE: f64 = 2.0;
+/// The setup steps that halve what a shortfall adds ([`setup_cost`]): a
+/// wood gatherer's bench and stone axe from empty hands (28 steps) take a
+/// sixth off it, a sawbench with its plot and the kiln's bricks (about 500)
+/// three quarters.
+const SETUP_HALF: f64 = 150.0;
+/// The most a pull on a job adds.
+const PULL: f64 = 0.6;
+/// Strands a game hour over the books at which a pull adds half of
+/// [`PULL`]: about what the town's faucet pays a citizen-hour (K0.1).
+const PULL_HALF: f64 = 150.0;
+/// What staying at the job it's at is worth, until its stint's least
+/// length.
+const MOMENTUM: f64 = 0.5;
+/// A middling citizen's stint, in game hours.
+const STINT_HOURS: f64 = 1.5;
 
 /// The rules layer. It keeps no state: the same situation gets the same
 /// answer, which is what lets C3.1 replay a log exactly.
@@ -216,6 +251,7 @@ impl Decider for RulesDecider {
                 Choice::TakeWork => wage(s, i),
                 Choice::Apply { guild: name } => guild(s, i, name),
                 Choice::Stay => (PASS, Decision::plain(i)),
+                Choice::Take { job, setup, pays } => (stint(s, job, *setup, *pays), Decision::plain(i)),
                 Choice::Post { price, quantity, .. } => {
                     // At its bid's price and a premium, for what it would bid for
                     let bid = price.min as f64;
@@ -236,6 +272,54 @@ impl Decider for RulesDecider {
         }
         pick(scored)
     }
+}
+
+/// How long a stint runs before the citizen asks what next (Callings D4),
+/// in game hours: [`STINT_HOURS`] times 0.5 for the hasty to 1.5 for the
+/// patient.
+pub fn stint_hours(t: &Temperament) -> f64 {
+    STINT_HOURS * (0.5 + t.patience as f64)
+}
+
+/// The least a stint runs: half its length. Until then the job it's at is
+/// worth [`MOMENTUM`] more, so a pull has to be worth leaving it for.
+pub fn least_stint(t: &Temperament) -> f64 {
+    stint_hours(t) / 2.0
+}
+
+/// What a shortfall is charged for `steps` of setup still to do: 1 when the
+/// job's ready, half at [`SETUP_HALF`], saturating, so a long chain is dear
+/// but never off the menu.
+pub fn setup_cost(steps: u32) -> f64 {
+    SETUP_HALF / (SETUP_HALF + steps as f64)
+}
+
+/// Taking up `job` for a stint (Callings K1.1, D4):
+///
+/// ```text
+/// u = STINT + LEAN · target
+///           + CHASE · max(0, target − recent) · setup_cost(setup)
+///           + pull(pays) + momentum
+/// ```
+///
+/// `target` is the calling's share of its work for the job, and `recent`
+/// its share of the work done lately, both from the situation, so a replay
+/// answers the same. A situation with no calling chases its role alone.
+fn stint(s: &Situation, job: &str, setup: u32, pays: i64) -> f64 {
+    let Question::Stint { doing, run, lately, .. } = &s.question else {
+        // A stint's answers on another question's menu fit nothing
+        return 0.0;
+    };
+    let target = match (s.who.calling(), Role::from_slug(job)) {
+        (Some(calling), Some(role)) => calling.share(role) as f64,
+        _ => 0.0,
+    };
+    let done: f64 = lately.values().map(|&v| v.max(0.0) as f64).sum();
+    let recent = if done > 0.0 { lately.get(job).map_or(0.0, |&v| v.max(0.0) as f64) / done } else { 0.0 };
+    let chase = CHASE * (target - recent).max(0.0) * setup_cost(setup);
+    let pull = if pays > 0 { PULL * pays as f64 / (pays as f64 + PULL_HALF) } else { 0.0 };
+    let at_it = doing.as_deref() == Some(job) && f64::from(*run) < least_stint(&s.who.temperament);
+    STINT + LEAN * target + chase + pull + if at_it { MOMENTUM } else { 0.0 }
 }
 
 /// How much more or less a place appeals today: up to [`WHIM`] either
@@ -490,6 +574,7 @@ mod tests {
                 name: "Percy Sawyer".into(),
                 role: "gatherer-wood".into(),
                 temperament: t,
+                calling: None,
             },
             at: Place {
                 x: 0.0,
@@ -1124,6 +1209,145 @@ mod tests {
         // A name not on the question fits nothing
         let mut s = guilds(vec![ore()], Temperament::default());
         s.menu[0] = Choice::Apply { guild: "Nobody's".into() };
+        assert_eq!(decide(&s).0.pick, 1);
+    }
+
+    use crate::citizen::calling::{self, Calling, Style};
+    use crate::citizen::persona::Persona;
+    use crate::sim::ROLES;
+    use std::collections::BTreeMap;
+
+    /// A citizen born to `role`, of `style`.
+    fn calling(role: Role, style: Style, seed: u64) -> Calling {
+        Persona::seeded_in(role, seed, &Default::default(), &calling::Mix::only(style)).calling
+    }
+
+    fn take(job: Role, setup: u32, pays: i64) -> Choice {
+        Choice::Take {
+            job: job.slug().into(),
+            setup,
+            pays,
+        }
+    }
+
+    /// The stint question for `calling`, at `doing` for `run` game hours,
+    /// with `lately` done, over `menu`.
+    fn stint(calling: Option<Calling>, doing: Option<Role>, run: f32, lately: &BTreeMap<String, f32>, menu: Vec<Choice>) -> Situation {
+        let q = Question::Stint {
+            why: super::super::Why::Done,
+            doing: doing.map(|d| d.slug().into()),
+            run,
+            lately: lately.clone(),
+        };
+        let mut s = situation(q, menu, Temperament::default());
+        s.who.calling = calling;
+        s.carry_on = doing.and_then(|d| s.menu.iter().position(|c| matches!(c, Choice::Take { job, .. } if job == d.slug())));
+        s
+    }
+
+    /// What `calling` works at over `stints` stints, every job ready: each
+    /// job's share of them.
+    fn lived(calling: &Calling, stints: usize) -> BTreeMap<String, f32> {
+        let mut lately: BTreeMap<String, f32> = BTreeMap::new();
+        let menu: Vec<Choice> = ROLES.iter().map(|&job| take(job, 0, 0)).collect();
+        for _ in 0..stints {
+            let s = stint(Some(calling.clone()), None, 0.0, &lately, menu.clone());
+            let Choice::Take { job, .. } = s.choice(&decide(&s).0) else { panic!() };
+            *lately.entry(job.clone()).or_default() += 1.0;
+        }
+        lately.values_mut().for_each(|v| *v /= stints as f32);
+        lately
+    }
+
+    #[test]
+    fn stints_chase_the_callings_shares_in_every_style() {
+        for (k, role) in ROLES.into_iter().enumerate() {
+            for style in Style::ALL {
+                let c = calling(role, style, 31 * k as u64 + 7);
+                let shares = lived(&c, 400);
+                for job in ROLES {
+                    let (got, want) = (shares.get(job.slug()).copied().unwrap_or(0.0), c.share(job));
+                    assert!((got - want).abs() < 0.02, "{style} {}: {job} {got} against {want}", role.slug());
+                }
+                // So a specialist keeps to its favourite, and an all-rounder
+                // spreads itself
+                let top = shares.values().fold(0.0f32, |a, &b| a.max(b));
+                match style {
+                    Style::Specialist => assert!((0.6..=0.8).contains(&shares[role.slug()]), "{shares:?}"),
+                    Style::Leaner => assert!((0.35..=0.55).contains(&shares[role.slug()]), "{shares:?}"),
+                    Style::AllRounder => assert!(top <= 0.25 && shares.len() == 8, "{shares:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_day_starts_at_the_favourite_surely() {
+        let menu: Vec<Choice> = ROLES.iter().map(|&job| take(job, 0, 0)).collect();
+        let fiber = Role::Gatherer(crate::sim::Gather::Fiber);
+        for style in [Style::Specialist, Style::Leaner] {
+            let s = stint(Some(calling(fiber, style, 3)), None, 0.0, &BTreeMap::new(), menu.clone());
+            let (d, confidence) = decide(&s);
+            assert_eq!(d, Decision::plain(0), "{style}");
+            assert!(confidence >= super::super::RULES_THRESHOLD, "{style}: {confidence}");
+        }
+        // The same situation always answers the same, to the bit
+        let s = stint(Some(calling(fiber, Style::AllRounder, 3)), None, 0.0, &BTreeMap::new(), menu);
+        let (a, b) = (decide(&s), decide(&s));
+        assert_eq!((a.0, a.1.to_bits()), (b.0, b.1.to_bits()));
+    }
+
+    #[test]
+    fn setup_is_charged_momentum_holds_and_a_pull_draws() {
+        use crate::sim::{Craft, Gather};
+        let (wood, planks, ore) = (Role::Gatherer(Gather::Wood), Role::Crafter(Craft::Planks), Role::Gatherer(Gather::Ore));
+        // Two jobs a tenth each, nothing done of either
+        let c = Calling {
+            favourite: None,
+            focus: 0.0,
+            leanings: vec![(wood, 0.1), (ore, 0.1), (planks, 0.1), (Role::Builder, 0.7)],
+            wander: 0.5,
+        };
+        let lately = BTreeMap::from([(Role::Builder.slug().to_string(), 1.0)]);
+        // The one ready to start wins over one with a sawbench to set up
+        let s = stint(Some(c.clone()), None, 0.0, &lately, vec![take(planks, 500, 0), take(wood, 0, 0)]);
+        assert_eq!(decide(&s).0.pick, 1);
+        // Setup is charged, not barred: a big enough shortfall still takes it
+        assert_eq!(setup_cost(0), 1.0);
+        assert!(setup_cost(28) > 0.8 && setup_cost(500) < 0.25 && setup_cost(500) > 0.0);
+        // At the builder's work a short while, it stays, though wood is short
+        let menu = || vec![take(Role::Builder, 0, 0), take(wood, 0, 0)];
+        let t = Temperament::default();
+        let s = stint(Some(c.clone()), Some(Role::Builder), least_stint(&t) as f32 - 0.1, &lately, menu());
+        assert_eq!(s.carry_on, Some(0));
+        assert_eq!(decide(&s).0.pick, 0, "momentum");
+        // Past its stint's least length, it goes where its share is short
+        let s = stint(Some(c.clone()), Some(Role::Builder), least_stint(&t) as f32 + 0.1, &lately, menu());
+        assert_eq!(decide(&s).0.pick, 1);
+        // A patient citizen's stints run longer
+        let (hasty, patient) = (stint_hours(&with(|t| t.patience = 0.0)), stint_hours(&with(|t| t.patience = 1.0)));
+        assert!(hasty < stint_hours(&t) && stint_hours(&t) < patient, "{hasty} {patient}");
+        // A pull draws it to a job it has done its share of already
+        let even: BTreeMap<String, f32> = [(wood, 0.1), (ore, 0.1), (planks, 0.1), (Role::Builder, 0.6)]
+            .into_iter()
+            .map(|(job, share)| (job.slug().to_string(), share))
+            .collect();
+        let s = stint(Some(c.clone()), None, 0.0, &even, vec![take(Role::Builder, 0, 0), take(ore, 0, 400)]);
+        assert_eq!(decide(&s).0.pick, 1, "pulled");
+        let s = stint(Some(c), None, 0.0, &even, vec![take(Role::Builder, 0, 0), take(ore, 0, 0)]);
+        assert_eq!(decide(&s).0.pick, 0, "not pulled");
+    }
+
+    #[test]
+    fn with_no_calling_a_citizen_keeps_to_its_role() {
+        // A swarm bot's, or a log's from before callings: its role alone
+        let lately = BTreeMap::from([("gatherer-wood".to_string(), 1.0)]);
+        let menu = vec![take(Role::Builder, 0, 0), take(Role::Gatherer(crate::sim::Gather::Wood), 0, 0)];
+        let s = stint(None, None, 0.0, &lately, menu);
+        assert_eq!(s.who.role, "gatherer-wood");
+        assert_eq!(decide(&s).0.pick, 1);
+        // A stint's answer on another question's menu fits nothing
+        let s = situation(Question::Work, vec![take(Role::Builder, 0, 0), Choice::Rest], Temperament::default());
         assert_eq!(decide(&s).0.pick, 1);
     }
 

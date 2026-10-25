@@ -288,6 +288,7 @@ mod tests {
                 name: "Percy Sawyer".into(),
                 role: "crafter-planks".into(),
                 temperament: Temperament::default(),
+                calling: None,
             },
             at: Place {
                 x: 6000.0,

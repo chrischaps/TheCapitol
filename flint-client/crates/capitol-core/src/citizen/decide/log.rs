@@ -5,8 +5,9 @@
 //! `record`:
 //!
 //! - **`start`**, when a run opens the log (and at the top of each file
-//!   after a rotation): the citizen, its role and its stack of layers.
-//!   Decision ids count up from 1 within a run.
+//!   after a rotation): the citizen, its role (its birth trade), its
+//!   calling (Callings K1.1; none in a log from before them) and its stack
+//!   of layers. Decision ids count up from 1 within a run.
 //! - **`decision`**: the [`Situation`] with its menu, and the [`Ruling`]:
 //!   each layer's verdict on the trail (settled, unsure, escalated, off the
 //!   menu, slow, pending), with its choice and how long it took, and the
@@ -32,6 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::{Held, Ruling, Situation};
+use crate::citizen::calling::Calling;
 
 /// The size a log grows to before it rotates, unless the town says
 /// otherwise.
@@ -50,6 +52,10 @@ pub enum Record {
         run: i64,
         citizen: String,
         role: String,
+        /// What it would rather be doing (K1.1). A log from before
+        /// callings has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calling: Option<Calling>,
         layers: Vec<String>,
     },
     /// Boxed, so the other records aren't the size of a decision (#264).
@@ -158,7 +164,15 @@ pub struct Log {
 impl Log {
     /// Opens (or makes) the log at `path` for a run of `citizen`, appending
     /// its `start`. It rotates past `limit` bytes, keeping `keep` old files.
-    pub fn open(path: &Path, citizen: &str, role: &str, layers: &[String], limit: u64, keep: usize) -> io::Result<Log> {
+    pub fn open(
+        path: &Path,
+        citizen: &str,
+        role: &str,
+        calling: Option<&Calling>,
+        layers: &[String],
+        limit: u64,
+        keep: usize,
+    ) -> io::Result<Log> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir)?;
         }
@@ -170,6 +184,7 @@ impl Log {
             run: t,
             citizen: citizen.to_string(),
             role: role.to_string(),
+            calling: calling.cloned(),
             layers: layers.to_vec(),
         };
         let mut log = Log {
@@ -343,6 +358,7 @@ mod tests {
                     sociability: 0.1,
                     patience: 0.9,
                 },
+                calling: None,
             },
             at: Place {
                 x: 6012.25,
@@ -373,6 +389,7 @@ mod tests {
                 run: 1,
                 citizen: "Percy Sawyer".into(),
                 role: "gatherer-wood".into(),
+                calling: Some(Calling::single(crate::sim::Role::Gatherer(crate::sim::Gather::Wood))),
                 layers: vec!["rules".into()],
             },
             Record::Decision {
@@ -418,6 +435,21 @@ mod tests {
     }
 
     #[test]
+    fn a_log_from_before_callings_still_reads() {
+        // A start and a situation's who as C3.1 to K0.3 wrote them
+        let start = r#"{"record":"start","t":1,"run":1,"citizen":"Percy Sawyer","role":"gatherer-wood","layers":["rules"]}"#;
+        let Record::Start { calling, role, .. } = serde_json::from_str(start).unwrap() else { panic!() };
+        assert_eq!((calling, role.as_str()), (None, "gatherer-wood"));
+        let mut s = situation();
+        s.who.calling = None;
+        let line = serde_json::to_string(&s).unwrap();
+        assert!(!line.contains("calling"), "{line}");
+        assert_eq!(serde_json::from_str::<Situation>(&line).unwrap(), s);
+        // Its stint is its role's alone
+        assert_eq!(s.who.calling(), Some(Calling::single(crate::sim::Role::Gatherer(crate::sim::Gather::Wood))));
+    }
+
+    #[test]
     fn a_temperament_survives_the_log_exactly() {
         // The rules weigh the temperament, so replay needs it to the bit
         let mut x: u32 = 1;
@@ -436,7 +468,7 @@ mod tests {
         let dir = temp("rotate");
         let path = file_for(&dir, "Percy Sawyer");
         assert_eq!(path.file_name().unwrap(), "percy-sawyer.jsonl");
-        let mut log = Log::open(&path, "Percy Sawyer", "gatherer-wood", &["rules".into()], 2000, 2).unwrap();
+        let mut log = Log::open(&path, "Percy Sawyer", "gatherer-wood", None, &["rules".into()], 2000, 2).unwrap();
         let s = situation();
         let ruling = Cascade::rules().ask(&s, Instant::now());
         let ids: Vec<u64> = (0..20).map(|_| log.decision(&s, &ruling)).collect();

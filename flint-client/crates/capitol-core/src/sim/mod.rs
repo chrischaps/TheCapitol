@@ -317,6 +317,19 @@ impl Role {
         plan::setup(catalog, holdings, &first)
     }
 
+    /// The stint menu's entry for the job (Callings K1.1): take it up at
+    /// `commitment`, charged its [`setup`](Self::setup)'s steps, with `pays`
+    /// from what pulls on it. `None` when it can't be reached now: leave it
+    /// off the menu.
+    pub fn take(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment, pays: i64) -> Option<Choice> {
+        let setup = self.setup(catalog, holdings, commitment).ok()?;
+        Some(Choice::Take {
+            job: self.slug().to_string(),
+            setup: setup.steps,
+            pays,
+        })
+    }
+
     /// A dabble's work (Callings D5): of the role's products, the one the
     /// fewest steps away, with what it holds and owns. A tool crafter makes
     /// a handle at a workbench rather than climb to the iron pickaxe; a
@@ -841,6 +854,7 @@ mod tests {
                 name: "Bot".into(),
                 role: "builder".into(),
                 temperament: Temperament::default(),
+                calling: None,
             },
             at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
             when: When { time_of_day: None, hours: 0.0 },
@@ -1063,6 +1077,7 @@ mod tests {
                         name: "Bot".into(),
                         role: role.slug().into(),
                         temperament: Temperament::default(),
+                        calling: None,
                     },
                     at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
                     when: When { time_of_day: None, hours: 0.0 },

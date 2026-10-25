@@ -3,9 +3,13 @@
 //! and temperaments, and the hall's board's since S2.5: a commission for
 //! what it makes, and a post for what it needs. Since S2.8, work offered
 //! at its trade, at a spread of rates, and since S4.5 a guild for its trade
-//! to join, some of them having invited it. A fresh live town asks only work and bank questions
-//! (#294), so this is what a new layer is measured on until the logs hold
-//! the rest. `capitol-town corpus` writes it as a rules-only citizen's log.
+//! to join, some of them having invited it. Since Callings K1.1 each
+//! citizen has a calling, every birth trade in every style, and is asked
+//! what to work at next over its calling's jobs: at the start of a day,
+//! with nothing done lately or at its shares, and pulled away mid-stint. A
+//! fresh live town asks only work and bank questions (#294), so this is
+//! what a new layer is measured on until the logs hold the rest.
+//! `capitol-town corpus` writes it as a rules-only citizen's log.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -14,18 +18,23 @@ use capitol_protocol::rules::court;
 use capitol_protocol::rules::wages::Work;
 use uuid::Uuid;
 
+use std::collections::BTreeMap;
+
 use super::log::{self, Fate, Log};
-use super::{Cascade, Choice, GuildSeen, Held, Mind, Place, Question, Quote, Situation, Temperament, When, Who};
+use super::{Cascade, Choice, GuildSeen, Held, Mind, Place, Question, Quote, Situation, Temperament, When, Who, Why};
 use crate::catalog::Catalog;
+use crate::citizen::calling::{self, Calling, Style};
+use crate::citizen::persona::Persona;
 use crate::sim::plan::Holdings;
 use crate::sim::wage::{self, Hire};
-use crate::sim::{Role, Wanted, LOT, MIX};
+use crate::sim::{Commitment, Role, Wanted, LOT, ROLES};
 
 /// The name the corpus's citizen logs under.
 pub const CITIZEN: &str = "Percy Sawyer";
 
-/// Every role's work, sell, buy, bid and stall questions over a spread
-/// of holdings, books and temperaments: what a town asks in a day.
+/// Every role's work, sell, buy, bid, stall and stint questions over a
+/// spread of holdings, books, temperaments and callings: what a town asks
+/// in a day.
 pub fn situations() -> Vec<Situation> {
     round(0)
 }
@@ -43,9 +52,12 @@ fn round(r: u32) -> Vec<Situation> {
     let catalog = Catalog::fallback();
     let mut out = Vec::new();
     let mut n = 0u32;
-    for (role, _) in MIX {
+    for (k, role) in ROLES.into_iter().enumerate() {
+        // Each birth trade in each style, round by round
+        let style = Style::ALL[(k + r as usize) % Style::ALL.len()];
         for (strands, fiber, product, last) in [(0, 0, 0, None), (40, 120, 12, Some(3)), (300, 260, 45, Some(9)), (900, 30, 80, Some(1))] {
             n += 1;
+            let calling = Persona::seeded_in(role, u64::from(n) << 16 | u64::from(r), &Default::default(), &calling::Mix::only(style)).calling;
             let t = |k: u32| ((n * 37 + k * 11 + r * 53 + r * k * 7) % 10) as f32 / 9.0;
             let (product, last) = (product * scale as i32, last.map(|l: i64| l * scale));
             let temperament = Temperament {
@@ -75,6 +87,7 @@ fn round(r: u32) -> Vec<Situation> {
                     name: format!("Citizen {n}"),
                     role: role.slug().into(),
                     temperament,
+                    calling: Some(calling.clone()),
                 },
                 at: Place {
                     x: 6000.0 + n as f64 * 13.7,
@@ -91,6 +104,7 @@ fn round(r: u32) -> Vec<Situation> {
                 menu,
                 carry_on: Some(carry_on),
             };
+            out.push(stint(&calling, role, n, &h, &catalog, s));
             let Ok(errands) = role.errands(&catalog, &h) else { continue };
             out.push(s(Question::Work, errands.iter().map(|e| e.choice(&catalog)).collect(), 0));
             out.push(s(Question::FreeTime, vec![Choice::Rest, Choice::Hall], 0));
@@ -193,6 +207,61 @@ fn round(r: u32) -> Vec<Situation> {
     out
 }
 
+/// What `n`, a citizen of `calling` born to `role`, works at next (K1.1),
+/// over its calling's jobs as it holds `h`: its favourite as a whole
+/// ladder, the rest as a dabble, one now and then pulled on. By turns it's
+/// starting its day with nothing done lately, done with a stint of its
+/// birth trade, at its calling's shares, or pulled away from its favourite
+/// with too little of it done. `s` makes the situation.
+fn stint(
+    calling: &Calling,
+    role: Role,
+    n: u32,
+    h: &Holdings,
+    catalog: &Catalog,
+    s: impl Fn(Question, Vec<Choice>, usize) -> Situation,
+) -> Situation {
+    let jobs: Vec<Role> = ROLES.into_iter().filter(|&job| calling.share(job) > 0.0).collect();
+    let menu: Vec<Choice> = jobs
+        .iter()
+        .enumerate()
+        .filter_map(|(j, job)| {
+            let commitment = if calling.favourite == Some(*job) { Commitment::Full } else { Commitment::Dabble };
+            let pays = if (n as usize + j).is_multiple_of(7) { 40 + 20 * (n % 5) as i64 } else { 0 };
+            job.take(catalog, h, commitment, pays)
+        })
+        .collect();
+    let favourite = calling.favourite.unwrap_or(role);
+    let (why, doing, run, lately): (Why, Option<Role>, f32, BTreeMap<String, f32>) = match n % 4 {
+        0 => (Why::Start, None, 0.0, BTreeMap::new()),
+        1 => (Why::Done, Some(role), 1.0 + (n % 3) as f32, BTreeMap::from([(role.slug().to_string(), 1.0)])),
+        2 => {
+            let at = jobs.iter().map(|&job| (job.slug().to_string(), calling.share(job))).collect();
+            (Why::Done, Some(favourite), 2.0, at)
+        }
+        _ => {
+            let short = jobs
+                .iter()
+                .map(|&job| {
+                    let share = calling.share(job);
+                    (job.slug().to_string(), if job == favourite { share * 0.5 } else { share * 1.3 })
+                })
+                .collect();
+            (Why::Pull, Some(favourite), 0.2 * (n % 4) as f32, short)
+        }
+    };
+    let carry_on = doing.and_then(|d| menu.iter().position(|c| matches!(c, Choice::Take { job, .. } if job == d.slug())));
+    let question = Question::Stint {
+        why,
+        doing: doing.map(|d| d.slug().to_string()),
+        run,
+        lately,
+    };
+    let mut situation = s(question, menu, 0);
+    situation.carry_on = carry_on;
+    situation
+}
+
 /// `word` with a capital: `Ore`.
 fn capitalised(word: &str) -> String {
     let mut chars = word.chars();
@@ -221,7 +290,7 @@ fn own_work(catalog: &Catalog, role: Role) -> Option<Work> {
 /// Writes `situations` to `path` as a rules-only citizen's log, each
 /// decision done.
 pub fn record(path: &Path, situations: &[Situation]) -> std::io::Result<()> {
-    let log = Log::open(path, CITIZEN, Role::Builder.slug(), &["rules".into()], log::LOG_LIMIT, log::LOG_KEEP)?;
+    let log = Log::open(path, CITIZEN, Role::Builder.slug(), None, &["rules".into()], log::LOG_LIMIT, log::LOG_KEEP)?;
     let mut mind = Mind::new(Cascade::rules(), Temperament::default()).with_log(Arc::new(Mutex::new(log)));
     for s in situations {
         let mark = mind.mark();
