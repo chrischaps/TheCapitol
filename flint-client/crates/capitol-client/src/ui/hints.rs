@@ -1149,7 +1149,8 @@ fn chapter_key(chapter: Chapter) -> &'static str {
 
 /// `--hints-sample`'s home for Settle in: a farm as the default world's
 /// typically are since Plots v2 (12 stations of a deed's 25, #459), on a
-/// granted deed assessed at the rural price, 250, so 5 a week.
+/// granted deed assessed at the home zones' one price, 500, so 10 a week
+/// (#292).
 fn sample_home() -> Home {
     Home {
         plot_id: uuid::Uuid::nil(),
@@ -1157,8 +1158,8 @@ fn sample_home() -> Home {
         fits: 12,
         capacity: 25,
         placed: 0,
-        assessed: 250,
-        weekly_tax: Some(5),
+        assessed: 500,
+        weekly_tax: Some(10),
         owed: 0,
     }
 }
@@ -1522,8 +1523,8 @@ mod tests {
         let station = body(Step::PlaceAtHome, None, Some(&farm), Play::Click);
         assert!(station.contains("Your farm fits 12 stations, though its deed allows 25"), "{station}");
         let tax = body(Step::ReadTax, None, Some(&farm), Play::Click);
-        assert!(tax.contains("assessed at 250 Strands") && tax.contains("5 a week"), "{tax}");
-        assert!(tax.contains("Four weeks unpaid (20 Strands)") && !tax.contains("owes"), "{tax}");
+        assert!(tax.contains("assessed at 500 Strands") && tax.contains("10 a week"), "{tax}");
+        assert!(tax.contains("Four weeks unpaid (40 Strands)") && !tax.contains("owes"), "{tax}");
         let owing = Home { owed: 3, ..farm.clone() };
         assert!(body(Step::ReadTax, None, Some(&owing), Play::Click).contains("It owes 3 now."));
         let untaxed = Home { weekly_tax: None, ..farm.clone() };

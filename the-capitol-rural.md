@@ -36,7 +36,7 @@ The rural ring sits between the suburb's packed post-war lots and the open wilds
   - Line 1382 averages two directions without allowing for the wrap at ±180°, so on trail 6 a lot can flip to the wrong side.
   - Lot depth is measured from the centreline, and the straight front edge of a lot on a curve bulges into its own trail.
 - **The water.** Since #222 the wilds' water runs onto the plain, down to r3150. The rural lots don't know it, so some have a stream or a pond across them (#223).
-- **The docs** say only "Rural Zone: large plots" (GDD §3, milestones). 200×150 is a code default and nothing more. The deed is a flat 250 (GDD:734).
+- **The docs** say only "Rural Zone: large plots" (GDD §3, milestones). 200×150 is a code default and nothing more. The deed is a flat 250 (GDD:734); since #292 it's 500, as in every home zone (RD9).
 - **The baseline** (R1, [#284](https://github.com/chrischaps/TheCapitol/issues/284)), over seeds 42, 7, 1234 and 99999. The full table is in §5.
   - **Lots:** 52, 70, 71 and 60, at 24k to 25k on average. The ring is 8 to 10% built.
   - **Clumping:** every seed has at least one half-sector with nothing built, and none has one above 22%. The CV of the half-sectors' shares is 0.64 to 0.79.
@@ -132,9 +132,11 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 
 - *As built (V1.3, [#457](https://github.com/chrischaps/TheCapitol/issues/457), Plots v2 `the-capitol-plots-v2.md`):* **Plots v2's farms**, for the grown ring of r3600 to r6100, are `RuralParams::v2()` (test-only until the flip, #459). Today's defaults reproduce today's ring exactly, so the pin holds. The v2 draws are frontage U[132, 146], field gap U[40, 46] and depth U[230, 290]. **Every farm takes 12 stations** (`RuralParams::room`, `station_room::takes`): the walk cuts down or slides on past a farm that doesn't, and the overlap pass leaves one it pulls back short of 12 as a field. 12 need a farm about 132 wide (three across at 55, 10 in from each side) and 185 deep, so the cut-down floor is 132 (`min_frontage`) and the shallowest farm 185 (`min_depth`). Today's floors, 100 and 110, are params now too. The issue's draws (frontage U[115, 150], gap U[35, 70]) left 17 to 19% of farms short of 12, and a gap under 40 is one the overlap pass drops. `takes` was too slow to ask of every farm a walk tries (generation went from 1.1 to 5.5 s in release). It now builds each packing order only when the one before it fails, and rules out a lot that's short by Groemer's packing bound first, with the same answers (`the_packing_bound_never_rules_out_a_lot_that_fits`). `station_room` isn't test-only any more.
 
-### RD9. The deed stays flat until Chris decides ([#292](https://github.com/chrischaps/TheCapitol/issues/292))
+### RD9. A farm's deed is the same price as any home's (Chris, 2026-10-24; [#292](https://github.com/chrischaps/TheCapitol/issues/292))
 
 The rural deed is a flat 250, and the tax is flat too. A farm is four times the land, so after the flip 250 buys four times as much. That may be right, since the countryside is the first rung next to the spawn, but it's Chris's call. #292 is `needs-decision`. Nothing in this plan changes prices.
+
+- *As built (#292):* **Chris's call is equal prices.** Rural, suburban and urban lots should each have pros and cons that might draw a player to one, but on balance be of equal value, so they cost the same. A farm's size is a pro, and the distance to the market its con. So the farm's deed isn't priced by area. The three home zones' `zones.deed_cost` are all **500** (`20270101_001_equal_deeds.sql`), the middle of the old 250, 500 and 1000, so the sink stays about where it was. Tax is 10 a week on any of them. If the farms prove much the most wanted (#451's balance runs will show it), the fix is the zones' other pros and cons, not the price.
 
 ### RD10. The ring is two roads deep, and the world grows (Chris, 2026-10-20; [#307](https://github.com/chrischaps/TheCapitol/issues/307))
 
@@ -360,7 +362,7 @@ The flip is one commit, and `scripts/ci.sh full` runs before it lands. It covers
 | R7 | [#290](https://github.com/chrischaps/TheCapitol/issues/290) | The flip (§7). *As built:* §7's as-built notes | L | R5, R6 |
 | R8 | [#291](https://github.com/chrischaps/TheCapitol/issues/291) | Remove the old trails, their params and the switch. *As built:* `terrain.rs` loses `generate_rural_paths_with_params`, the trails' lots, the four `rural_trail_*` / `rural_plot_*` params, `catmull_rom_spline` and seven polygon and polyline helpers, which only the trails and their lots used. `RuralLayout` is gone, and the farms' lot generator is `generate_farms`. The pin holds at `4742a2a314848a25`. `rural-plan.ps1 -Layout` and `RURAL_LAYOUT` are gone too; the plans are still named `farms-…`. `metrics::is_rural_road` takes only `lane_*`. The React tweak panel's four trail sliders are now the lane width and the farms' frontage and depth ranges (§6's as-built note) | S | R7 |
 
-Follow-up: [#292](https://github.com/chrischaps/TheCapitol/issues/292), the rural deed's price for four times the land (`needs-decision`).
+Follow-up: [#292](https://github.com/chrischaps/TheCapitol/issues/292), the rural deed's price for four times the land. Decided: 500, the same as every home zone (RD9).
 
 Later: [#423](https://github.com/chrischaps/TheCapitol/issues/423) (plots plan `the-capitol-plots.md` §5.3) made the farms smaller, about 400 of about 36k (RD6's #423 note, §5's as-built table). Capacity at the new size is [#424](https://github.com/chrischaps/TheCapitol/issues/424).
 

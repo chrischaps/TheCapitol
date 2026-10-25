@@ -61,8 +61,9 @@ use crate::net::NetConfig;
 use crate::poll::Fetch;
 use crate::state::StateEvent;
 
-/// A deed's price until a plot listing says otherwise: Rural's.
-const DEFAULT_DEED: i64 = 250;
+/// A deed's price until a plot listing says otherwise: any home zone's,
+/// since they cost the same (#292).
+pub(super) const DEFAULT_DEED: i64 = 500;
 /// Where builders look for land, nearest the rural spawn first.
 const PLOT_ZONES: [&str; 2] = ["rural", "suburban"];
 /// The most spots on its lot a bot walks to before it gives up on placing.

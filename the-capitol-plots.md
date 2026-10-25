@@ -26,7 +26,7 @@ Today the counts run the wrong way round. The ring with the least land has the m
 - **The capacities can't be reached.** Urban's 9 and suburban's 16 are both above what fits. Only rural's 25 is real.
 - **The guild district** (72 halls of about 20k) is out of scope.
 
-The deed is 250 in all three zones, as a live trial in the town. Before that trial, rural's flat deed was #292.
+The deed is 250 in all three zones, as a live trial in the town. Before that trial, rural's flat deed was #292. *Since #292 (Chris, 2026-10-24) it's 500 in all three, in every world (PD3).*
 
 ## 3. Targets
 
@@ -66,6 +66,8 @@ The ★ default is option 1, because it keeps "bigger lot, more room" inside a z
 ### PD3. The deed stays flat until the sizes are in
 
 The deed is 250 in every zone, as a town trial. Changing the sizes and the price together would make the trial unreadable. So this plan changes no price. Once all three parts are in, cut an issue (`economy`, `needs-decision`) for a deed that follows the lot's area or its room, using the town's numbers. #292 folds into it.
+
+- *Decided (#292, Chris, 2026-10-24):* **no deed follows the lot's area or room.** The three home zones are of equal value on balance, each with its pros and cons (a farm's room against the walk to the market), so they cost the same: **500 each**, the middle of the old 250, 500 and 1000 (`20270101_001_equal_deeds.sql`). Tax is 10 a week on any of them. If one zone draws far more players than the others, the fix is its pros and cons, not its price. Owned plots keep what they were assessed at. The migration drops any `deed_price` knob for the three zones, since a multiple of the old price means something else against the new one. No follow-up issue is needed.
 
 ### PD4. Old lots get a new prefix, and the migration releases the owned ones
 
@@ -148,7 +150,7 @@ For each part:
 - **#418:** floors on urban lots, the route to capacity 9 (`needs-decision`).
 - **#416 (landed):** urban homes for merchants and some crafters. Gatherers and builders can live urban once lots take 4.
 - **#419 (landed):** a station claim stays in the home zone.
-- **#292:** the flat rural deed, folded into PD3's follow-up.
+- **#292:** the flat rural deed, folded into PD3's follow-up. Decided: every home deed is 500 (PD3).
 
 ## 8. Work packages
 

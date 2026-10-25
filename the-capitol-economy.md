@@ -315,7 +315,7 @@ The anchor is **1 Strand = 1 fiber**. Grass gives about 2 fiber per 3-second pul
 | forge / sawbench kit | 10 min | ~150 |
 | anvil kit | 21 min | ~320 |
 
-At this anchor, a Suburban deed (500 Strands) is about half an hour of grass, and a Rural one (250) is about fifteen minutes. That's cheap next to an anvil. Deed costs aren't part of v1 content, but E2.7's sim should report hours of labour per deed so the two can be tuned together.
+At this anchor, a Suburban deed (500 Strands) is about half an hour of grass, and a Rural one (250) is about fifteen minutes. That's cheap next to an anvil. Deed costs aren't part of v1 content, but E2.7's sim should report hours of labour per deed so the two can be tuned together. (Since #292 every home deed is 500, about half an hour of grass.)
 
 **The wilds (2026-10-18).** The Wilderness becomes the wilds: r3800 to r6000, with mountains, rivers and lakes, and no claims (`the-capitol-wilds.md`).
 - WD8 there proposes what it yields, for this tree to take or leave:

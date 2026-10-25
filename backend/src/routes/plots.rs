@@ -606,6 +606,20 @@ mod tests {
             .unwrap() as i64
     }
 
+    /// The three home zones are of equal value on balance, so their deeds
+    /// cost the same: a farm's room is paid for in the walk, not the price
+    /// (#292)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_home_zones_deeds_cost_the_same(db: PgPool) {
+        let costs: Vec<(String, i32)> =
+            sqlx::query_as("SELECT id, deed_cost FROM zones WHERE id IN ('rural', 'suburban', 'urban') ORDER BY id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(costs, [("rural".into(), 500), ("suburban".into(), 500), ("urban".into(), 500)]);
+    }
+
     /// A sender for `claim`, and a receiver to see what it broadcast
     fn events() -> (broadcast::Sender<GameEvent>, broadcast::Receiver<GameEvent>) {
         broadcast::channel(16)

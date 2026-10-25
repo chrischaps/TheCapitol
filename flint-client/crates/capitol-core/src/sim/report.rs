@@ -719,10 +719,9 @@ impl Report {
         if let Some((start, end)) = self.makers {
             let _ = writeln!(md, "- Market makers: {start} Strands at the start, {end} at the end");
         }
-        for (zone, cost) in [("Rural", 250), ("Suburban", 500)] {
-            if let Some(h) = self.deed_hours(cost) {
-                let _ = writeln!(md, "- A {zone} deed ({cost}) is {h:.2} hours of grass");
-            }
+        let deed = super::run::DEFAULT_DEED;
+        if let Some(h) = self.deed_hours(deed) {
+            let _ = writeln!(md, "- A deed ({deed}, in any home zone) is {h:.2} hours of grass");
         }
         if self.court.busy() {
             let c = &self.court;

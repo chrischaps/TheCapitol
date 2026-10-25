@@ -740,18 +740,18 @@ Issues and manages property rights.
 
 | Service | Fee | Frequency |
 |---------|-----|-----------|
-| Initial deed claim (Rural) | 250 Strands | One-time |
-| Initial deed claim (Suburban) | 500 Strands | One-time |
-| Initial deed claim (Urban) | 1,000 Strands | One-time |
+| Initial deed claim (Rural, Suburban or Urban) | 500 Strands | One-time |
 | Property tax | 2% of assessed plot value | Weekly, charged hourly in exact fractions |
 | Deed transfer | 2% of sale price | Per transaction |
 | Plot upgrade permit | 500-2,000 Strands | One-time |
 
 *Property tax is the primary recurring sink, scaling with economy size.*
 
+*The three home zones cost the same (#292). On balance they're of equal value, each with pros and cons that might draw a player to one: a farm's room against the walk to the market, a yard's nearness against its four stations. If one draws far more players than the others, the fix is its pros and cons, not its price. Until #292 the deeds were 250 rural, 500 suburban and 1000 urban.*
+
 *The wilds have no deeds: nothing there can be claimed (`the-capitol-wilds.md` WD6).*
 
-**Unpaid tax and foreclosure:** tax is charged hourly, a 168th of the week's tax at a time. Whole Strands are charged and the fraction carries to the next hour, so a week costs exactly 2%: an urban deed of 1000 pays 1 Strand about every eighth hour, 20 a week, and a rural deed of 250 pays 1 every 33.6 hours, 5 a week. (Until #136 each hour rounded up, so every deed under 8400 paid at least 168 a week.) An hour the owner can't pay is added to the plot's debt, and the debt comes out of their Strands as soon as they have them. Owners are warned as the debt passes each week of tax, and again when one more charge would end it. A plot that owes four weeks of tax is foreclosed: it goes back on the market and the deed's value is refunded less the debt. Its stations come down: each kit goes back to the station's owner, and everything in them to whoever owns it (a guest's deposit to the guest). Whatever doesn't fit in an inventory goes to that player's **impound** (#141), a store of 480 slots that things only come out of: from anywhere, with the impound panel's Take all, or by dragging a stack to an empty slot in the pack. `plot_foreclosed` tells the owner what went there. A lot laid under a workbench, and a forced terrain commit, send their overflow there too. Warnings and the foreclosure itself wait for an owner who's offline, so nobody comes back to find a plot gone with no word why, and an owner can pay the debt off whenever they like from the plot panel (#138).
+**Unpaid tax and foreclosure:** tax is charged hourly, a 168th of the week's tax at a time. Whole Strands are charged and the fraction carries to the next hour, so a week costs exactly 2%: a home deed of 500 pays 1 Strand every 16.8 hours, 10 a week, and a guild hall of 5000 pays 1 about every 1.7 hours, 100 a week. (Until #136 each hour rounded up, so every deed under 8400 paid at least 168 a week.) An hour the owner can't pay is added to the plot's debt, and the debt comes out of their Strands as soon as they have them. Owners are warned as the debt passes each week of tax, and again when one more charge would end it. A plot that owes four weeks of tax is foreclosed: it goes back on the market and the deed's value is refunded less the debt. Its stations come down: each kit goes back to the station's owner, and everything in them to whoever owns it (a guest's deposit to the guest). Whatever doesn't fit in an inventory goes to that player's **impound** (#141), a store of 480 slots that things only come out of: from anywhere, with the impound panel's Take all, or by dragging a stack to an empty slot in the pack. `plot_foreclosed` tells the owner what went there. A lot laid under a workbench, and a forced terrain commit, send their overflow there too. Warnings and the foreclosure itself wait for an owner who's offline, so nobody comes back to find a plot gone with no word why, and an owner can pay the debt off whenever they like from the plot panel (#138).
 
 #### Guild Registry
 
@@ -891,7 +891,7 @@ A new player's economic journey:
 2. **Gather Fiber** - 10-15 minutes of gathering = ~500-1000 Fiber
 3. **Travel to Capitol** - Experience the world, use Fiber for canal tolls
 4. **Exchange Fiber for Strands** - Establish account at Capitol Exchange
-5. **Claim Deed** - Spend ~250-500 Strands depending on zone choice
+5. **Claim Deed** - Spend 500 Strands, the same in every home zone (or the deed the road in grants)
 6. **Establish Workshop** - Begin crafting/gathering loop
 7. **Earn through labor** - Take contracts, sell goods, or continue gathering
 

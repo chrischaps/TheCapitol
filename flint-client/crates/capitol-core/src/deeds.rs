@@ -123,11 +123,12 @@ pub fn whereabouts(zone: Zone, x: f64, y: f64) -> String {
 }
 
 /// What the grant's slip says it is (D4, D6), with a week's tax on a deed
-/// in each of `taxes`' zones: one zone's ("5 a week"), or each in turn.
+/// in each of `taxes`' zones: one figure when they're all the same ("10 a
+/// week", as they are since #292), or each in turn.
 pub fn grant_terms(taxes: &[(Zone, i64)]) -> String {
     let tax = match taxes {
         [] => "the zone's weekly rate".to_owned(),
-        [(_, n)] => format!("{n} a week"),
+        [(_, n), rest @ ..] if rest.iter().all(|(_, m)| m == n) => format!("{n} a week"),
         many => {
             let each: Vec<String> = many
                 .iter()
@@ -259,6 +260,8 @@ mod tests {
             grant_terms(&[(Zone::Rural, 5)]),
             "One deed, any lot in the rural, suburban or urban rings. Taxed as any deed is: 5 a week."
         );
+        assert!(grant_terms(&[(Zone::Urban, 10), (Zone::Suburban, 10), (Zone::Rural, 10)])
+            .ends_with("Taxed as any deed is: 10 a week."));
         assert!(grant_terms(&[(Zone::Urban, 20), (Zone::Suburban, 10), (Zone::Rural, 5)])
             .ends_with("Taxed as any deed is: 20 a week on a yard, 10 on a house and 5 on a farm."));
         assert!(grant_terms(&[]).ends_with("the zone's weekly rate."));

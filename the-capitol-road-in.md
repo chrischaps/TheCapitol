@@ -41,7 +41,7 @@ The question the plan answers: **can a player's first choice of home be an infor
 - `Tour::judge` marks an account done if it holds any non-raw item.
 
 **A deed** is a price, not an item (`the-capitol-milestones.md` M7):
-- `zones.deed_cost` (rural 250, suburban 500, urban 1000, guild 5000) × the `deed_price.<zone>` tunable, charged as `DeedPurchase` by `routes/plots.rs::claim()` in one transaction.
+- `zones.deed_cost` (500 in each home zone since #292, which was rural 250, suburban 500 and urban 1000; guild 5000) × the `deed_price.<zone>` tunable, charged as `DeedPurchase` by `routes/plots.rs::claim()` in one transaction.
 - `assessed_value` is set to what was paid, and tax is 2% of it a week (`property_tax.rs`).
 - Foreclosure after 4 weeks of debt refunds the deed less the debt. `plot_sync::RETIRED_LOTS` refunds in full.
 - Claims have no range check and no per-player cap.
@@ -282,7 +282,7 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
   - **The tax card** is the only step that's a card and nothing more, so its **"Noted"** is the step: `Did::ReadTax`, sent as `tutorial_seen { read_tax }` once (`Hints::noted`). It says your lot's assessed value, its tax a week, taken a little each hour, that an hour you can't pay is owed and Alt-clicking the lot shows the debt and pays it, what it owes now if anything, and that four weeks unpaid (in Strands) forecloses it: the stations come down and back to you, the land goes back to the city, a bought deed is refunded less the debt and the road in's nothing (D5). The plot panel now shows an owned lot's tax a week too, under its value.
   - **Well begun.** The closing card has the six chapters' pips gold, the city's seal by its title (`theme::capitol_seal`, the Registrar's), "You've walked the road in and made a home, and the city has you on its books. The rest is yours: make, trade, and make your name.", then `G` ("the Gazette each morning, and Wanted: work people will pay for", since S2.3, #389, put the Wanted page beside the Gazette) and `?` ("every control, any time"), each a keycap. It stays 12 s (8 before). Once the tour's finished nothing of it shows: no card, no header chip, no line in the `?` overlay.
   - **`finished_at`** was already set by the last step's `mark` (#438). `engine::tutorial`'s `settling_in_finishes_the_road_and_nothing_sooner` walks the chapter through its real judges (a workbench placed at home, its job set, the tax card seen) for two players, one reading the tax card first and one last, and checks `finished_at` waits for every step either way, and that rope is refused as a job.
-  - `--hints-sample place_at_home|set_automation|read_tax|settle_in-done` shows the cards offline on a sample farm (12 of 25, assessed 250, 5 a week); offline, the road in's farm stop stands in for your home's ring.
+  - `--hints-sample place_at_home|set_automation|read_tax|settle_in-done` shows the cards offline on a sample farm (12 of 25, assessed 500, 10 a week since #292); offline, the road in's farm stop stands in for your home's ring.
 - **O3.3 Citizens walk the road in** (#450, M): the steps as a `Decider` task, and the claim in the citizen's home zone. `sim/plan.rs` no longer saves for the first deed.
 
   *As built:*
@@ -320,7 +320,7 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
 - Deed transfer and sale between players (GDD §8.4).
 - A second chapter of the road in, outward: the wilds, the trails and a better tool (WD7's "the first trip out is a choice made with a tool in your hand").
 - Apprenticeships (GDD's employment, "an onboarding path and interdependence"), once wages (S2.6) and the board (S2.3) are in.
-- A deed price that follows the lot's area or room (`the-capitol-plots.md` PD3), which changes what the grant is worth by zone.
+- ~~A deed price that follows the lot's area or room (`the-capitol-plots.md` PD3).~~ Decided against in #292: the home zones are of equal value and cost the same, so the grant is worth the same whichever zone it's spent in.
 
 ## 9. Risks
 
