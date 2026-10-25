@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
-    AutomationMode, BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuyListing, CollectRequest,
+    AutomationMode, BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuyListing, ClosedStall, CollectRequest,
     CollectResponse, ConfigureAutomation, DepositRequest, DepositResponse, GrantRequest, GrantResponse,
     HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder, MarketSummaryResponse, MoveItemRequest,
     MyOrdersQuery, MyStallResponse, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest, RentStall,
@@ -1700,6 +1700,22 @@ impl Bot {
         match self.call("reading our stall", RestRequest::MyStall)? {
             RestResponse::MyStall(mine) => Ok(mine),
             other => Err(unexpected("reading our stall", &other)),
+        }
+    }
+
+    /// Gives our stall up now, from anywhere (#268): the shop closes, its
+    /// goods go to the market box or wait for room there, and the days left
+    /// aren't refunded.
+    pub fn close_stall(&mut self) -> Result<ClosedStall, BotError> {
+        match self.call("closing our stall", RestRequest::CloseStall)? {
+            RestResponse::ClosedStall(closed) => {
+                self.log(format!(
+                    "closed {} at {}: {} stacks to the market box, {} waiting",
+                    closed.name, closed.stall_id, closed.returned, closed.waiting
+                ));
+                Ok(closed)
+            }
+            other => Err(unexpected("closing our stall", &other)),
         }
     }
 

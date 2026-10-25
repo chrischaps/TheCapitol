@@ -12,8 +12,9 @@
 //!   stall (D6): from afar the panel says how far away you are, and Buy
 //!   waits until you're back.
 //! - **Your shop:** when the rent runs out, Pay to keep it (up to a week
-//!   ahead) and a rename; your listings with Unlist; and Stock, from a stack
-//!   in your inventory at a price a unit.
+//!   ahead) and a rename; your listings with Unlist; Stock, from a stack in
+//!   your inventory at a price a unit; and Give up the stall, from anywhere,
+//!   asked once since the days paid aren't refunded (#268).
 //! - **A free stall:** what it costs (`rules::bazaar`), a name and the days,
 //!   and Rent. One stall a merchant: if you keep another, it says which.
 //!
@@ -55,6 +56,8 @@ pub enum Action {
     Unlist(Uuid),
     /// Walk to your own stall, from a free one
     GoTo(String),
+    /// Give up your stall now, with no refund (#268)
+    GiveUp,
     Close,
 }
 
@@ -117,6 +120,9 @@ pub struct ShopPanel {
     /// Where things were drawn this frame, for the tests to click
     buys: Vec<(Uuid, egui::Rect)>,
     rent_button: Option<egui::Rect>,
+    give_up_button: Option<egui::Rect>,
+    /// Give up the stall was clicked once, and it asks to be sure
+    giving_up: bool,
     /// Where the panel was drawn this frame. `None` while it's closed.
     pub rect: Option<egui::Rect>,
 }
@@ -127,6 +133,7 @@ impl ShopPanel {
         if self.stall.as_deref() != Some(stall_id) {
             self.picks.clear();
             self.days = 0;
+            self.giving_up = false;
         }
         self.stall = Some(stall_id.to_owned());
     }
@@ -147,6 +154,7 @@ impl ShopPanel {
         let open = view.is_some() && self.stall.is_some();
         let shown = ctx.animate_bool_with_time(Id::new("capitol_shop_fade"), open, FADE);
         self.rect = None;
+        self.give_up_button = None;
         let view = view?;
         if shown <= 0.0 {
             return None;
@@ -424,6 +432,57 @@ impl ShopPanel {
         if let Some(a) = self.stock_form(ui, view, shop) {
             action = Some(a);
         }
+        ui.add_space(6.0);
+        if let Some(a) = self.give_up(ui, view, shop) {
+            action = Some(a);
+        }
+        action
+    }
+
+    /// Give up the stall (#268), from anywhere: asked once, since the days
+    /// paid ahead aren't refunded.
+    fn give_up(&mut self, ui: &mut egui::Ui, view: &View, shop: &BazaarShop) -> Option<Action> {
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            if self.giving_up {
+                let ahead = paid_words(shop.paid_until, view.now);
+                let line = match ahead.strip_prefix("paid ") {
+                    Some(ahead) => format!("Close the shop now? The {ahead} you paid aren't refunded."),
+                    None => "Close the shop now?".to_owned(),
+                };
+                ui.label(RichText::new(line).color(theme::GOLD_LIGHT).size(size::SMALL));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let keep = ui.add(egui::Button::new(RichText::new("Keep it").size(size::SMALL).color(DIM)));
+                    if keep.clicked() {
+                        self.giving_up = false;
+                    }
+                    let yes = ui.add_enabled(
+                        !view.busy,
+                        egui::Button::new(RichText::new("Yes, close it").font(theme::strong(size::SMALL)).color(SHORT))
+                            .fill(SHORT.gamma_multiply(0.14))
+                            .stroke(Stroke::new(1.0_f32, SHORT.gamma_multiply(0.7)))
+                            .rounding(4.0),
+                    );
+                    self.give_up_button = Some(yes.rect);
+                    if yes.clicked() {
+                        self.giving_up = false;
+                        action = Some(Action::GiveUp);
+                    }
+                });
+            } else {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let b = ui.add_enabled(
+                        !view.busy,
+                        egui::Button::new(RichText::new("Give up the stall").size(size::SMALL).color(DIM)).frame(false),
+                    );
+                    self.give_up_button = Some(b.rect);
+                    let b = b.on_hover_text("Close the shop now: its goods go to your market box at the Exchange hall");
+                    if b.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.giving_up = true;
+                    }
+                });
+            }
+        });
         action
     }
 
@@ -913,6 +972,28 @@ mod tests {
         panel.close();
         run(&mut panel, &view, None);
         assert!(panel.rect.is_none());
+    }
+
+    #[test]
+    fn giving_up_your_stall_asks_once_and_keep_it_backs_out() {
+        let sample = Sample::new();
+        let catalog = Catalog::fallback();
+        let view = sample.view("bazaar_stall_6", &catalog);
+        let mut panel = ShopPanel::default();
+        panel.open_on("bazaar_stall_6");
+        run(&mut panel, &view, None);
+        let give_up = panel.give_up_button.expect("a Give up button");
+        assert_eq!(run(&mut panel, &view, Some(give_up.center())), None, "asked first");
+        assert!(panel.giving_up);
+        run(&mut panel, &view, None);
+        let yes = panel.give_up_button.expect("a Yes button");
+        assert_eq!(run(&mut panel, &view, Some(yes.center())), Some(Action::GiveUp));
+        assert!(!panel.giving_up);
+
+        // Asked, then another stall: it's forgotten
+        panel.giving_up = true;
+        panel.open_on("bazaar_stall_4");
+        assert!(!panel.giving_up);
     }
 
     #[test]

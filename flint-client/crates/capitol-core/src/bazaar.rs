@@ -502,15 +502,19 @@ impl BazaarStore {
                 }
                 shop.listings.retain(|l| !l.units.is_empty());
             }),
-            ServerMessage::StallLapsed { stall_id, .. } => {
-                self.shops.remove(stall_id);
-                if let Some(mine) = &mut self.mine {
-                    if mine.shop.as_ref().is_some_and(|s| &s.stall_id == stall_id) {
-                        mine.shop = None;
-                    }
-                }
-            }
+            ServerMessage::StallLapsed { stall_id, .. } => self.closed(stall_id),
             _ => {}
+        }
+    }
+
+    /// The shop at `stall_id` closed: its rent ran out, or you gave it up
+    /// (#268). The goods it waits to send home come with `/bazaar/mine`.
+    pub fn closed(&mut self, stall_id: &str) {
+        self.shops.remove(stall_id);
+        if let Some(mine) = &mut self.mine {
+            if mine.shop.as_ref().is_some_and(|s| s.stall_id == stall_id) {
+                mine.shop = None;
+            }
         }
     }
 
@@ -812,5 +816,9 @@ mod tests {
         store.unlisted(id);
         assert!(store.my_shop().unwrap().listings.is_empty());
         assert!(store.shop("bazaar_stall_4").unwrap().listings.is_empty());
+        // Giving it up closes it in both places (#268)
+        store.closed("bazaar_stall_4");
+        assert!(store.my_shop().is_none());
+        assert!(store.shop("bazaar_stall_4").is_none());
     }
 }

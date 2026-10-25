@@ -21,7 +21,7 @@ use capitol_protocol::rest::{
     PlaceOrder,
 };
 use capitol_protocol::rest::{
-    BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, MyStallResponse, RentStall,
+    BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, ClosedStall, MyStallResponse, RentStall,
     ShopSign, StockListing,
 };
 use capitol_protocol::rest::{
@@ -200,6 +200,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::bazaar::my_stall,
         crate::routes::bazaar::get_shop,
         crate::routes::bazaar::rent,
+        crate::routes::bazaar::close,
         crate::routes::bazaar::stock,
         crate::routes::bazaar::unlist,
         crate::routes::bazaar::buy,
@@ -376,6 +377,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         BazaarShop,
         BazaarListing,
         MyStallResponse,
+        ClosedStall,
         RentStall,
         StockListing,
         BuyListing,

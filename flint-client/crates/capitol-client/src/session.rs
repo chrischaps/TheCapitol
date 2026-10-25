@@ -918,6 +918,12 @@ impl Session {
         self.ask_bazaar(RestRequest::Unlist { listing_id });
     }
 
+    /// Gives up your stall now, with no refund (#268).
+    pub fn close_stall(&mut self) {
+        tracing::info!("bazaar: giving up our stall");
+        self.ask_bazaar(RestRequest::CloseStall);
+    }
+
     /// Buys from a listing at the stall you're at.
     pub fn buy_listing(&mut self, listing_id: Uuid, request: BuyListing) {
         tracing::info!("bazaar: buying {} of {listing_id}", request.quantity);
@@ -991,18 +997,10 @@ impl Session {
                     ),
                 )
             }
-            StateEvent::StallLapsed { name, returned, waiting, .. } => {
-                let went = match returned {
-                    0 => String::new(),
-                    1 => " One stack went to your market box at the Exchange hall.".to_owned(),
-                    n => format!(" {n} stacks went to your market box at the Exchange hall."),
-                };
-                let wait = match waiting {
-                    0 => String::new(),
-                    n => format!(" {n} more wait for room there."),
-                };
-                TradeNote::new("Your stall closed", format!("The rent on {name} ran out.{went}{wait}"))
-            }
+            StateEvent::StallLapsed { name, returned, waiting, .. } => TradeNote::new(
+                "Your stall closed",
+                format!("The rent on {name} ran out.{}", went_home(*returned, *waiting)),
+            ),
             _ => return,
         };
         tracing::info!("bazaar: {}: {}", note.title, note.body);
@@ -2710,6 +2708,12 @@ impl Session {
                                 ),
                             ));
                         }
+                        Ok(RestResponse::ClosedStall(closed)) => {
+                            self.market_notes.push(TradeNote::new(
+                                "You closed your shop",
+                                format!("{} is given up.{}", closed.name, went_home(closed.returned, closed.waiting)),
+                            ));
+                        }
                         Ok(_) => {}
                         Err(e) => {
                             let why = refusal(e);
@@ -3370,6 +3374,21 @@ impl Session {
             }
         }
     }
+}
+
+/// Where a closed shop's goods went: " One stack went to your market box at
+/// the Exchange hall. 2 more wait for room there.", or nothing.
+fn went_home(returned: u32, waiting: u32) -> String {
+    let went = match returned {
+        0 => String::new(),
+        1 => " One stack went to your market box at the Exchange hall.".to_owned(),
+        n => format!(" {n} stacks went to your market box at the Exchange hall."),
+    };
+    let wait = match waiting {
+        0 => String::new(),
+        n => format!(" {n} more wait for room there."),
+    };
+    format!("{went}{wait}")
 }
 
 /// A refused request's reason, as a player should read it: the server's own

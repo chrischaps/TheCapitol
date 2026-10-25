@@ -2786,6 +2786,7 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::shop::Action::Rent { stall_id, request }) => session.rent_stall(&stall_id, request),
                     Some(ui::shop::Action::Stock(request)) => session.stock_shop(request),
                     Some(ui::shop::Action::Unlist(id)) => session.unlist(id),
+                    Some(ui::shop::Action::GiveUp) => session.close_stall(),
                     Some(ui::shop::Action::GoTo(id)) => visit_stall(session, &self.terrain, &mut self.shop, &id, now),
                     Some(ui::shop::Action::Close) => self.shop.close(),
                     None => {}

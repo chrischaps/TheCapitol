@@ -5,7 +5,8 @@
 //! kinds of goods, but not prices, quantities or grades. Those are seen at
 //! the stall: seeing a shop, renting, stocking, unlisting and buying all need
 //! you within `STALL_RANGE` of the stall's footprint. Your own shop
-//! (`/bazaar/mine`) you can read from anywhere.
+//! (`/bazaar/mine`) you can read, and give up (`/bazaar/mine/close`, #268),
+//! from anywhere.
 //!
 //! Each write is one of `engine::bazaar`'s transactions. Once it commits, the
 //! route tells whoever it moved Strands or goods for.
@@ -16,7 +17,8 @@ use axum::{
     Extension, Json, Router,
 };
 use capitol_protocol::rest::{
-    BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuyListing, MyStallResponse, RentStall, StockListing,
+    BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuyListing, ClosedStall, MyStallResponse, RentStall,
+    StockListing,
 };
 use capitol_protocol::rules::bazaar::{at_the_stall, STALL_RANGE};
 use capitol_protocol::terrain::Landmark;
@@ -38,6 +40,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/", get(get_directory))
         .route("/mine", get(my_stall))
+        .route("/mine/close", post(close))
         .route("/mine/listings", post(stock))
         .route("/stalls/{id}", get(get_shop))
         .route("/stalls/{id}/rent", post(rent))
@@ -145,6 +148,29 @@ pub async fn rent(
     announce_lapsed(&events, &lapsed);
     tell_balance(&state.db, &events, player_id).await;
     Ok(Json(shop))
+}
+
+/// Give up your stall now, before its rent runs out: the shop closes, and its
+/// goods go to your market box, or wait for room there. The days left aren't
+/// refunded. Works from anywhere.
+#[utoipa::path(
+    post,
+    path = "/bazaar/mine/close",
+    responses(
+        (status = 200, description = "Closed", body = ClosedStall),
+        (status = 400, description = "You don't rent a stall")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Bazaar"
+)]
+pub async fn close(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<ClosedStall>, AppError> {
+    let player_id = player_of(&state.db, auth_user.account_id).await?;
+    let (closed, market_box) = bazaar::close(&state.db, player_id, Utc::now()).await.map_err(refused)?;
+    let _ = events(&state).await.send(GameEvent::InventoryUpdated { player_id, container_id: market_box, slots: Vec::new() });
+    Ok(Json(closed))
 }
 
 /// Stock your shop with units of a stack in your inventory, at a price per

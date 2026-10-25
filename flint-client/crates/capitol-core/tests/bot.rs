@@ -460,43 +460,36 @@ fn stack_of(bot: &Bot, item_type: &str) -> uuid::Uuid {
         .unwrap_or_else(|| panic!("no {item_type} in the inventory"))
 }
 
-/// C1.4, the bazaar through `Bot`: a merchant rents a stall (or keeps the one
-/// it has), stocks rope there, and a customer finds the shop in the
-/// directory, walks to it, browses and buys. The merchant hears the sale,
-/// its store takes the unit off the listing, and it unlists the rest.
+/// C1.4, the bazaar through `Bot`: a new merchant rents a free stall, stocks
+/// rope there, and a customer finds the shop in the directory, walks to it,
+/// browses and buys. The merchant hears the sale, its store takes the unit
+/// off the listing, and it unlists the rest. Then it stocks its last rope
+/// and gives the stall up (#268): the rope goes to its market box, and the
+/// stall is free for the next run.
 #[test]
 #[ignore = "needs a local stack with DEV_GRANTS=on: docker-compose up -d, then cargo run in backend/"]
 fn bots_keep_a_shop_and_buy_from_one() {
     use capitol_core::protocol::rest::{BuyListing, StockListing};
-    use chrono::{DateTime, Utc};
 
-    // One merchant every run: thirteen stalls would run out in a day of
-    // fresh ones, since a stall can't be given up early (#268). It pays a
-    // day more while that keeps it within the week.
-    let mut merchant = Bot::sign_in(live(), &Account::numbered("merchant", 1)).expect("merchant signed in");
+    let mut merchant =
+        Bot::sign_in(live(), &Account::numbered(&format!("merchant{}", stamp()), 1)).expect("merchant signed in");
     let mut customer =
         Bot::sign_in(live(), &Account::numbered(&format!("customer{}", stamp()), 1)).expect("customer signed in");
     granted(&mut merchant, 500, &[("rope", 3, 64)]);
     granted(&mut customer, 500, &[]);
 
-    let now = || DateTime::<Utc>::from(SystemTime::now());
     let name = format!("Ropes {}", stamp() % 1000);
-    let stall_id = match merchant.my_stall().expect("our stall").shop {
-        Some(shop) if shop.paid_until > now() + chrono::Duration::days(6) => shop.stall_id,
-        Some(shop) => merchant.rent_stall(&shop.stall_id, 1, Some(&name)).expect("paid a day more").stall_id,
-        None => {
-            let free = merchant
-                .bazaar()
-                .expect("the directory")
-                .stalls
-                .into_iter()
-                .find(|s| s.shop.is_none())
-                .expect("a free stall");
-            let shop = merchant.rent_stall(&free.stall_id, 1, Some(&name)).expect("rented");
-            assert_eq!(Some(shop.owner_id), merchant.state().me());
-            shop.stall_id
-        }
-    };
+    assert!(merchant.my_stall().expect("our stall").shop.is_none(), "a new merchant keeps no stall");
+    let free = merchant
+        .bazaar()
+        .expect("the directory")
+        .stalls
+        .into_iter()
+        .find(|s| s.shop.is_none())
+        .expect("a free stall");
+    let shop = merchant.rent_stall(&free.stall_id, 1, Some(&name)).expect("rented");
+    assert_eq!(Some(shop.owner_id), merchant.state().me());
+    let stall_id = shop.stall_id;
     assert_eq!(merchant.state().bazaar().my_shop().map(|s| s.stall_id.as_str()), Some(stall_id.as_str()));
 
     // Stock two of the three, at a price to tell this run's listing by
@@ -548,6 +541,27 @@ fn bots_keep_a_shop_and_buy_from_one() {
     merchant.unlist(listing.id).expect("unlisted");
     assert_eq!(left(&merchant), None);
     assert_eq!(merchant.count(container_type::PLAYER_INVENTORY, "rope"), rope_now + 1);
+
+    // The last rope back on the counter, then the stall given up, a day early
+    // and with no refund (#268): the rope goes to the market box
+    let strands = merchant.state().strands().expect("a balance");
+    merchant
+        .stock(StockListing { item_id: stack_of(&merchant, "rope"), quantity: 1, price, qualities: None })
+        .expect("stocked the last");
+    let boxed = merchant.count(container_type::MARKET_BOX, "rope");
+    let closed = merchant.close_stall().expect("closed");
+    assert_eq!((closed.stall_id.as_str(), closed.name.as_str()), (stall_id.as_str(), name.as_str()));
+    assert_eq!((closed.returned, closed.waiting), (1, 0));
+    assert!(merchant.state().bazaar().my_shop().is_none(), "the store closed it");
+    merchant
+        .until("the rope in the market box", Duration::from_secs(10), |s, _| {
+            s.market_box().map_or(0, |b| b.items().filter(|i| i.item_type == "rope").map(|i| i.quantity).sum::<i32>()) > boxed
+        })
+        .expect("the rope went to the market box");
+    assert_eq!(merchant.state().strands(), Some(strands), "no refund");
+    assert!(merchant.my_stall().expect("our stall").shop.is_none());
+    let directory = customer.bazaar().expect("the directory");
+    assert!(directory.stalls.iter().any(|s| s.stall_id == stall_id && s.shop.is_none()), "free for the next");
 }
 
 /// C1.4, a station through `Bot`: split a stack, put down a workbench, have a

@@ -14,6 +14,8 @@
 //!   it's full, and the price goes from the buyer (`bazaar_purchase`) to the
 //!   merchant (`bazaar_sale`), with a notice to the merchant.
 //! - [`unlist`]: the units come back to the merchant's inventory, or box.
+//! - [`close`]: the merchant gives the stall up before the rent runs out
+//!   (#268), and it closes as a lapse does. No refund.
 //! - [`sweep`]: a stall whose rent ran out closes, and its goods go to the
 //!   merchant's market box. Those that don't fit wait, still in the stock,
 //!   and go as soon as there's room. No goods are lost.
@@ -27,8 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::Instrument;
 
 use capitol_protocol::rest::{Maker, 
-    BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, MyStallResponse, ShopSign,
-    StockListing,
+    BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, ClosedStall, MyStallResponse,
+    ShopSign, StockListing,
 };
 use capitol_protocol::rules::bazaar::{self as rules, MAX_LISTINGS, MAX_RENT_DAYS, RENT_DAY_SECS};
 use capitol_protocol::rules::stacking::{Pick, Units};
@@ -534,10 +536,45 @@ async fn stack_in(conn: &mut PgConnection, stack: Uuid, into: Uuid, item_type: &
     }
 }
 
+/// Close `player_id`'s open shop now, before its rent runs out (#268), the
+/// way a lapse does: the stall is free, and its goods go to their market box
+/// or wait for room there. The unused days aren't refunded, since the rent
+/// is the bazaar's sink. No notice is queued: the merchant asked, and the
+/// answer tells them. Returns what closed, and the box.
+pub async fn close(db: &PgPool, player_id: Uuid, now: DateTime<Utc>) -> Result<(ClosedStall, Uuid), BazaarError> {
+    let mut tx = db.begin().await?;
+    // A rent that ran out already is the sweep's to close
+    let stall_id: Option<String> =
+        sqlx::query_scalar("SELECT stall_id FROM bazaar_rentals WHERE player_id = $1 AND paid_until > $2 FOR UPDATE")
+            .bind(player_id)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let stall_id = stall_id.ok_or(BazaarError::NotRenting)?;
+    let vacated = vacate(&mut tx, &stall_id).await?;
+    tx.commit().await?;
+    let closed = ClosedStall {
+        stall_id,
+        name: vacated.name,
+        returned: vacated.returned,
+        waiting: vacated.waiting,
+    };
+    Ok((closed, vacated.market_box))
+}
+
+/// A stall [`vacate`] closed.
+struct Vacated {
+    player_id: Uuid,
+    name: String,
+    returned: u32,
+    waiting: u32,
+    market_box: Uuid,
+}
+
 /// Close the stall `stall_id` (its rental locked by the caller): the rental
 /// goes, so the stall is free, and its goods go to the merchant's market box,
 /// or wait for room there.
-async fn lapse(conn: &mut PgConnection, stall_id: &str) -> Result<Lapsed, sqlx::Error> {
+async fn vacate(conn: &mut PgConnection, stall_id: &str) -> Result<Vacated, sqlx::Error> {
     let (player_id, name): (Uuid, String) =
         sqlx::query_as("DELETE FROM bazaar_rentals WHERE stall_id = $1 RETURNING player_id, name")
             .bind(stall_id)
@@ -548,6 +585,13 @@ async fn lapse(conn: &mut PgConnection, stall_id: &str) -> Result<Lapsed, sqlx::
         .execute(&mut *conn)
         .await?;
     let (returned, waiting, market_box) = return_waiting(conn, player_id).await?;
+    Ok(Vacated { player_id, name, returned, waiting, market_box })
+}
+
+/// Close the stall `stall_id` because its rent ran out (its rental locked by
+/// the caller), as [`vacate`] does, and queue the merchant a notice.
+async fn lapse(conn: &mut PgConnection, stall_id: &str) -> Result<Lapsed, sqlx::Error> {
+    let Vacated { player_id, name, returned, waiting, market_box } = vacate(conn, stall_id).await?;
     let message = ServerMessage::StallLapsed { stall_id: stall_id.to_string(), name, returned, waiting };
     let notice_id = notices::queue(&mut *conn, player_id, stall_id, &message).await?;
     Ok(Lapsed {
@@ -1026,6 +1070,49 @@ mod tests {
         assert_eq!(swept.boxes, vec![(ada.id, the_box)]);
         assert_eq!(all_in(&db, the_box, "fiber").await, Units::uniform(6, 77));
         assert!(mine(&db, ada.id, later).await.unwrap().returning.is_empty());
+        assert_eq!(every_unit(&db, &[&ada, &bram], "fiber").await, Units::uniform(6, 77));
+    }
+
+    /// #268: a merchant gives the stall up days early. It closes as a lapse
+    /// does, with its goods to the market box (or waiting), no refund and no
+    /// notice, and the next merchant can rent it at once.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_merchant_closes_the_shop_early_with_no_refund(db: PgPool) {
+        let now = Utc::now();
+        let ada = player(&db, "ada", 1000).await;
+        let bram = player(&db, "bram", 1000).await;
+        slots(&db, "market_box", 1).await;
+        assert!(matches!(close(&db, ada.id, now).await, Err(BazaarError::NotRenting)));
+
+        let rope = stack_of(&db, ada.id, ada.inventory, 0, "rope", &Units::uniform(4, 70)).await;
+        let fiber = stack_of(&db, ada.id, ada.inventory, 1, "fiber", &Units::uniform(6, 77)).await;
+        rent(&db, ada.id, STALL, 3, Some("Ada's"), now).await.unwrap();
+        stock(&db, ada.id, &stock_req(rope, 9, 4, None), now).await.unwrap();
+        let second = stock(&db, ada.id, &stock_req(fiber, 4, 6, None), now + Duration::seconds(1)).await.unwrap();
+        assert_eq!(balance(&db, ada.id).await, 940);
+
+        // A day in, with two left, she gives it up: the box has room for the rope
+        let later = now + Duration::days(1);
+        let (closed, the_box) = close(&db, ada.id, later).await.unwrap();
+        let want = ClosedStall { stall_id: STALL.into(), name: "Ada's".into(), returned: 1, waiting: 1 };
+        assert_eq!((closed, the_box), (want, box_of(&db, ada.id).await));
+        assert_eq!(all_in(&db, the_box, "rope").await, Units::uniform(4, 70));
+        assert!(matches!(buy(&db, bram.id, second.id, STALL, &buy_req(1), later).await, Err(BazaarError::NoListing)));
+        let mine_now = mine(&db, ada.id, later).await.unwrap();
+        assert_eq!((mine_now.shop, mine_now.returning.len()), (None, 1));
+        assert_eq!(directory(&db, &[STALL.into()], later).await.unwrap().stalls[0].shop, None);
+
+        // No refund, no notice, and nothing for the sweep to close
+        assert_eq!(balance(&db, ada.id).await, 940);
+        assert_eq!(audit(&db, ada.id).await, vec![(-60, "bazaar_rent".into())]);
+        assert!(notices::take_all(&db, ada.id, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty());
+        assert!(sweep(&db, later + Duration::days(3)).await.unwrap().lapsed.is_empty());
+        assert!(matches!(close(&db, ada.id, later).await, Err(BazaarError::NotRenting)));
+
+        // Bram takes the stall; she can rent another, and the fiber still waits
+        rent(&db, bram.id, STALL, 1, Some("Bram's"), later).await.unwrap();
+        rent(&db, ada.id, "bazaar_stall_4", 1, Some("Ada's Again"), later).await.unwrap();
         assert_eq!(every_unit(&db, &[&ada, &bram], "fiber").await, Units::uniform(6, 77));
     }
 

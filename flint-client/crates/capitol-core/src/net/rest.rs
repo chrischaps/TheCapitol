@@ -248,6 +248,8 @@ pub enum RestRequest {
     Shop { stall_id: String },
     /// `POST /bazaar/stalls/{id}/rent`
     RentStall { stall_id: String, request: RentStall },
+    /// `POST /bazaar/mine/close`: give your stall up before the rent runs out (#268)
+    CloseStall,
     /// `POST /bazaar/mine/listings`
     Stock(StockListing),
     /// `DELETE /bazaar/listings/{id}`
@@ -390,6 +392,8 @@ pub enum RestResponse {
     MyStall(MyStallResponse),
     /// A shop seen at its stall, or yours as rented
     Shop(BazaarShop),
+    /// Your shop, given up
+    ClosedStall(ClosedStall),
     /// A listing as stocked
     Listed(BazaarListing),
     /// A listing taken off your shop
@@ -490,6 +494,7 @@ impl RestRequest {
             | StartAutomation { .. }
             | StopAutomation { .. }
             | RentStall { .. }
+            | CloseStall
             | Stock(_)
             | Buy { .. }
             | CreateCitizen(_)
@@ -664,6 +669,7 @@ impl RestRequest {
             MyStall => "/bazaar/mine".into(),
             Shop { stall_id } => format!("/bazaar/stalls/{stall_id}"),
             RentStall { stall_id, .. } => format!("/bazaar/stalls/{stall_id}/rent"),
+            CloseStall => "/bazaar/mine/close".into(),
             Stock(_) => "/bazaar/mine/listings".into(),
             Unlist { listing_id } => format!("/bazaar/listings/{listing_id}"),
             Buy { listing_id, .. } => format!("/bazaar/listings/{listing_id}/buy"),
@@ -834,6 +840,7 @@ impl RestRequest {
             Q::Bazaar => A::Bazaar(de(body)?),
             Q::MyStall => A::MyStall(de(body)?),
             Q::Shop { .. } | Q::RentStall { .. } => A::Shop(de(body)?),
+            Q::CloseStall => A::ClosedStall(de(body)?),
             Q::Stock(_) => A::Listed(de(body)?),
             // The body is `null`
             Q::Unlist { listing_id } => A::Unlisted { listing_id: *listing_id },
@@ -1256,6 +1263,7 @@ mod tests {
                 "POST",
                 "/bazaar/stalls/bazaar_stall_3/rent".into(),
             ),
+            (RestRequest::CloseStall, "POST", "/bazaar/mine/close".into()),
             (
                 RestRequest::Stock(StockListing { item_id: id, quantity: 1, price: 1, qualities: None }),
                 "POST",

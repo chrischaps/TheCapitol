@@ -244,8 +244,14 @@ impl Poller {
             // What came out of the impound (#141) or the market box
             Ok(RestResponse::Collected(_)) => self.request(Fetch::Containers),
             // Stock left the inventory or came back to it, or a purchase
-            // landed in it or the market box (E3.11)
-            Ok(RestResponse::Listed(_) | RestResponse::Unlisted { .. } | RestResponse::Bought { .. }) => {
+            // landed in it or the market box (E3.11), or a closed shop's
+            // goods went to the box (#268)
+            Ok(
+                RestResponse::Listed(_)
+                | RestResponse::Unlisted { .. }
+                | RestResponse::Bought { .. }
+                | RestResponse::ClosedStall(_),
+            ) => {
                 self.request(Fetch::Containers)
             }
             Ok(RestResponse::MoveItem(_) | RestResponse::SplitStack(_)) => {

@@ -2192,6 +2192,21 @@ pub struct MyStallResponse {
     pub returning: Vec<BazaarListing>,
 }
 
+/// `POST /bazaar/mine/close`: your shop, given up before its rent ran out
+/// (#268). It closes as a lapse does, and the unused days aren't refunded:
+/// the rent is the bazaar's sink.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ClosedStall {
+    pub stall_id: String,
+    /// The shop's name
+    pub name: String,
+    /// Stacks that went to your market box
+    pub returned: u32,
+    /// Stacks still waiting for room there (`MyStallResponse::returning`)
+    pub waiting: u32,
+}
+
 /// `POST /bazaar/stalls/{id}/rent`: rent a free stall, or pay more on your own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]

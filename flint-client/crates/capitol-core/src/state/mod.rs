@@ -1450,6 +1450,10 @@ impl GameState {
                 self.bazaar.unlisted(*listing_id);
                 out.push(StateEvent::BazaarUpdated);
             }
+            R::ClosedStall(closed) => {
+                self.bazaar.closed(&closed.stall_id);
+                out.push(StateEvent::BazaarUpdated);
+            }
             R::Bought { listing_id, purchase } => {
                 self.bazaar.bought(*listing_id, purchase);
                 out.push(StateEvent::BazaarUpdated);
