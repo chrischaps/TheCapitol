@@ -9,6 +9,8 @@
 //! - [`schedule`]: its day on the server's clock, from waking to the night's
 //!   work (C1.2).
 //! - [`habit`]: when it plays, on the real clock (#276).
+//! - [`calling`]: what it would rather be doing, and how much (Callings
+//!   K0.2): a favourite, its focus, its leanings and its wander.
 //! - [`decide`]: how it makes up its mind (C1.3): the situation, the menu,
 //!   and a cascade of layers that picks from it.
 //! - [`meet`]: how it answers the trades people ask it to (C1.5).
@@ -20,6 +22,7 @@
 //!   against each other (D6.3).
 
 pub mod balance;
+pub mod calling;
 pub mod decide;
 pub mod habit;
 pub mod idle;

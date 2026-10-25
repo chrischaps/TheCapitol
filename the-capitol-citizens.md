@@ -136,7 +136,7 @@ Reviewers say it is weak on decisions that need broad context or nuanced judgeme
 
 Each citizen in `town.toml` has:
 - a name from a seeded, period-flavoured generator (given name plus a trade surname);
-- a trade (a `Role`), for life. *Planned:* a calling in its place, a favourite and how strongly it keeps to it, with stints at the other trades ([callings](the-capitol-callings.md) D1, #528);
+- a birth trade (a `Role`), which gives it its name and its home, and a **calling** ([callings](the-capitol-callings.md) D1, #528, built): a favourite (its birth trade, or none for an all-rounder), how strongly it keeps to it (`focus`), leanings over the other jobs, and a taste for detours (`wander`), drawn last from its stream and dealt by `[callings] mix`. It still works its birth trade alone for now; stints at the other trades by its calling are planned (K1);
 - a home: a lot once it can afford one;
 - a temperament: `thrift`, `risk`, `sociability` and `patience`, each 0 to 1, which weight the rules layer and colour a model layer's prompt;
 - a schedule on the server's time of day;

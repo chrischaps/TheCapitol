@@ -52,6 +52,7 @@ use serde::Deserialize;
 use super::decide::log::{self, Log};
 use super::decide::pulse::{Pulse, SharedPulse};
 use super::decide::{self, Cascade, Mind, SharedLog};
+use super::calling::{self, Calling, Style};
 use super::habit::{Habit, Kind, Mix, Presence};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
@@ -92,6 +93,9 @@ struct RosterFile {
     voice: Option<String>,
     /// When citizens play (#276): the town's mix of habits.
     habits: Option<HabitsFile>,
+    /// Who citizens are, as work goes (Callings K0.2): the town's mix of
+    /// styles.
+    callings: Option<CallingsFile>,
     #[serde(default, rename = "citizen")]
     citizens: Vec<CitizenFile>,
 }
@@ -111,6 +115,37 @@ struct MixFile {
     casual: f64,
     lapsed: f64,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallingsFile {
+    mix: Option<CallingMixFile>,
+}
+
+/// Each style's weight: `{ specialist = 0.4, leaner = 0.4, all-rounder = 0.2 }`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallingMixFile {
+    specialist: f64,
+    leaner: f64,
+    #[serde(rename = "all-rounder")]
+    all_rounder: f64,
+}
+
+/// `{ favourite = "builder", focus = 0.71, wander = 0.4, leanings = {
+/// crafter-planks = 0.12, ... } }`: its favourite a role, or `"none"` for an
+/// all-rounder, whose focus is 0.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallingFile {
+    favourite: String,
+    focus: f32,
+    wander: f32,
+    leanings: BTreeMap<String, f32>,
+}
+
+/// An all-rounder's favourite, as the roster writes it.
+const NO_FAVOURITE: &str = "none";
 
 /// `{ kind = "casual", zone = -5 }`: the zone in hours from UTC.
 #[derive(Debug, Deserialize)]
@@ -137,6 +172,9 @@ struct CitizenFile {
     schedule: Option<ScheduleFile>,
     temperament: Option<TemperamentFile>,
     habit: Option<HabitFile>,
+    /// Its calling (K0.2). A roster from before callings has none, and
+    /// draws one from the name, by the town's mix.
+    calling: Option<CallingFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,9 +206,10 @@ struct TemperamentFile {
 
 impl CitizenFile {
     /// The persona the file gives, the name's seed filling what it leaves
-    /// out, its habit's kind by the town's `mix`.
-    fn persona(&self, role: Role, mix: &Mix) -> Result<Persona, String> {
-        let mut persona = Persona::seeded_in(role, seed(&self.name), mix);
+    /// out, its habit's kind by the town's `mix` and its calling's style by
+    /// its `callings`.
+    fn persona(&self, role: Role, mix: &Mix, callings: &calling::Mix) -> Result<Persona, String> {
+        let mut persona = Persona::seeded_in(role, seed(&self.name), mix, callings);
         if let Some(home) = &self.home {
             persona.home = Home {
                 zone: Zone::from_str(&home.zone).ok_or_else(|| format!("has a home in {:?}, not a zone", home.zone))?,
@@ -216,6 +255,27 @@ impl CitizenFile {
             persona.habit = Habit::new(kind, habit.zone, seed(&self.name));
             persona.habit.check()?;
         }
+        if let Some(c) = &self.calling {
+            let job = |slug: &str| {
+                Role::from_slug(slug).ok_or_else(|| {
+                    let known: Vec<&str> = sim::ROLES.iter().map(|r| r.slug()).collect();
+                    format!("has a calling naming {slug:?}; a job is one of {}", known.join(", "))
+                })
+            };
+            let favourite = match c.favourite.as_str() {
+                NO_FAVOURITE => None,
+                slug => Some(job(slug)?),
+            };
+            let mut leanings = c.leanings.iter().map(|(slug, w)| Ok((job(slug)?, *w))).collect::<Result<Vec<_>, String>>()?;
+            leanings.sort_by_key(|(r, _)| sim::ROLES.iter().position(|o| o == r));
+            persona.calling = Calling {
+                favourite,
+                focus: c.focus,
+                leanings,
+                wander: c.wander,
+            };
+            persona.calling.check(role).map_err(|e| format!("has a calling that won't do: it {e}"))?;
+        }
         Ok(persona)
     }
 }
@@ -232,6 +292,8 @@ pub struct Roster {
     pub voice: String,
     /// The town's mix of habits (#276), for the citizens it seeds.
     pub mix: Mix,
+    /// The town's mix of callings' styles (K0.2), for the citizens it seeds.
+    pub callings: calling::Mix,
     pub citizens: Vec<Citizen>,
 }
 
@@ -239,6 +301,8 @@ pub struct Roster {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Citizen {
     pub name: String,
+    /// Its birth trade: it gave the citizen its name and its home, and it's
+    /// its calling's favourite unless it's an all-rounder (K0.2).
     pub role: Role,
     /// Its decision layers (C1.3): its own, or the town's.
     pub layers: Vec<String>,
@@ -287,6 +351,7 @@ impl Roster {
                 layers: default_layers(),
                 voice: voice::DEFAULT_VOICE.to_string(),
                 mix: Mix::default(),
+                callings: calling::Mix::default(),
                 citizens: Vec::new(),
             })
         }
@@ -310,6 +375,15 @@ impl Roster {
             None => Mix::default(),
         };
         mix.check().map_err(|e| format!("{}: habits: {e}", path.display()))?;
+        let callings = match file.callings.and_then(|c| c.mix) {
+            Some(m) => calling::Mix {
+                specialist: m.specialist,
+                leaner: m.leaner,
+                all_rounder: m.all_rounder,
+            },
+            None => calling::Mix::default(),
+        };
+        callings.check().map_err(|e| format!("{}: callings: {e}", path.display()))?;
         let mut citizens = Vec::with_capacity(file.citizens.len());
         for c in file.citizens {
             let what = |problem: &str| format!("{}: citizen {:?} {problem}", path.display(), c.name);
@@ -317,7 +391,7 @@ impl Roster {
                 let known: Vec<&str> = sim::ROLES.iter().map(|r| r.slug()).collect();
                 what(&format!("has role {:?}; a role is one of {}", c.role, known.join(", ")))
             })?;
-            let persona = c.persona(role, &mix).map_err(|e| what(&e))?;
+            let persona = c.persona(role, &mix, &callings).map_err(|e| what(&e))?;
             let key = match (c.key, c.key_file) {
                 (Some(secret), None) => Key::Inline(secret),
                 (None, Some(file)) => Key::File(dir.join(file)),
@@ -345,21 +419,24 @@ impl Roster {
             layers,
             voice: town_voice,
             mix,
+            callings,
             citizens,
         })
     }
 
     /// Adds a citizen to the end of the roster file, with the persona its
     /// name seeds written out in full, leaving what's there (and its
-    /// comments) as it was.
-    fn append(&mut self, name: &str, role: Role, secret: &str) -> std::io::Result<()> {
+    /// comments) as it was. Its calling is of `style`, or by the town's mix
+    /// without one.
+    fn append(&mut self, name: &str, role: Role, style: Option<Style>, secret: &str) -> std::io::Result<()> {
         use std::io::Write;
+        let callings = style.map_or(self.callings, calling::Mix::only);
         let citizen = Citizen {
             name: name.to_string(),
             role,
             layers: self.layers.clone(),
             voice: self.voice.clone(),
-            persona: Persona::seeded_in(role, seed(name), &self.mix),
+            persona: Persona::seeded_in(role, seed(name), &self.mix, &callings),
             key: Key::Inline(secret.to_string()),
         };
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
@@ -383,14 +460,17 @@ fn entry(citizen: &Citizen, secret: &str) -> String {
         market,
         schedule: day,
         habit,
+        calling,
     } = &citizen.persona;
+    let leanings: Vec<String> = calling.leanings.iter().map(|(job, w)| format!("{} = {w:?}", job.slug())).collect();
     format!(
         "\n[[citizen]]\nname = {}\nrole = {}\nkey = {}\n\
          home = {{ zone = {}, avenue = {}, depth = {:?} }}\n\
          market = {}\n\
          schedule = {{ wake = {}, market = {}, home = {}, bed = {} }}\n\
          temperament = {{ thrift = {:?}, risk = {:?}, sociability = {:?}, patience = {:?} }}\n\
-         habit = {{ kind = {}, zone = {} }}\n",
+         habit = {{ kind = {}, zone = {} }}\n\
+         calling = {{ favourite = {}, focus = {:?}, wander = {:?}, leanings = {{ {} }} }}\n",
         quote(&citizen.name),
         quote(citizen.role.slug()),
         quote(secret),
@@ -408,6 +488,10 @@ fn entry(citizen: &Citizen, secret: &str) -> String {
         t.patience,
         quote(habit.kind.as_str()),
         habit.zone,
+        quote(calling.favourite.map_or(NO_FAVOURITE, |r| r.slug())),
+        calling.focus,
+        calling.wander,
+        leanings.join(", "),
     )
 }
 
@@ -531,7 +615,8 @@ impl Admin {
 /// to the roster as soon as it's made: its key's secret is shown only once.
 /// Each is of `role`, or, with none given, roles continue the sim's mix from
 /// the roster's size, so any town is a mix. Merchants (C1.6) are made only
-/// by name. Names come from [`persona::name`]; one the server says is taken is passed
+/// by name. Each one's calling (K0.2) is of `style`, or by the roster's mix
+/// of callings. Names come from [`persona::name`]; one the server says is taken is passed
 /// over for the next. Returns the citizens made; on an error, those made
 /// before it are on the roster all the same.
 pub fn mint(
@@ -540,6 +625,7 @@ pub fn mint(
     roster: &mut Roster,
     count: usize,
     role: Option<Role>,
+    style: Option<Style>,
 ) -> Result<Vec<Citizen>, String> {
     let token = admin.sign_in(config)?;
     let had = roster.citizens.len();
@@ -569,7 +655,7 @@ pub fn mint(
             }
         };
         roster
-            .append(&created.citizen.name, role, &created.secret)
+            .append(&created.citizen.name, role, style, &created.secret)
             .map_err(|e| {
                 format!(
                     "{} was made, but writing it to {} failed: {e}. Its key is {}",
@@ -1315,14 +1401,17 @@ layers = [\"x\"]").contains("citizen \"A\""));
         let path = dir.join("town.toml");
         std::fs::write(&path, ROSTER_TEXT).unwrap();
         let mut roster = Roster::load(&path).unwrap();
-        roster.append("Maud \"Mo\" Mason", Role::Builder, "cap_maud").unwrap();
+        roster.append("Maud \"Mo\" Mason", Role::Builder, None, "cap_maud").unwrap();
+        roster.append("Ivor Tyler", Role::Builder, Some(Style::AllRounder), "cap_ivor").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(text.starts_with(ROSTER_TEXT), "the comment and the rest stay");
         let again = Roster::parse(&text, &path).unwrap();
-        assert_eq!(again.citizens.len(), 3);
+        assert_eq!(again.citizens.len(), 4);
         assert_eq!(again.citizens[2].name, "Maud \"Mo\" Mason");
         assert_eq!(again.citizens[2].key(), Ok("cap_maud".into()));
+        // Ivor was dealt the style he was minted with, and it's written down
+        assert_eq!(again.citizens[3].persona.calling.style(), Style::AllRounder);
         assert_eq!(again.citizens, roster.citizens);
     }
 
@@ -1336,6 +1425,9 @@ layers = [\"x\"]").contains("citizen \"A\""));
         assert_eq!(ada.home.avenue.as_str(), "south-west");
         assert_eq!(ada.market, Market::Bazaar);
         assert_eq!(schedule::clock(ada.schedule.wake), "05:40");
+        assert_eq!(ada.calling.favourite, Some(Role::Gatherer(Gather::Fiber)));
+        assert_eq!(ada.calling.style(), Style::Specialist);
+        assert!((ada.calling.share(Role::Gatherer(Gather::Wood)) - 0.12).abs() < 1e-3);
         let percy = &roster.citizens[1];
         assert_eq!(percy.persona, Persona::seeded(percy.role, seed(&percy.name)));
     }
@@ -1382,15 +1474,17 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
 
     #[test]
     fn a_minted_entry_reads_back_the_persona_its_name_seeds() {
-        for (role, _) in sim::MIX {
+        for role in sim::ROLES {
             for n in 0..30 {
                 let name = persona::name(role, n);
+                // Each style in turn, as `mint --calling` deals them
+                let style = Style::ALL[n as usize % 3];
                 let citizen = Citizen {
                     name: name.clone(),
                     role,
                     layers: default_layers(),
                     voice: voice::DEFAULT_VOICE.to_string(),
-                    persona: Persona::seeded(role, seed(&name)),
+                    persona: Persona::seeded_in(role, seed(&name), &Mix::default(), &calling::Mix::only(style)),
                     key: Key::Inline("k".into()),
                 };
                 let text = entry(&citizen, "k");
@@ -1398,6 +1492,122 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
                 assert_eq!(back.citizens[0], citizen, "{text}");
             }
         }
+    }
+
+    /// A roster from before callings (K0.2): each citizen keeps the name,
+    /// temperament, home, market, day and habit it had, pinned here as
+    /// they were drawn before callings, and draws a calling after them.
+    #[test]
+    fn an_old_roster_keeps_its_people_and_draws_each_a_calling() {
+        let text = r#"
+[[citizen]]
+name = "Ada Rushton"
+role = "gatherer-fiber"
+key = "a"
+
+[[citizen]]
+name = "Dorothy Builder"
+role = "builder"
+key = "b"
+
+[[citizen]]
+name = "Nora Arkwright"
+role = "crafter-tools"
+key = "c"
+
+[[citizen]]
+name = "Mabel Draper"
+role = "merchant"
+key = "d"
+"#;
+        let roster = Roster::parse(text, Path::new("town.toml")).unwrap();
+        // Their names are still what mint names them
+        let names: Vec<String> = [(Role::Gatherer(Gather::Fiber), 0), (Role::Builder, 7), (Role::Crafter(Craft::Tools), 31), (Role::Merchant, 400)]
+            .into_iter()
+            .map(|(role, n)| persona::name(role, n))
+            .collect();
+        assert_eq!(names, roster.citizens.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+        let pinned = [
+            ((0.12, 0.54, 0.64, 0.2), (Zone::Suburban, 7, 0.42), Market::Hall, 0.22569444444444445, (Kind::Regular, 0)),
+            ((0.32, 0.85, 0.67, 0.53), (Zone::Suburban, 1, 0.68), Market::Hall, 0.2513888888888889, (Kind::Casual, -6)),
+            ((0.87, 0.34, 0.61, 0.72), (Zone::Suburban, 6, 0.68), Market::Bazaar, 0.2708333333333333, (Kind::Casual, -5)),
+            ((0.23, 0.63, 0.4, 0.61), (Zone::Urban, 7, 0.24), Market::Hall, 0.2361111111111111, (Kind::Casual, 1)),
+        ];
+        for (citizen, (t, (zone, avenue, depth), market, wake, (kind, tz))) in roster.citizens.iter().zip(pinned) {
+            let p = &citizen.persona;
+            let who = &citizen.name;
+            assert_eq!((p.temperament.thrift, p.temperament.risk, p.temperament.sociability, p.temperament.patience), t, "{who}");
+            assert_eq!((p.home.zone, p.home.avenue, p.home.depth), (zone, Avenue(avenue), depth), "{who}");
+            assert_eq!(p.market, market, "{who}");
+            assert_eq!(p.schedule.wake, wake, "{who}");
+            assert_eq!((p.habit.kind, p.habit.zone), (kind, tz), "{who}");
+            // And a calling, its favourite its birth trade unless it has none
+            assert_eq!(p.calling.check(citizen.role), Ok(()), "{who}");
+            assert!(p.calling.favourite.is_none_or(|f| f == citizen.role), "{who}");
+            assert_eq!(p.calling, Persona::seeded(citizen.role, seed(who)).calling);
+        }
+    }
+
+    /// `mint`'s town of a thousand, its roles by the sim's mix and its names
+    /// as mint gives them, is dealt each style within 3% of the default mix.
+    #[test]
+    fn a_thousand_minted_are_dealt_the_mix_of_callings() {
+        let town: Vec<Persona> = Role::assign(1000)
+            .into_iter()
+            .enumerate()
+            .map(|(i, role)| Persona::seeded(role, seed(&persona::name(role, i as u64))))
+            .collect();
+        let mix = calling::Mix::default();
+        for style in Style::ALL {
+            let share = town.iter().filter(|p| p.calling.style() == style).count() as f64 / 1000.0;
+            assert!((share - mix.weight(style)).abs() <= 0.03, "{style}: {share}");
+        }
+    }
+
+    #[test]
+    fn a_roster_reads_a_calling_and_the_towns_mix() {
+        let text = r#"
+[callings]
+mix = { specialist = 0.0, leaner = 0.0, all-rounder = 1.0 }
+
+[[citizen]]
+name = "Ada Reeder"
+role = "gatherer-fiber"
+key = "k"
+calling = { favourite = "gatherer-fiber", focus = 0.5, wander = 0.9, leanings = { builder = 0.25, merchant = 0.25 } }
+
+[[citizen]]
+name = "Percy Sawyer"
+role = "crafter-planks"
+key = "j"
+"#;
+        let roster = Roster::parse(text, Path::new("town.toml")).unwrap();
+        let ada = &roster.citizens[0].persona.calling;
+        assert_eq!(ada.style(), Style::Leaner);
+        assert_eq!(ada.share(Role::Gatherer(Gather::Fiber)), 0.5);
+        assert_eq!(ada.share(Role::Merchant), 0.25);
+        assert_eq!(ada.share(Role::Gatherer(Gather::Wood)), 0.0);
+        assert_eq!(ada.wander, 0.9);
+        // In the jobs' own order, whatever order the roster wrote them in
+        assert_eq!(ada.leanings, vec![(Role::Builder, 0.25), (Role::Merchant, 0.25)]);
+        // Percy's is drawn from his name, by the town's mix: no favourite
+        assert_eq!(roster.citizens[1].persona.calling.style(), Style::AllRounder);
+        assert_eq!(roster.callings, calling::Mix::only(Style::AllRounder));
+        assert_eq!(Roster::parse("", Path::new("t.toml")).unwrap().callings, calling::Mix::default());
+        let path = Path::new("town.toml");
+        let err = |text: &str| Roster::parse(text, path).unwrap_err();
+        assert!(err("[callings]\nmix = { specialist = -1.0, leaner = 0.3, all-rounder = 0.5 }").contains("0 or more"));
+        assert!(err("[callings]\nmix = { specialist = 0.1 }").contains("missing field"));
+        let with = |calling: &str| err(&format!("[[citizen]]\nname = \"A\"\nrole = \"builder\"\nkey = \"k\"\ncalling = {calling}"));
+        assert!(with("{ favourite = \"merchant\", focus = 0.7, wander = 0.1, leanings = {} }").contains("its role is builder"));
+        assert!(with("{ favourite = \"poet\", focus = 0.7, wander = 0.1, leanings = {} }").contains("a job is one of"));
+        assert!(with("{ favourite = \"builder\", focus = 0.7, wander = 0.1, leanings = { hats = 0.1 } }").contains("\"hats\""));
+        assert!(with("{ favourite = \"none\", focus = 0.7, wander = 0.1, leanings = { builder = 0.1 } }").contains("all-rounder's focus is 0"));
+        assert!(with("{ favourite = \"builder\", focus = 0.7, wander = 0.1, leanings = { builder = 0.1 } }").contains("besides favouring"));
+        assert!(with("{ favourite = \"builder\", focus = 0.7 }").contains("missing field"));
+        // Its wander runs 0 to 1, as everything else does
+        let all = with("{ favourite = \"none\", focus = 0.0, wander = 2.0, leanings = { builder = 0.5, merchant = 0.5 } }");
+        assert!(all.contains("wander"), "{all}");
     }
 
     /// C1.2's day, as planned: twenty citizens minted as `mint` would, and

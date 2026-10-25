@@ -8,10 +8,12 @@
 # A role is one of the sim's: gatherer-fiber, gatherer-wood, gatherer-ore,
 # crafter-planks, crafter-ingots, crafter-tools, builder; or merchant (C1.6),
 # who earns a float banking fiber, then makes a market in three goods at the
-# hall. `mint --count n --role merchant` makes merchants.
+# hall. `mint --count n --role merchant` makes merchants. The role is the
+# citizen's birth trade: it gives it its name and its home, and it's its
+# calling's favourite unless it's an all-rounder.
 #
 # The persona (C1.2). `mint` writes all of it, drawn from the citizen's
-# name; any of the five lines left out is drawn from the name again, so
+# name; any of the six lines left out is drawn from the name again, so
 # they're there to read and to change.
 #
 # - home: the zone (rural or suburban) its lot will be in, the avenue it
@@ -31,6 +33,14 @@
 #   who's on when.
 # - temperament: each 0 to 1. Thrift is how many deeds' worth it saves
 #   before it buys a home; sociability, how long it stays at the market.
+# - calling (Callings K0.2): what it would rather be doing, and how much.
+#   Its favourite is its role, or "none" for an all-rounder; its focus the
+#   favourite's share of its work time (0 for an all-rounder); its leanings
+#   its share for each other job, by role (merchant is trading); and its
+#   wander, 0 to 1, its taste for detours. The shares are scaled to sum to
+#   1. A roster from before callings, with no calling line, draws one from
+#   the name, by the town's [callings] mix. Nothing reads it yet: stints
+#   (K1) will.
 
 # The server, unless --server or $CAPITOL_SERVER says otherwise.
 server = "http://localhost:3000"
@@ -69,6 +79,15 @@ voice = "phrasebook"
 [habits]
 mix = { dedicated = 0.05, regular = 0.30, casual = 0.55, lapsed = 0.10 }
 
+# Who citizens are, as work goes (Callings K0.2): the share of each style
+# of calling `mint` deals, by weight. A specialist gives about 70% of its
+# work time to its favourite, most of the rest to two or three jobs kin to
+# it; a leaner about 45%, the rest spread over the others; an all-rounder
+# has no favourite and spreads itself evenly. Everyone leans at least a
+# little toward every job. `mint --calling <style>` deals one style.
+[callings]
+mix = { specialist = 0.4, leaner = 0.4, all-rounder = 0.2 }
+
 [[citizen]]
 name = "Ada Reeder"
 role = "gatherer-fiber"
@@ -78,6 +97,7 @@ market = "bazaar"
 schedule = { wake = "05:40", market = "14:10-16:25", home = "19:05", bed = "20:55" }
 temperament = { thrift = 0.31, risk = 0.58, sociability = 0.66, patience = 0.47 }
 habit = { kind = "regular", zone = -5 }
+calling = { favourite = "gatherer-fiber", focus = 0.7, wander = 0.35, leanings = { gatherer-wood = 0.12, gatherer-ore = 0.07, crafter-planks = 0.01, crafter-ingots = 0.01, crafter-tools = 0.01, builder = 0.02, merchant = 0.06 } }
 
 [[citizen]]
 name = "Percy Sawyer"

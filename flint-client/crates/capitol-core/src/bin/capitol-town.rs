@@ -4,6 +4,7 @@
 //! ```text
 //! capitol-town mint --count 20      # make twenty citizens, onto town.toml
 //! capitol-town mint --count 2 --role merchant   # and two merchants (C1.6)
+//! capitol-town mint --count 3 --calling all-rounder   # three with no favourite (K0.2)
 //! capitol-town mint --online 20     # enough citizens that 20 are on, on average (#276)
 //! capitol-town habits               # who's on when, over the coming weeks (#276)
 //! capitol-town road-in              # where each citizen is on the road in (#450)
@@ -41,6 +42,7 @@ use capitol_core::citizen::town::{self, Admin, Hours, Logs, Reporter, Roster, To
 use capitol_core::net::{self, NetConfig, RestRequest, RestResponse};
 use capitol_core::protocol::ledger::Ledger;
 use capitol_core::protocol::metrics::{self, TOWN_REPORT_MS};
+use capitol_core::citizen::calling::Style;
 use capitol_core::sim::Role;
 
 const USAGE: &str = "\
@@ -82,13 +84,14 @@ USAGE:
                                  print its conservation and load: for a soak
                                  that stopped before its report. Exits 1 if
                                  they drifted.
-    capitol-town mint --count <n> [--role <role>]
-    capitol-town mint --online <n> [--role <role>]
+    capitol-town mint --count <n> [--role <role>] [--calling <style>]
+    capitol-town mint --online <n> [--role <role>] [--calling <style>]
                                  Make n citizens through the admin endpoint,
                                  or with --online enough that n of them are
                                  on at once on average, by the roster's mix
                                  of habits, and add them, with their keys
-                                 and their seeded personas, to the roster
+                                 and their seeded personas, callings and
+                                 all, to the roster
     capitol-town habits          Who on the roster is on when, over the
                                  next four weeks: its habits, the average
                                  online, the fewest and most, and the
@@ -156,7 +159,14 @@ FLAGS:
     --role <role>     With mint, make every one of them this: gatherer-fiber,
                       gatherer-wood, gatherer-ore, crafter-planks,
                       crafter-ingots, crafter-tools, builder or merchant
-                      [default: the sim's mix, which has no merchants]
+                      [default: the sim's mix, which has no merchants].
+                      It's the citizen's birth trade: its name, its home,
+                      and its calling's favourite
+    --calling <style> With mint, deal every one of them this style of
+                      calling: specialist (about 70% of its work on its
+                      favourite), leaner (about 45%) or all-rounder (no
+                      favourite) [default: the roster's [callings] mix,
+                      40 / 40 / 20]
     --admin <email>   With mint or soak, an admin account to act as
                       [default: $CAPITOL_ADMIN_EMAIL]. Its password is read
                       from $CAPITOL_ADMIN_PASSWORD only, never a flag.
@@ -247,6 +257,8 @@ struct Options {
     admin: Option<String>,
     /// With mint, the role to make every citizen
     role: Option<Role>,
+    /// With mint, the style of calling to deal every citizen (K0.2)
+    calling: Option<Style>,
     /// 0: no decision logs
     log_mb: u64,
     /// With run, write the report when it stops
@@ -289,6 +301,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         every: Duration::from_secs(60),
         admin: std::env::var("CAPITOL_ADMIN_EMAIL").ok().filter(|s| !s.is_empty()),
         role: None,
+        calling: None,
         log_mb: LOG_MB,
         report: false,
         sample: Duration::from_secs(60),
@@ -413,6 +426,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 let slug = value()?;
                 options.role = Some(Role::from_slug(&slug).ok_or_else(|| format!("--role: {slug:?} is no role"))?);
             }
+            "--calling" => {
+                let style = value()?;
+                options.calling = Some(Style::from_str(&style).ok_or_else(|| {
+                    format!("--calling: {style:?} is no style; a calling is specialist, leaner or all-rounder")
+                })?);
+            }
             "--admin" => {
                 options.admin = Some(value()?);
                 admin_given = true;
@@ -490,6 +509,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     if options.role.is_some() && !matches!(options.action, Action::Mint { .. }) {
         return Err("--role goes with mint".into());
     }
+    if options.calling.is_some() && !matches!(options.action, Action::Mint { .. }) {
+        return Err("--calling goes with mint".into());
+    }
     if every_given && !options.lives() {
         return Err("--every goes with run or soak".into());
     }
@@ -548,13 +570,14 @@ fn mint(options: &Options, size: Size) -> Result<(), String> {
         // A pool of the mix is on its share of the time
         Size::Online(n) => (n / roster.mix.share()).ceil().max(1.0) as usize,
     };
-    let result = town::mint(&NetConfig::with_base_url(&server), &admin, &mut roster, count, options.role);
+    let result = town::mint(&NetConfig::with_base_url(&server), &admin, &mut roster, count, options.role, options.calling);
     for citizen in &roster.citizens[had..] {
         let p = &citizen.persona;
         println!(
-            "made {} ({}), of the {} {} avenue, at the {} {}, {} in {}",
+            "made {} ({}, {}), of the {} {} avenue, at the {} {}, {} in {}",
             citizen.name,
             citizen.role,
+            p.calling,
             p.home.zone,
             p.home.avenue,
             p.market,
@@ -1356,6 +1379,11 @@ mod tests {
         assert_eq!(o.roster, PathBuf::from("t/x.toml"));
         let o = parse(args("mint --count 2 --role merchant")).unwrap().unwrap();
         assert_eq!(o.role, Some(Role::Merchant));
+        assert_eq!(o.calling, None);
+        let o = parse(args("mint --count 2 --role builder --calling all-rounder")).unwrap().unwrap();
+        assert_eq!((o.role, o.calling), (Some(Role::Builder), Some(Style::AllRounder)));
+        assert!(parse(args("mint --count 2 --calling hermit")).unwrap_err().contains("specialist, leaner or all-rounder"));
+        assert!(parse(args("run --calling leaner")).is_err(), "--calling without mint");
         let o = parse(args("mint --online 18")).unwrap().unwrap();
         assert_eq!(o.action, Action::Mint { size: Size::Online(18.0) });
         assert_eq!(parse(args("habits")).unwrap().unwrap().action, Action::Habits);

@@ -202,7 +202,7 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 
 ## 5. Architecture notes
 
-- **Where it lives.** The calling lives in `citizen/persona.rs`. The stint question lives in `citizen/decide/` (a `Question` and `Choice` like the rest, with rules scoring, Jev's prose, the corpus and the log). The job of the moment is `SimBot::job()` in `sim/run.rs`.
+- **Where it lives.** The calling lives in `citizen/calling.rs`, held by the persona (`citizen/persona.rs`). The stint question lives in `citizen/decide/` (a `Question` and `Choice` like the rest, with rules scoring, Jev's prose, the corpus and the log). The job of the moment is `SimBot::job()` in `sim/run.rs`.
 - **What reads the stint, and what reads the calling.** The menus run per job. Some things take the **union of willing jobs**, because a person answers what they're able and willing to do, not just what they're doing this hour:
   - commission claims (`answers`);
   - wage work (`does`, `crafts_at`);
@@ -229,7 +229,7 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 | WP | What | Size | Depends |
 |---|---|---|---|
 | K0.1 #527 | Time by activity in the town report and `compare`; a baseline soak of today's roles (#403's recipe), the "before" for §10 | S | – |
-| K0.2 #528 | `Calling` in the persona, drawn last; `[callings] mix`; the roster's `calling`, with `role` as the birth trade; `mint --calling`; old rosters draw one | M | – |
+| K0.2 #528 | `Calling` in the persona, drawn last; `[callings] mix`; the roster's `calling`, with `role` as the birth trade; `mint --calling`; old rosters draw one. *As built:* `citizen/calling.rs`. The jobs are the eight `sim::ROLES`, `merchant` standing for trading. A `Style` isn't stored but read off the calling: no favourite is an all-rounder, a focus of 0.575 or more a specialist (drawn 0.62 to 0.78), less a leaner (0.38 to 0.52). A specialist puts 75 to 85% of the rest on two or three of its favourite's three kin jobs (`calling::kin`, either side of it in the chain), the others at least 0.01 each; a leaner spreads the rest over all seven, its kin ×1.6; an all-rounder weighs all eight 0.7 to 1, so none is over 17%. `wander` is two draws averaged, as a trait. Each share is written to two places, so `Calling::share` scales them to sum to 1. The roster line is `calling = { favourite = "builder", focus = 0.71, wander = 0.4, leanings = { crafter-planks = 0.12, ... } }`, `favourite = "none"` and `focus = 0.0` for an all-rounder; the favourite must be the role or none. `Calling::single(role)` is the swarm's: focus 1.0, no leanings, no wander. `mint --calling specialist\|leaner\|all-rounder`. Measured: `Role::assign(1000)` deals 38.2 / 42.2 / 19.6%. | M | – |
 | K0.3 #529 | `plan::setup` and the dabble commitment. *Built: `plan::setup` returns a `Result`, and `Commitment` is on `Role::work`, `goals_at`, `errands_at` and `Role::setup`; see §5* | M | – |
 
 ### K1: Stints (`cg:K1-stints`)

@@ -11,7 +11,9 @@
 //!   spot on an avenue in its zone, where it goes at dusk;
 //! - **a market**: the hall or the bazaar, where it spends its market hours;
 //! - **a [`Schedule`]**: its day on the server's clock;
-//! - **a [`Habit`]**: when it plays, on the real clock (#276).
+//! - **a [`Habit`]**: when it plays, on the real clock (#276);
+//! - **a [`Calling`]**: what it would rather be doing, and how much
+//!   (Callings K0.2).
 //!
 //! All of it is drawn from the citizen's own stream, seeded by its name, so
 //! a roster that leaves any of it out reads back the persona `mint` wrote.
@@ -21,6 +23,7 @@ use std::fmt;
 
 use capitol_protocol::rules::Zone;
 
+use super::calling::{self, Calling};
 use super::habit::{Habit, Mix};
 use super::schedule::Schedule;
 use crate::sim::{Craft, Gather, Role};
@@ -33,18 +36,20 @@ pub struct Persona {
     pub market: Market,
     pub schedule: Schedule,
     pub habit: Habit,
+    pub calling: Calling,
 }
 
 impl Persona {
     /// The persona a citizen of `role` with the stream `seed` is born with,
-    /// in a town of the default [`Mix`] of habits. The same seed always
-    /// gives the same persona.
+    /// in a town of the default [`Mix`] of habits and of callings. The same
+    /// seed always gives the same persona.
     pub fn seeded(role: Role, seed: u64) -> Persona {
-        Persona::seeded_in(role, seed, &Mix::default())
+        Persona::seeded_in(role, seed, &Mix::default(), &calling::Mix::default())
     }
 
-    /// As [`seeded`](Persona::seeded), its habit's kind drawn from `mix`.
-    pub fn seeded_in(role: Role, seed: u64, mix: &Mix) -> Persona {
+    /// As [`seeded`](Persona::seeded), its habit's kind drawn from `mix`
+    /// and its calling's style from `callings`.
+    pub fn seeded_in(role: Role, seed: u64, mix: &Mix, callings: &calling::Mix) -> Persona {
         let mut rng = Rng::new(seed);
         let temperament = Temperament::seeded(&mut rng);
         let home = Home::seeded(&mut rng, role);
@@ -52,12 +57,15 @@ impl Persona {
         let schedule = Schedule::seeded(&mut rng, &temperament);
         // Drawn last, so the persona C1.2 drew is the same
         let habit = Habit::seeded(&mut rng, mix, seed);
+        // And the calling after it (K0.2), so the persona #276 drew is too
+        let calling = Calling::seeded(&mut rng, callings, role);
         Persona {
             temperament,
             home,
             market,
             schedule,
             habit,
+            calling,
         }
     }
 }
@@ -336,6 +344,7 @@ mod tests {
         assert_eq!(ada.home.check(), Ok(()));
         assert_eq!(ada.schedule.check(), Ok(()));
         assert_eq!(ada.habit.check(), Ok(()));
+        assert_eq!(ada.calling.check(Role::Builder), Ok(()));
     }
 
     #[test]
