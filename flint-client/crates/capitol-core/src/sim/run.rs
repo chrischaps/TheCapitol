@@ -1035,28 +1035,35 @@ impl SimBot {
         errands.swap_remove(pick)
     }
 
-    /// Asks the mind whether to sell the job of the moment's product before
-    /// `errand`, and if not, whether to buy what it would gather. `None`:
-    /// just do it. A merchant makes its market on a stint at trading.
+    /// Asks the mind whether to sell what it has spare before `errand`
+    /// (Callings K1.4: whatever job it came of), and if not, whether to buy
+    /// what it would gather. `None`: just do it. A merchant makes its market
+    /// on a stint at trading.
     fn choose_trade(&mut self, holdings: &Holdings, errand: &Errand) -> Option<Trade> {
         let job = self.job();
         if self.merchant.is_some() && job == Role::Merchant {
             return self.choose_market(holdings, errand);
         }
-        // What a claim of its own wants isn't for sale (S2.5)
-        if let Some(product) = job.product().filter(|p| !self.board.owes(p)) {
-            let (bid, ask) = self.best(product);
-            if let Some(menu) = job.sell_menu(holdings, errand.goal.as_ref(), bid, ask) {
-                let question = Question::Sell { item: product.into() };
-                if let Some((d, Choice::Sell { item, .. })) = self.decide(question, menu, 1, holdings) {
-                    return Some(Trade::Sell {
-                        item,
-                        quantity: d.quantity?,
-                        price: d.price?,
-                    });
-                }
+        // What a claim of its own wants isn't spare (S2.5): one question at
+        // the hall, for the first good someone bids for, then one about a
+        // stall, for the most it has spare
+        let spare = self.spare(holdings, errand.goal.as_ref());
+        let sale = spare.iter().find_map(|&(item, n)| {
+            let (bid, ask) = self.best(item);
+            Some((item, super::sell_menu(holdings, item, n, bid, ask)?))
+        });
+        if let Some((item, menu)) = sale {
+            let question = Question::Sell { item: item.into() };
+            if let Some((d, Choice::Sell { item, .. })) = self.decide(question, menu, 1, holdings) {
+                return Some(Trade::Sell {
+                    item,
+                    quantity: d.quantity?,
+                    price: d.price?,
+                });
             }
-            if let Some(stock) = self.choose_stall(holdings, product) {
+        }
+        if let Some(&(item, n)) = spare.first() {
+            if let Some(stock) = self.choose_stall(holdings, item, n) {
                 return Some(stock);
             }
         }
@@ -1336,6 +1343,7 @@ impl SimBot {
         h.lot_for = Some(lot_for);
         h.plot_spare = spare;
         h.owed = self.owed();
+        h.promised = self.board.promised();
         h
     }
 

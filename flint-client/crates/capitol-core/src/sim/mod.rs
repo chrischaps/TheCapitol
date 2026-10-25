@@ -11,6 +11,8 @@
 //! - [`run`]: the swarm itself, one thread a bot.
 //! - [`stint`]: a citizen's job of the moment, what it has done lately and
 //!   the jobs it answers for (Callings K1.2). Pure.
+//! - [`surplus`]: what a citizen has spare to sell and what it wants, across
+//!   its jobs (Callings K1.4). Pure.
 //! - [`wage`]: work offered, what it pays and what a role's own trade earns
 //!   (Commons S2.8). Pure.
 //! - [`guild`]: guilds for a role's trade, what a member pays in, and when it
@@ -22,10 +24,11 @@
 //!
 //! **The market (E3.8).** Market makers (`--makers`, two by default) join the
 //! swarm, funded by a grant, and quote [`MARKET_ITEMS`]. The swarm trades
-//! through them ([`Role::sell_menu`], [`Role::buy_menu`], decided since C1.3 by
+//! through them ([`sell_menu`], [`Role::buy_menu`], decided since C1.3 by
 //! the rules layer, `citizen::decide`): a bot sells what its role makes once it
 //! holds [`SELL_AT`], and buys what a step would have it gather, if gathering
-//! that isn't its job. Orders are placed at the Exchange hall (D6), so each
+//! that isn't its job. A citizen sells what it has spare, whatever its job
+//! (Callings K1.4, [`surplus`]). Orders are placed at the Exchange hall (D6), so each
 //! trade is a walk in and out, and a seller sells all it holds at once. With no makers (`--makers 0`) nobody trades and each
 //! bot climbs the whole tree its role needs by itself, as in E2.7.
 //!
@@ -40,6 +43,7 @@ pub mod plan;
 pub mod report;
 pub mod run;
 pub mod stint;
+pub mod surplus;
 pub mod wage;
 
 use std::fmt;
@@ -502,38 +506,6 @@ impl Role {
         }
     }
 
-    /// The menu for selling the role's product before working toward
-    /// `goal`, if there's a question to ask: it holds at least half of
-    /// [`SELL_AT`], is only making more of it (a builder still building
-    /// keeps its bricks) or earning its float, someone bids, and it can pay
-    /// the listing fee on some. Sell (a price round the bid, up to all it
-    /// holds, or as many as it can pay the fee on at the top price), or keep.
-    pub fn sell_menu(&self, holdings: &Holdings, goal: Option<&Goal>, bid: Option<i64>, ask: Option<i64>) -> Option<Vec<Choice>> {
-        let product = self.product()?;
-        let held = holdings.count(product);
-        let selling = goal == Some(&Goal::hold(product, held + 1)) || matches!(goal, Some(Goal::Strands(_)));
-        if held < SELL_AT / 2 || !selling {
-            return None;
-        }
-        let bid = bid?;
-        let price = Span::new((bid / 2).max(1), (bid * 2).max(ask.unwrap_or(0)));
-        // A sell's fee is paid when it's placed (#294)
-        let mut most = held;
-        while most > 0 && holdings.fees.listing_fee(price.max * most as i64) > holdings.strands {
-            most -= 1;
-        }
-        (most > 0).then(|| {
-            vec![
-                Choice::Sell {
-                    item: product.to_string(),
-                    price,
-                    quantity: Span::new(1, most),
-                },
-                Choice::Keep,
-            ]
-        })
-    }
-
     /// The menu for buying what `step` would gather, if there's a question
     /// to ask: it's on the market, gathering it isn't the role's job, it's
     /// for sale, and the bot can afford some at the ask, with what it
@@ -560,8 +532,9 @@ impl Role {
     }
 
     /// What the role's work takes from the market that it doesn't make
-    /// itself: what a citizen of it bids for (C1.5), so whoever gathers or
-    /// makes it has someone to sell to. From the recipes: planks are sawn
+    /// itself: what a citizen at it bids for (C1.5), so whoever gathers or
+    /// makes it has someone to sell to, with the needs of the jobs it leans
+    /// to most ([`surplus::wants`], Callings K1.4). From the recipes: planks are sawn
     /// from logs, ingots smelted from ore with charcoal, tools knapped from
     /// stone with handles of plank and heads of iron, and a builder's
     /// stations take stone, logs, iron, planks and charcoal for its bricks.
@@ -576,53 +549,16 @@ impl Role {
         }
     }
 
-    /// The menu for leaving a standing bid for `item` at the hall (C1.5),
-    /// if there's a question to ask: the role needs it, it has no bid up for
-    /// it already, the citizen can put a worth to it (`worth`, from its
-    /// books), and it can afford some, with what it [`kept`] back. Bid (up
-    /// to half again the worth, up to two lots), or gather it as it would
-    /// have. A maker comes by its deed with its [`FLOAT`] still in hand, so
-    /// it can bid once it has a plot (#294).
-    pub fn bid_menu(&self, holdings: &Holdings, item: &str, worth: Option<i64>, bidding: bool) -> Option<Vec<Choice>> {
-        if bidding || !self.needs().contains(&item) {
-            return None;
+    /// What the role's work uses of the hall's goods, whoever made them
+    /// (Callings K1.4): its [`needs`](Self::needs), the logs an ingot
+    /// crafter burns for charcoal, and the bricks a builder's forge takes.
+    /// What a citizen keeps rather than sells ([`surplus::spare`]).
+    pub fn uses(&self) -> &'static [&'static str] {
+        match self {
+            Role::Crafter(Craft::Ingots) => &["iron_ore", "charcoal", "log"],
+            Role::Builder => &["stone", "log", "iron_ingot", "plank", "charcoal", "brick"],
+            _ => self.needs(),
         }
-        let worth = worth?.max(1);
-        let top = worth + (worth / 2).max(1);
-        let afford = affordable(holdings, top);
-        (afford > 0).then(|| {
-            vec![
-                Choice::Bid {
-                    item: item.to_string(),
-                    price: Span::new((worth / 2).max(1), top),
-                    quantity: Span::new(1, afford),
-                },
-                Choice::Gather { item: item.to_string() },
-            ]
-        })
-    }
-
-    /// The menu for stocking a stall with what the role makes (C1.5), if
-    /// there's a question to ask: it holds half of [`STALL_AT`] or more, can
-    /// put a worth to it, and keeps a stall (`keeps`) or can pay
-    /// [`STALL_DAYS`] of rent for one, with what it [`keeps`](kept) back.
-    /// Stock (a price round its worth, up to all it holds), or keep it.
-    pub fn stall_menu(&self, holdings: &Holdings, worth: Option<i64>, keeps: bool) -> Option<Vec<Choice>> {
-        let product = self.product()?;
-        let held = holdings.count(product);
-        let worth = worth?.max(1);
-        let rent = holdings.fees.rent(STALL_DAYS);
-        if held < STALL_AT / 2 || (!keeps && holdings.strands - kept(holdings) < rent) {
-            return None;
-        }
-        Some(vec![
-            Choice::Stock {
-                item: product.to_string(),
-                price: Span::new((worth / 2).max(1), worth * 2 + 1),
-                quantity: Span::new(1, held),
-            },
-            Choice::Keep,
-        ])
     }
 
     /// What the role answers a commission for (S2.5): what it gathers or
@@ -669,40 +605,6 @@ impl Role {
         }
         menu.push(Choice::Pass);
         Some(menu)
-    }
-
-    /// The menu for posting a commission for `item` (S2.5), if there's a
-    /// question to ask: the role needs it, its standing bid at `bid` hasn't
-    /// filled in a day, it has fewer than [`MAX_POSTS`] open, and it can
-    /// put the price and the court's fee down on some, with what it
-    /// [`kept`] back. Post (from the bid's price to twice it, up to two
-    /// lots), or pass.
-    pub fn post_menu(&self, holdings: &Holdings, item: &str, bid: i64, open: usize) -> Option<Vec<Choice>> {
-        if open >= MAX_POSTS || !self.needs().contains(&item) {
-            return None;
-        }
-        let bid = bid.max(1);
-        let top = bid * 2;
-        let budget = holdings.strands - kept(holdings);
-        let mut afford = 2 * LOT;
-        while afford > 0 && {
-            let value = court::commission_value(top, afford);
-            value + court::court_fee(value) > budget
-        } {
-            afford -= 1;
-        }
-        (afford > 0).then(|| {
-            vec![
-                Choice::Post {
-                    item: item.to_string(),
-                    grade: POST_GRADE.to_string(),
-                    price: Span::new(bid, top),
-                    quantity: Span::new(1, afford),
-                    due: POST_DAYS,
-                },
-                Choice::Pass,
-            ]
-        })
     }
 
     /// The stations whose work the role does for a wage (S2.8): those its
@@ -792,6 +694,117 @@ pub fn merchant_items(seed: u64) -> Vec<&'static str> {
     // In the market's own order, so a merchant's report reads the same way
     picked.sort_by_key(|i| MARKET_ITEMS.iter().position(|m| m == i));
     picked
+}
+
+/// The menu for selling `spare` of `item` before working (E3.8, Callings
+/// K1.4), if there's a question to ask: it has half of [`SELL_AT`] or more
+/// spare ([`surplus::spare`]), someone bids, and it can pay the listing fee
+/// on some. Sell (a price round the bid, up to all it has spare, or as many
+/// as it can pay the fee on at the top price), or keep.
+pub fn sell_menu(holdings: &Holdings, item: &str, spare: i32, bid: Option<i64>, ask: Option<i64>) -> Option<Vec<Choice>> {
+    if spare < SELL_AT / 2 {
+        return None;
+    }
+    let bid = bid?;
+    let price = Span::new((bid / 2).max(1), (bid * 2).max(ask.unwrap_or(0)));
+    // A sell's fee is paid when it's placed (#294)
+    let mut most = spare;
+    while most > 0 && holdings.fees.listing_fee(price.max * most as i64) > holdings.strands {
+        most -= 1;
+    }
+    (most > 0).then(|| {
+        vec![
+            Choice::Sell {
+                item: item.to_string(),
+                price,
+                quantity: Span::new(1, most),
+            },
+            Choice::Keep,
+        ]
+    })
+}
+
+/// The menu for stocking a stall with `spare` of `item` (C1.5, Callings
+/// K1.4), if there's a question to ask: it has half of [`STALL_AT`] or more
+/// spare, can put a worth to it, and keeps a stall (`keeps`) or can pay
+/// [`STALL_DAYS`] of rent for one, with what it [`keeps`](kept) back. Stock
+/// (a price round its worth, up to all it has spare), or keep it.
+pub fn stall_menu(holdings: &Holdings, item: &str, spare: i32, worth: Option<i64>, keeps: bool) -> Option<Vec<Choice>> {
+    let worth = worth?.max(1);
+    let rent = holdings.fees.rent(STALL_DAYS);
+    if spare < STALL_AT / 2 || (!keeps && holdings.strands - kept(holdings) < rent) {
+        return None;
+    }
+    Some(vec![
+        Choice::Stock {
+            item: item.to_string(),
+            price: Span::new((worth / 2).max(1), worth * 2 + 1),
+            quantity: Span::new(1, spare),
+        },
+        Choice::Keep,
+    ])
+}
+
+/// The menu for leaving a standing bid for `item` at the hall (C1.5), if
+/// there's a question to ask: it [`wants`](surplus::wants) it, holds less
+/// than a [`STOCK`](surplus::STOCK) of it, has no bid up for it already,
+/// can put a worth to it (`worth`, from its books), and can afford some,
+/// with what it [`kept`] back. Bid (up to half again the worth, for up to
+/// two lots or what the stock lacks), or gather it as it would have. A
+/// maker comes by its deed with its [`FLOAT`] still in hand, so it can bid
+/// once it has a plot (#294).
+pub fn bid_menu(holdings: &Holdings, item: &str, wants: &[&str], worth: Option<i64>, bidding: bool) -> Option<Vec<Choice>> {
+    let short = surplus::STOCK - holdings.count(item);
+    if bidding || !wants.contains(&item) || short <= 0 {
+        return None;
+    }
+    let worth = worth?.max(1);
+    let top = worth + (worth / 2).max(1);
+    let afford = affordable(holdings, top).min(short);
+    (afford > 0).then(|| {
+        vec![
+            Choice::Bid {
+                item: item.to_string(),
+                price: Span::new((worth / 2).max(1), top),
+                quantity: Span::new(1, afford),
+            },
+            Choice::Gather { item: item.to_string() },
+        ]
+    })
+}
+
+/// The menu for posting a commission for `item` (S2.5), if there's a
+/// question to ask: it [`wants`](surplus::wants) it, its standing bid at
+/// `bid` hasn't filled in a day, it has fewer than [`MAX_POSTS`] open, and
+/// it can put the price and the court's fee down on some, with what it
+/// [`kept`] back. Post (from the bid's price to twice it, up to two lots),
+/// or pass.
+pub fn post_menu(holdings: &Holdings, item: &str, wants: &[&str], bid: i64, open: usize) -> Option<Vec<Choice>> {
+    if open >= MAX_POSTS || !wants.contains(&item) {
+        return None;
+    }
+    let bid = bid.max(1);
+    let top = bid * 2;
+    let budget = holdings.strands - kept(holdings);
+    let mut afford = 2 * LOT;
+    while afford > 0 && {
+        let value = court::commission_value(top, afford);
+        value + court::court_fee(value) > budget
+    } {
+        afford -= 1;
+    }
+    (afford > 0).then(|| {
+        vec![
+            Choice::Post {
+                item: item.to_string(),
+                grade: POST_GRADE.to_string(),
+                price: Span::new(bid, top),
+                quantity: Span::new(1, afford),
+                due: POST_DAYS,
+            },
+            Choice::Pass,
+        ]
+    })
 }
 
 /// The Strands a bot keeps back from goods and rent: [`FLOOR`] for its
@@ -953,9 +966,13 @@ mod tests {
         })
     }
 
+    /// What a swarm bot of `role` sells: its product, while it only makes
+    /// more of it.
     fn sell(role: Role, catalog: &Catalog, h: &Holdings, bid: Option<i64>) -> Option<Choice> {
         let product = role.product()?;
-        let menu = role.sell_menu(h, Some(&role.goal(catalog, h)), bid, None)?;
+        let selling = surplus::selling(role, h, Some(&role.goal(catalog, h)));
+        let (_, spare) = surplus::spare(h, role, selling, &[role]).into_iter().find(|(i, _)| *i == product)?;
+        let menu = sell_menu(h, product, spare, bid, None)?;
         rules_pick(Question::Sell { item: product.into() }, menu, h, bid, None)
     }
 
@@ -981,7 +998,7 @@ mod tests {
         assert_eq!(sell(wood, &catalog, &h, Some(7)), None);
         // A builder still building keeps its bricks: there's no question
         h.items.insert("brick".into(), 40);
-        assert_eq!(Role::Builder.sell_menu(&h, Some(&Role::Builder.goal(&catalog, &h)), Some(9), None), None);
+        assert_eq!(sell(Role::Builder, &catalog, &h, Some(9)), None);
     }
 
     #[test]
@@ -1030,9 +1047,10 @@ mod tests {
         // the fee on at the top of the span: 1 Strand covers 100 of value
         h.items.insert("log".into(), SELL_AT);
         let goal = Goal::Strands(FLOAT);
-        assert_eq!(wood.sell_menu(&h, Some(&goal), Some(7), None), None, "nothing for the fee");
+        assert!(surplus::selling(wood, &h, Some(&goal)));
+        assert_eq!(sell_menu(&h, "log", SELL_AT, Some(7), None), None, "nothing for the fee");
         h.strands = 1;
-        let menu = wood.sell_menu(&h, Some(&goal), Some(7), None).unwrap();
+        let menu = sell_menu(&h, "log", SELL_AT, Some(7), None).unwrap();
         assert_eq!(
             menu[0],
             Choice::Sell {
@@ -1042,7 +1060,10 @@ mod tests {
             }
         );
         h.strands = FLOOR;
-        assert!(matches!(&wood.sell_menu(&h, Some(&goal), Some(7), None).unwrap()[0], Choice::Sell { quantity, .. } if quantity.max == SELL_AT));
+        assert!(matches!(&sell_menu(&h, "log", SELL_AT, Some(7), None).unwrap()[0], Choice::Sell { quantity, .. } if quantity.max == SELL_AT));
+        // No more than it has spare, and nothing under half a SELL_AT of it
+        assert!(matches!(&sell_menu(&h, "log", 12, Some(7), None).unwrap()[0], Choice::Sell { quantity, .. } if quantity.max == 12));
+        assert_eq!(sell_menu(&h, "log", SELL_AT / 2 - 1, Some(7), None), None);
     }
 
     #[test]
@@ -1053,8 +1074,8 @@ mod tests {
             deed_cost: 250,
             ..Holdings::default()
         };
-        let planks = Role::Crafter(Craft::Planks);
-        let menu = planks.bid_menu(&h, "log", Some(8), false).unwrap();
+        let planks = Role::Crafter(Craft::Planks).needs();
+        let menu = bid_menu(&h, "log", planks, Some(8), false).unwrap();
         assert_eq!(
             menu[0],
             Choice::Bid {
@@ -1064,14 +1085,20 @@ mod tests {
             }
         );
         // Not twice, not what it doesn't use, not without a worth
-        assert_eq!(planks.bid_menu(&h, "log", Some(8), true), None);
-        assert_eq!(planks.bid_menu(&h, "stone", Some(8), false), None);
-        assert_eq!(planks.bid_menu(&h, "log", None, false), None);
+        assert_eq!(bid_menu(&h, "log", planks, Some(8), true), None);
+        assert_eq!(bid_menu(&h, "stone", planks, Some(8), false), None);
+        assert_eq!(bid_menu(&h, "log", planks, None, false), None);
         assert!(Role::Gatherer(Gather::Wood).needs().is_empty());
+        // Up to a working stock of it (Callings K1.4), and none once it has one
+        h.items.insert("log".into(), surplus::STOCK - 3);
+        assert!(matches!(&bid_menu(&h, "log", planks, Some(8), false).unwrap()[0], Choice::Bid { quantity, .. } if quantity.max == 3));
+        h.items.insert("log".into(), surplus::STOCK);
+        assert_eq!(bid_menu(&h, "log", planks, Some(8), false), None);
+        h.items.clear();
         // No plot yet: the deed's price is kept back
         h.plot_room = None;
         h.strands = 260;
-        assert_eq!(planks.bid_menu(&h, "log", Some(8), false), None);
+        assert_eq!(bid_menu(&h, "log", planks, Some(8), false), None);
     }
 
     #[test]
@@ -1093,18 +1120,16 @@ mod tests {
             ..Holdings::default()
         };
         h.items.insert("log".into(), STALL_AT);
-        let wood = Role::Gatherer(Gather::Wood);
-        assert!(wood.stall_menu(&h, Some(10), false).is_some());
+        assert!(stall_menu(&h, "log", STALL_AT, Some(10), false).is_some());
         // Not enough for the rent with a deed kept back, unless it keeps one
         h.strands = 280;
-        assert_eq!(wood.stall_menu(&h, Some(10), false), None);
-        assert!(wood.stall_menu(&h, Some(10), true).is_some());
-        // Too few, or no worth to price them by
-        h.items.insert("log".into(), STALL_AT / 2 - 1);
-        assert_eq!(wood.stall_menu(&h, Some(10), true), None);
-        h.items.insert("log".into(), STALL_AT);
-        assert_eq!(wood.stall_menu(&h, None, true), None);
-        assert_eq!(Role::Crafter(Craft::Tools).stall_menu(&h, Some(10), true), None);
+        assert_eq!(stall_menu(&h, "log", STALL_AT, Some(10), false), None);
+        assert!(stall_menu(&h, "log", STALL_AT, Some(10), true).is_some());
+        // Too few spare, or no worth to price them by
+        assert_eq!(stall_menu(&h, "log", STALL_AT / 2 - 1, Some(10), true), None);
+        assert_eq!(stall_menu(&h, "log", STALL_AT, None, true), None);
+        // Up to what it has spare
+        assert!(matches!(&stall_menu(&h, "log", 25, Some(10), true).unwrap()[0], Choice::Stock { quantity, .. } if quantity.max == 25));
     }
 
     /// C1.1's choice of step: bank at [`BANK_FIBER_AT`], else the first goal's.
@@ -1245,13 +1270,13 @@ mod tests {
 
     #[test]
     fn a_crafter_posts_for_what_its_bids_need_while_it_has_room_and_strands() {
-        let planks = Role::Crafter(Craft::Planks);
+        let planks = Role::Crafter(Craft::Planks).needs();
         let h = Holdings {
             strands: 1000,
             plot_room: Some(2),
             ..Holdings::default()
         };
-        let menu = planks.post_menu(&h, "log", 10, 0).unwrap();
+        let menu = post_menu(&h, "log", planks, 10, 0).unwrap();
         assert_eq!(
             menu,
             vec![
@@ -1266,12 +1291,12 @@ mod tests {
             ]
         );
         // Two open already, or something its trade doesn't need: no question
-        assert_eq!(planks.post_menu(&h, "log", 10, MAX_POSTS), None);
-        assert_eq!(planks.post_menu(&h, "stone", 10, 0), None);
-        assert_eq!(Role::Gatherer(Gather::Wood).post_menu(&h, "log", 10, 0), None);
+        assert_eq!(post_menu(&h, "log", planks, 10, MAX_POSTS), None);
+        assert_eq!(post_menu(&h, "stone", planks, 10, 0), None);
+        assert_eq!(post_menu(&h, "log", Role::Gatherer(Gather::Wood).needs(), 10, 0), None);
         // The whole price and the court's fee go down, from what it keeps spare
         let short = Holdings { strands: 100, ..h.clone() };
-        let Some(Choice::Post { quantity, .. }) = planks.post_menu(&short, "log", 10, 0).map(|m| m[0].clone()) else {
+        let Some(Choice::Post { quantity, .. }) = post_menu(&short, "log", planks, 10, 0).map(|m| m[0].clone()) else {
             panic!("a post")
         };
         let value = court::commission_value(20, quantity.max);
@@ -1279,7 +1304,7 @@ mod tests {
         let more = court::commission_value(20, quantity.max + 1);
         assert!(more + court::court_fee(more) > 100 - FLOOR);
         let broke = Holdings { strands: 20, ..h };
-        assert_eq!(planks.post_menu(&broke, "log", 10, 0), None);
+        assert_eq!(post_menu(&broke, "log", planks, 10, 0), None);
     }
 
     #[test]

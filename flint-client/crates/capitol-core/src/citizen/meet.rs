@@ -9,8 +9,9 @@
 //!    after 30 s and executes a trade only within range. Once the window is
 //!    open it steps over to within earshot ([`HEARD`](rules::talk::HEARD)),
 //!    since a trade is asked from further off than a word carries.
-//! 2. **It lays out its wares**: everything it holds of what its role makes,
-//!    if it can put a worth to it. That's the shop window.
+//! 2. **It lays out its wares**: everything it has spare, whatever job it
+//!    came of (Callings K1.4, [`surplus`](crate::sim::surplus)), that it can
+//!    put a worth to. That's the shop window.
 //! 3. **It weighs what they put up**, once they've stopped changing it for
 //!    [`TRADE_THINK`], through its cascade ([`Question::Trade`]):
 //!    - Strands for its wares: **accept**; **counter**, once, by taking goods
@@ -30,8 +31,8 @@
 //!
 //! **Asking** (#295, [`ask`]). A citizen lingering among others knows the
 //! citizens near it by their trade names ([`trade_of`]), as anyone could.
-//! When one makes what its trade needs and nobody is selling it at the hall,
-//! or needs what it makes and nobody is bidding, it may ask them
+//! When one makes what it wants and nobody is selling it at the hall, or
+//! needs what it has spare and nobody is bidding, it may ask them
 //! ([`ask_menu`], [`Question::Ask`]). It walks over and asks, and the window
 //! goes as any other: buying, it waits for their wares and puts up Strands
 //! for them, no more than it decided to spend; selling, it lays out what it
@@ -165,23 +166,16 @@ impl Side {
     }
 }
 
-/// The shop window: every stack of `product` in the inventory, if the
-/// citizen can put a worth to it.
-pub fn window(inventory: Option<&Container>, product: Option<&str>, market: &[Quote]) -> Side {
-    let (Some(inventory), Some(product)) = (inventory, product) else {
-        return Side::default();
-    };
-    if worth_in(market, product).is_none() {
-        return Side::default();
+/// The shop window: what the citizen has spare (`wares`, by item), of what
+/// it can put a worth to, the biggest stacks first.
+pub fn window(inventory: Option<&Container>, wares: &[(String, i32)], market: &[Quote]) -> Side {
+    let mut side = Side::default();
+    for (item, n) in wares {
+        if worth_in(market, item).is_some() {
+            side.lines.extend(some_of(inventory, item, *n).lines);
+        }
     }
-    Side {
-        lines: inventory
-            .items()
-            .filter(|i| i.item_type == product && i.quantity > 0)
-            .map(|i| (i.item_id, i.item_type.clone(), i.quantity))
-            .collect(),
-        strands: 0,
-    }
+    side
 }
 
 /// Where one trade stands, for the citizen in it.
@@ -301,12 +295,12 @@ impl Met {
     }
 }
 
-/// The citizen answering: who it is, what it makes, and game hours since
-/// its life began.
+/// The citizen answering: who it is, what it has spare to lay out, by item
+/// (Callings K1.4), and game hours since its life began.
 #[derive(Debug, Clone)]
-pub struct Answering<'a> {
+pub struct Answering {
     pub who: Who,
-    pub product: Option<&'a str>,
+    pub wares: Vec<(String, i32)>,
     pub hours: f64,
 }
 
@@ -371,7 +365,7 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
     come_over(bot)?;
     face_partner(bot)?;
     speak_to_partner(bot, Occasion::Opening);
-    let wares = window(bot.state().inventory(), me.product, &quotes(bot.state()));
+    let wares = window(bot.state().inventory(), &me.wares, &quotes(bot.state()));
     if !wares.is_empty() {
         let (items, strands) = wares.offer();
         let _ = bot.trade_act(|s, now| s.trade_offer(now, items, strands));
@@ -659,18 +653,28 @@ pub fn neighbours(state: &GameState, about: (f64, f64), reach: f64) -> Vec<Neigh
 }
 
 /// The menu for asking one of `neighbours` to trade (#295), if there's a
-/// question to ask, for a citizen of `role` holding `holdings`:
+/// question to ask, for a citizen holding `holdings` that `wants` these
+/// goods and has `spare` of those (Callings K1.4,
+/// [`surplus`](crate::sim::surplus)):
 ///
-/// - **buy from** one who makes what its trade needs, when nobody is
-///   selling it at the hall, it can put a worth to it, and it can afford
-///   some (up to half again the worth, up to two lots), keeping a deed's
-///   price back until it has a plot, as a bid does;
-/// - **sell to** one whose trade needs what it makes, when nobody is
-///   bidding for it at the hall, it can put a worth to it, and it holds
-///   half of [`SELL_AT`] or more;
+/// - **buy from** one who makes what it wants, when nobody is selling it
+///   at the hall, it can put a worth to it, and it can afford some (up to
+///   half again the worth, up to two lots), keeping a deed's price back
+///   until it has a plot, as a bid does;
+/// - **sell to** one whose trade needs what it has spare, when nobody is
+///   bidding for it at the hall, it can put a worth to it, and it has half
+///   of [`SELL_AT`] or more spare: the most it has spare of what they
+///   need;
 ///
-/// and **rest**, last: leave them be.
-pub fn ask_menu(role: Role, holdings: &Holdings, market: &[Quote], neighbours: &[Neighbour]) -> Option<Vec<Choice>> {
+/// and **rest**, last: leave them be. Until K3.2 a neighbour's trade is
+/// read from their name.
+pub fn ask_menu(
+    wants: &[&str],
+    spare: &[(&str, i32)],
+    holdings: &Holdings,
+    market: &[Quote],
+    neighbours: &[Neighbour],
+) -> Option<Vec<Choice>> {
     let book = |item: &str| market.iter().find(|q| q.item == item);
     let selling = |item: &&str| book(item).is_some_and(|q| q.ask.is_some());
     let bidding = |item: &&str| book(item).is_some_and(|q| q.bid.is_some());
@@ -678,7 +682,7 @@ pub fn ask_menu(role: Role, holdings: &Holdings, market: &[Quote], neighbours: &
     let budget = holdings.strands - reserve;
     let mut menu = Vec::new();
     for n in neighbours {
-        let wanted = n.trade.product().filter(|item| role.needs().contains(item) && !selling(item));
+        let wanted = n.trade.product().filter(|item| wants.contains(item) && !selling(item));
         if let Some((item, worth)) = wanted.and_then(|item| Some((item, worth_in(market, item)?.max(1)))) {
             let top = worth + (worth / 2).max(1);
             let afford = (budget / top).min(2 * LOT as i64) as i32;
@@ -691,16 +695,15 @@ pub fn ask_menu(role: Role, holdings: &Holdings, market: &[Quote], neighbours: &
                 });
             }
         }
-        let needed = role.product().filter(|item| n.trade.needs().contains(item) && !bidding(item));
-        if let Some(item) = needed.filter(|item| worth_in(market, item).is_some()) {
-            let held = holdings.count(item);
-            if held >= SELL_AT / 2 {
-                menu.push(Choice::SellTo {
-                    partner: n.name.clone(),
-                    item: item.to_string(),
-                    quantity: Span::new(1, held),
-                });
-            }
+        let needed = spare.iter().find(|&&(item, n_spare)| {
+            n_spare >= SELL_AT / 2 && n.trade.needs().contains(&item) && !bidding(&item) && worth_in(market, item).is_some()
+        });
+        if let Some(&(item, n_spare)) = needed {
+            menu.push(Choice::SellTo {
+                partner: n.name.clone(),
+                item: item.to_string(),
+                quantity: Span::new(1, n_spare),
+            });
         }
     }
     if menu.is_empty() {
@@ -788,10 +791,23 @@ mod tests {
                 capitol_protocol::rest::SlotItem::new(ORE, "iron_ore".into(), "Ore".into(), 50, 3, 1),
             ],
         );
-        let side = window(Some(&inv), Some("log"), &logs_at(10));
+        let wares = |w: &[(&str, i32)]| -> Vec<(String, i32)> { w.iter().map(|&(i, n)| (i.to_string(), n)).collect() };
+        let side = window(Some(&inv), &wares(&[("log", 7)]), &logs_at(10));
         assert_eq!(side.lines, vec![(LOGS, "log".to_string(), 7)]);
-        assert!(window(Some(&inv), Some("log"), &[]).is_empty(), "no worth, no sale");
-        assert!(window(Some(&inv), None, &logs_at(10)).is_empty());
+        // What it has spare and no more, of what it can put a worth to
+        let side = window(Some(&inv), &wares(&[("log", 4), ("iron_ore", 3)]), &logs_at(10));
+        assert_eq!(side.lines, vec![(LOGS, "log".to_string(), 4)]);
+        let mut market = logs_at(10);
+        market.push(Quote {
+            item: "iron_ore".into(),
+            bid: None,
+            ask: None,
+            last: Some(6),
+        });
+        let side = window(Some(&inv), &wares(&[("log", 4), ("iron_ore", 3)]), &market);
+        assert_eq!(side.lines, vec![(LOGS, "log".to_string(), 4), (ORE, "iron_ore".to_string(), 3)]);
+        assert!(window(Some(&inv), &wares(&[("log", 7)]), &[]).is_empty(), "no worth, no sale");
+        assert!(window(Some(&inv), &[], &logs_at(10)).is_empty());
     }
 
     #[test]
@@ -942,8 +958,10 @@ mod tests {
     }
 
     #[test]
-    fn a_citizen_asks_whoever_makes_what_it_needs_or_needs_what_it_makes() {
-        let sawyer = Role::Crafter(crate::sim::Craft::Planks);
+    fn a_citizen_asks_whoever_makes_what_it_wants_or_needs_what_it_has_spare() {
+        // A sawyer at its sawing: it wants logs, and has its planks spare
+        let wants = ["log"];
+        let spare = [("plank", 14)];
         let ada = neighbour(1, "Ada Woodward");
         let ivor = neighbour(2, "Ivor Mason");
         let hazel = neighbour(3, "Hazel Reeder");
@@ -961,7 +979,7 @@ mod tests {
             ask: None,
             last: Some(20),
         });
-        let menu = ask_menu(sawyer, &holdings, &market, &[ada.clone(), ivor.clone(), hazel.clone()]).unwrap();
+        let menu = ask_menu(&wants, &spare, &holdings, &market, &[ada.clone(), ivor.clone(), hazel.clone()]).unwrap();
         assert_eq!(
             menu,
             vec![
@@ -980,23 +998,48 @@ mod tests {
             ]
         );
         // A fiber gatherer makes nothing it needs, nor needs what it makes
-        assert_eq!(ask_menu(sawyer, &holdings, &market, &[hazel]), None);
+        assert_eq!(ask_menu(&wants, &spare, &holdings, &market, std::slice::from_ref(&hazel)), None);
         // Someone selling logs at the hall, someone bidding for planks: the
         // book first
         let mut booked = market.clone();
         booked[0].ask = Some(11);
         booked[1].bid = Some(19);
-        assert_eq!(ask_menu(sawyer, &holdings, &booked, &[ada.clone(), ivor.clone()]), None);
+        assert_eq!(ask_menu(&wants, &spare, &holdings, &booked, &[ada.clone(), ivor.clone()]), None);
         // No plot yet: a deed's price kept back, so three logs at most
         let homeless = Holdings {
             strands: 300,
             plot_room: None,
             ..holdings.clone()
         };
-        let menu = ask_menu(sawyer, &homeless, &market, std::slice::from_ref(&ada)).unwrap();
+        let menu = ask_menu(&wants, &spare, &homeless, &market, std::slice::from_ref(&ada)).unwrap();
         assert!(matches!(&menu[0], Choice::BuyFrom { quantity, .. } if quantity.max == 3), "{menu:?}");
         // Logs it can't put a worth to: nothing to ask for
-        assert_eq!(ask_menu(sawyer, &holdings, &[], &[ada]), None);
+        assert_eq!(ask_menu(&wants, &spare, &holdings, &[], std::slice::from_ref(&ada)), None);
+        // Too few planks spare to be worth the asking
+        assert_eq!(ask_menu(&[], &[("plank", 9)], &holdings, &market, std::slice::from_ref(&ivor)), None);
+        // On a wood stint after an ore one (Callings K1.4): it wants nothing
+        // of Ada, and offers a smith its spare ore, the most it has spare
+        // of what a smith needs
+        let ida = neighbour(4, "Ida Smith");
+        market.push(Quote {
+            item: "iron_ore".into(),
+            bid: None,
+            ask: None,
+            last: Some(6),
+        });
+        let spare = [("iron_ore", 30), ("plank", 14)];
+        let menu = ask_menu(&[], &spare, &holdings, &market, &[ada, ida, hazel]).unwrap();
+        assert_eq!(
+            menu,
+            vec![
+                Choice::SellTo {
+                    partner: "Ida Smith".into(),
+                    item: "iron_ore".into(),
+                    quantity: Span::new(1, 30),
+                },
+                Choice::Rest,
+            ]
+        );
     }
 
     #[test]

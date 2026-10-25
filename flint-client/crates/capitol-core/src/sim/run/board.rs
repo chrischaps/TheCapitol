@@ -19,8 +19,9 @@
 //!   willing to mine counts the wild veins: a grade the rural ring can't
 //!   give, or a price that pays the walk ([`WILD_PAY`]), sends it to the
 //!   ranges, and it gathers only there until the claim is kept.
-//! - **Posting.** A crafter whose bid for an input has stood a game day
-//!   without a fill posts a commission for it at the bid's price and a
+//! - **Posting.** A citizen whose bid for something it wants (the job at
+//!   hand's inputs and its nearest jobs', Callings K1.4) has stood a game
+//!   day without a fill posts a commission for it at the bid's price and a
 //!   premium, never with more than [`MAX_POSTS`](crate::sim::MAX_POSTS)
 //!   open ([`SimBot::post_wants`]).
 
@@ -190,9 +191,18 @@ impl Board {
         self.owing().next().is_some()
     }
 
-    /// Whether a claim of its own still wants `item`.
-    pub(super) fn owes(&self, item: &str) -> bool {
-        self.owing().any(|(_, m)| m.item_type == item)
+    /// What its standing claims still want delivered, by item, whether it
+    /// holds it or not: none of it is spare (Callings K1.4).
+    pub(super) fn promised(&self) -> Vec<(String, i32)> {
+        let mut promised: Vec<(String, i32)> = Vec::new();
+        for (claim, c) in self.owing() {
+            let left = claim.quantity - claim.delivered;
+            match promised.iter_mut().find(|(item, _)| *item == c.item_type) {
+                Some((_, n)) => *n += left,
+                None => promised.push((c.item_type.clone(), left)),
+            }
+        }
+        promised
     }
 
     /// Whether a claim of its own on `item` is to come from the wilds.
@@ -457,26 +467,27 @@ impl SimBot {
         Ok(())
     }
 
-    /// At the hall: for each input its bids have wanted a game day without
-    /// a fill, asks the mind whether to post a commission for it.
+    /// At the hall: for each thing it wants ([`surplus::wants`](crate::sim::surplus::wants))
+    /// that its bids have wanted a game day without a fill, asks the mind
+    /// whether to post a commission for it.
     pub(super) fn post_wants(&mut self) -> Result<(), BotError> {
         let Some(me) = self.bot.state().me() else { return Ok(()) };
         let day = Duration::from_secs(DAY_LENGTH_SECS as u64);
-        let job = self.job();
-        for item in job.needs() {
-            let Some(&(since, bid)) = self.board.wanting.get(*item) else { continue };
+        let wants = self.wants();
+        for &item in &wants {
+            let Some(&(since, bid)) = self.board.wanting.get(item) else { continue };
             let mine: Vec<&Commission> = self
                 .board
                 .commissions
                 .iter()
                 .filter(|c| c.poster_id == me && c.status == CommissionStatus::Open)
                 .collect();
-            if since.elapsed() < day || mine.iter().any(|c| c.item_type == *item) {
+            if since.elapsed() < day || mine.iter().any(|c| c.item_type == item) {
                 continue;
             }
             let open = mine.len();
             let holdings = self.holdings();
-            let Some(menu) = job.post_menu(&holdings, item, bid, open) else { continue };
+            let Some(menu) = super::super::post_menu(&holdings, item, &wants, bid, open) else { continue };
             let mark = self.mind.mark();
             let pass = menu.len() - 1;
             let trade = match self.decide(Question::Buy { item: item.to_string() }, menu, pass, &holdings) {

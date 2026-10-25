@@ -87,6 +87,9 @@ pub struct Holdings {
     /// What its claims on commissions still want of it that it doesn't hold
     /// at their grade, by item (Commons S2.5): its work makes them first.
     pub owed: Vec<(String, i32)>,
+    /// What its claims still want delivered, by item, held or not: none of
+    /// it is spare to sell (Callings K1.4).
+    pub promised: Vec<(String, i32)>,
 }
 
 impl Holdings {
@@ -97,6 +100,11 @@ impl Holdings {
     /// Whether its lot's room is kept for a `station` ([`lot_for`](Self::lot_for)).
     pub fn keeps_room_for(&self, station: &str) -> bool {
         self.lot_for.as_ref().is_none_or(|kept| kept.contains(station))
+    }
+
+    /// What its claims still want delivered of `item_type`.
+    pub fn promised(&self, item_type: &str) -> i32 {
+        self.promised.iter().filter(|(item, _)| item == item_type).map(|(_, n)| n).sum()
     }
 }
 

@@ -814,7 +814,8 @@ fn a_citizen_counters_a_short_offer_declines_a_lowball_and_takes_a_fair_one() {
                 temperament: Temperament::default(),
                 calling: None,
             },
-            product: Some("log"),
+            // All the logs it holds are spare (Callings K1.4)
+            wares: vec![("log".into(), i32::MAX)],
             hours: 0.0,
         };
         let mut mind = Mind::rules();
@@ -929,7 +930,8 @@ fn two_citizens_trade_when_one_asks_the_other() {
             temperament: Temperament::default(),
             calling: None,
         },
-        product,
+        // All it holds of what it makes is spare (Callings K1.4)
+        wares: product.map(|p| (p.to_string(), i32::MAX)).into_iter().collect(),
         hours: 0.0,
     };
     // Answers one trade, on a thread of its own

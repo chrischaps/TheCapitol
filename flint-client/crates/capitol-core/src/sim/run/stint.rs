@@ -11,8 +11,9 @@
 
 use std::collections::HashMap;
 
-use super::super::plan::Holdings;
+use super::super::plan::{Goal, Holdings};
 use super::super::stint::{self, Kept, Stint, STUCK_AGAIN};
+use super::super::surplus;
 use super::super::wage::Job;
 use super::super::{Commitment, Role};
 use capitol_protocol::rules::DAY_LENGTH_SECS;
@@ -79,6 +80,40 @@ impl SimBot {
     /// first.
     pub(super) fn willing(&self) -> Vec<Role> {
         stint::willing(&self.calling, self.job(), self.merchant.is_some())
+    }
+
+    /// What it has spare to sell, the most first (Callings K1.4,
+    /// [`surplus::spare`]), as it works toward `goal`: what its claims, the
+    /// job at hand and its other willing jobs don't keep back, whatever job
+    /// it came of. A merchant's stock is its market's. A swarm bot sells
+    /// only its role's product, while it's only making more of it, as in
+    /// E3.8 and before callings.
+    pub(super) fn spare(&self, holdings: &Holdings, goal: Option<&Goal>) -> Vec<(&'static str, i32)> {
+        let job = self.job();
+        let selling = surplus::selling(job, holdings, goal);
+        let mut spare = surplus::spare(holdings, job, selling, &self.willing());
+        if self.persona.is_none() {
+            spare.retain(|&(item, _)| job.product() == Some(item));
+        }
+        if let Some(merchant) = &self.merchant {
+            spare.retain(|&(item, _)| !merchant.deals(item));
+        }
+        spare
+    }
+
+    /// What the job of the moment works toward first, as its work menu would
+    /// have it: what a trade window or an ask reads its spare by, away from
+    /// an errand.
+    pub(super) fn goal_now(&self, holdings: &Holdings) -> Option<Goal> {
+        let catalog = self.bot.state().catalog();
+        self.job().goals_at(catalog, holdings, self.commitment()).into_iter().next()
+    }
+
+    /// What it wants of the hall's goods (Callings K1.4,
+    /// [`surplus::wants`]): the job at hand's inputs, then those of the
+    /// jobs it leans to most.
+    pub(super) fn wants(&self) -> Vec<&'static str> {
+        surplus::wants(&self.calling, self.job())
     }
 
     /// The first of its [willing](Self::willing) jobs that answers a

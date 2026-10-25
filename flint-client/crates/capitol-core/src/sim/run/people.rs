@@ -1,6 +1,7 @@
 //! A citizen among people (C1.5): answering trades, standing bids for what
-//! its trade needs, and a stall for what it makes more of than the hall
-//! takes. Among other citizens it asks for trades too (#295). Everything
+//! it wants, and a stall for what it has spare that the hall doesn't take
+//! (Callings K1.4: across its jobs, [`surplus`](super::super::surplus)).
+//! Among other citizens it asks for trades too (#295). Everything
 //! here follows the normal rules and pays the normal costs: the fee on a
 //! bid, the rent on a stall (D2).
 
@@ -13,7 +14,7 @@ use uuid::Uuid;
 
 use super::super::plan::Holdings;
 use super::super::report::Entry;
-use super::super::{Trade, STALL_DAYS};
+use super::super::{bid_menu, stall_menu, Trade, STALL_DAYS};
 use super::{Action, SimBot};
 use crate::bazaar;
 use crate::bot::BotError;
@@ -71,7 +72,8 @@ impl SimBot {
             .collect();
         let holdings = self.holdings();
         let market = meet::quotes(self.bot.state());
-        let Some(menu) = meet::ask_menu(self.job(), &holdings, &market, &neighbours) else {
+        let spare = self.spare(&holdings, self.goal_now(&holdings).as_ref());
+        let Some(menu) = meet::ask_menu(&self.wants(), &spare, &holdings, &market, &neighbours) else {
             return Ok(false);
         };
         let mark = self.mind.mark();
@@ -131,8 +133,15 @@ impl SimBot {
         self.bot.face(ox, oy)
     }
 
-    /// The citizen as a trade's cascade sees it.
-    fn answering(&self) -> Answering<'static> {
+    /// The citizen as a trade's cascade sees it, with what it has spare to
+    /// lay out.
+    fn answering(&self) -> Answering {
+        let holdings = self.holdings();
+        let wares = self
+            .spare(&holdings, self.goal_now(&holdings).as_ref())
+            .into_iter()
+            .map(|(item, n)| (item.to_string(), n))
+            .collect();
         Answering {
             who: Who {
                 name: self.bot.name().to_string(),
@@ -140,7 +149,7 @@ impl SimBot {
                 temperament: self.mind.temperament,
                 calling: self.persona.as_ref().map(|p| p.calling.clone()),
             },
-            product: self.job().product(),
+            wares,
             hours: self.now(),
         }
     }
@@ -196,15 +205,15 @@ impl SimBot {
             .any(|o| o.side == OrderSide::Buy && o.item_type == item)
     }
 
-    /// Asks the mind whether to stock a stall with `product`: a citizen's
-    /// question when nobody bids for what it makes at the hall.
-    pub(super) fn choose_stall(&mut self, holdings: &Holdings, product: &str) -> Option<Trade> {
+    /// Asks the mind whether to stock a stall with the `spare` it has of
+    /// `item`: a citizen's question when nobody at the hall takes it.
+    pub(super) fn choose_stall(&mut self, holdings: &Holdings, item: &str, spare: i32) -> Option<Trade> {
         if !self.people {
             return None;
         }
         let keeps = self.bot.state().bazaar().my_shop().is_some();
-        let menu = self.job().stall_menu(holdings, self.worth(product), keeps)?;
-        let question = Question::Sell { item: product.into() };
+        let menu = stall_menu(holdings, item, spare, self.worth(item), keeps)?;
+        let question = Question::Sell { item: item.into() };
         match self.decide(question, menu, 1, holdings)? {
             (d, Choice::Stock { item, .. }) => Some(Trade::Stock {
                 item,
@@ -216,12 +225,13 @@ impl SimBot {
     }
 
     /// Asks the mind whether to leave a standing bid for `item`, which the
-    /// next step would gather and nobody is selling: a citizen's question.
+    /// next step would gather and nobody is selling, or which it wants for
+    /// a job it leans to: a citizen's question.
     pub(super) fn choose_bid(&mut self, holdings: &Holdings, item: &str) -> Option<Trade> {
         if !self.people {
             return None;
         }
-        let menu = self.job().bid_menu(holdings, item, self.worth(item), self.bidding(item))?;
+        let menu = bid_menu(holdings, item, &self.wants(), self.worth(item), self.bidding(item))?;
         match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {
             (d, Choice::Bid { item, .. }) => Some(Trade::Bid {
                 item,
@@ -233,8 +243,9 @@ impl SimBot {
     }
 
     /// At the hall: takes down standing bids that have stood a game hour,
-    /// and asks again about a bid for each thing its trade needs, so
-    /// whoever makes it has someone to sell to.
+    /// and asks again about a bid for each thing it wants (the job at
+    /// hand's inputs, then its nearest jobs', Callings K1.4), so whoever
+    /// makes it has someone to sell to.
     pub(super) fn post_demand(&mut self) -> Result<(), BotError> {
         let life = chrono::Duration::from_std(self.wall(BID_LIFE)).unwrap_or(chrono::Duration::MAX);
         let now = self.bot.state().utc_now();
@@ -255,7 +266,7 @@ impl SimBot {
                 Err(e) => return Err(e),
             }
         }
-        for item in self.job().needs() {
+        for item in self.wants() {
             let holdings = self.holdings();
             let mark = self.mind.mark();
             let Some(trade @ Trade::Bid { .. }) = self.choose_bid(&holdings, item) else {

@@ -27,7 +27,7 @@ use crate::citizen::calling::{self, Calling, Style};
 use crate::citizen::persona::Persona;
 use crate::sim::plan::Holdings;
 use crate::sim::wage::{self, Hire};
-use crate::sim::{Commitment, Role, Wanted, LOT, ROLES};
+use crate::sim::{bid_menu, post_menu, sell_menu, stall_menu, stint, surplus, Commitment, Role, Wanted, LOT, ROLES};
 
 /// The name the corpus's citizen logs under.
 pub const CITIZEN: &str = "Percy Sawyer";
@@ -108,13 +108,17 @@ fn round(r: u32) -> Vec<Situation> {
             let Ok(errands) = role.errands(&catalog, &h) else { continue };
             out.push(s(Question::Work, errands.iter().map(|e| e.choice(&catalog)).collect(), 0));
             out.push(s(Question::FreeTime, vec![Choice::Rest, Choice::Hall], 0));
-            if let Some(p) = role.product() {
-                let goal = errands.first().and_then(|e| e.goal.as_ref());
-                if let Some(menu) = role.sell_menu(&h, goal, last.map(|l| l - 1), last.map(|l| l + 2)) {
-                    out.push(s(Question::Sell { item: p.into() }, menu, 1));
+            // What it has spare at its birth trade, across its calling's
+            // jobs (Callings K1.4)
+            let goal = errands.first().and_then(|e| e.goal.as_ref());
+            let willing = stint::willing(&calling, role, false);
+            let spare = surplus::spare(&h, role, surplus::selling(role, &h, goal), &willing);
+            if let Some(&(item, n)) = spare.first() {
+                if let Some(menu) = sell_menu(&h, item, n, last.map(|l| l - 1), last.map(|l| l + 2)) {
+                    out.push(s(Question::Sell { item: item.into() }, menu, 1));
                 }
-                if let Some(menu) = role.stall_menu(&h, last, false) {
-                    out.push(s(Question::Sell { item: p.into() }, menu, 1));
+                if let Some(menu) = stall_menu(&h, item, n, last, false) {
+                    out.push(s(Question::Sell { item: item.into() }, menu, 1));
                 }
             }
             for e in &errands {
@@ -126,11 +130,12 @@ fn round(r: u32) -> Vec<Situation> {
                     out.push(s(Question::Buy { item: item.unwrap_or_default() }, menu, 1));
                 }
             }
-            for item in role.needs() {
-                if let Some(menu) = role.bid_menu(&h, item, last, false) {
+            let wants = surplus::wants(&calling, role);
+            for &item in &wants {
+                if let Some(menu) = bid_menu(&h, item, &wants, last, false) {
                     out.push(s(Question::Buy { item: item.to_string() }, menu, 1));
                 }
-                if let Some(menu) = role.post_menu(&h, item, last.unwrap_or(4), 0) {
+                if let Some(menu) = post_menu(&h, item, &wants, last.unwrap_or(4), 0) {
                     out.push(s(Question::Buy { item: item.to_string() }, menu, 1));
                 }
             }

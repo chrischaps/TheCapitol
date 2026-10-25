@@ -49,6 +49,11 @@ impl Merchant {
         }
     }
 
+    /// Whether it makes a market in `item`: its stock, never spare.
+    pub(super) fn deals(&self, item: &str) -> bool {
+        self.items.iter().any(|i| i == item)
+    }
+
     fn config(&self) -> MakerConfig {
         MakerConfig {
             items: self.items.clone(),
