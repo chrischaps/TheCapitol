@@ -847,6 +847,65 @@ struct Finished {
     crafts: Vec<FinishedCraft>,
     /// Walks that ended far enough to judge for the road in (#439)
     walks: Vec<Uuid>,
+    /// In the writer's backlog until it's written (#407)
+    handed: super::load::Handed,
+}
+
+impl Finished {
+    fn new(gathers: Vec<PendingItem>, crafts: Vec<FinishedCraft>, walks: Vec<Uuid>) -> Finished {
+        let handed = super::load::Handed::new(gathers.len() + crafts.len());
+        Finished { gathers, crafts, walks, handed }
+    }
+
+    /// A tick's saves dealt to the writer's [`WRITERS`] lanes, each by the box
+    /// it writes into ([`lane`]), in the tick's order within each. Lanes with
+    /// nothing to save are left out.
+    fn dealt(gathers: Vec<PendingItem>, crafts: Vec<FinishedCraft>, walks: Vec<Uuid>) -> Vec<(usize, Finished)> {
+        let mut lanes: Vec<(Vec<PendingItem>, Vec<FinishedCraft>, Vec<Uuid>)> =
+            (0..WRITERS).map(|_| Default::default()).collect();
+        for item in gathers {
+            // On a wage shift it goes into the employer's market box
+            let into = item.wage.as_ref().map_or(item.player_id, |w| w.employer_id);
+            lanes[lane(into)].0.push(item);
+        }
+        for craft in crafts {
+            // At a station, its own or on a wage shift, its output goes into
+            // the station's box
+            let shift_station = craft.wage.as_ref().and_then(|w| match &w.work {
+                capitol_protocol::rules::wages::Work::Craft { station_id, .. } => Some(*station_id),
+                capitol_protocol::rules::wages::Work::Gather { .. } => None,
+            });
+            lanes[lane(craft.station_id.or(shift_station).unwrap_or(craft.player_id))].1.push(craft);
+        }
+        for player in walks {
+            lanes[lane(player)].2.push(player);
+        }
+        lanes
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (g, c, w))| !(g.is_empty() && c.is_empty() && w.is_empty()))
+            .map(|(i, (g, c, w))| (i, Finished::new(g, c, w)))
+            .collect()
+    }
+}
+
+/// Lanes the writer saves in side by side (#407). A gather is about 14
+/// statements, each a round trip, and a commit's flush: about 5 ms on an idle
+/// database and 10 in a loaded town, nearly all of it waiting. One lane was
+/// about 40% busy at 200 citizens. On the local Postgres, four lanes wrote
+/// 2.4 times as many gathers a second as one, about 550, and eight no more
+/// than four: past that the database's commits are the ceiling (#524).
+const WRITERS: usize = 4;
+
+/// The writer's lane for saves into `key`'s box: a player's inventory, an
+/// employer's market box, a station's box. Saves into one box are written
+/// in order, one after the other, as when there was one writer. Saves into
+/// different boxes run side by side; where they still meet (a station craft
+/// taking its inputs from the crafter's inventory), the database's locks
+/// order them, and a gather that loses a race is tried again
+/// ([`persist_gather`]).
+fn lane(key: Uuid) -> usize {
+    (key.as_u128() % WRITERS as u128) as usize
 }
 
 pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppState) {
@@ -864,10 +923,15 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
     }
 
     // The tick awaits no database (#304): what it finishes goes to the
-    // writer, which saves it in order, a tick's worth at a time
+    // writer, which saves it a tick's worth at a time, in lanes (#407)
     let event_sender = game_state.read().await.event_sender.clone();
-    let (to_writer, from_tick) = mpsc::unbounded_channel();
-    tokio::spawn(run_writer(app_state.db.clone(), event_sender, from_tick));
+    let to_writers: Vec<_> = (0..WRITERS)
+        .map(|_| {
+            let (to_writer, from_tick) = mpsc::unbounded_channel();
+            tokio::spawn(run_writer(app_state.db.clone(), event_sender.clone(), from_tick));
+            to_writer
+        })
+        .collect();
     // The position save in flight, so a slow one is never overtaken by the next
     let mut saving_positions: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -917,8 +981,10 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         // tells the gatherers and crafters only once each is written.
         if !gathers.is_empty() || !crafts.is_empty() || !walks.is_empty() {
             let _timed = Phase::Writes.timed();
-            if to_writer.send(Finished { gathers, crafts, walks }).is_err() {
-                tracing::error!("The writer has stopped: this tick's gathers and crafts weren't saved");
+            for (lane, finished) in Finished::dealt(gathers, crafts, walks) {
+                if to_writers[lane].send(finished).is_err() {
+                    tracing::error!("Writer {lane} has stopped: this tick's gathers and crafts in it weren't saved");
+                }
             }
         }
 
@@ -1054,17 +1120,18 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
     }
 }
 
-/// Saves what the ticks finished, a tick at a time and in the order they
-/// finished it, until the tick loop stops (#304). One writer, so two
-/// gathers into one inventory are written one after the other, as they
-/// were when the tick wrote them itself. One writer has a ceiling: about
-/// 40% busy at 200 citizens (#407).
+/// Saves what the ticks finished in one of the writer's lanes, a tick at a
+/// time and in the order they finished it, until the tick loop stops (#304).
+/// Two gathers into one inventory are in one lane ([`lane`]), so they're
+/// written one after the other, as they were when the tick wrote them
+/// itself. The lanes run side by side (#407), each its own
+/// `loops.writer` cycles, so the loop's busy share can pass 100%.
 ///
 /// Once each is written, it's judged for the road in (#439), as is each walk
 /// that ended. A player's step is asked about once a run ([`Judged`]).
 async fn run_writer(db: sqlx::PgPool, events: broadcast::Sender<GameEvent>, mut from_tick: mpsc::UnboundedReceiver<Finished>) {
     let mut judged = Judged::default();
-    while let Some(Finished { gathers, crafts, walks }) = from_tick.recv().await {
+    while let Some(Finished { gathers, crafts, walks, handed }) = from_tick.recv().await {
         let _timed = Loop::Writer.timed();
         async {
             for item in gathers {
@@ -1082,6 +1149,7 @@ async fn run_writer(db: sqlx::PgPool, events: broadcast::Sender<GameEvent>, mut 
         }
         .instrument(tracing::info_span!("loop.writer"))
         .await;
+        drop(handed);
     }
 }
 
@@ -1196,29 +1264,69 @@ async fn persist_positions(db: &sqlx::PgPool, positions: &[SavedPosition]) -> Re
 ///
 /// Returns whether something was gathered and written: not a failed pull,
 /// nor a gather that wrote nothing.
-pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadcast::Sender<GameEvent>) -> bool {
-    let mut tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::error!("Failed to start saving a gather: {:?}", e);
-            return false;
+///
+/// Its box can still be written by someone else at the same moment: a route
+/// moving things in the inventory, or a station craft in another of the
+/// writer's lanes (#407) taking its inputs from it. A gather that loses the
+/// race for a free slot, or a lock, is rolled back and tried again
+/// ([`raced`]), up to [`GATHER_TRIES`] times, where before it was lost.
+pub(crate) async fn persist_gather(db: &sqlx::PgPool, item: PendingItem, events: &broadcast::Sender<GameEvent>) -> bool {
+    let mut tries = 1;
+    loop {
+        match write_gather(db, item.clone(), events).await {
+            Ok(gathered) => return gathered,
+            Err(Unsaved { doing, cause }) if tries < GATHER_TRIES && raced(&cause) => {
+                tracing::debug!("A gather by {} lost a race {doing} and is tried again: {cause}", item.player_id);
+                tries += 1;
+            }
+            Err(Unsaved { doing, cause }) => {
+                tracing::error!("Failed {doing} for a gather by {}: {:?}", item.player_id, cause);
+                return false;
+            }
         }
-    };
+    }
+}
+
+/// Times a gather is tried that loses a race with another of the writer's
+/// lanes (#407)
+const GATHER_TRIES: usize = 3;
+
+/// A gather's transaction failed: rolled back, nothing told
+struct Unsaved {
+    /// What it was doing, for the log
+    doing: &'static str,
+    cause: sqlx::Error,
+}
+
+/// Whether `e` lost a race with another transaction, so trying again from
+/// the start can succeed: a unique slot taken first (23505), a deadlock
+/// (40P01) or a serialization failure (40001)
+fn raced(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::Database(db) => db.is_unique_violation() || matches!(db.code().as_deref(), Some("40P01" | "40001")),
+        _ => false,
+    }
+}
+
+/// One try at [`persist_gather`]: all of it, or none of it.
+async fn write_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadcast::Sender<GameEvent>) -> Result<bool, Unsaved> {
+    let unsaved = |doing| move |cause| Unsaved { doing, cause };
+    let mut tx = db.begin().await.map_err(unsaved("starting"))?;
     let (mut used, mut broken) = (None, None);
     // On a wage shift: what the pay has to tell people, and whose box it went in
     let (mut wage_news, mut box_owner) = (None, None);
     // What it made and wore out, counted once it's written (C1.7)
     let mut flows = ledger::Flows::new();
     if let Some(gather) = item.tool.take() {
-        match tools::wear_held(&mut tx, gather.held.item_id, item.player_id).await {
-            Ok(Some(wear)) => {
+        match tools::wear_held(&mut tx, gather.held.item_id, item.player_id).await.map_err(unsaved("wearing its tool"))? {
+            Some(wear) => {
                 flows.wore(&gather.held.item_type, &wear);
                 used = Some(gather.held.after(&wear));
                 if let Wear::Broke(b) = wear {
                     broken = Some(b);
                 }
             }
-            Ok(None) => match gather.by_hand {
+            None => match gather.by_hand {
                 Some((quantity, quality)) => (item.quantity, item.quality) = (quantity, quality),
                 None => {
                     let _ = events.send(GameEvent::ExtractionFailed {
@@ -1228,13 +1336,9 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
                             gather.held.item_type
                         ),
                     });
-                    return false;
+                    return Ok(false);
                 }
             },
-            Err(e) => {
-                tracing::error!("Failed to wear tool {}: {:?}", gather.held.item_id, e);
-                return false;
-            }
         }
     }
     // The inventory that changed: the one the units went into, or after a
@@ -1242,24 +1346,22 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
     let container_id = if item.quantity == 0 && used.is_none() {
         None
     } else if item.quantity == 0 {
-        match inventory_of(&mut tx, item.player_id).await {
-            Ok(found) => found.map(|(container_id, _)| container_id),
-            Err(e) => {
-                tracing::error!("Failed to find {}'s inventory: {:?}", item.player_id, e);
-                return false;
-            }
-        }
+        inventory_of(&mut tx, item.player_id)
+            .await
+            .map_err(unsaved("finding the inventory"))?
+            .map(|(container_id, _)| container_id)
     } else {
         let paid = match &item.wage {
             Some(work) => match place_for_wages(&mut tx, &item, work).await {
                 Ok(Ok(placed)) => placed,
                 Ok(Err(why)) => {
                     let _ = events.send(GameEvent::ExtractionFailed { player_id: item.player_id, reason: why.to_string() });
-                    return false;
+                    return Ok(false);
                 }
+                Err(wages::WageError::Db(cause)) => return Err(Unsaved { doing: "paying wages", cause }),
                 Err(e) => {
                     tracing::error!("Failed to pay wages on a gather by {}: {}", item.player_id, e.message());
-                    return false;
+                    return Ok(false);
                 }
             },
             None => None,
@@ -1270,36 +1372,29 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
                 box_owner = item.wage.as_ref().map(|w| w.employer_id);
                 container_id
             }
-            None => match place_gathered(&mut tx, &item).await {
-                Ok(Some(container_id)) => container_id,
-                Ok(None) => return false,
-                Err(e) => {
-                    tracing::error!("Failed to persist {} for {}: {:?}", item.item_type, item.player_id, e);
-                    return false;
-                }
+            None => match place_gathered(&mut tx, &item).await.map_err(unsaved("placing it"))? {
+                Some(container_id) => container_id,
+                None => return Ok(false),
             },
         };
         // The employer's box had no room: the gatherer keeps it, unpaid, and the shift ends
         if let (Some(work), None) = (&item.wage, &wage_news) {
             match wages::end_shift(&mut tx, work, capitol_protocol::rules::wages::ShiftEnd::BoxFull, chrono::Utc::now()).await {
                 Ok(news) => wage_news = Some(news),
+                Err(wages::WageError::Db(cause)) => return Err(Unsaved { doing: "ending a shift on a full box", cause }),
                 Err(e) => {
                     tracing::error!("Failed to end {}'s shift on a full box: {}", item.player_id, e.message());
-                    return false;
+                    return Ok(false);
                 }
             }
         }
-        if let Err(e) = super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity).await {
-            tracing::error!("Failed to tally a gather for the Gazette: {:?}", e);
-            return false;
-        }
+        super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity)
+            .await
+            .map_err(unsaved("tallying it for the Gazette"))?;
         flows.add(&item.item_type, UnitFlow::Gathered, item.quantity as i64);
         Some(container_id)
     };
-    if let Err(e) = ledger::commit(tx, flows).await {
-        tracing::error!("Failed to save a gather: {:?}", e);
-        return false;
-    }
+    ledger::commit(tx, flows).await.map_err(unsaved("committing"))?;
 
     let _ = events.send(GameEvent::ExtractionCompleted {
         player_id: item.player_id,
@@ -1323,7 +1418,7 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
     if let Some(news) = wage_news {
         wages::announce(events, news);
     }
-    item.quantity > 0
+    Ok(item.quantity > 0)
 }
 
 /// Put a gather made on the wage shift `work` into the employer's market box,
@@ -2253,7 +2348,7 @@ mod tests {
         let writer = tokio::spawn(run_writer(db.clone(), events, from_tick));
 
         let both = vec![sickle_gather(ada, &sickle), sickle_gather(ada, &sickle)];
-        to_writer.send(Finished { gathers: both, crafts: Vec::new(), walks: Vec::new() }).unwrap();
+        to_writer.send(Finished::new(both, Vec::new(), Vec::new())).unwrap();
         drop(to_writer);
         writer.await.unwrap();
 
@@ -2262,6 +2357,100 @@ mod tests {
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::Tutorial { .. }), "the first counts on the road in");
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 0));
+    }
+
+    /// A tick's saves are dealt by the box they write into, in order within a
+    /// lane: a wage gather by its employer, a station craft by its station
+    /// (#407)
+    #[test]
+    fn saves_are_dealt_to_lanes_by_the_box_they_write_into() {
+        // Keys that land in lanes 0, 1 and 2
+        let key = |n: u128| Uuid::from_u128(n * 1_000 * WRITERS as u128 + n);
+        let (ada, employer, station) = (key(0), key(1), key(2));
+        let gather = |quantity: i32, wage: Option<Uuid>| PendingItem {
+            player_id: ada,
+            node_id: Uuid::nil(),
+            item_type: "fiber".into(),
+            item_name: "Plant Fiber".into(),
+            quantity,
+            quality: 50,
+            tool: None,
+            wage: wage.map(|employer_id| ShiftWork {
+                offer_id: Uuid::nil(),
+                shift_id: Uuid::nil(),
+                employer_id,
+                worker_id: ada,
+                work: capitol_protocol::rules::wages::Work::Gather { plot_id: Uuid::nil(), resource: "grass".into() },
+            }),
+        };
+        let craft = |station_id: Option<Uuid>| FinishedCraft {
+            player_id: ada,
+            operation_id: Uuid::nil(),
+            recipe_id: "rope_basic".into(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            tool: None,
+            station_id,
+            wage: None,
+        };
+        let dealt = Finished::dealt(
+            vec![gather(1, None), gather(2, Some(employer)), gather(3, None)],
+            vec![craft(Some(station)), craft(None)],
+            vec![ada],
+        );
+        let lanes: Vec<_> = dealt
+            .iter()
+            .map(|(lane, f)| {
+                let gathers: Vec<i32> = f.gathers.iter().map(|g| g.quantity).collect();
+                (*lane, gathers, f.crafts.iter().map(|c| c.station_id).collect::<Vec<_>>(), f.walks.len())
+            })
+            .collect();
+        assert_eq!(
+            lanes,
+            vec![
+                (lane(ada), vec![1, 3], vec![None], 1),
+                (lane(employer), vec![2], vec![], 0),
+                (lane(station), vec![], vec![Some(station)], 0),
+            ]
+        );
+    }
+
+    /// Two lanes gathering into one inventory at once race for its free
+    /// slots, and the loser is tried again: every gather is written (#407)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn gathers_that_race_for_a_slot_are_tried_again(db: sqlx::PgPool) {
+        let (ada, inventory, _sickle) = gatherer(&db, 1).await;
+        let (events, _heard) = broadcast::channel(256);
+        let types: Vec<String> = sqlx::query_scalar("SELECT id FROM item_types WHERE id <> 'stone_sickle' ORDER BY id LIMIT 16")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(types.len(), 16, "enough item types for a new stack each");
+        let gather = |item_type: &str| PendingItem {
+            player_id: ada,
+            node_id: Uuid::new_v4(),
+            item_type: item_type.into(),
+            item_name: item_type.into(),
+            quantity: 1,
+            quality: 50,
+            tool: None,
+            wage: None,
+        };
+        // Each pair is two new stacks wanting the same first free slot
+        for pair in types.chunks(2) {
+            let (a, b) = tokio::join!(
+                persist_gather(&db, gather(&pair[0]), &events),
+                persist_gather(&db, gather(&pair[1]), &events),
+            );
+            assert!(a && b, "both of {pair:?} written");
+        }
+        let stacks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE container_id = $1 AND item_type <> 'stone_sickle'")
+            .bind(inventory)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(stacks, 16);
     }
 
     /// A walk is judged where it ends: one that ends `WALK_DISTANCE` or more
@@ -2309,7 +2498,7 @@ mod tests {
         let (to_writer, from_tick) = mpsc::unbounded_channel();
         let writer = tokio::spawn(run_writer(db.clone(), events, from_tick));
         let gathers = vec![sickle_gather(ada, &sickle), failed, sickle_gather(ada, &sickle)];
-        to_writer.send(Finished { gathers, crafts: vec![rope(&bo, fiber)], walks: vec![ada, ada] }).unwrap();
+        to_writer.send(Finished::new(gathers, vec![rope(&bo, fiber)], vec![ada, ada])).unwrap();
         drop(to_writer);
         writer.await.unwrap();
 

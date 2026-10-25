@@ -8,7 +8,9 @@
 //! each also counts its slow statements ([`slow_statement`]), and since D0.3
 //! each reader of the event bus counts the events it missed ([`Receiver`]),
 //! and since D3.1 each tick counts the commands waiting for it
-//! ([`commands_taken`]).
+//! ([`commands_taken`]). Since #407 the writer's backlog is a gauge
+//! ([`Handed`]): the saves the ticks handed it that it hasn't written, and
+//! how long each tick's saves waited to be written.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,6 +76,12 @@ static COMMANDS: AtomicU64 = AtomicU64::new(0);
 static COMMAND_DEPTHS: [AtomicU64; COMMAND_BUCKETS.len() + 1] = [const { AtomicU64::new(0) }; COMMAND_BUCKETS.len() + 1];
 static COMMAND_QUEUE_MAX: AtomicU64 = AtomicU64::new(0);
 
+static WRITER_QUEUED: AtomicU64 = AtomicU64::new(0);
+static WRITER_QUEUE_MAX: AtomicU64 = AtomicU64::new(0);
+static WRITER_BATCHES: AtomicU64 = AtomicU64::new(0);
+static WRITER_LAG_NANOS: AtomicU64 = AtomicU64::new(0);
+static WRITER_LAG_MAX_NANOS: AtomicU64 = AtomicU64::new(0);
+
 static SLOW_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// `SLOW_STATEMENT_MS`, as the pool was told it, in µs
 static SLOW_THRESHOLD_MICROS: AtomicU64 = AtomicU64::new(0);
@@ -91,6 +99,41 @@ pub fn commands_taken(n: usize) {
     COMMAND_QUEUE_MAX.fetch_max(n, Ordering::Relaxed);
     let bucket = COMMAND_BUCKETS.iter().position(|bound| n as f64 <= *bound).unwrap_or(COMMAND_BUCKETS.len());
     COMMAND_DEPTHS[bucket].fetch_add(1, Ordering::Relaxed);
+}
+
+/// One tick's saves, handed to the writer ([`Loop::Writer`]) and not yet
+/// written (#407). They count in the backlog from [`Handed::new`] until the
+/// guard drops, and the time between is the batch's lag: how much later
+/// than the tick its gatherers and crafters are told. A batch with no
+/// gathers or crafts (walks to judge, #439) isn't counted.
+#[must_use = "it counts in the backlog until it's dropped"]
+pub struct Handed {
+    saves: u64,
+    at: Instant,
+}
+
+impl Handed {
+    /// `saves` gathers and crafts, handed over now.
+    pub fn new(saves: usize) -> Handed {
+        let saves = saves as u64;
+        let queued = WRITER_QUEUED.fetch_add(saves, Ordering::Relaxed) + saves;
+        WRITER_QUEUE_MAX.fetch_max(queued, Ordering::Relaxed);
+        Handed { saves, at: Instant::now() }
+    }
+}
+
+impl Drop for Handed {
+    fn drop(&mut self) {
+        // A batch of walks alone saves nothing, and has no lag to say
+        if self.saves == 0 {
+            return;
+        }
+        WRITER_QUEUED.fetch_sub(self.saves, Ordering::Relaxed);
+        let nanos = self.at.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        WRITER_BATCHES.fetch_add(1, Ordering::Relaxed);
+        WRITER_LAG_NANOS.fetch_add(nanos, Ordering::Relaxed);
+        WRITER_LAG_MAX_NANOS.fetch_max(nanos, Ordering::Relaxed);
+    }
 }
 
 /// A part of the tick's work (D0.1). Between them they cover all of it, so
@@ -182,7 +225,8 @@ pub enum Loop {
     Market,
     Bazaar,
     /// Saving one tick's finished gathers and crafts (`persist_gather`,
-    /// `finish_craft`), in order
+    /// `finish_craft`) in one of the writer's lanes, in order. The lanes run
+    /// side by side (#407), so its time can pass the wall clock's
     Writer,
     /// Saving every player's position in one statement, every 100 ticks
     Positions,
@@ -418,6 +462,11 @@ pub fn read(tick_period: Duration) -> Load {
         commands: COMMANDS.load(Ordering::Relaxed),
         command_buckets: COMMAND_DEPTHS.iter().map(|b| b.load(Ordering::Relaxed)).collect(),
         command_queue_max: COMMAND_QUEUE_MAX.load(Ordering::Relaxed),
+        writer_queued: WRITER_QUEUED.load(Ordering::Relaxed),
+        writer_queue_max: WRITER_QUEUE_MAX.load(Ordering::Relaxed),
+        writer_batches: WRITER_BATCHES.load(Ordering::Relaxed),
+        writer_lag_secs: WRITER_LAG_NANOS.load(Ordering::Relaxed) as f64 / 1e9,
+        writer_lag_max_ms: WRITER_LAG_MAX_NANOS.load(Ordering::Relaxed) as f64 / 1e6,
         ..Load::default()
     }
 }
@@ -459,6 +508,22 @@ mod tests {
         // None waiting is the first bucket; 7 is under the 10 bound
         assert!(after.command_buckets[0] > before.command_buckets[0]);
         assert!(after.command_buckets[4] > before.command_buckets[4]);
+    }
+
+    /// Saves count in the backlog until they're written, and the wait is the lag
+    #[test]
+    fn the_writers_backlog_counts_until_its_saves_are_written() {
+        let before = read(Duration::from_millis(100));
+        let handed = Handed::new(5);
+        let during = read(Duration::from_millis(100));
+        // Other tests may hand saves over too, but none holds 5 for long
+        assert!(during.writer_queue_max >= 5);
+        std::thread::sleep(Duration::from_millis(3));
+        drop(handed);
+        let after = read(Duration::from_millis(100));
+        assert!(after.writer_batches > before.writer_batches);
+        assert!(after.writer_lag_secs - before.writer_lag_secs >= 0.003);
+        assert!(after.writer_lag_max_ms >= 3.0);
     }
 
     #[test]

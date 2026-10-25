@@ -665,6 +665,17 @@
       { label: "p99", color: "--s2", value: (s) => s.load.command_queue_p99 },
     ],
   });
+  // The writer (#407): saves waiting for it, and how late a tick's were written
+  CHARTS.writer = () => lineChart($("chart-writer"), {
+    has: (s) => s.load?.writer_lag_ms !== undefined,
+    height: 160,
+    axis: count,
+    legend: (v) => plural(v, "save", "saves"),
+    series: [
+      { label: "Waiting", color: "--s2", width: 2, value: (s) => s.load.writer_queued },
+      { label: "Lag", color: "--s3", legend: ms, value: (s) => s.load.writer_lag_ms },
+    ],
+  });
   CHARTS.bus = () => lineChart($("chart-bus"), {
     has: (s) => s.load && s.events,
     height: 160,
@@ -751,7 +762,7 @@
   const PAGE_CHARTS = {
     overview: ["players"],
     economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making"],
-    performance: ["tick", "phases", "over", "commands", "bus", "sockets", "pool", "txns"],
+    performance: ["tick", "phases", "over", "commands", "writer", "bus", "sockets", "pool", "txns"],
     town: ["townOn", "rulings", "cost"],
     tuning: ["tune-sinks", "tune-production", "tune-distribution", "tune-prices", "tune-tick"],
     citizen: ["citizenStrands"],
@@ -1780,7 +1791,7 @@
     automation: { say: "stations' automation", color: "--fl-fees" },
     market: { say: "the market's matching", color: "--s3" },
     bazaar: { say: "the bazaar's sweep", color: "--fl-rent" },
-    writer: { say: "the writer's saves of gathers and crafts", color: "--s2" },
+    writer: { say: "the writer's saves of gathers and crafts, in four lanes", color: "--s2" },
     positions: { say: "the position save", color: "--fl-tax" },
     tax: { say: "the property tax", color: "--fl-withdrawals" },
     subscriptions: { say: "subscriptions' lapse", color: "--fl-other" },
@@ -1846,7 +1857,7 @@
       : `The tick takes ${ms(l.tick_mean_ms)} on average, ${bound(l.tick_p95_ms)} at p95 and ${bound(l.tick_p99_ms)} at p99, of its ${ms(l.tick_period_ms)}.`;
     phases(shown);
     over(shown);
-    for (const name of ["commands", "bus", "sockets", "pool", "txns"]) chart(name);
+    for (const name of ["commands", "writer", "bus", "sockets", "pool", "txns"]) chart(name);
     queuesHeadline(shown);
     socketsHeadline(shown);
     dbHeadline(shown);
@@ -1977,6 +1988,7 @@
         : nf.format(Math.max(...counted.map((s) => s.load.command_queue_p99 ?? 0)));
       line = `${capital(plural(commands, "command", "commands"))} came in ${since(counted[0])}, ${Number((commands / ticks).toFixed(2))} a tick, and at the 99th percentile no more than ${deepest} waited for one.`;
     }
+    line += writerLine(shown);
     const lost = shown.reduce((a, s) => a + missed(s.load), 0);
     const resyncs = shown.reduce((a, s) => a + s.load.socket_resyncs, 0);
     const bus = latest((s) => s.events)?.events;
@@ -1991,6 +2003,17 @@
       line += resyncs ? `, and ${plural(resyncs, "socket", "sockets")} resynced.` : ".";
     }
     $("queues-headline").textContent = line;
+  }
+
+  /** The writer's backlog in words, with a space before it; none from a server before #407 */
+  function writerLine(shown) {
+    const counted = shown.filter((s) => s.load.writer_lag_ms !== undefined);
+    if (!counted.length) return "";
+    const now = counted.at(-1).load.writer_queued;
+    const lags = counted.map((s) => s.load.writer_lag_ms).filter((v) => v != null);
+    if (!lags.length) return ` The writer had nothing to save ${since(counted[0])}.`;
+    const worst = Math.max(...lags);
+    return ` The writer has ${now === 0 ? "nothing" : plural(now, "save", "saves")} waiting, and a tick's saves were written ${ms(lags.reduce((a, v) => a + v, 0) / lags.length)} after it on average, ${ms(worst)} in the worst ten seconds.`;
   }
 
   function socketsHeadline(shown) {
