@@ -154,6 +154,11 @@ impl SimBot {
         };
         self.wages.offers = read.offers;
         let me = self.bot.state().me();
+        // Offers of its own a session before left up (K2.4), to end as any
+        // of its offers does
+        if let Some(me) = me {
+            self.hiring.adopt(&self.wages.offers, me);
+        }
         // A shift the server says it's on: one from before a restart, or the
         // one it knows. None: any it thought it had ended unheard
         let running = read.shift.filter(|s| Some(s.worker_id) == me && s.ended_at.is_none());

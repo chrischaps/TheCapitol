@@ -1920,6 +1920,68 @@ impl Bot {
         }
     }
 
+    /// Takes our offer `offer_id` down (S2.6): a shift on it ends, paid for
+    /// what was made, and the rest of its escrow comes back. Returns it as
+    /// it closed. From anywhere.
+    pub fn withdraw_wages(&mut self, offer_id: Uuid) -> Result<capitol_protocol::rest::WageOffer, BotError> {
+        match self.call("taking an offer of work down", RestRequest::WithdrawWages { offer_id })? {
+            RestResponse::WageOffer(offer) => {
+                self.log(format!("took offer {offer_id} down: {} of {} made", offer.made, offer.cap));
+                Ok(offer)
+            }
+            other => Err(unexpected("taking an offer of work down", &other)),
+        }
+    }
+
+    /// Puts up to `want` of `item_type` from the inventory into the box of
+    /// our station `station_id`, a whole stack at a time into its empty
+    /// slots, for a hire's work (Callings K2.4). Stand within its reach.
+    /// How many went in: fewer when the inventory or the box runs short.
+    pub fn stock_station(&mut self, station_id: Uuid, item_type: &str, want: i32) -> Result<i32, BotError> {
+        let what = "looking in the station's box";
+        let RestResponse::StationContainer(the_box) = self.call(what, RestRequest::StationContainer { station_id })? else {
+            return Err(BotError::Failed(format!("{what}: an answer that isn't a box")));
+        };
+        let used: Vec<i32> = the_box.slots.iter().map(|i| i.slot_index).collect();
+        let mut free = (0..the_box.slot_count).filter(|s| !used.contains(s));
+        let stacks: Vec<(Uuid, i32)> = self
+            .state
+            .inventory()
+            .map_or(Vec::new(), |inv| inv.items().filter(|i| i.item_type == item_type).map(|i| (i.item_id, i.quantity)).collect());
+        let mut moved = 0;
+        for (item_id, quantity) in stacks {
+            if moved >= want {
+                break;
+            }
+            let Some(slot) = free.next() else { break };
+            let request = RestRequest::MoveItem(MoveItemRequest {
+                item_id,
+                target_container_id: the_box.id,
+                target_slot: slot,
+            });
+            self.call("stocking the station's box", request)?;
+            moved += quantity;
+        }
+        self.settle()?;
+        Ok(moved)
+    }
+
+    /// Brings everything in the box of our station `station_id` into the
+    /// inventory: what a hire made there and what it left (K2.4). Stand
+    /// within its reach. How many stacks came out.
+    pub fn empty_station(&mut self, station_id: Uuid) -> Result<usize, BotError> {
+        let what = "looking in the station's box";
+        let RestResponse::StationContainer(the_box) = self.call(what, RestRequest::StationContainer { station_id })? else {
+            return Err(BotError::Failed(format!("{what}: an answer that isn't a box")));
+        };
+        if the_box.slots.is_empty() {
+            return Ok(0);
+        }
+        self.move_to_inventory(&the_box.slots, "emptying the station's box")?;
+        self.settle()?;
+        Ok(the_box.slots.len())
+    }
+
     /// Every open wage offer, newest first, and the shift we're working if
     /// we are (Commons S2.6). From anywhere.
     pub fn wages(&mut self) -> Result<capitol_protocol::rest::WagesResponse, BotError> {

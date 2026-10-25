@@ -177,6 +177,38 @@ fn round(r: u32) -> Vec<Situation> {
                 };
                 out.push(s(question, menu, 1));
             }
+            // Hiring (Callings K2.4): its lot's grass, and planks sawn at a
+            // bench of its from a dozen logs, at its line by its thrift
+            let mut stocked = h.clone();
+            stocked.strands += 400 * scale;
+            stocked.items.insert("log".into(), 12);
+            let openings = [
+                wage::Opening {
+                    work: Work::Gather {
+                        plot_id: Uuid::nil(),
+                        resource: "grass".into(),
+                    },
+                    most: wage::GATHER_CAP,
+                    stock: Vec::new(),
+                },
+                wage::Opening {
+                    work: Work::Craft {
+                        station_id: Uuid::nil(),
+                        recipe_id: "plank".into(),
+                    },
+                    most: 36,
+                    stock: vec![("log".into(), 12)],
+                },
+            ];
+            let line = wage::hire_line(wage::HIRE_LINE, temperament.thrift);
+            for opening in &openings {
+                let books = |item: &str| super::rules::worth_in(&market, item);
+                if let Some((question, menu)) = wage::hire_menu(opening, &catalog, &stocked, line, books) {
+                    let mut situation = s(question, menu, 1);
+                    situation.holdings = (&stocked).into();
+                    out.push(situation);
+                }
+            }
             // A guild for its trade (S4.5): some invited it, and some have
             // a rival for its trade too
             let word = role.trade_words()[0];

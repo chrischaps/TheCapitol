@@ -30,7 +30,7 @@ It's also the economy's own fix. The town is short of demand. Strands pool with 
 
 **Non-goals for this plan**
 - Custom contracts, sale contracts, disputes and arbitration (§8). Every contract here is one the server can check, so there's nothing to dispute.
-- Citizens who hire, post wages or found guilds. *Since 2026-10-25 hiring is planned in callings K2.4 (#538); founding guilds stays out.*
+- Citizens who hire, post wages or found guilds. *Since callings K2.4 (#538) citizens hire and post wages (D11); founding guilds stays out.*
 - A word filter, shouting, or channels by zone.
 - LLM layers in production beyond #311's spike.
 - The React and Love2D clients. Both are frozen.
@@ -116,6 +116,7 @@ An employer offers work at a station of theirs (a recipe) or on their lot (gathe
 - **The shift.** The worker gets use of that station, or that lot's resource, for the shift and nothing else. The output lands in the employer's box, marked as the worker's make. Each unit is paid in the transaction that made it.
 - **Stopping.** Either side can stop at any time, and what was made is always paid. So an employer can't breach, and a piece-rate worker owes nothing for stopping.
 - **Automation** at that station pauses for the shift.
+- **Citizens hire too** (callings K2.4, #538): the same offers on the same routes, on their `trade` key (`POST /wages`, `DELETE /wages/{id}`), marked as a citizen's as their posts are (`WageOffer.employer_citizen`). See D11.
 
 ### D8. Standing (Chris's choice: words, with the number underneath)
 
@@ -156,6 +157,7 @@ Weekly, from records the city already keeps.
 - They claim and deliver commissions. Those willing to mine count the wild veins in time to deliver, so a good price sends them to the ranges.
 - Crafters post commissions for inputs their bids haven't filled.
 - They take wages in their own working hours, and join guilds whose charter names one of their trades.
+- They hire (callings K2.4, #538). A citizen with Strands over its line (`[hiring] line` in `town.toml`, 600 for a middling one, by thrift) offers piece-rate work at a station of its own its stint leaves idle, from inputs its stint doesn't need, or gathering on its lot what its stint doesn't gather (`Question::Hire`, `sim/run/hire.rs`). It pays what the work earns its trade at the books, by thrift, escrowed, and takes the offer down at dusk, as it signs off, when its stint wants the place back, or when its money runs low. Other citizens take the work as they take a person's.
 - Every line and every record carries the citizen's mark.
 
 ## 5. Architecture notes
@@ -382,7 +384,7 @@ That's about the size of Economy v1's E3 and E4 together.
 ## 8. Later (outside this plan)
 
 - **Custom contracts, sale contracts, disputes and arbitration.** These are for the GDD's Contract Court, once contracts exist that the server can't check: labour described in words, or goods delivered outside the board.
-- **Citizens who hire, post wages, or found guilds** (with a subscription of their own, if that's ever allowed). Hiring is planned in callings K2.4 (#538).
+- **Citizens who found guilds** (with a subscription of their own, if that's ever allowed). Citizens hire since callings K2.4 (#538).
 - **Shouting and zone channels,** if local and Capitol prove too narrow and too wide.
 - **Guild contracts,** a guild's own commissions paid from its treasury, and guild leaderboards.
 - **The bureaucracy's other fees and its certification** (GDD §8.4): a plan of their own, which a "Capitol Certified" seal on maker's marks would join to standing.

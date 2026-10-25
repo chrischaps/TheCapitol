@@ -180,7 +180,7 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         // Reading a letter of your own: a citizen does it on the road in (#450)
         | ("POST", "letters", [_, "read"])
         // Working for a wage: a citizen takes the work and stops its shift
-        // on its key (Commons S2.8). Offering work stays a person's
+        // on its key (Commons S2.8). Offering it is trade (below)
         | ("POST", "wages", [_, "take"])
         | ("DELETE", "wages", [_, "shift"])
         // Guilds: a citizen asks to join, declines an invitation and leaves
@@ -200,7 +200,11 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("POST", "commissions", [] | [_, "deliver" | "claim"])
         // Paying into its guild's treasury (S4.5)
         | ("POST", "guilds", [_, "deposit"])
-        | ("DELETE", "commissions", [_] | [_, "claim"]) => Some(ApiKeyScope::Trade),
+        | ("DELETE", "commissions", [_] | [_, "claim"])
+        // Hiring: a citizen offers piece-rate work, escrowed, and takes its
+        // offer down on its key (Callings K2.4)
+        | ("POST", "wages", [])
+        | ("DELETE", "wages", [_]) => Some(ApiKeyScope::Trade),
         _ => None,
     }
 }
@@ -420,12 +424,14 @@ mod tests {
         assert_eq!(rest(Method::DELETE, "/commissions/abc/claim"), Some(Trade));
         assert_eq!(rest(Method::DELETE, "/commissions/abc"), Some(Trade));
         assert_eq!(rest(Method::POST, "/commissions/abc"), None);
-        // Working for a wage is play; offering it isn't on a key (S2.8)
+        // Working for a wage is play (S2.8); offering it and taking the
+        // offer down are trade, since they escrow Strands (K2.4)
         assert_eq!(rest(Method::GET, "/wages"), Some(Read));
         assert_eq!(rest(Method::POST, "/wages/abc/take"), Some(Play));
         assert_eq!(rest(Method::DELETE, "/wages/abc/shift"), Some(Play));
-        assert_eq!(rest(Method::POST, "/wages"), None);
-        assert_eq!(rest(Method::DELETE, "/wages/abc"), None);
+        assert_eq!(rest(Method::POST, "/wages"), Some(Trade));
+        assert_eq!(rest(Method::DELETE, "/wages/abc"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/wages/abc"), None);
         // A citizen joins, leaves and pays into a guild; it never founds or
         // runs one (S4.5)
         assert_eq!(rest(Method::GET, "/guilds"), Some(Read));

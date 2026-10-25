@@ -7,13 +7,38 @@
 //! shift and a citizen's own trade walk alike: to the bench, between nodes.
 //! The walk to the work isn't weighed, so far-off work looks as good as near
 //! ([#507](https://github.com/chrischaps/TheCapitol/issues/507)).
+//!
+//! **Hiring** (Callings K2.4) is the other side: the work a citizen could
+//! offer ([`openings`]), at a station of its own that the job of the moment
+//! doesn't work at, from inputs that job doesn't need, or on its lot,
+//! gathering what grows there that the job doesn't gather; whether it can
+//! afford to ([`hire_menu`], over its [`hire_line`]); the rate it pays
+//! ([`hire_rate`]); and when it wants the place back ([`wants_back`]).
+
+use std::collections::HashMap;
 
 use capitol_protocol::rest::{CatalogResourceType, RecipeInfo};
-use capitol_protocol::rules::wages::Work;
+use capitol_protocol::rules::court::court_fee;
+use capitol_protocol::rules::wages::{offer_value, Work};
 use capitol_protocol::rules::TICK_MS;
+use uuid::Uuid;
 
-use super::Role;
+use super::plan::Holdings;
+use super::{Role, ROLES};
 use crate::catalog::Catalog;
+use crate::citizen::decide::{Choice, Question, Span, Temperament};
+
+/// The fewest units worth offering work for (K2.4): two logs' planks.
+pub const LEAST_HIRE: i32 = 6;
+/// The least an offer is worth at the fair rate, in Strands: the court's
+/// fee is at least 6, so a smaller one pays more than a tenth again in fees.
+pub const LEAST_HIRE_VALUE: i64 = 50;
+/// The most units a gathering offer pays for: what its escrow holds.
+pub const GATHER_CAP: i32 = 60;
+/// A middling citizen's line (K2.4): the Strands it keeps back before it
+/// hires, unless the town's `[hiring] line` says otherwise. About what a
+/// merchant's float is.
+pub const HIRE_LINE: i64 = 600;
 
 /// Work offered, as a role's menu needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +148,266 @@ pub fn earns(role: Role, catalog: &Catalog, worth: impl Fn(&str) -> Option<i64>)
     Some((crafts_an_hour(r) * net).round() as i64)
 }
 
+/// Work a citizen could hire someone for (Callings K2.4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Opening {
+    pub work: Work,
+    /// The most units it could offer: what the inputs it can spare make,
+    /// or a gather's [`GATHER_CAP`]
+    pub most: i32,
+    /// What a craft's box wants for `most`, by input: nothing for a gather
+    pub stock: Vec<(String, i32)>,
+}
+
+impl Opening {
+    /// What `cap` units take of each input, in whole crafts.
+    pub fn stock_for(&self, catalog: &Catalog, cap: i32) -> Vec<(String, i32)> {
+        let Work::Craft { recipe_id, .. } = &self.work else { return Vec::new() };
+        let Some(r) = recipe(catalog, recipe_id) else { return Vec::new() };
+        let crafts = crafts_for(r, cap);
+        r.inputs.iter().map(|i| (i.item_type.clone(), i.quantity * crafts)).collect()
+    }
+}
+
+/// Crafts of `r` that make `units`, at its least yield.
+fn crafts_for(r: &RecipeInfo, units: i32) -> i32 {
+    let made = r.outputs.first().map_or(1, |o| o.quantity_min.max(1));
+    (units.max(0) + made - 1) / made
+}
+
+/// The goods a station of `kind` is hired for: what the jobs that work at
+/// it answer commissions for or need, as made there. A sawbench saws
+/// planks, a forge smelts ingots, a kiln burns charcoal and bricks, and a
+/// workbench makes handles; an anvil's heads are a tool crafter's own.
+fn hired_for(kind: &str) -> Vec<&'static str> {
+    let mut goods: Vec<&'static str> = ROLES
+        .iter()
+        .filter(|r| r.crafts_at().contains(&kind))
+        .flat_map(|r| r.answers().iter().chain(r.needs()).copied())
+        .collect();
+    goods.sort_unstable();
+    goods.dedup();
+    goods
+}
+
+/// Whether the job of the moment wants `work`'s place for itself: it works
+/// at that station, or gathers that resource. A citizen hires out only
+/// what its stint leaves idle, and takes it back when a stint wants it.
+pub fn wants_back(job_now: Role, catalog: &Catalog, work: &Work) -> bool {
+    match job(catalog, work) {
+        Some(Job::Craft { station: Some(station), .. }) => job_now.crafts_at().contains(&station),
+        Some(j @ Job::Gather { .. }) => job_now.does(&j),
+        _ => false,
+    }
+}
+
+/// The work a citizen at `job_now` could offer (K2.4):
+/// - **at a station of its own** (`stations`, by type) that `job_now`
+///   doesn't work at: the recipe there, of the goods it's hired for (and
+///   at a workbench, handwork a trade answers for: rope), that `spare`
+///   (what it holds that `job_now` neither needs nor makes) makes the most
+///   of at their targets, at least [`LEAST_HIRE`] units' worth;
+/// - **on its lot** (`lot`: its id, and the resources that grow in its
+///   bounds with how many nodes of each): gathering a gatherer's good that
+///   `job_now` doesn't gather, where the nodes keep a worker busy
+///   ([`gather_most`]), up to a game hour's yield or [`GATHER_CAP`].
+///
+/// A recipe that wants a tool of the crafter is left out, since the worker
+/// may not hold one.
+pub fn openings(
+    catalog: &Catalog,
+    job_now: Role,
+    stations: &[(String, Uuid)],
+    spare: &HashMap<String, i32>,
+    lot: Option<(Uuid, &[(String, i32)])>,
+) -> Vec<Opening> {
+    let mut out = Vec::new();
+    for (kind, station_id) in stations {
+        if job_now.crafts_at().contains(&kind.as_str()) {
+            continue;
+        }
+        let goods = hired_for(kind);
+        let best = catalog
+            .recipes()
+            .iter()
+            .filter(|r| r.tool_type.is_none())
+            .filter(|r| {
+                let Some(out) = r.outputs.first() else { return false };
+                match r.required_station_type.as_deref() {
+                    Some(at) => at == kind && goods.contains(&out.item_type.as_str()),
+                    // Handwork at the bench: rope from a fiber gatherer's
+                    // fiber, which the court takes at any station
+                    None => kind == "workbench" && ROLES.iter().any(|role| role.answers().contains(&out.item_type.as_str())),
+                }
+            })
+            .filter_map(|r| {
+                let crafts = r
+                    .inputs
+                    .iter()
+                    .map(|i| spare.get(&i.item_type).copied().unwrap_or(0) / i.quantity.max(1))
+                    .min()?;
+                let out = r.outputs.first()?;
+                let most = crafts * out.quantity_min.max(1);
+                let worth = most as i64 * catalog.target_price(&out.item_type).unwrap_or(1);
+                (most >= LEAST_HIRE).then_some((worth, r, most))
+            })
+            .max_by_key(|(worth, ..)| *worth);
+        if let Some((_, r, most)) = best {
+            let work = Work::Craft {
+                station_id: *station_id,
+                recipe_id: r.id.clone(),
+            };
+            let opening = Opening {
+                work,
+                most,
+                stock: Vec::new(),
+            };
+            let stock = opening.stock_for(catalog, most);
+            out.push(Opening { stock, ..opening });
+        }
+    }
+    if let Some((plot_id, resources)) = lot {
+        for (resource, nodes) in resources {
+            let Some(r) = catalog.resource_type(resource) else { continue };
+            let gathered = Job::Gather { yields: &r.yields_item };
+            if !ROLES.iter().any(|role| role.does(&gathered)) || job_now.does(&gathered) {
+                continue;
+            }
+            let most = gather_most(r, *nodes);
+            if most < LEAST_HIRE {
+                continue;
+            }
+            out.push(Opening {
+                work: Work::Gather {
+                    plot_id,
+                    resource: resource.clone(),
+                },
+                most,
+                stock: Vec::new(),
+            });
+        }
+    }
+    out
+}
+
+/// Game seconds a worker on a gathering shift takes between nodes, besides
+/// the gather itself: a short walk across the lot.
+const NODE_WALK_SECS: f64 = 10.0;
+
+/// What `nodes` of `r` on a lot give a worker in a game hour, up to
+/// [`GATHER_CAP`]: 0 unless going round them keeps it busy at least half
+/// the time, since a node gathered is spent until it grows back, and a
+/// worker who finds none ready three times gives the shift up. A few grass
+/// tufts keep one busy; a lone vein, spent for ten minutes after each
+/// pull, doesn't.
+pub fn gather_most(r: &CatalogResourceType, nodes: i32) -> i32 {
+    let regrow = secs(r.regeneration_ticks);
+    let round = nodes.max(0) as f64 * (secs(r.extraction_duration_ticks) + NODE_WALK_SECS);
+    if nodes <= 0 || round < regrow / 2.0 {
+        return 0;
+    }
+    let pulls = (3600.0 / regrow.max(round)) * nodes as f64;
+    ((pulls * gathered(r)).floor() as i32).min(GATHER_CAP)
+}
+
+/// A citizen's line (K2.4): the Strands it keeps back before it hires, the
+/// town's `base` times 0.5 for the free-handed to 1.5 for the thrifty.
+pub fn hire_line(base: i64, thrift: f32) -> i64 {
+    (base as f64 * (0.5 + thrift as f64)).round() as i64
+}
+
+/// What a unit of `work` earns the trade that does it, at the books
+/// (`worth`): a craft's goods less its inputs, a unit at the recipe's
+/// least yield, or a gather's good. `None` when the books can't say. What
+/// an employer pays to leave a worker no worse off than at its own trade
+/// ([`earns`] counts the same).
+pub fn fair(catalog: &Catalog, work: &Work, worth: impl Fn(&str) -> Option<i64>) -> Option<i64> {
+    match work {
+        Work::Craft { recipe_id, .. } => {
+            let r = recipe(catalog, recipe_id)?;
+            let out = r.outputs.first()?;
+            let made = out.quantity_min.max(1) as i64;
+            let mut net = made * worth(&out.item_type)?;
+            for input in &r.inputs {
+                net -= input.quantity as i64 * worth(&input.item_type)?;
+            }
+            // A unit's share, rounded up: a Strand short is a worker lost
+            Some((net.max(0) + made - 1) / made)
+        }
+        Work::Gather { resource, .. } => worth(&catalog.resource_type(resource)?.yields_item),
+    }
+}
+
+/// The rate a citizen offers (K2.4): what the work earns its trade at the
+/// books ([`fair`]), else the Flint form's [`rate_for`](crate::wages::rate_for)
+/// (half the good's target), times 1.2 for the free-handed to 0.8 for the
+/// thrifty, rounded, and at least a Strand. At middling thrift a
+/// middling worker takes it ([`rules::wage`](crate::citizen::decide::rules)).
+pub fn hire_rate(rate_for: i64, fair: Option<i64>, t: &Temperament) -> i64 {
+    let base = fair.filter(|f| *f > 0).unwrap_or(rate_for).max(1);
+    ((base as f64 * (1.2 - 0.4 * t.thrift as f64)).round() as i64).max(1)
+}
+
+/// How many units, up to `most`, an offer at `rate` can escrow with the
+/// court's fee from `budget`.
+pub fn affordable(rate: i64, most: i32, budget: i64) -> i32 {
+    let costs = |n: i32| {
+        let value = offer_value(rate, n);
+        value + court_fee(value)
+    };
+    if most <= 0 || rate <= 0 || costs(1) > budget {
+        return 0;
+    }
+    // The cost rises with the units: the most that fits
+    let (mut lo, mut hi) = (1, most);
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if costs(mid) <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+/// The question and menu for hiring for `opening` (K2.4), if there's one
+/// to ask: the citizen holds Strands over its `line`, enough to escrow
+/// [`LEAST_HIRE`] units (or all there are) at the rate its books say is
+/// fair, and [`LEAST_HIRE_VALUE`] worth of them. Offer the work (a rate up to twice that, up to `opening.most`
+/// units), or pass. The rules take the rate and the units from what the
+/// question carries, so a replay offers the same.
+pub fn hire_menu(
+    opening: &Opening,
+    catalog: &Catalog,
+    holdings: &Holdings,
+    line: i64,
+    worth: impl Fn(&str) -> Option<i64>,
+) -> Option<(Question, Vec<Choice>)> {
+    let rate_for = crate::wages::rate_for(&opening.work, catalog);
+    let fair = fair(catalog, &opening.work, worth);
+    let base = fair.filter(|f| *f > 0).unwrap_or(rate_for).max(1);
+    let budget = holdings.strands - line;
+    let n = affordable(base, opening.most, budget);
+    if n < LEAST_HIRE.min(opening.most) || offer_value(base, n) < LEAST_HIRE_VALUE {
+        return None;
+    }
+    let question = Question::Hire {
+        work: words(catalog, &opening.work),
+        rate_for,
+        fair,
+        line,
+    };
+    let menu = vec![
+        Choice::Hire {
+            rate: Span::new(1, base * 2),
+            cap: Span::new(1, opening.most),
+        },
+        Choice::Pass,
+    ];
+    Some((question, menu))
+}
+
 fn recipe<'a>(catalog: &'a Catalog, id: &str) -> Option<&'a RecipeInfo> {
     catalog.recipes().iter().find(|r| r.id == id)
 }
@@ -226,6 +511,167 @@ mod tests {
         let dear = |item: &str| if item == "log" { Some(20) } else { books(item) };
         assert!(earns(Role::Crafter(Craft::Planks), &catalog, dear).unwrap() < 0);
         assert_eq!(earns(Role::Merchant, &catalog, books), None);
+    }
+
+    fn spare(items: &[(&str, i32)]) -> HashMap<String, i32> {
+        items.iter().map(|(i, n)| (i.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn a_citizen_hires_out_what_its_stint_leaves_idle() {
+        let catalog = Catalog::fallback();
+        let (saw, kiln, forge) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        let lot = Uuid::from_u128(9);
+        let stations = vec![("sawbench".to_string(), saw), ("kiln".to_string(), kiln), ("forge".to_string(), forge)];
+        let grass = [("grass".to_string(), 4), ("no_such".to_string(), 3), ("iron_vein".to_string(), 1)];
+        let held = spare(&[("log", 5), ("fiber", 40)]);
+        // On a fiber stint: the sawbench saws its logs (15 planks beats 10
+        // charcoal), the forge has no ore, and the lot's grass is the
+        // stint's own
+        let fiber = openings(&catalog, Role::Gatherer(Gather::Fiber), &stations, &held, Some((lot, &grass)));
+        assert_eq!(fiber.len(), 2, "{fiber:?}");
+        assert_eq!(
+            fiber[0].work,
+            Work::Craft {
+                station_id: saw,
+                recipe_id: "plank".into()
+            }
+        );
+        assert_eq!((fiber[0].most, fiber[0].stock.clone()), (15, vec![("log".to_string(), 5)]));
+        assert_eq!(
+            fiber[1].work,
+            Work::Craft {
+                station_id: kiln,
+                recipe_id: "charcoal".into()
+            }
+        );
+        assert!(!fiber.iter().any(|o| matches!(o.work, Work::Gather { .. })));
+        // On a planks stint the sawbench is its own, and the grass is
+        // anyone's to gather for it
+        let planks = openings(&catalog, Role::Crafter(Craft::Planks), &stations, &held, Some((lot, &grass)));
+        assert!(planks.iter().all(|o| crate::wages::place_of(&o.work) != saw), "{planks:?}");
+        assert!(planks.iter().any(|o| o.work
+            == Work::Gather {
+                plot_id: lot,
+                resource: "grass".into()
+            }
+            && o.most == GATHER_CAP));
+        // At a workbench, rope twisted from its fiber
+        let bench = vec![("workbench".to_string(), Uuid::from_u128(4))];
+        let rope = openings(&catalog, Role::Gatherer(Gather::Wood), &bench, &held, None);
+        assert_eq!(rope.len(), 1, "{rope:?}");
+        assert_eq!((rope[0].most, rope[0].stock.clone()), (20, vec![("fiber".to_string(), 40)]));
+        assert!(matches!(&rope[0].work, Work::Craft { recipe_id, .. } if recipe_id == "rope_basic"));
+        // A lone vein, spent ten minutes after each pull, keeps nobody busy
+        assert!(!planks.iter().any(|o| matches!(&o.work, Work::Gather { resource, .. } if resource == "iron_vein")));
+        let vein = catalog.resource_type("iron_vein").unwrap();
+        assert_eq!(gather_most(vein, 1), 0);
+        assert!(gather_most(vein, 40) >= LEAST_HIRE);
+        let tufts = catalog.resource_type("grass").unwrap();
+        assert_eq!((gather_most(tufts, 0), gather_most(tufts, 1)), (0, 0));
+        assert_eq!(gather_most(tufts, 4), GATHER_CAP);
+        // Too few logs for a hire's worth: nothing at the bench
+        let few = openings(&catalog, Role::Gatherer(Gather::Fiber), &stations, &spare(&[("log", 1)]), None);
+        assert!(few.is_empty(), "{few:?}");
+        // What it wants back follows the same line
+        let saw_planks = Work::Craft {
+            station_id: saw,
+            recipe_id: "plank".into(),
+        };
+        assert!(wants_back(Role::Crafter(Craft::Planks), &catalog, &saw_planks));
+        assert!(!wants_back(Role::Gatherer(Gather::Wood), &catalog, &saw_planks));
+        let on_lot = gather("grass");
+        assert!(wants_back(Role::Gatherer(Gather::Fiber), &catalog, &on_lot));
+        assert!(!wants_back(Role::Builder, &catalog, &on_lot));
+    }
+
+    #[test]
+    fn an_offer_pays_what_the_work_earns_its_trade_by_thrift_within_the_line() {
+        let catalog = Catalog::fallback();
+        let targets = |item: &str| catalog.target_price(item);
+        let plank = craft("plank");
+        let fair_plank = fair(&catalog, &plank, targets).unwrap();
+        // Three planks from a log: what they fetch over the log, a plank's share
+        let (p, l) = (catalog.target_price("plank").unwrap(), catalog.target_price("log").unwrap());
+        assert_eq!(fair_plank, (3 * p - l + 2) / 3);
+        assert_eq!(fair(&catalog, &gather("grass"), |_| None), None);
+        let middling = Temperament::default();
+        let thrifty = Temperament {
+            thrift: 1.0,
+            ..middling
+        };
+        let free = Temperament {
+            thrift: 0.0,
+            ..middling
+        };
+        assert_eq!(hire_rate(1, Some(fair_plank), &middling), fair_plank);
+        assert!(hire_rate(1, Some(fair_plank), &thrifty) < fair_plank);
+        assert!(hire_rate(1, Some(fair_plank), &free) > fair_plank);
+        // With no books, the form's half the target; never under a Strand
+        assert_eq!(hire_rate(7, None, &middling), 7);
+        assert_eq!(hire_rate(1, None, &thrifty), 1);
+        // The line by thrift
+        assert_eq!((hire_line(600, 0.0), hire_line(600, 0.5), hire_line(600, 1.0)), (300, 600, 900));
+        // What a budget escrows, the court's fee and all
+        let n = affordable(3, 100, 200);
+        let cost = |n: i32| offer_value(3, n) + court_fee(offer_value(3, n));
+        assert!(cost(n) <= 200 && cost(n + 1) > 200, "{n}");
+        assert_eq!(affordable(3, 10, 10_000), 10);
+        assert_eq!(affordable(3, 10, 0), 0);
+        assert_eq!(affordable(3, 10, -50), 0);
+    }
+
+    /// The question is asked only over the line, with enough to escrow a
+    /// hire's worth at the fair rate: so nobody hires while broke.
+    #[test]
+    fn only_a_citizen_over_its_line_is_asked_to_hire() {
+        let catalog = Catalog::fallback();
+        let opening = Opening {
+            work: craft("plank"),
+            most: 30,
+            stock: vec![("log".into(), 10)],
+        };
+        let books = |item: &str| catalog.target_price(item);
+        let holding = |strands: i64| Holdings {
+            strands,
+            ..Holdings::default()
+        };
+        assert!(hire_menu(&opening, &catalog, &holding(0), 600, books).is_none());
+        assert!(hire_menu(&opening, &catalog, &holding(600), 600, books).is_none());
+        // A few Strands over isn't a hire's worth, nor are a few units
+        assert!(hire_menu(&opening, &catalog, &holding(605), 600, books).is_none());
+        let few = Opening { most: 6, ..opening.clone() };
+        assert!(hire_menu(&few, &catalog, &holding(900), 600, books).is_none());
+        let (question, menu) = hire_menu(&opening, &catalog, &holding(900), 600, books).unwrap();
+        let fair_plank = fair(&catalog, &opening.work, books).unwrap();
+        assert_eq!(
+            question,
+            Question::Hire {
+                work: "craft plank at a sawbench".into(),
+                rate_for: crate::wages::rate_for(&opening.work, &catalog),
+                fair: Some(fair_plank),
+                line: 600,
+            }
+        );
+        assert_eq!(
+            menu,
+            vec![
+                Choice::Hire {
+                    rate: Span::new(1, fair_plank * 2),
+                    cap: Span::new(1, 30)
+                },
+                Choice::Pass
+            ]
+        );
+        // What a cap of planks takes from the pack
+        assert_eq!(opening.stock_for(&catalog, 7), vec![("log".to_string(), 3)]);
+        assert!(Opening {
+            work: gather("grass"),
+            most: GATHER_CAP,
+            stock: Vec::new()
+        }
+        .stock_for(&catalog, 10)
+        .is_empty());
     }
 
     /// At the books' targets, the Flint form's default rate for planks

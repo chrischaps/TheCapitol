@@ -88,6 +88,15 @@ mix = { dedicated = 0.05, regular = 0.30, casual = 0.55, lapsed = 0.10 }
 [callings]
 mix = { specialist = 0.4, leaner = 0.4, all-rounder = 0.2 }
 
+# When citizens hire (Callings K2.4): a citizen with a station or a lot its
+# stint leaves idle offers piece-rate work there, escrowed as anyone's is,
+# once it holds Strands over its line. The line is this for a middling
+# citizen, half again for the thriftiest and half for the free-handed.
+# It takes its offers down at dusk, as it signs off, when it wants the
+# place back, and under half its line.
+[hiring]
+line = 600
+
 [[citizen]]
 name = "Ada Reeder"
 role = "gatherer-fiber"

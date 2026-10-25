@@ -435,6 +435,15 @@ pub fn question(q: &Question) -> String {
                 "{employer} offers piece-rate work: {work}, at {rate} Strands a unit, up to {left} more, for the next {ends:.0} game hours. Working steadily it pays about {pays} Strands a game hour, paid for each unit as it's made, from escrow. {own} Take the work, or leave it?"
             )
         }
+        Question::Hire { work, rate_for, fair, line } => {
+            let pays = match fair {
+                Some(f) => format!("The trade that does it earns about {f} Strands a unit at today's prices"),
+                None => format!("Today's prices can't say what the trade earns; the usual starting rate is {rate_for} Strands a unit"),
+            };
+            format!(
+                "Your stint leaves a place of yours idle, and you could hire someone to work it: {work}. {pays}. You keep {line} Strands back before you hire, and you're over that. The pay for every unit is escrowed when you offer it, with the court's fee on top, and what isn't earned comes back when you take the offer down. Offer the work, or leave it?"
+            )
+        }
         Question::Guild { guilds } => {
             let each: Vec<String> = guilds
                 .iter()
@@ -514,6 +523,7 @@ pub fn label(c: &Choice) -> String {
         Choice::Pass => "pass".into(),
         Choice::Post { item, .. } => format!("post for {item}"),
         Choice::TakeWork => "take the work".into(),
+        Choice::Hire { .. } => "hire".into(),
         Choice::Apply { guild } => format!("join {guild}"),
         Choice::Stay => "stay out".into(),
         Choice::Take { job, .. } => doing(job),
@@ -628,6 +638,11 @@ pub fn entry(c: &Choice) -> String {
             range(price)
         ),
         Choice::TakeWork => "Take the work: walk there and work the shift through your working hours, paid for each unit as it's made".into(),
+        Choice::Hire { rate, cap } => format!(
+            "Offer the work at {} Strands a unit, for up to {} units, all of it escrowed; it comes down at the end of your day or when you want the place back",
+            range(rate),
+            count(cap)
+        ),
         Choice::Apply { guild } => format!("Ask to join {guild}, or accept its invitation: an officer takes you in"),
         Choice::Stay => "Stay out of these guilds for today, and decline any invitation".into(),
         Choice::Take { job, setup, pays } => {

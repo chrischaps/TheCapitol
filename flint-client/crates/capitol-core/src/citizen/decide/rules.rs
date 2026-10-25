@@ -61,6 +61,14 @@
 //! who'd sooner their own trade; less for the careful, since a wage is a
 //! sure thing. With nothing at the books to go by, the careful take it.
 //!
+//! Hiring (Callings K2.4, [`hire`]): a citizen with Strands over its line
+//! offers work at a station or on a lot its stint leaves idle, the more
+//! readily the further over the line it is, and the less thrifty. It pays
+//! what the work earns its trade at the books (or, with none, the form's
+//! half the target), more for the free-handed and less for the thrifty
+//! ([`wage::hire_rate`]), for as many units as its Strands over the line
+//! escrow. Passing is a steady [`PASS`].
+//!
 //! Guilds (Commons S4.5, [`guild`]): a citizen asks to join a guild for its
 //! trade the more readily the more sociable, and one that invited it more
 //! readily still. A middling citizen joins its trade's guild; a reserved
@@ -75,7 +83,8 @@
 //! pull on it adds up to [`PULL`], and the job it's at is worth
 //! [`MOMENTUM`] more until its stint's least length ([`least_stint`]).
 
-use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Temperament, Verdict};
+use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Span, Temperament, Verdict};
+use crate::sim::wage;
 use crate::sim::{Role, BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
 
 /// What "what the rules would do" is worth.
@@ -249,6 +258,7 @@ impl Decider for RulesDecider {
                 // Passing is a steady PASS, on the board and a wage alike
                 Choice::Pass => (PASS, Decision::plain(i)),
                 Choice::TakeWork => wage(s, i),
+                Choice::Hire { rate, cap } => hire(s, i, rate, cap),
                 Choice::Apply { guild: name } => guild(s, i, name),
                 Choice::Stay => (PASS, Decision::plain(i)),
                 Choice::Take { job, setup, pays } => (stint(s, job, *setup, *pays), Decision::plain(i)),
@@ -541,6 +551,44 @@ fn wage(s: &Situation, i: usize) -> (f64, Decision) {
         None => 0.35 + 0.5 * (1.0 - t.risk as f64),
     };
     (u, Decision::plain(i))
+}
+
+/// Offering work (K2.4): worth more the further its Strands are over its
+/// line, up to as far again, and less the thriftier,
+///
+/// ```text
+/// u = 0.45 + 0.45 · min(1, (strands − line) / line) − 0.3 · (thrift − 0.5)
+/// ```
+///
+/// so a middling citizen hires once it's more than a tenth over its line,
+/// and a thrifty one once it's nearly half over. The rate is
+/// [`wage::hire_rate`], and the units as many as the Strands over the line
+/// escrow with the court's fee, up to the most there are. One that can't
+/// escrow a unit is worth nothing.
+fn hire(s: &Situation, i: usize, rate: &Span<i64>, cap: &Span<i32>) -> (f64, Decision) {
+    let none = Decision {
+        pick: i,
+        price: Some(rate.min),
+        quantity: Some(cap.min),
+    };
+    let Question::Hire { rate_for, fair, line, .. } = &s.question else {
+        return (0.0, none);
+    };
+    let t = &s.who.temperament;
+    let r = rate.clamp(wage::hire_rate(*rate_for, *fair, t));
+    let budget = s.holdings.strands - line;
+    let n = wage::affordable(r, cap.max, budget);
+    if n < cap.min {
+        return (0.0, none);
+    }
+    let over = (budget as f64 / (*line).max(1) as f64).clamp(0.0, 1.0);
+    let u = 0.45 + 0.45 * over - 0.3 * (t.thrift as f64 - 0.5);
+    let d = Decision {
+        pick: i,
+        price: Some(r),
+        quantity: Some(n),
+    };
+    (u, d)
 }
 
 /// Asking to join the guild named `name` (S4.5): the company of its
@@ -1168,6 +1216,78 @@ mod tests {
         assert_eq!(pick(100, None, with(|t| t.risk = 0.0)), 0);
         assert_eq!(pick(100, None, middling), 0);
         assert_eq!(pick(100, None, with(|t| t.risk = 1.0)), 1);
+    }
+
+    fn hiring(strands: i64, line: i64, fair: Option<i64>, t: Temperament) -> Situation {
+        let q = Question::Hire {
+            work: "craft plank at a sawbench".into(),
+            rate_for: 2,
+            fair,
+            line,
+        };
+        let menu = vec![
+            Choice::Hire {
+                rate: Span::new(1, 6),
+                cap: Span::new(1, 36),
+            },
+            Choice::Pass,
+        ];
+        let mut s = situation(q, menu, t);
+        s.holdings.strands = strands;
+        s
+    }
+
+    #[test]
+    fn a_citizen_over_its_line_hires_at_the_fair_rate_for_what_it_can_escrow() {
+        let middling = Temperament::default();
+        // Well over its line: the fair rate, and every unit there is
+        let (d, confidence) = decide(&hiring(1200, 600, Some(3), middling));
+        assert_eq!((d.pick, d.price, d.quantity), (0, Some(3), Some(36)));
+        assert!(confidence >= super::super::RULES_THRESHOLD, "{confidence}");
+        // A little over: as many as the Strands over the line escrow
+        let (d, _) = decide(&hiring(700, 600, Some(3), middling));
+        let n = d.quantity.unwrap();
+        assert_eq!(d.pick, 0);
+        assert!(n < 36 && n == crate::sim::wage::affordable(3, 36, 100), "{n}");
+        // A tenth over isn't enough
+        assert_eq!(decide(&hiring(660, 600, Some(3), middling)).0.pick, 1);
+        // At or under the line, never: nobody hires while broke
+        assert_eq!(decide(&hiring(600, 600, Some(3), middling)).0.pick, 1);
+        assert_eq!(decide(&hiring(0, 600, Some(3), middling)).0.pick, 1);
+        // The thrifty wait to be further over, and pay less; the
+        // free-handed pay more
+        let thrifty = with(|t| t.thrift = 1.0);
+        assert_eq!(decide(&hiring(700, 600, Some(3), thrifty)).0.pick, 1);
+        let (d, _) = decide(&hiring(1500, 600, Some(3), thrifty));
+        assert_eq!((d.pick, d.price), (0, Some(2)));
+        assert_eq!(decide(&hiring(1500, 600, Some(3), with(|t| t.thrift = 0.0))).0.price, Some(4));
+        // With no books, the form's rate
+        assert_eq!(decide(&hiring(1500, 600, None, middling)).0.price, Some(2));
+    }
+
+    /// A middling employer's rate is one a middling worker takes: what the
+    /// work pays it an hour is what its own trade earns there.
+    #[test]
+    fn a_middling_citizen_takes_a_middling_citizens_offer() {
+        use crate::catalog::Catalog;
+        use crate::sim::wage as w;
+        let catalog = Catalog::fallback();
+        let books = |item: &str| catalog.target_price(item);
+        let work = capitol_protocol::rules::wages::Work::Craft {
+            station_id: uuid::Uuid::nil(),
+            recipe_id: "plank".into(),
+        };
+        let middling = Temperament::default();
+        let fair = w::fair(&catalog, &work, books);
+        let (d, _) = decide(&hiring(1500, 600, fair, middling));
+        let rate = d.price.unwrap();
+        let earns = w::earns(Role::Crafter(crate::sim::Craft::Planks), &catalog, books);
+        let pays = w::pays(&catalog, &work, rate).unwrap();
+        assert_eq!(decide(&wage(pays, earns, middling)).0.pick, 0, "{rate}: {pays} against {earns:?}");
+        // A thrifty employer's isn't
+        let (d, _) = decide(&hiring(1500, 600, fair, with(|t| t.thrift = 1.0)));
+        let pays = w::pays(&catalog, &work, d.price.unwrap()).unwrap();
+        assert_eq!(decide(&wage(pays, earns, middling)).0.pick, 1);
     }
 
     fn guilds(guilds: Vec<super::super::GuildSeen>, t: Temperament) -> Situation {

@@ -21,6 +21,7 @@
 
 mod board;
 mod guilds;
+mod hire;
 mod idle;
 mod merchant;
 mod people;
@@ -226,6 +227,7 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
 /// buying a lot to live on first if it has saved enough, and then the
 /// night's work from home. `Ok` once stopped, or away; `Err` when the bot
 /// couldn't start, or the server won't have it back.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn live(
     mut bot: Bot,
     role: Role,
@@ -233,6 +235,7 @@ pub(crate) fn live(
     seed: u64,
     mut mind: Mind,
     voice: Voice,
+    hire_line: i64,
     town: &Tether,
 ) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
@@ -251,6 +254,8 @@ pub(crate) fn live(
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
     citizen.people = true;
     citizen.persona = Some(persona.clone());
+    // The town's line for hiring (K2.4), which its thrift weighs
+    citizen.hiring.base_line = hire_line;
     // Its calling, and the stint it was on and what it did lately, from
     // the side file, so a short session still adds up to a mix (K1.2)
     citizen.calling = persona.calling.clone();
@@ -266,6 +271,15 @@ pub(crate) fn live(
     if ended.is_ok() {
         if let Err(e) = citizen.end_shift("signed_off") {
             town.health(|h| h.failed(format!("stopping its shift: {e}")));
+        }
+        // Its offers of work too (K2.4), and what they left in its boxes,
+        // unless the town is stopping
+        let mut hires = citizen.end_hires("signed_off");
+        if hires.is_ok() && !town.stopped() {
+            hires = citizen.collect_boxes();
+        }
+        if let Err(e) = hires {
+            town.health(|h| h.failed(format!("taking its offers of work down: {e}")));
         }
         // A guild day's deposit it hasn't made, before it goes (S4.5)
         if let Err(e) = citizen.pay_in_on_leaving() {
@@ -348,6 +362,7 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::Road { .. }, Some(Action::Road(_)))
         | (Choice::Claim { .. } | Choice::Deliver { .. }, Some(Action::Board(_)))
         | (Choice::TakeWork, Some(Action::Wage(_)))
+        | (Choice::Hire { .. }, Some(Action::Hire(_)))
         | (Choice::Apply { .. }, Some(Action::Guild(_)))
         | (Choice::Post { .. }, Some(Action::Trade(Trade::Post { .. })))
         | (Choice::Rest | Choice::Hall, None) => true,
@@ -435,6 +450,9 @@ struct SimBot {
     /// Its guild as it last read it, and what it has done about guilds
     /// (S4.5). Only a citizen joins one.
     guilds: guilds::Guilds,
+    /// Its offers of work, and the boxes they left (Callings K2.4). Only a
+    /// citizen hires.
+    hiring: hire::Hiring,
     /// The lot it last took its stations down on to pack again (#405):
     /// once a lot, so a packing that comes out no better doesn't go round.
     repacked: Option<Uuid>,
@@ -453,6 +471,9 @@ enum Action {
     Board(board::BoardAct),
     /// Work taken for a wage, or a unit of its shift (S2.8).
     Wage(wages::WageAct),
+    /// Work offered at a place of its own, or a box a hire left brought
+    /// home (Callings K2.4).
+    Hire(hire::HireAct),
     /// Joining a guild, paying in or leaving (S4.5), between its other
     /// business: never a round of its own.
     Guild(guilds::GuildAct),
@@ -498,6 +519,7 @@ impl SimBot {
             board: board::Board::new(),
             wages: wages::Wages::new(),
             guilds: guilds::Guilds::new(),
+            hiring: hire::Hiring::new(),
             repacked: None,
         }
     }
@@ -583,6 +605,17 @@ impl SimBot {
             // stands, before the round's own business
             self.read_guild()?;
             self.mind_guild(phase, town)?;
+            // Its offers of work (K2.4): any whose place its stint wants
+            // back, or all once its money runs low, come down
+            match self.mind_hires() {
+                Ok(()) => {}
+                Err(e) if e.is_final() => return Err(e),
+                Err(e) => {
+                    if let Some(town) = town {
+                        town.health(|h| h.failed(format!("taking an offer of work down: {e}")));
+                    }
+                }
+            }
             let holdings = self.holdings();
             // A lot with no room for the rest of its chain, that would have
             // it packed again, is (#405): planned again with its kits home
@@ -605,6 +638,8 @@ impl SimBot {
             let board = if self.people { self.choose_board(&holdings) } else { None };
             // Then work for a wage (S2.8): its shift, or work it takes
             let wage = if board.is_none() { self.choose_wage(&holdings, phase) } else { None };
+            // Then hiring (K2.4): a box a hire left, or work it offers
+            let hire = if board.is_none() && wage.is_none() { self.choose_hire(&holdings, phase) } else { None };
             // What to work on, at the job of the moment, then whether to
             // trade first (C1.3). On a shift, the employer's work is its work
             let errand = match self.job().errands_at(&catalog, &holdings, self.commitment()) {
@@ -621,7 +656,7 @@ impl SimBot {
                 Err(_) => self.choose_road(&holdings, None),
             };
             let trade = match &errand {
-                _ if road.is_some() || board.is_some() => None,
+                _ if road.is_some() || board.is_some() || hire.is_some() => None,
                 // No market in the night's work (#276)
                 Ok(Some(errand)) if self.trading && !self.night_shift => self.choose_trade(&holdings, errand),
                 _ => None,
@@ -641,6 +676,7 @@ impl SimBot {
             let action = match (board, wage, road, step, trade) {
                 (Some(act), ..) => Ok(Some(Action::Board(act))),
                 (None, Some(act), ..) => Ok(Some(Action::Wage(act))),
+                _ if hire.is_some() => Ok(hire.map(Action::Hire)),
                 (None, None, Some(lesson), _, _) => Ok(Some(Action::Road(lesson))),
                 (None, None, None, _, Some(trade)) => Ok(Some(Action::Trade(trade))),
                 _ if phase == Some(Phase::Market) => Ok(Some(Action::Market)),
@@ -663,6 +699,7 @@ impl SimBot {
                         Action::Road(lesson) => self.walk_road(*lesson),
                         Action::Board(act) => self.board_act(act),
                         Action::Wage(act) => self.wage_act(act),
+                        Action::Hire(act) => self.hire_act(act),
                         Action::Guild(act) => self.guild_act(act),
                     };
                     if errand_label.is_some() {
@@ -783,6 +820,7 @@ impl SimBot {
             Action::Road(step) => format!("the road in: {}", road_in::does(*step)),
             Action::Board(act) => act.label(),
             Action::Wage(act) => act.label(),
+            Action::Hire(act) => act.label(),
             Action::Guild(act) => act.label(),
         }
     }
@@ -796,7 +834,9 @@ impl SimBot {
             Action::Step(step) => (job, activity::is_setup(catalog, goal, step)),
             Action::Trade(Trade::Sell { .. } | Trade::Buy { .. } | Trade::Bid { .. }) => (job, false),
             Action::Trade(Trade::Stock { .. } | Trade::MakeMarket) => (Activity::Trading, false),
-            Action::Trade(Trade::Post { .. }) | Action::Board(_) | Action::Wage(_) | Action::Guild(_) => (Activity::Commons, false),
+            Action::Trade(Trade::Post { .. }) | Action::Board(_) | Action::Wage(_) | Action::Hire(_) | Action::Guild(_) => {
+                (Activity::Commons, false)
+            }
             Action::Road(_) => (Activity::RoadIn, false),
             Action::Market => (Activity::Free, false),
         }
@@ -892,6 +932,13 @@ impl SimBot {
             Ok(()) => {}
             Err(e) if e.is_final() => return Err(e),
             Err(e) => town.health(|h| h.failed(format!("stopping its shift: {e}"))),
+        }
+        // and the work it offered (K2.4), and what that left in its boxes
+        // comes home with it
+        match self.end_hires("day").and_then(|()| self.collect_boxes()) {
+            Ok(()) => {}
+            Err(e) if e.is_final() => return Err(e),
+            Err(e) => town.health(|h| h.failed(format!("taking its offers of work down: {e}"))),
         }
         self.at_market = false;
         self.spot = None;
@@ -1222,7 +1269,10 @@ impl SimBot {
                     }
                 }
                 // Wages (S2.8): the board's offers, its pay, and a shift's end
-                StateEvent::WageBoard(offer) => self.wages.update(offer),
+                StateEvent::WageBoard(offer) => {
+                    self.hire_heard(&offer);
+                    self.wages.update(offer)
+                }
                 StateEvent::WagePaid {
                     item_type, units, paid, ..
                 } => self.entries.push(Entry::Earned {

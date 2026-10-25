@@ -104,6 +104,21 @@ pub enum Entry {
     /// A shift of its ended, `why` in a word (`cap`, `day`, `employer`),
     /// with `made` units made on it.
     ShiftEnded { why: String, made: i32 },
+    /// It offered piece-rate work (Callings K2.4): `work` in a few words, at
+    /// `rate` a unit for up to `cap`, all of it escrowed, and the court's
+    /// `fee` on top.
+    Hired { work: String, rate: i64, cap: i32, fee: i64 },
+    /// An offer of its came down, `why` in a word (`filled`, `day`,
+    /// `wanted`, `low`, `signed_off`, `expired`), with `made` units made on
+    /// it, `paid` for them from the escrow, and `refunded` what was left of
+    /// it.
+    HireEnded {
+        work: String,
+        why: String,
+        made: i32,
+        paid: i64,
+        refunded: i64,
+    },
     /// It asked to join `guild`, or accepted its invitation (Commons S4.5).
     Applied { guild: String },
     /// It's in `guild` now.
@@ -159,6 +174,8 @@ impl BotRun {
                 Entry::Delivered { paid, .. } => expected += paid,
                 Entry::Expired { refunded, .. } => expected += refunded,
                 Entry::Earned { paid, .. } => expected += paid,
+                Entry::Hired { rate, cap, fee, .. } => expected -= rate * *cap as i64 + fee,
+                Entry::HireEnded { refunded, .. } => expected += refunded,
                 Entry::PaidIn { strands, .. } => expected -= strands,
                 Entry::GuildShare { strands, .. } => expected += strands,
                 _ => {}
@@ -270,8 +287,8 @@ impl Court {
     }
 }
 
-/// What citizens earned working for others (Commons S2.8), every bot
-/// together.
+/// What citizens earned working for others (Commons S2.8), and paid
+/// others to work for them (Callings K2.4), every bot together.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Wages {
     /// Shifts taken
@@ -281,6 +298,15 @@ pub struct Wages {
     pub earned: i64,
     /// Shifts ended, by why
     pub ended: BTreeMap<String, usize>,
+    /// Offers of work made, and those that came down with work done on them
+    pub offers: usize,
+    pub worked: usize,
+    /// Units bought on them, what they were paid, and the court's fees
+    pub bought: i64,
+    pub paid: i64,
+    pub fees: i64,
+    /// Offers taken down, by why
+    pub closed: BTreeMap<String, usize>,
 }
 
 impl Wages {
@@ -297,6 +323,16 @@ impl Wages {
                 self.earned += paid;
             }
             Entry::ShiftEnded { why, .. } => *self.ended.entry(why.clone()).or_insert(0) += 1,
+            Entry::Hired { fee, .. } => {
+                self.offers += 1;
+                self.fees += fee;
+            }
+            Entry::HireEnded { why, made, paid, .. } => {
+                self.worked += usize::from(*made > 0);
+                self.bought += *made as i64;
+                self.paid += paid;
+                *self.closed.entry(why.clone()).or_insert(0) += 1;
+            }
             _ => {}
         }
     }
@@ -672,7 +708,11 @@ impl Report {
                     | Entry::Expired { .. }
                     | Entry::Lapsed { .. } => {}
                     // Counted by the wages
-                    Entry::TookWork { .. } | Entry::Earned { .. } | Entry::ShiftEnded { .. } => {}
+                    Entry::TookWork { .. }
+                    | Entry::Earned { .. }
+                    | Entry::ShiftEnded { .. }
+                    | Entry::Hired { .. }
+                    | Entry::HireEnded { .. } => {}
                     // Counted by the guilds
                     Entry::Applied { .. }
                     | Entry::Joined { .. }
@@ -972,6 +1012,15 @@ impl Report {
                 "- Shifts taken: {}; ended: {ended}\n- Units made for employers: {}, paid {} Strands from their escrow",
                 w.shifts, w.units, w.earned
             );
+            if w.offers > 0 {
+                let closed: Vec<String> = w.closed.iter().map(|(why, n)| format!("{n} {}", closed_words(why))).collect();
+                let closed = if closed.is_empty() { "none yet".to_string() } else { closed.join(", ") };
+                let _ = writeln!(
+                    md,
+                    "- Offers of work made: {}, {} of them worked; taken down: {closed}\n- Units bought on them: {}, paid {} Strands, and {} in the court's fees",
+                    w.offers, w.worked, w.bought, w.paid, w.fees
+                );
+            }
         }
         if self.guilds.busy() {
             let g = &self.guilds;
@@ -1097,6 +1146,20 @@ fn ended_words(why: &str) -> String {
         "employer" => "by the employer".into(),
         "failed" => "when the work failed".into(),
         "worker" => "by the worker".into(),
+        why => why.replace('_', " "),
+    }
+}
+
+/// Why an offer of work came down, as the wages section says it.
+fn closed_words(why: &str) -> String {
+    match why {
+        "filled" => "at the cap".into(),
+        "expired" => "at its end".into(),
+        "day" => "at the end of a day".into(),
+        "wanted" => "wanted back for a stint".into(),
+        "low" => "as the money ran low".into(),
+        "signed_off" => "as the employer signed off".into(),
+        "gone" => "with the place gone".into(),
         why => why.replace('_', " "),
     }
 }
@@ -1488,6 +1551,41 @@ mod tests {
         assert!(md.contains("Shifts taken: 2; ended: 1 at the cap, 1 at the end of a day"), "{md}");
         assert!(md.contains("Units made for employers: 6, paid 12 Strands"), "{md}");
         assert!(!Report::build(&[], 1.0, 1.0, 60.0).sections().contains("## Wages"));
+    }
+
+    /// Callings K2.4: an employer's offers, what it bought on them and
+    /// what came back, with its escrow no tax.
+    #[test]
+    fn hires_are_counted_and_their_escrow_is_no_tax() {
+        let hired = |cap| Entry::Hired {
+            work: "craft plank at a sawbench".into(),
+            rate: 3,
+            cap,
+            fee: 2,
+        };
+        let ended = |why: &str, made: i32, cap: i32| Entry::HireEnded {
+            work: "craft plank at a sawbench".into(),
+            why: why.into(),
+            made,
+            paid: 3 * made as i64,
+            refunded: 3 * (cap - made) as i64,
+        };
+        let employer = BotRun {
+            name: "Ada".into(),
+            role: "gatherer-fiber".into(),
+            entries: vec![hired(30), ended("day", 12, 30), hired(30), ended("filled", 30, 30), hired(10), ended("wanted", 0, 10)],
+            strands_start: 1000,
+            // 126 paid for 42 planks, and 6 in fees
+            strands_end: 1000 - 126 - 6,
+            error: None,
+        };
+        assert_eq!(employer.tax(), 0);
+        let report = Report::build(&[employer], 1.0, 1.0, 60.0);
+        let w = &report.wages;
+        assert_eq!((w.offers, w.worked, w.bought, w.paid, w.fees), (3, 2, 42, 126, 6));
+        let md = report.sections();
+        assert!(md.contains("Offers of work made: 3, 2 of them worked; taken down: 1 at the end of a day, 1 at the cap, 1 wanted back for a stint"), "{md}");
+        assert!(md.contains("Units bought on them: 42, paid 126 Strands, and 6 in the court's fees"), "{md}");
     }
 
     #[test]

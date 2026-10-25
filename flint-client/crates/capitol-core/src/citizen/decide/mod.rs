@@ -267,6 +267,20 @@ pub enum Question {
         pays: i64,
         earns: Option<i64>,
     },
+    /// Whether to offer piece-rate work (Callings K2.4): `work` (`craft
+    /// plank at a sawbench`, `gather grass`) at a station or on a lot of its
+    /// own that its stint leaves idle. `rate_for` is the Flint form's
+    /// starting rate, half the good's target; `fair` what a unit earns the
+    /// trade that does it at the citizen's books, `None` when they can't
+    /// say; `line` the Strands it keeps back before it hires, which its
+    /// [`Held::strands`] are over.
+    Hire {
+        work: String,
+        rate_for: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fair: Option<i64>,
+        line: i64,
+    },
     /// Whether to ask to join one of `guilds`, or stay out of them all
     /// (Commons S4.5). Asked once a game day of a citizen in no guild, and
     /// at once when a guild invites it.
@@ -334,6 +348,7 @@ impl Question {
             Question::Road { .. } => "road".into(),
             Question::Commission { id, .. } => format!("commission {id}"),
             Question::Wage { id, .. } => format!("wage {id}"),
+            Question::Hire { work, .. } => format!("hire {work}"),
             Question::Guild { .. } => "guild".into(),
             Question::Stint { .. } => "stint".into(),
         }
@@ -485,6 +500,13 @@ pub enum Choice {
     /// each unit as it's made, until the cap, the end of its day, or the
     /// employer stops it. On the menu beside [`Pass`](Self::Pass).
     TakeWork,
+    /// Offer piece-rate work (Callings K2.4): `rate` Strands a unit, for up
+    /// to `cap` units, all of it escrowed with the court's fee on top, so it
+    /// can't breach. It's taken down at the end of the citizen's day, when
+    /// it wants the place back for a stint, or when its money runs low. On
+    /// the menu beside [`Pass`](Self::Pass). Needs a price (the rate) and a
+    /// quantity (the cap).
+    Hire { rate: Span<i64>, cap: Span<i32> },
     /// Ask to join the guild named `guild` (S4.5), or accept its invitation:
     /// an officer or its leader takes it in, for a Strand from its treasury.
     Apply { guild: String },
@@ -515,7 +537,8 @@ impl Choice {
             | Choice::Bid { price, quantity, .. }
             | Choice::Stock { price, quantity, .. }
             | Choice::BuyFrom { price, quantity, .. }
-            | Choice::Post { price, quantity, .. } => (Some(*price), Some(*quantity)),
+            | Choice::Post { price, quantity, .. }
+            | Choice::Hire { rate: price, cap: quantity } => (Some(*price), Some(*quantity)),
             Choice::Counter { strands } | Choice::Pay { strands } => (Some(*strands), None),
             Choice::SellTo { quantity, .. } | Choice::Claim { quantity } | Choice::Deliver { quantity } => (None, Some(*quantity)),
             _ => (None, None),
