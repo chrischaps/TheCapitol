@@ -288,6 +288,8 @@ pub struct CapitolExtension {
     /// sample numbers.
     dev: ui::dev_overlay::DevOverlay,
     dev_sample: bool,
+    /// The frame's instant, paced like dt (#406): what the session samples at.
+    frame: capitol_core::frame_time::FrameInstant,
     /// The admin's world layer on F6 (D5.3).
     layer: crate::debug_layers::Layer,
     /// The player's settings, and the file they're kept in (P8.4).
@@ -411,6 +413,7 @@ impl CapitolExtension {
             shortcuts: ui::shortcuts::Shortcuts::default(),
             dev: ui::dev_overlay::DevOverlay::default(),
             dev_sample: false,
+            frame: Default::default(),
             layer: Default::default(),
             settings: SettingsFile::load(crate::settings::Settings::PATH),
             settings_panel: ui::settings::SettingsPanel::default(),
@@ -1704,7 +1707,15 @@ impl PlayerExtension for CapitolExtension {
     }
 
     fn pre_update(&mut self, ctx: &mut ExtensionCtx) {
-        let now = Instant::now();
+        // Paced like the engine's dt, so the avatars step evenly when vsync
+        // lets frames through in bursts (#406). A `--frame-step` capture keeps
+        // the wall clock, as before.
+        let wall = Instant::now();
+        let now = if ctx.clock.frame_step.is_some() {
+            wall
+        } else {
+            self.frame.advance(wall, ctx.clock.delta_time)
+        };
         self.dev.record(ctx.clock.delta_time, ctx.world.entity_count());
         if ctx.input.is_action_just_pressed("dev_overlay") {
             self.dev.toggle();
@@ -2559,7 +2570,7 @@ impl PlayerExtension for CapitolExtension {
                     session.set_tutorial_dismissed(false);
                 }
                 if let (true, Some(shown)) = (clicks.shown_lot, &self.shown_lot) {
-                    session.move_to(Instant::now(), shown.x, shown.y);
+                    session.move_to(self.frame.now_or(Instant::now()), shown.x, shown.y);
                 }
                 if clicks.work {
                     self.gazette.open_work();
@@ -2636,7 +2647,7 @@ impl PlayerExtension for CapitolExtension {
                 action = self.form.show(ctx, &view, opacity);
             }
             if !at_login {
-                let now = Instant::now();
+                let now = self.frame.now_or(Instant::now());
                 // Enter crafts at the open station, else on the crafting
                 // panel, when either is set to a recipe; otherwise it talks.
                 let enter = std::mem::take(&mut self.craft_key);
@@ -3092,7 +3103,7 @@ impl PlayerExtension for CapitolExtension {
                 if let Some(action) = asked {
                     act_on_trade(session, action, now);
                 }
-                let refused = session.move_refused(Instant::now());
+                let refused = session.move_refused(now);
                 let state = session.state();
                 let clicks = self.inventory.show(
                     ctx,

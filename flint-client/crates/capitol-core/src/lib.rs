@@ -8,6 +8,8 @@
 //!   `NetEvent` and returns the [`state::StateEvent`]s the game reacts to.
 //! - [`motion`]: smooth positions. [`motion::Motion`] draws other players
 //!   150 ms behind between snapshots and predicts the local player's walk.
+//! - [`frame_time`]: the frame's instant to sample them at, paced like the
+//!   engine's dt so bursty vsync doesn't judder them (#406).
 //! - [`harvest`]: clicking a node: extract it, or walk there and extract
 //!   on arrival.
 //! - [`craft`]: crafting by hand: the recipe the inputs make, what's
@@ -66,6 +68,7 @@ pub mod commissions;
 pub mod citizen;
 pub mod craft;
 pub mod focus;
+pub mod frame_time;
 pub mod deeds;
 pub mod exchange;
 pub mod gazette;
