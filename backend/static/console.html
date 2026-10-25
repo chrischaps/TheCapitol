@@ -235,8 +235,9 @@
       <article class="story">
         <h2 class="head">The queues</h2>
         <p class="headline" id="queues-headline">Waiting for the first sample.</p>
-        <p class="dek">Commands waiting for each tick, from the players' sockets and the routes: the mean a tick and the 99th percentile's bucket. Under it, the game's event bus: the backlog of its slowest reader, and the events readers missed by falling behind it, which makes a socket resync.</p>
+        <p class="dek">Commands waiting for each tick, from the players' sockets and the routes: the mean a tick and the 99th percentile's bucket. Under it, the writer: the gathers and crafts the ticks handed it that it hasn't saved, and how long after its tick each batch was saved, which is how late its players heard. Then the game's event bus: the backlog of its slowest reader, and the events readers missed by falling behind it, which makes a socket resync.</p>
         <div class="chart chart-short" id="chart-commands"></div>
+        <div class="chart chart-short" id="chart-writer"></div>
         <div class="chart chart-short" id="chart-bus"></div>
       </article>
 

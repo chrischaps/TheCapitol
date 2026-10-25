@@ -210,6 +210,25 @@ pub struct Load {
     /// The deepest the queue has been when a tick took it up
     #[serde(default)]
     pub command_queue_max: u64,
+    /// Gathers and crafts the ticks handed the writer (`loops.writer`) that
+    /// it hasn't written yet, now (#407). A writer falling behind shows here
+    /// first: the tick doesn't slow, its saves just wait longer.
+    #[serde(default)]
+    pub writer_queued: u64,
+    /// The most that have waited at once
+    #[serde(default)]
+    pub writer_queue_max: u64,
+    /// Ticks' saves the writer has written, each tick's as one batch
+    #[serde(default)]
+    pub writer_batches: u64,
+    /// Seconds those batches waited, all told, from the tick handing them
+    /// over to the last of them written: how late their gatherers and
+    /// crafters heard
+    #[serde(default)]
+    pub writer_lag_secs: f64,
+    /// The longest a batch has waited, in ms
+    #[serde(default)]
+    pub writer_lag_max_ms: f64,
 }
 
 /// One phase of the tick, or one loop beside it, as running totals.
@@ -595,6 +614,13 @@ pub struct LoadWindow {
     /// or with no ticks or no buckets
     #[serde(default)]
     pub command_queue_p99: Option<f64>,
+    /// Saves waiting for the writer at the window's end (#407)
+    #[serde(default)]
+    pub writer_queued: u64,
+    /// The mean wait of the window's batches, from the tick to written, in
+    /// ms; `None` with none written
+    #[serde(default)]
+    pub writer_lag_ms: Option<f64>,
 }
 
 /// One phase, or one loop, between two loads.
@@ -695,6 +721,11 @@ impl LoadWindow {
                 .collect(),
             commands: b.commands.saturating_sub(a.commands),
             command_queue_p99: if depth_runs > 0 { percentile(&COMMAND_BUCKETS, &depths, depth_runs, 0.99) } else { None },
+            writer_queued: b.writer_queued,
+            writer_lag_ms: match b.writer_batches.saturating_sub(a.writer_batches) {
+                0 => None,
+                n => Some((b.writer_lag_secs - a.writer_lag_secs).max(0.0) * 1000.0 / n as f64),
+            },
         }
     }
 }
@@ -955,5 +986,18 @@ mod tests {
         let w = LoadWindow::between(&a, &b, 10.0);
         assert_eq!(w.commands, 76);
         assert_eq!(w.command_queue_p99, Some(5.0));
+    }
+
+    /// The writer's backlog is the window's end, and its lag the window's
+    /// batches' mean (#407)
+    #[test]
+    fn a_load_window_reads_the_writers_backlog_and_lag() {
+        let a = Load { writer_batches: 10, writer_lag_secs: 0.5, ..Load::default() };
+        let quiet = LoadWindow::between(&a, &a, 10.0);
+        assert_eq!((quiet.writer_queued, quiet.writer_lag_ms), (0, None), "nothing written, no lag to say");
+        let b = Load { writer_queued: 7, writer_batches: 30, writer_lag_secs: 0.9, ..a.clone() };
+        let w = LoadWindow::between(&a, &b, 10.0);
+        assert_eq!(w.writer_queued, 7);
+        assert!((w.writer_lag_ms.unwrap() - 20.0).abs() < 1e-9, "0.4 s over 20 batches");
     }
 }
