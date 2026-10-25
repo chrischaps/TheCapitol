@@ -150,12 +150,12 @@ Weekly, from records the city already keeps.
 
 ### D11. Citizens in the commons
 
-*Planned (callings, #526):* a citizen answers and posts for every trade it's willing to work, not only its role's (K1.2 #531, K1.4 #533, K2.3 #537).
+*Callings (#526):* since K1.2 (#531) a citizen answers commissions, takes wage work and joins guilds for every job it's willing to work (`sim::stint::willing`: its favourite, the job of the moment, and any its calling gives 5% or more), not only its role's, and a claim on another job's goods pulls its next stint to that job. Anyone willing to mine counts the wild veins. It still posts and bids for the job of the moment's inputs; across all its jobs is K1.4 (#533), and patrons K2.3 (#537).
 
 - They speak from a rules phrasebook keyed by temperament and seeded, so a replay says the same. #311 is the Claude layer over the same `Speaker` seam.
-- They claim and deliver commissions. Ore gatherers count the wild veins in time to deliver, so a good price sends them to the ranges.
+- They claim and deliver commissions. Those willing to mine count the wild veins in time to deliver, so a good price sends them to the ranges.
 - Crafters post commissions for inputs their bids haven't filled.
-- They take wages in their own working hours, and join guilds whose charter names their trade.
+- They take wages in their own working hours, and join guilds whose charter names one of their trades.
 - Every line and every record carries the citizen's mark.
 
 ## 5. Architecture notes

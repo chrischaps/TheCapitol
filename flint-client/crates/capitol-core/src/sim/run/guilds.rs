@@ -269,7 +269,9 @@ impl SimBot {
             .iter()
             .filter_map(|g| Some((g, self.guilds.charters.get(&g.id)?.as_str())))
             .collect();
-        let seen = guild::seen(self.role, &listed, &invited, &applied);
+        // The guilds of every trade it's willing to work at, its favourite's
+        // first (Callings K1.2)
+        let seen = guild::seen(&self.willing(), &listed, &invited, &applied);
         if seen.is_empty() {
             return Ok(None);
         }

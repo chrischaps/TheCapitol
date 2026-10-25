@@ -7,16 +7,18 @@
 //!   all it owes at the grade (or the claim is nearly out), it walks to the
 //!   hall and delivers, before anything else that day. Until then its work
 //!   makes what it owes ([`Holdings::owed`]), and it sells none of it.
-//! - **Answering.** A commission for something its trade makes
-//!   ([`Role::answers`](crate::sim::Role::answers)) is a question
-//!   ([`Question::Commission`]): claim up to a day's work of it, deliver
-//!   what it holds, or pass. One a round, the best paid first, and one it
-//!   passed isn't asked about again for [`ASK_AGAIN`].
+//! - **Answering.** A commission for something one of its willing jobs
+//!   makes ([`Role::answers`](crate::sim::Role::answers), Callings K1.2:
+//!   its favourite, the job it's at, and those its calling leans to) is a
+//!   question ([`Question::Commission`]): claim up to a day's work of it,
+//!   deliver what it holds, or pass. One a round, the best paid first, and
+//!   one it passed isn't asked about again for [`ASK_AGAIN`]. A claim it
+//!   takes for another job's goods pulls it toward that job's stint.
 //! - **Making it in time.** A claim is offered only for what it can make at
-//!   the grade where it goes ([`ground`]) in the time a claim runs. An ore
-//!   gatherer counts the wild veins: a grade the rural ring can't give, or a
-//!   price that pays the walk ([`WILD_PAY`]), sends it to the ranges, and it
-//!   gathers only there until the claim is kept.
+//!   the grade where it goes ([`ground`]) in the time a claim runs. Anyone
+//!   willing to mine counts the wild veins: a grade the rural ring can't
+//!   give, or a price that pays the walk ([`WILD_PAY`]), sends it to the
+//!   ranges, and it gathers only there until the claim is kept.
 //! - **Posting.** A crafter whose bid for an input has stood a game day
 //!   without a fill posts a commission for it at the bid's price and a
 //!   premium, never with more than [`MAX_POSTS`](crate::sim::MAX_POSTS)
@@ -34,7 +36,7 @@ use uuid::Uuid;
 use super::super::plan::Holdings;
 use super::super::report::Entry;
 use super::super::{Gather, Role, Trade, Wanted, LOT, POST_DAYS, POST_GRADE};
-use super::{Action, SimBot};
+use super::{stint, Action, SimBot};
 use crate::bot::BotError;
 use crate::catalog::Catalog;
 use crate::citizen::decide::{Choice, Question};
@@ -70,8 +72,9 @@ pub(crate) enum Ground {
 /// wilds from the row's floor up to the resource's top and
 /// [`WILD_QUALITY_ADD`]); a citizen counts on the top third of it, since a
 /// node's own quality isn't on the wire (#504). The
-/// wild veins count for an ore gatherer only. A good no node yields is
-/// crafted, and made up to [`MADE_REACH`].
+/// wild veins count for mining only: `role` is the job that answers for
+/// `item`, so they count for anyone willing to mine (Callings K1.2). A
+/// good no node yields is crafted, and made up to [`MADE_REACH`].
 pub(crate) fn ground(role: Role, catalog: &Catalog, item: &str, min_quality: i32) -> Option<Ground> {
     let sources: Vec<_> = catalog.resource_types().iter().filter(|r| r.yields_item == item).collect();
     if sources.is_empty() {
@@ -202,8 +205,9 @@ impl Board {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BoardAct {
     /// Claim `quantity` of commission `id`'s `item`; from the wilds, with
-    /// `wild`
-    Claim { id: Uuid, item: String, quantity: i32, wild: bool },
+    /// `wild`. It `pays` Strands a game hour over the books, which pulls
+    /// on the job that makes it (Callings K1.2)
+    Claim { id: Uuid, item: String, quantity: i32, wild: bool, pays: i64 },
     /// Walk to the hall and deliver `quantity` of `item` to commission `id`
     Deliver { id: Uuid, item: String, quantity: i32 },
 }
@@ -281,7 +285,7 @@ impl SimBot {
                 can_make: false,
                 due_soon,
             };
-            if let Some(act) = self.ask_commission(&c, &wanted, holdings, false) {
+            if let Some(act) = self.ask_commission(&c, &wanted, holdings, false, 0) {
                 return Some(act);
             }
         }
@@ -299,14 +303,16 @@ impl SimBot {
             .iter()
             .filter(|c| c.status == CommissionStatus::Open && c.poster_id != me && !c.withdrawn)
             .filter(|c| !mine.contains(&c.id) && !self.board.passed.contains_key(&c.id))
-            .filter(|c| self.role.answers().contains(&c.item_type.as_str()))
+            .filter(|c| self.answerer(&c.item_type).is_some())
             .cloned()
             .collect();
         open.sort_by_key(|c| std::cmp::Reverse(c.price));
         let catalog = self.bot.state().catalog().clone();
         for c in open {
+            // The willing job that answers for it, whose menu it is
+            let Some(job) = self.answerer(&c.item_type) else { continue };
             let unclaimed = court::unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn);
-            let ground = ground(self.role, &catalog, &c.item_type, c.min_quality);
+            let ground = ground(job, &catalog, &c.item_type, c.min_quality);
             let day_work = day_work(&self.board.made, &c.item_type, worked);
             // In time: a day's work is a game day's, and a claim runs a court
             // day at most, never past the due date
@@ -322,20 +328,25 @@ impl SimBot {
                 due_soon: false,
             };
             // Better ore pays the walk to the ranges
-            let pays = self.worth(&c.item_type).is_some_and(|w| c.price as f64 >= w as f64 * WILD_PAY);
-            let wild = ground == Some(Ground::Wilds) || (pays && self.role == Role::Gatherer(Gather::Ore));
-            if self.role.commission_menu(&wanted).is_none() {
+            let worth = self.worth(&c.item_type);
+            let pays_walk = worth.is_some_and(|w| c.price as f64 >= w as f64 * WILD_PAY);
+            let wild = ground == Some(Ground::Wilds) || (pays_walk && job == Role::Gatherer(Gather::Ore));
+            if job.commission_menu(&wanted).is_none() {
                 continue;
             }
-            return self.ask_commission(&c, &wanted, holdings, wild);
+            let pays = stint::claim_pays(c.price, worth, day_work);
+            return self.ask_commission(&c, &wanted, holdings, wild, pays);
         }
         None
     }
 
     /// The mind's answer about commission `c`, as `wanted` sees it: what
-    /// to do, or `None` to pass (and not be asked again for a while).
-    fn ask_commission(&mut self, c: &Commission, wanted: &Wanted, holdings: &Holdings, wild: bool) -> Option<BoardAct> {
-        let menu = self.role.commission_menu(wanted)?;
+    /// to do, or `None` to pass (and not be asked again for a while). A
+    /// claim of its own is any willing job's to bring in, and one it may
+    /// take, the job's that answers for it.
+    fn ask_commission(&mut self, c: &Commission, wanted: &Wanted, holdings: &Holdings, wild: bool, pays: i64) -> Option<BoardAct> {
+        let job = self.answerer(&c.item_type).unwrap_or(self.job());
+        let menu = job.commission_menu(wanted)?;
         let now = self.bot.state().utc_now();
         let question = Question::Commission {
             id: c.id,
@@ -353,6 +364,7 @@ impl SimBot {
                 item: c.item_type.clone(),
                 quantity: d.quantity?,
                 wild,
+                pays,
             },
             Some((d, Choice::Deliver { .. })) => BoardAct::Deliver {
                 id: c.id,
@@ -372,7 +384,7 @@ impl SimBot {
     /// Does what it chose at the board.
     pub(super) fn board_act(&mut self, act: &BoardAct) -> Result<(), BotError> {
         match act {
-            BoardAct::Claim { id, item, quantity, wild } => {
+            BoardAct::Claim { id, item, quantity, wild, pays } => {
                 let claimed = self.bot.claim_commission(*id, *quantity);
                 self.board.stale();
                 // Refused (someone claimed it first, say): not asked again
@@ -388,6 +400,8 @@ impl SimBot {
                     item: item.clone(),
                     quantity: claimed.claim.quantity,
                 });
+                // A promise of another job's goods pulls it to that job
+                self.pulled(item, *pays);
                 // What it owes counts from now, not at the next read
                 self.board.claims.retain(|c| c.commission_id != *id);
                 self.board.claims.push(claimed.claim);
@@ -448,7 +462,8 @@ impl SimBot {
     pub(super) fn post_wants(&mut self) -> Result<(), BotError> {
         let Some(me) = self.bot.state().me() else { return Ok(()) };
         let day = Duration::from_secs(DAY_LENGTH_SECS as u64);
-        for item in self.role.needs() {
+        let job = self.job();
+        for item in job.needs() {
             let Some(&(since, bid)) = self.board.wanting.get(*item) else { continue };
             let mine: Vec<&Commission> = self
                 .board
@@ -461,7 +476,7 @@ impl SimBot {
             }
             let open = mine.len();
             let holdings = self.holdings();
-            let Some(menu) = self.role.post_menu(&holdings, item, bid, open) else { continue };
+            let Some(menu) = job.post_menu(&holdings, item, bid, open) else { continue };
             let mark = self.mind.mark();
             let pass = menu.len() - 1;
             let trade = match self.decide(Question::Buy { item: item.to_string() }, menu, pass, &holdings) {

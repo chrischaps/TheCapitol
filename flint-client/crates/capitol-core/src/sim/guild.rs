@@ -2,10 +2,10 @@
 //! trade, what it pays in, and when it gives one up. Pure, so it's tested
 //! without a server.
 //!
-//! - **For its trade.** A guild is on a citizen's menu when its name or
-//!   charter names the trade in a word of [`Role::trade_words`]: "ore" for
-//!   an ore gatherer, "planks" for a plank crafter, as whole words, a plural
-//!   or not.
+//! - **For its trades.** A guild is on a citizen's menu when its name or
+//!   charter names one of its willing jobs' trades (Callings K1.2) in a word
+//!   of [`Role::trade_words`]: "ore" for mining, "planks" for sawing, as
+//!   whole words, a plural or not. Its favourite's guilds come first.
 //! - **Paying in.** On a guild day, once a game week ([`guild_day`]), a
 //!   member deposits a tenth of what it gained over the day, never from
 //!   what it keeps back ([`deposit`]).
@@ -33,17 +33,19 @@ pub const CHARTER_SHOWN: usize = 200;
 /// The most guilds on one question's menu.
 pub const MENU_GUILDS: usize = 5;
 
-/// The guilds a citizen of `role` is asked about (S4.5), from the registry
-/// as `listed` has it (the largest first, each with its charter): those for
-/// its trade, and those in `invited`, which come first. Guilds it has
-/// `applied` to already wait on their officers, and aren't asked again. At
-/// most [`MENU_GUILDS`].
-pub fn seen(role: Role, listed: &[(&GuildSummary, &str)], invited: &[Uuid], applied: &HashSet<Uuid>) -> Vec<(Uuid, GuildSeen)> {
-    let mut seen: Vec<(Uuid, GuildSeen)> = listed
+/// The guilds a citizen who works at `jobs` is asked about (S4.5), from the
+/// registry as `listed` has it (the largest first, each with its charter):
+/// those for one of its jobs' trades, and those in `invited`, which come
+/// first. Then those of its first job (its favourite, Callings K1.2), then
+/// the next's. Guilds it has `applied` to already wait on their officers,
+/// and aren't asked again. At most [`MENU_GUILDS`].
+pub fn seen(jobs: &[Role], listed: &[(&GuildSummary, &str)], invited: &[Uuid], applied: &HashSet<Uuid>) -> Vec<(Uuid, GuildSeen)> {
+    let mut seen: Vec<(usize, Uuid, GuildSeen)> = listed
         .iter()
         .filter(|(g, _)| !applied.contains(&g.id))
         .filter_map(|(g, charter)| {
-            let trade = names_trade(role, &g.name, charter);
+            let rank = jobs.iter().position(|&job| names_trade(job, &g.name, charter));
+            let trade = rank.is_some();
             let invited = invited.contains(&g.id);
             (trade || invited).then(|| {
                 let guild = GuildSeen {
@@ -54,14 +56,15 @@ pub fn seen(role: Role, listed: &[(&GuildSummary, &str)], invited: &[Uuid], appl
                     invited,
                     trade,
                 };
-                (g.id, guild)
+                (rank.unwrap_or(jobs.len()), g.id, guild)
             })
         })
         .collect();
-    // Stable: those that asked it first, then the registry's order
-    seen.sort_by_key(|(_, g)| !g.invited);
+    // Stable: those that asked it first, then by its jobs, then the
+    // registry's order
+    seen.sort_by_key(|(rank, _, g)| (!g.invited, *rank));
     seen.truncate(MENU_GUILDS);
-    seen
+    seen.into_iter().map(|(_, id, g)| (id, g)).collect()
 }
 
 /// The menu for [`seen`]: ask to join each, or stay out, last.
@@ -172,18 +175,22 @@ mod tests {
         let listed = [(&diggers, "Miners of the ranges."), (&ore_guild, ""), (&sawyers, "Planks."), (&store, "Shopkeepers.")];
         let names = |seen: &[(Uuid, GuildSeen)]| seen.iter().map(|(_, g)| g.name.clone()).collect::<Vec<_>>();
         // Its trade's, the largest first: by charter, then by name
-        let seen = seen(ore, &listed, &[], &HashSet::new());
+        let seen = seen(&[ore], &listed, &[], &HashSet::new());
         assert_eq!(names(&seen), ["Diggers", "The Ore Guild"]);
         assert!(seen.iter().all(|(_, g)| g.trade && !g.invited));
         // An invitation from another trade's guild comes first
-        let asked = super::seen(ore, &listed, &[sawyers.id], &HashSet::new());
+        let asked = super::seen(&[ore], &listed, &[sawyers.id], &HashSet::new());
         assert_eq!(names(&asked), ["Sawyers", "Diggers", "The Ore Guild"]);
         assert!(asked[0].1.invited && !asked[0].1.trade);
         // One it applied to waits on its officers
         let applied = HashSet::from([diggers.id]);
-        assert_eq!(names(&super::seen(ore, &listed, &[], &applied)), ["The Ore Guild"]);
+        assert_eq!(names(&super::seen(&[ore], &listed, &[], &applied)), ["The Ore Guild"]);
         // A trade no guild names has none
-        assert!(super::seen(Role::Builder, &listed, &[], &HashSet::new()).is_empty());
+        assert!(super::seen(&[Role::Builder], &listed, &[], &HashSet::new()).is_empty());
+        // Several trades (Callings K1.2): every one's guilds, its favourite's first
+        let planks = Role::Crafter(Craft::Planks);
+        assert_eq!(names(&super::seen(&[planks, ore], &listed, &[], &HashSet::new())), ["Sawyers", "Diggers", "The Ore Guild"]);
+        assert_eq!(names(&super::seen(&[ore, planks], &listed, &[], &HashSet::new())), ["Diggers", "The Ore Guild", "Sawyers"]);
         // Asking to join each, then staying out
         assert_eq!(
             menu(&seen),
@@ -192,7 +199,7 @@ mod tests {
         // At most five
         let many: Vec<GuildSummary> = (0..8).map(|n| summary(10 + n, &format!("Ore Guild {n}"), 3)).collect();
         let listed: Vec<(&GuildSummary, &str)> = many.iter().map(|g| (g, "")).collect();
-        assert_eq!(super::seen(ore, &listed, &[], &HashSet::new()).len(), MENU_GUILDS);
+        assert_eq!(super::seen(&[ore], &listed, &[], &HashSet::new()).len(), MENU_GUILDS);
     }
 
     #[test]

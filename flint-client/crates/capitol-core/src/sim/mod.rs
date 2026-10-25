@@ -9,6 +9,8 @@
 //!   what it holds. Pure.
 //! - [`report`]: the numbers, as markdown and CSV. Pure.
 //! - [`run`]: the swarm itself, one thread a bot.
+//! - [`stint`]: a citizen's job of the moment, what it has done lately and
+//!   the jobs it answers for (Callings K1.2). Pure.
 //! - [`wage`]: work offered, what it pays and what a role's own trade earns
 //!   (Commons S2.8). Pure.
 //! - [`guild`]: guilds for a role's trade, what a member pays in, and when it
@@ -37,6 +39,7 @@ pub mod lot;
 pub mod plan;
 pub mod report;
 pub mod run;
+pub mod stint;
 pub mod wage;
 
 use std::fmt;

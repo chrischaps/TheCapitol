@@ -1227,8 +1227,9 @@ fn audition(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Prints the health and writes it beside the roster, and appends who was
-/// where in their day to the presence log (C1.2).
+/// Prints the health and writes it beside the roster, appends who was
+/// where in their day to the presence log (C1.2), and keeps the citizens'
+/// stints (Callings K1.2).
 fn report(town: &Town, server: &str, roster: &Path) {
     let now_ms = unix_ms();
     let game = schedule::clock(capitol_core::protocol::rules::time_of_day(now_ms));
@@ -1246,6 +1247,10 @@ fn report(town: &Town, server: &str, roster: &Path) {
     let presence = town::presence_path(roster);
     if let Err(e) = append_presence(&presence, &town.presence(now_ms)) {
         eprintln!("capitol-town: writing {}: {e}", presence.display());
+    }
+    // Each citizen's stint and what it did lately, for its next session
+    if let Err(e) = town.save_stints() {
+        eprintln!("capitol-town: writing {}: {e}", town::stints_path(roster).display());
     }
 }
 

@@ -5,9 +5,11 @@
 //! - **Reading.** The open offers are read every [`READ_EVERY`], and kept
 //!   between reads from the board's own messages (`wage_offered`,
 //!   `wage_updated`, `wage_closed`).
-//! - **Taking.** Work its trade does ([`Role::wage_menu`](crate::sim::Role::wage_menu))
-//!   is a question ([`Question::Wage`]): what the work pays a game hour
-//!   against what its own trade earns one at the books ([`wage`]). Only in
+//! - **Taking.** Work one of its willing jobs does ([`Role::wage_menu`](crate::sim::Role::wage_menu),
+//!   Callings K1.2: its favourite, the job it's at, and those its calling
+//!   leans to) is a question ([`Question::Wage`]): what the work pays a
+//!   game hour against what that job's own trade earns one at the books
+//!   ([`wage`]). Only in
 //!   its working hours, owing nothing on the board, and once a day for any
 //!   one employer, so a single person doesn't take over a citizen's life.
 //!   One a round, the best paid first; one it passed isn't asked about
@@ -202,7 +204,6 @@ impl SimBot {
             .filter_map(|o| Some((wage::pays(&catalog, &o.work, o.rate)?, o.clone())))
             .collect();
         open.sort_by_key(|(pays, _)| std::cmp::Reverse(*pays));
-        let earns = wage::earns(self.role, &catalog, |item| self.worth(item));
         for (pays, o) in open {
             let Some(job) = wage::job(&catalog, &o.work) else { continue };
             let tooled = wage::tool_needed(&catalog, &o.work).is_none_or(|t| holdings.tools.contains(t));
@@ -211,7 +212,11 @@ impl SimBot {
                 left: o.cap - o.made,
                 tooled,
             };
-            let Some(menu) = self.role.wage_menu(&hire) else { continue };
+            // The willing job that does the work (Callings K1.2), and what
+            // its own trade would earn it instead
+            let Some(doer) = self.doer(&hire.job) else { continue };
+            let Some(menu) = doer.wage_menu(&hire) else { continue };
+            let earns = wage::earns(doer, &catalog, |item| self.worth(item));
             let work = wage::words(&catalog, &o.work);
             let question = Question::Wage {
                 id: o.id,

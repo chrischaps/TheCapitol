@@ -71,7 +71,7 @@ impl SimBot {
             .collect();
         let holdings = self.holdings();
         let market = meet::quotes(self.bot.state());
-        let Some(menu) = meet::ask_menu(self.role, &holdings, &market, &neighbours) else {
+        let Some(menu) = meet::ask_menu(self.job(), &holdings, &market, &neighbours) else {
             return Ok(false);
         };
         let mark = self.mind.mark();
@@ -140,7 +140,7 @@ impl SimBot {
                 temperament: self.mind.temperament,
                 calling: self.persona.as_ref().map(|p| p.calling.clone()),
             },
-            product: self.role.product(),
+            product: self.job().product(),
             hours: self.now(),
         }
     }
@@ -203,7 +203,7 @@ impl SimBot {
             return None;
         }
         let keeps = self.bot.state().bazaar().my_shop().is_some();
-        let menu = self.role.stall_menu(holdings, self.worth(product), keeps)?;
+        let menu = self.job().stall_menu(holdings, self.worth(product), keeps)?;
         let question = Question::Sell { item: product.into() };
         match self.decide(question, menu, 1, holdings)? {
             (d, Choice::Stock { item, .. }) => Some(Trade::Stock {
@@ -221,7 +221,7 @@ impl SimBot {
         if !self.people {
             return None;
         }
-        let menu = self.role.bid_menu(holdings, item, self.worth(item), self.bidding(item))?;
+        let menu = self.job().bid_menu(holdings, item, self.worth(item), self.bidding(item))?;
         match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {
             (d, Choice::Bid { item, .. }) => Some(Trade::Bid {
                 item,
@@ -255,7 +255,7 @@ impl SimBot {
                 Err(e) => return Err(e),
             }
         }
-        for item in self.role.needs() {
+        for item in self.job().needs() {
             let holdings = self.holdings();
             let mark = self.mind.mark();
             let Some(trade @ Trade::Bid { .. }) = self.choose_bid(&holdings, item) else {

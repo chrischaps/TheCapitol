@@ -25,6 +25,7 @@ mod idle;
 mod merchant;
 mod people;
 pub mod road_in;
+mod stint;
 mod wages;
 
 pub use road_in::walk_the_road;
@@ -49,6 +50,7 @@ use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError, NO_WAY};
 use crate::catalog::Catalog;
+use crate::citizen::calling::Calling;
 use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Decision, Held, Mind, Place, Question, Situation, When, Who};
 use crate::citizen::meet;
@@ -249,6 +251,10 @@ pub(crate) fn live(
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
     citizen.people = true;
     citizen.persona = Some(persona.clone());
+    // Its calling, and the stint it was on and what it did lately, from
+    // the side file, so a short session still adds up to a mix (K1.2)
+    citizen.calling = persona.calling.clone();
+    citizen.stints = stint::Stints::from_kept(&town.kept(), citizen.now());
     // Every citizen walks the road in, and earns its deed (#450)
     citizen.road = Some(road_in::Road::default());
     if role == Role::Merchant {
@@ -269,6 +275,8 @@ pub(crate) fn live(
     // What the day's last steps did: its walk home, and its deed
     citizen.journal();
     town.record(std::mem::take(&mut citizen.entries), citizen.mind.take_rulings());
+    citizen.credit();
+    town.keep(citizen.stints.kept(citizen.now()));
     ended
 }
 
@@ -343,6 +351,8 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::Apply { .. }, Some(Action::Guild(_)))
         | (Choice::Post { .. }, Some(Action::Trade(Trade::Post { .. })))
         | (Choice::Rest | Choice::Hall, None) => true,
+        // A stint is taken up as it's chosen (Callings K1.2)
+        (Choice::Take { .. }, _) => true,
         (Choice::Keep | Choice::Gather { .. } | Choice::Pass | Choice::Stay, _) => return Fate::Passed,
         _ => false,
     };
@@ -362,10 +372,19 @@ struct Seen {
     shunned_until: Option<Instant>,
 }
 
-/// One bot playing its role.
+/// One bot playing its role, or a citizen its calling (Callings K1.2).
 struct SimBot {
     bot: Bot,
+    /// Its birth trade: the swarm's role, a citizen's roster `role`. Its
+    /// lot, home and road in go by it until K1.3; its work goes by the job
+    /// of the moment ([`Self::job`]).
     role: Role,
+    /// What it would rather be doing (K0.2): a citizen's persona's, or its
+    /// role alone for a swarm bot ([`Calling::single`]).
+    calling: Calling,
+    /// Its stints: the job of the moment, what it has done lately, and
+    /// what pulls on it. A swarm bot never takes one.
+    stints: stint::Stints,
     scale: f64,
     start: Instant,
     entries: Vec<Entry>,
@@ -453,6 +472,8 @@ impl SimBot {
         SimBot {
             bot,
             role,
+            calling: Calling::single(role),
+            stints: stint::Stints::default(),
             scale,
             start,
             entries: Vec::new(),
@@ -574,15 +595,18 @@ impl SimBot {
                     }
                 }
             }
+            // What to work at for the next while (Callings K1.2): asked as
+            // a session starts, as a stint runs its length, and on a pull
+            self.mind_stint(&holdings);
             // The round's decisions, whose outcomes are logged after it (C3.1)
             let mark = self.mind.mark();
             // A promise first, then the board, before the road or a trade
             let board = if self.people { self.choose_board(&holdings) } else { None };
             // Then work for a wage (S2.8): its shift, or work it takes
             let wage = if board.is_none() { self.choose_wage(&holdings, phase) } else { None };
-            // What to work on, then whether to trade first (C1.3). On a
-            // shift, the employer's work is its work
-            let errand = match self.role.errands(&catalog, &holdings) {
+            // What to work on, at the job of the moment, then whether to
+            // trade first (C1.3). On a shift, the employer's work is its work
+            let errand = match self.job().errands_at(&catalog, &holdings, self.commitment()) {
                 _ if wage.is_some() => Ok(None),
                 Ok(errands) if errands.is_empty() => Ok(None),
                 Ok(errands) => Ok(Some(self.choose_errand(&catalog, &holdings, errands))),
@@ -608,8 +632,8 @@ impl SimBot {
             // are filed under (Callings K0.1)
             let goal = errand.as_ref().ok().and_then(Option::as_ref).map(|e| e.goal.clone());
             let job = match &goal {
-                Some(goal) => Activity::of_goal(&catalog, goal.as_ref(), self.role),
-                None => Activity::of_role(self.role),
+                Some(goal) => Activity::of_goal(&catalog, goal.as_ref(), self.job()),
+                None => Activity::of_role(self.job()),
             };
             let step = errand.map(|e| e.map(|e| e.step));
             let errand_label = step.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.label(&catalog));
@@ -699,12 +723,15 @@ impl SimBot {
                         }
                     }
                 }
+                // Nothing to do at the job of the moment: another, next round
                 Ok(None) => {
+                    self.stint_stuck();
                     self.idle(town);
                     self.settle(mark, None, &Ok(()));
                 }
                 Err(stuck) => {
                     self.entries.push(Entry::Stuck { reason: stuck.0 });
+                    self.stint_stuck();
                     self.idle(town);
                     self.settle(mark, None, &Ok(()));
                 }
@@ -715,10 +742,15 @@ impl SimBot {
                 town.record(std::mem::take(&mut self.entries), self.mind.take_rulings());
                 let strands = self.bot.state().strands();
                 let road = self.road_progress().map(|p| RoadInReport::of(&p));
+                let stint = self.stints.on.map(|s| s.job);
                 town.health(|h| {
                     h.strands = strands;
                     h.road_in = road.or(h.road_in.take());
+                    h.stint = stint;
                 });
+                // Its stint and what it did lately, for its next session
+                self.credit();
+                town.keep(self.stints.kept(self.now()));
             }
         }
         Ok(town.map_or(Ended::Stopped, Tether::ended))
@@ -934,8 +966,8 @@ impl SimBot {
         }
     }
 
-    /// Asks the mind what to work on, from the role's errands. While a
-    /// layer thinks, it carries on with the last step's errand.
+    /// Asks the mind what to work on, from the job of the moment's errands.
+    /// While a layer thinks, it carries on with the last step's errand.
     fn choose_errand(&mut self, catalog: &Catalog, holdings: &Holdings, mut errands: Vec<Errand>) -> Errand {
         let menu: Vec<Choice> = errands.iter().map(|e| e.choice(catalog)).collect();
         let carry_on = self
@@ -949,16 +981,18 @@ impl SimBot {
         errands.swap_remove(pick)
     }
 
-    /// Asks the mind whether to sell the role's product before `errand`,
-    /// and if not, whether to buy what it would gather. `None`: just do it.
+    /// Asks the mind whether to sell the job of the moment's product before
+    /// `errand`, and if not, whether to buy what it would gather. `None`:
+    /// just do it. A merchant makes its market on a stint at trading.
     fn choose_trade(&mut self, holdings: &Holdings, errand: &Errand) -> Option<Trade> {
-        if self.merchant.is_some() {
+        let job = self.job();
+        if self.merchant.is_some() && job == Role::Merchant {
             return self.choose_market(holdings, errand);
         }
         // What a claim of its own wants isn't for sale (S2.5)
-        if let Some(product) = self.role.product().filter(|p| !self.board.owes(p)) {
+        if let Some(product) = job.product().filter(|p| !self.board.owes(p)) {
             let (bid, ask) = self.best(product);
-            if let Some(menu) = self.role.sell_menu(holdings, errand.goal.as_ref(), bid, ask) {
+            if let Some(menu) = job.sell_menu(holdings, errand.goal.as_ref(), bid, ask) {
                 let question = Question::Sell { item: product.into() };
                 if let Some((d, Choice::Sell { item, .. })) = self.decide(question, menu, 1, holdings) {
                     return Some(Trade::Sell {
@@ -976,7 +1010,7 @@ impl SimBot {
             return None;
         };
         let (_, ask) = self.best(item);
-        let Some(menu) = self.role.buy_menu(holdings, &errand.step, ask) else {
+        let Some(menu) = job.buy_menu(holdings, &errand.step, ask) else {
             // Nobody selling: leave a bid for it, if the trade needs it
             return self.choose_bid(holdings, item);
         };

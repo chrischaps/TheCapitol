@@ -18,6 +18,11 @@
 //! - **Health**: each citizen's [`Health`], one line apiece, which the town
 //!   prints and writes beside the roster every minute, and its presence,
 //!   appended to `town.presence.csv` (C1.2).
+//! - **Stints** (Callings K1.2): the job each citizen is at, how long it's
+//!   run and what it has done lately ([`Kept`]), saved with the health to
+//!   `town.stints.json` beside the roster and read back as the town starts,
+//!   so a casual citizen's half-hour sessions still add up to a mix. The
+//!   roster itself is never rewritten.
 //! - **Decisions**: each citizen's decision log (C3.1,
 //!   [`decide::log`](super::decide::log)), one JSONL file apiece in
 //!   `town.decisions/` beside the roster, kept across its lives.
@@ -60,6 +65,7 @@ use super::voice;
 use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
 use crate::sim::report::{BotRun, Entry};
+use crate::sim::stint::Kept;
 use crate::sim::{self, Role};
 
 /// The roster, beside wherever the town is run from.
@@ -503,6 +509,34 @@ pub fn presence_path(roster: &Path) -> PathBuf {
 /// world while it's `working` or `resting`.
 pub const PRESENCE_HEADER: &str = "unix_ms,game_time,name,role,phase,standing";
 
+/// Where the town keeps its citizens' stints (Callings K1.2): beside the
+/// roster, `town.stints.json`, an entry a citizen by name.
+pub fn stints_path(roster: &Path) -> PathBuf {
+    roster.with_extension("stints.json")
+}
+
+/// The stints kept at `path`, by name. A file that's missing or won't read
+/// is no stints: each citizen asks afresh, which costs it its mix so far
+/// and nothing else.
+pub fn read_stints(path: &Path) -> BTreeMap<String, Kept> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("capitol-town: {} doesn't read, so every citizen starts its stints afresh: {e}", path.display());
+        BTreeMap::new()
+    })
+}
+
+/// Writes `stints` to `path`, by way of a file beside it, so a town stopped
+/// mid-write keeps the last whole one.
+pub fn write_stints(path: &Path, stints: &BTreeMap<String, Kept>) -> std::io::Result<()> {
+    let text = serde_json::to_string_pretty(stints).map_err(std::io::Error::other)?;
+    let part = path.with_extension("json.part");
+    std::fs::write(&part, text)?;
+    std::fs::rename(&part, path)
+}
+
 /// Where the town writes its health: beside the roster, `town.status`.
 pub fn status_path(roster: &Path) -> PathBuf {
     roster.with_extension("status")
@@ -710,6 +744,10 @@ impl fmt::Display for Standing {
 pub struct Health {
     pub name: String,
     pub role: Role,
+    /// Its calling's style (Callings K0.2), once known.
+    pub style: Option<Style>,
+    /// The job of the moment (K1.2): its stint's, once it has one.
+    pub stint: Option<Role>,
     pub standing: Standing,
     /// Where in its day it is, by the clock (C1.2).
     pub phase: Option<Phase>,
@@ -731,6 +769,8 @@ impl Health {
         Health {
             name: name.to_string(),
             role,
+            style: None,
+            stint: None,
             standing: Standing::Starting,
             phase: None,
             strands: None,
@@ -752,15 +792,19 @@ impl Health {
         self.failures += 1;
     }
 
-    /// One line: who, what role, where its life stands and where in its
-    /// day, Strands, what it's doing, and the last failure.
+    /// One line: who, what role and calling, where its life stands and
+    /// where in its day, Strands, the job of the moment and what it's doing
+    /// at it, and the last failure.
     pub fn line(&self, now: Instant) -> String {
         let strands = self.strands.map_or_else(|| "–".to_string(), |s| format!("{s} S"));
         let phase = self.phase.map_or("–", |p| p.as_str());
+        let style = self.style.map_or("–", |s| s.as_str());
+        let stint = self.stint.map_or(String::new(), |job| format!("{}: ", calling::doing(job)));
         let mut line = format!(
-            "{:<20} {:<17} {:<8} {:<6} {:>9}  {}",
+            "{:<20} {:<17} {:<11} {:<8} {:<6} {:>9}  {stint}{}",
             self.name,
             self.role.to_string(),
+            style,
             self.standing.to_string(),
             phase,
             strands,
@@ -825,6 +869,8 @@ pub(crate) struct Tether<'a> {
     stop: &'a AtomicBool,
     health: &'a Mutex<Health>,
     book: &'a Mutex<Book>,
+    /// Its stints, kept across its lives and the town's (Callings K1.2).
+    kept: &'a Mutex<Kept>,
     /// The server's clock less ours, as the last life saw it.
     clock_offset_ms: &'a AtomicI64,
     /// When this session ends (#276), in unix ms on our clock.
@@ -864,6 +910,16 @@ impl Tether<'_> {
     /// Writes down what the citizen did since it last did, for the report.
     pub(crate) fn record(&self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>) {
         self.book.lock().unwrap_or_else(|e| e.into_inner()).record(entries, rulings);
+    }
+
+    /// Its stints as last kept (Callings K1.2).
+    pub(crate) fn kept(&self) -> Kept {
+        self.kept.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Keeps its stints, for its next life and the town's side file.
+    pub(crate) fn keep(&self, kept: Kept) {
+        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) = kept;
     }
 
     /// Notes the server's clock, as a life signed in reads it.
@@ -914,6 +970,9 @@ pub struct Town {
     stop: Arc<AtomicBool>,
     health: Vec<Arc<Mutex<Health>>>,
     books: Vec<Arc<Mutex<Book>>>,
+    /// Each citizen's stints (Callings K1.2), by name, and where they're kept
+    kept: Vec<(String, Arc<Mutex<Kept>>)>,
+    stints_path: PathBuf,
     pulses: Vec<SharedPulse>,
     lives: Vec<thread::JoinHandle<()>>,
 }
@@ -929,29 +988,39 @@ impl Town {
         logs: Option<&Logs>,
         hours: Hours,
     ) -> std::io::Result<Town> {
+        let stints_path = stints_path(&roster.path);
+        let mut stints = read_stints(&stints_path);
         let mut town = Town {
             stop,
             health: Vec::new(),
             books: Vec::new(),
+            kept: Vec::new(),
+            stints_path,
             pulses: Vec::new(),
             lives: Vec::new(),
         };
         let now = local_unix_ms();
         let mut arriving = 0;
         for citizen in &roster.citizens {
-            let health = Arc::new(Mutex::new(Health::new(&citizen.name, citizen.role)));
+            let kept = stints.remove(&citizen.name).unwrap_or_default();
+            let mut health = Health::new(&citizen.name, citizen.role);
+            health.style = Some(citizen.persona.calling.style());
+            health.stint = kept.job.as_deref().and_then(Role::from_slug);
+            let health = Arc::new(Mutex::new(health));
             let book = Arc::new(Mutex::new(Book::default()));
+            let kept = Arc::new(Mutex::new(kept));
             let pulse = Pulse::shared();
             let log = logs.and_then(|logs| open_log(citizen, logs));
-            let (citizen, server, stop, h, b, p) =
-                (citizen.clone(), server.to_string(), town.stop.clone(), health.clone(), book.clone(), pulse.clone());
+            town.kept.push((citizen.name.clone(), kept.clone()));
+            let (citizen, server, stop, h, b, k, p) =
+                (citizen.clone(), server.to_string(), town.stop.clone(), health.clone(), book.clone(), kept, pulse.clone());
             // Only those signing in now wait their turn
             let on = hours == Hours::AlwaysOn || matches!(citizen.persona.habit.at(now), Presence::On { .. });
             let turn = if on { STAGGER * arriving } else { Duration::ZERO };
             arriving += u32::from(on);
             let life = thread::Builder::new()
                 .name(format!("citizen-{}", citizen.name))
-                .spawn(move || live(&citizen, &server, turn, hours, &stop, &h, &b, &p, log.as_ref()))?;
+                .spawn(move || live(&citizen, &server, turn, hours, &stop, &h, &b, &k, &p, log.as_ref()))?;
             town.health.push(health);
             town.books.push(book);
             town.pulses.push(pulse);
@@ -984,6 +1053,16 @@ impl Town {
                 (run, book.rulings)
             })
             .collect()
+    }
+
+    /// Writes each citizen's stints beside the roster (Callings K1.2),
+    /// keeping those kept there of anyone not on this roster.
+    pub fn save_stints(&self) -> std::io::Result<()> {
+        let mut stints = read_stints(&self.stints_path);
+        for (name, kept) in &self.kept {
+            stints.insert(name.clone(), kept.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        }
+        write_stints(&self.stints_path, &stints)
     }
 
     /// Its citizens' health and pulses, for a [`Reporter`] on another
@@ -1080,6 +1159,7 @@ fn live(
     stop: &AtomicBool,
     health: &Mutex<Health>,
     book: &Mutex<Book>,
+    kept: &Mutex<Kept>,
     pulse: &SharedPulse,
     log: Option<&SharedLog>,
 ) {
@@ -1088,6 +1168,7 @@ fn live(
     let tether = Tether {
         stop,
         health,
+        kept,
         book,
         clock_offset_ms: &clock_offset_ms,
         session_end: &session_end,
@@ -1685,10 +1766,12 @@ key = "j"
             Mutex::new(Book::default()),
             AtomicI64::new(0),
         );
+        let kept = Mutex::new(Kept::default());
         let session_end = AtomicI64::new(local_unix_ms() + 60_000);
         let tether = Tether {
             stop: &stop,
             health: &health,
+            kept: &kept,
             book: &book,
             clock_offset_ms: &offset,
             session_end: &session_end,
@@ -1714,12 +1797,39 @@ key = "j"
         for part in ["gatherer (fiber)", "working", "market", "312 S", "gather fiber"] {
             assert!(line.contains(part), "{line} lacks {part}");
         }
+        // Its calling's style and the job of the moment (Callings K1.2)
+        h.style = Some(Style::Leaner);
+        h.stint = Some(Role::Crafter(Craft::Planks));
+        let line = h.line(now);
+        assert!(line.contains("leaner") && line.contains("sawing planks: gather fiber"), "{line}");
         assert!(!line.contains("failure"));
         h.failure = Some((now, "extract refused".into()));
         h.restarts = 1;
         let line = h.line(now + Duration::from_secs(240));
         assert!(line.contains("1 restart ·"), "{line}");
         assert!(line.ends_with("last failure 4m ago: extract refused"), "{line}");
+    }
+
+    /// The side file (Callings K1.2) keeps each citizen's stint by name, and
+    /// one that's missing or torn is no stints, never a town that won't start.
+    #[test]
+    fn stints_are_kept_beside_the_roster_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("capitol-stints-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = stints_path(&dir.join("town.toml"));
+        assert_eq!(path.file_name().unwrap(), "town.stints.json");
+        let _ = std::fs::remove_file(&path);
+        assert!(read_stints(&path).is_empty());
+        let mut lately = sim::stint::Lately::default();
+        lately.add(Role::Builder, 1.25);
+        let ada = Kept { job: Some("builder".into()), run: 0.5, lately };
+        let stints = BTreeMap::from([("Ada Reeder".to_string(), ada.clone()), ("Bo Tanner".to_string(), Kept::default())]);
+        write_stints(&path, &stints).unwrap();
+        assert_eq!(read_stints(&path), stints);
+        assert!(!path.with_extension("json.part").exists());
+        std::fs::write(&path, "{ torn").unwrap();
+        assert!(read_stints(&path).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
