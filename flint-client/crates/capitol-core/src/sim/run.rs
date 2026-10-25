@@ -413,6 +413,9 @@ struct SimBot {
     /// Its guild as it last read it, and what it has done about guilds
     /// (S4.5). Only a citizen joins one.
     guilds: guilds::Guilds,
+    /// The lot it last took its stations down on to pack again (#405):
+    /// once a lot, so a packing that comes out no better doesn't go round.
+    repacked: Option<Uuid>,
 }
 
 /// What a bot does next.
@@ -471,6 +474,7 @@ impl SimBot {
             board: board::Board::new(),
             wages: wages::Wages::new(),
             guilds: guilds::Guilds::new(),
+            repacked: None,
         }
     }
 
@@ -556,6 +560,18 @@ impl SimBot {
             self.read_guild()?;
             self.mind_guild(phase, town)?;
             let holdings = self.holdings();
+            // A lot with no room for the rest of its chain, that would have
+            // it packed again, is (#405): planned again with its kits home
+            match self.repack(&holdings) {
+                Ok(0) => {}
+                Ok(_) => continue,
+                Err(e) if e.is_final() => return Err(e),
+                Err(e) => {
+                    if let Some(town) = town {
+                        town.health(|h| h.failed(format!("repacking its lot: {e}")));
+                    }
+                }
+            }
             // The round's decisions, whose outcomes are logged after it (C3.1)
             let mark = self.mind.mark();
             // A promise first, then the board, before the road or a trade
@@ -1168,20 +1184,82 @@ impl SimBot {
         }
         h.stations.extend(self.stations.keys().cloned());
         // What fits on the lot, not just its capacity: a narrow suburban lot
-        // runs out of ground first (#305). A builder on one too small for its
-        // chain stays stuck there (#405)
+        // runs out of ground first (#305). One that would take the rest of
+        // its chain packed again is ([`Self::repack`], #405)
         h.plot_room = state.plots().first().map(|p| lot::room(p, &self.stations_at()));
         // Past what its role still wants for its own, the room a workbench
         // may take, so it stays home (#499)
+        h.plot_spare = h.plot_room.map_or(0, |room| room - self.still_wanted(catalog));
+        h.owed = self.owed();
+        h
+    }
+
+    /// How many of its role's stations for a lot it has yet to place.
+    fn still_wanted(&self, catalog: &Catalog) -> i32 {
         let placed = self
             .stations
             .keys()
             .filter(|kind| catalog.station_type(kind).is_some_and(|t| !t.off_plot))
             .count() as i32;
-        let wanted = (self.role.room_wanted() - placed).max(0);
-        h.plot_spare = h.plot_room.map_or(0, |room| room - wanted);
-        h.owed = self.owed();
-        h
+        (self.role.room_wanted() - placed).max(0)
+    }
+
+    /// Takes down its own stations on its lot, so the planner puts them back
+    /// where [`lot::spots`] packs them (#405), when the lot has no room left
+    /// for the rest of its role's chain but would, packed again. A builder
+    /// whose kiln went in the middle of a narrow lot before #305 stayed
+    /// stuck at the forge. One at work stays, and the others are packed
+    /// round it. Once a lot ([`Self::repacked`]). One on a lot too small
+    /// even empty stays stuck: a deed can't be given up (#519). How many
+    /// came down.
+    fn repack(&mut self, holdings: &Holdings) -> Result<usize, BotError> {
+        let state = self.bot.state();
+        let Some(plot) = state.plots().first().cloned() else {
+            return Ok(0);
+        };
+        let still = self.still_wanted(state.catalog());
+        let short = holdings.plot_room.is_some_and(|room| room < still);
+        if !short || self.repacked == Some(plot.id) {
+            return Ok(0);
+        }
+        // What the store last heard of each, for a job set since it was placed
+        let ours: Vec<(String, StationInfo)> = self
+            .stations
+            .iter()
+            .map(|(kind, s)| (kind.clone(), state.station(s.id).cloned().unwrap_or_else(|| s.clone())))
+            .collect();
+        let (moving, staying): (Vec<_>, Vec<_>) =
+            ours.into_iter().partition(|(_, s)| idle(s) && plot.contains(s.x, s.y));
+        if moving.is_empty() {
+            return Ok(0);
+        }
+        let mine = |id: Uuid| self.stations.values().any(|s| s.id == id);
+        let fixed: Vec<(f64, f64)> = state
+            .stations()
+            .values()
+            .filter(|s| !mine(s.id))
+            .chain(staying.iter().map(|(_, s)| s))
+            .map(|s| (s.x, s.y))
+            .collect();
+        if !lot::repack_frees(&plot, &fixed, moving.len(), still as usize) {
+            return Ok(0);
+        }
+        self.repacked = Some(plot.id);
+        let mut down = 0;
+        for (kind, s) in moving {
+            self.bot.walk_to(s.x, s.y + 10.0)?;
+            match self.bot.remove_station(s.id) {
+                Ok(()) => {
+                    self.stations.remove(&kind);
+                    down += 1;
+                }
+                // The pack has no room for the kit and what's in its box:
+                // left standing, and the others packed round it
+                Err(BotError::Rest { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(down)
     }
 
     fn take(&mut self, step: &Step) -> Result<(), BotError> {
@@ -1699,15 +1777,19 @@ fn leaving(
     (x, y): (f64, f64),
     own_lot: impl Fn(f64, f64) -> bool,
 ) -> Vec<(String, StationInfo)> {
-    use capitol_protocol::rest::AutomationState;
     let away = |s: &StationInfo| (s.x - x).hypot(s.y - y);
-    let idle = |s: &StationInfo| s.automation.as_ref().is_none_or(|a| a.state == AutomationState::Stopped);
     let mut leaving: Vec<_> = stations
         .into_iter()
         .filter(|(_, s)| idle(s) && !own_lot(s.x, s.y) && away(s) <= PACK_UP_REACH)
         .collect();
     leaving.sort_by(|a, b| away(&a.1).total_cmp(&away(&b.1)));
     leaving
+}
+
+/// Whether a station may come down: no job on it, or one stopped (#499).
+fn idle(s: &StationInfo) -> bool {
+    use capitol_protocol::rest::AutomationState;
+    s.automation.as_ref().is_none_or(|a| a.state == AutomationState::Stopped)
 }
 
 /// How far `r` lies outside the band `(inner, outer)`.

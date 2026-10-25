@@ -257,6 +257,16 @@ pub fn room(plot: &PlotInfo, taken: &[(f64, f64)]) -> i32 {
     (indoors + yard).min(left(plot)) as i32
 }
 
+/// Whether taking down the `movable` stations on `plot` and putting them back
+/// where [`spots`] packs them leaves room for `still` more, round the
+/// stations at `fixed` (#405). A kiln placed in the middle of a narrow lot
+/// before #305 can leave no room for the forge, on a lot that takes both.
+pub fn repack_frees(plot: &PlotInfo, fixed: &[(f64, f64)], movable: usize, still: usize) -> bool {
+    let mut emptied = plot.clone();
+    emptied.station_count = (plot.station_count - movable as i32).max(0);
+    room(&emptied, fixed) as usize >= movable + still
+}
+
 /// Whether an empty `plot` takes `wanted` stations.
 pub fn takes(plot: &PlotInfo, wanted: i32) -> bool {
     let wanted = (wanted.max(0) as usize).min(left(plot));
@@ -462,6 +472,20 @@ mod tests {
         assert!(takes(&strip, 3));
         assert!(!takes(&strip, 4));
         assert!(takes(&lot(turned(200.0, 145.0, 0.3), 0), 4));
+    }
+
+    /// A kiln in the middle of a lot 120 by 60 leaves no room, on a lot
+    /// that takes three zigzagged along it: taken down and put back, it
+    /// leaves room for two more, but not for three (#405).
+    #[test]
+    fn a_kiln_in_the_middle_repacks_to_make_room() {
+        let plot = |count| lot([(0.0, 0.0), (120.0, 0.0), (120.0, 60.0), (0.0, 60.0)], count);
+        assert_eq!(room(&plot(0), &[]), 3);
+        assert_eq!(room(&plot(1), &[(60.0, 30.0)]), 0);
+        assert!(repack_frees(&plot(1), &[], 1, 2));
+        assert!(!repack_frees(&plot(1), &[], 1, 3));
+        // A station that stays, at the lot's middle, holds it as the kiln did
+        assert!(!repack_frees(&plot(2), &[(60.0, 30.0)], 1, 1));
     }
 }
 
