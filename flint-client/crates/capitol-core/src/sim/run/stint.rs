@@ -8,8 +8,12 @@
 //! A swarm bot has no persona, so its calling is its role alone: it never
 //! asks, and its job is its role, as before callings. Nor does anyone ask
 //! on a wage's shift, whose work is its employer's (S2.8).
+//!
+//! As a session starts and a stint ends, the menu has the detours open to
+//! it beside the jobs (K1.5, [`detour`](super::detour)): one taken comes
+//! first, and the next round asks again what to work at. Never on a pull.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use super::super::plan::{Goal, Holdings};
 use super::super::stint::{self, Kept, Stint, STUCK_AGAIN};
@@ -20,6 +24,8 @@ use capitol_protocol::rules::DAY_LENGTH_SECS;
 use super::SimBot;
 use crate::citizen::decide::rules::stint_hours;
 use crate::citizen::decide::{Choice, Question, Why};
+use crate::citizen::detour::Detour;
+use crate::citizen::schedule::Phase;
 
 /// Game hours in a game day, which a claim's day's work is made in.
 const DAY_GAME_HOURS: f64 = DAY_LENGTH_SECS as f64 / 3600.0;
@@ -42,6 +48,11 @@ pub(super) struct Stints {
     pulled: Option<(Role, i64)>,
     /// Jobs whose work was stuck, and when (in the run's game hours).
     stuck: HashMap<Role, f64>,
+    /// The recipes it has made, which a detour to try one passes over
+    /// (K1.5).
+    pub(super) made: BTreeSet<String>,
+    /// The sights and parks it has been to on a detour.
+    pub(super) seen: BTreeSet<String>,
 }
 
 impl Stints {
@@ -50,6 +61,8 @@ impl Stints {
         Stints {
             on: kept.stint(now),
             lately: kept.lately.clone(),
+            made: kept.made.clone(),
+            seen: kept.seen.clone(),
             ..Stints::default()
         }
     }
@@ -60,6 +73,8 @@ impl Stints {
             job: self.on.map(|s| s.job.slug().to_string()),
             run: self.on.map_or(0.0, |s| s.run(now)),
             lately: self.lately.clone(),
+            made: self.made.clone(),
+            seen: self.seen.clone(),
         }
     }
 }
@@ -170,10 +185,13 @@ impl SimBot {
     /// Asks what to work at, if it's time to (D4): a session's first round,
     /// a stint run its length, or a pull. Not a swarm bot's, nor on a
     /// shift. The decision is settled at once: taking up a job is done as
-    /// it's chosen.
-    pub(super) fn mind_stint(&mut self, holdings: &Holdings) {
+    /// it's chosen. A detour (K1.5) is on the menu too as a session starts
+    /// and a stint ends, in its working hours (`phase`): one picked is the
+    /// round's to take, and settled with it, and the stint's question comes
+    /// again the round after.
+    pub(super) fn mind_stint(&mut self, holdings: &Holdings, phase: Option<Phase>) -> Option<Detour> {
         if self.persona.is_none() || self.wages.on_shift() {
-            return;
+            return None;
         }
         self.credit();
         let now = self.now();
@@ -183,7 +201,7 @@ impl SimBot {
             None => Why::Start,
             _ if self.stints.pulled.is_some() => Why::Pull,
             Some(on) if on.run(now) >= hours => Why::Done,
-            Some(_) => return,
+            Some(_) => return None,
         };
         self.stints.asked = true;
         let pulled = self.stints.pulled.take();
@@ -198,10 +216,16 @@ impl SimBot {
                 Some((job, job.take(&catalog, holdings, stint::commitment(&self.calling, job), pays)?))
             })
             .collect();
-        let pick = match jobs.len() {
+        // A wander off first, as it starts or finishes a stint, and never
+        // on a pull, which is a claim's (K1.5)
+        let detours = match why {
+            Why::Start | Why::Done if !jobs.is_empty() && self.detours_open(phase) => self.detours(holdings),
+            _ => Vec::new(),
+        };
+        let pick = match jobs.len() + detours.len() {
             0 => None,
             // Nothing to choose between
-            1 => Some(jobs[0].0),
+            1 => Some(Ok(jobs[0].0)),
             _ => {
                 let carry_on = doing
                     .or(self.calling.favourite)
@@ -214,20 +238,36 @@ impl SimBot {
                     lately: self.stints.lately.question(),
                 };
                 let mark = self.mind.mark();
-                let menu = jobs.iter().map(|(_, c)| c.clone()).collect();
+                let menu = jobs.iter().map(|(_, c)| c.clone()).chain(detours.iter().cloned()).collect();
                 let picked = self.decide(question, menu, carry_on, holdings).map(|(d, _)| d.pick);
-                self.settle(mark, None, &Ok(()));
-                picked.map(|i| jobs.swap_remove(i).0)
+                match picked {
+                    // Settled with the round that takes it
+                    Some(i) if i >= jobs.len() => Detour::of(&detours[i - jobs.len()]).map(Err),
+                    picked => {
+                        self.settle(mark, None, &Ok(()));
+                        picked.map(|i| Ok(jobs.swap_remove(i).0))
+                    }
+                }
             }
         };
-        let Some(job) = pick else {
+        let job = match pick {
             // Nothing it can take up now: it keeps at what it was, if anything
-            return;
+            None => return None,
+            // What to work at is asked again once it's back
+            Some(Err(detour)) => return Some(detour),
+            Some(Ok(job)) => job,
         };
         let carries_on = doing == Some(job) && why != Why::Done;
         if !carries_on {
             self.stints.on = Some(Stint { job, since: now });
         }
+        None
+    }
+
+    /// Back from a detour: its time was no job's, so lately isn't credited
+    /// with it.
+    pub(super) fn back_from_detour(&mut self) {
+        self.stints.credited = Some(self.now());
     }
 }
 
@@ -261,6 +301,8 @@ mod tests {
             job: Some("builder".into()),
             run: 0.4,
             lately,
+            made: BTreeSet::from(["rope_basic".to_string()]),
+            seen: BTreeSet::new(),
         };
         let stints = Stints::from_kept(&kept, 10.0);
         assert_eq!(stints.on.map(|s| s.job), Some(Role::Builder));

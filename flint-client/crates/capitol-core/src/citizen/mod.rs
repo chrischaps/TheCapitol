@@ -16,6 +16,8 @@
 //! - [`meet`]: how it answers the trades people ask it to (C1.5).
 //! - [`phrases`]: what it says, and how often (Commons S1.6).
 //! - [`idle`]: where it spends the time between its tasks (C2.1).
+//! - [`detour`]: the unrelated things it does in work hours (Callings
+//!   K1.5): an untried recipe, a lake, the lane, the paper, a neighbour.
 //! - [`report`]: what the town did, and in a soak whether the server's books
 //!   balanced and how hard it worked (C1.7).
 //! - [`balance`]: a soak under a preset of tunables, and two of them held up
@@ -24,6 +26,7 @@
 pub mod balance;
 pub mod calling;
 pub mod decide;
+pub mod detour;
 pub mod habit;
 pub mod idle;
 pub mod meet;

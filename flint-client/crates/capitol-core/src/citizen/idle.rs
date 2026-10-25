@@ -10,6 +10,11 @@
 //! The places come from `/terrain` ([`Places::new`]), so they are the
 //! world's: the hall's door and the face it's on, the bazaar's lane, the
 //! suburb's parks (big enough to stand about in) and the canals' bridges.
+//! A detour (Callings K1.5, [`detour`](super::detour)) goes further: to the
+//! wilds' sights at the ends of their trails, a lake, a ford or a ridge top
+//! ([`Sight`]), and to a neighbour's lot ([`Places::lots`]).
+
+use std::collections::HashMap;
 
 use capitol_protocol::terrain::{Landmark, LandmarkKind, TerrainResponse};
 
@@ -66,6 +71,35 @@ pub enum PlaceKind {
         /// From the deck's middle to its rail.
         rail: f64,
     },
+    /// Something to see in the wilds, at the end of the trail that goes to
+    /// it (W5's spurs and climbs, `wild_spur_{k}` and `wild_climb_{k}`, its
+    /// `id`): on the trail's last point, which a walker can reach, looking
+    /// at it (Callings K1.5).
+    Sight { id: String, sight: Sight, look: Point },
+}
+
+/// What a wild trail's end is there for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sight {
+    /// A lake's shore: looking out over the water.
+    Lake,
+    /// A ford: looking across the river.
+    Ford,
+    /// The highest ground a trail reaches in a massif: looking back at the
+    /// city.
+    Top,
+}
+
+impl Sight {
+    /// In a few words, from which way it lies: `a lake in the hills to the
+    /// north-east`.
+    pub fn words(self, bearing: &str) -> String {
+        match self {
+            Sight::Lake => format!("a lake in the hills to the {bearing}"),
+            Sight::Ford => format!("a ford in the hills to the {bearing}"),
+            Sight::Top => format!("a ridge top to the {bearing}"),
+        }
+    }
 }
 
 impl Place {
@@ -109,6 +143,9 @@ impl Place {
                 let p = (x + along.0 * side * rail + nx * s, y + along.1 * side * rail + ny * s);
                 (p, (p.0 + along.0 * side * 60.0, p.1 + along.1 * side * 60.0))
             }
+            // The trail's end, which a walker can reach where the ground to
+            // either side may be a cliff, or the water
+            PlaceKind::Sight { look, .. } => (self.at, *look),
         }
     }
 
@@ -119,6 +156,9 @@ impl Place {
             PlaceKind::Lane { .. } => "to the bazaar lane",
             PlaceKind::Park { .. } => "to the park",
             PlaceKind::Bridge { .. } => "to the bridge",
+            PlaceKind::Sight { sight: Sight::Lake, .. } => "out to a lake",
+            PlaceKind::Sight { sight: Sight::Ford, .. } => "out to a ford",
+            PlaceKind::Sight { sight: Sight::Top, .. } => "up to a ridge top",
         }
     }
 
@@ -129,6 +169,18 @@ impl Place {
             PlaceKind::Lane { .. } => "strolling the bazaar lane",
             PlaceKind::Park { .. } => "in the park",
             PlaceKind::Bridge { .. } => "on the bridge",
+            PlaceKind::Sight { sight: Sight::Lake, .. } => "looking out over a lake",
+            PlaceKind::Sight { sight: Sight::Ford, .. } => "watching the river at a ford",
+            PlaceKind::Sight { sight: Sight::Top, .. } => "on a ridge top, looking back at the city",
+        }
+    }
+
+    /// The park's, the bridge's or the sight's id; `None` for the steps
+    /// and the lane, of which there's one each.
+    pub fn id(&self) -> Option<&str> {
+        match &self.kind {
+            PlaceKind::Park { id, .. } | PlaceKind::Bridge { id, .. } | PlaceKind::Sight { id, .. } => Some(id),
+            _ => None,
         }
     }
 }
@@ -140,6 +192,13 @@ pub struct Places {
     pub lane: Option<Place>,
     pub parks: Vec<Place>,
     pub bridges: Vec<Place>,
+    /// The wilds' sights, at the ends of their trails (K1.5).
+    pub sights: Vec<Place>,
+    /// Every lot's middle, by its `/terrain` id: where a neighbour lives,
+    /// for a citizen calling on them (K1.5).
+    pub lots: HashMap<String, Point>,
+    /// The world's centre, for which way a place lies.
+    pub centre: Point,
 }
 
 impl Places {
@@ -190,20 +249,39 @@ impl Places {
                 })
             })
             .collect();
+        let lots = terrain
+            .terrain_plots
+            .iter()
+            .filter(|l| !l.corners.is_empty())
+            .map(|l| {
+                let n = l.corners.len() as f64;
+                let middle = (l.corners.iter().map(|p| p.0).sum::<f64>() / n, l.corners.iter().map(|p| p.1).sum::<f64>() / n);
+                (l.id.clone(), middle)
+            })
+            .collect();
         Places {
             hall_steps,
             lane,
             parks,
             bridges,
+            sights: sights(terrain),
+            lots,
+            centre,
         }
     }
 
-    /// The park or bridge `id` names.
+    /// The park, bridge or sight `id` names.
     pub fn named(&self, id: &str) -> Option<&Place> {
-        self.parks.iter().chain(&self.bridges).find(|p| match &p.kind {
-            PlaceKind::Park { id: i, .. } | PlaceKind::Bridge { id: i, .. } => i == id,
-            _ => false,
-        })
+        self.parks.iter().chain(&self.bridges).chain(&self.sights).find(|p| p.id() == Some(id))
+    }
+
+    /// Which way `at` lies from the middle of the world, as a compass
+    /// point: `north-east`. North is up the map, toward smaller `y`.
+    pub fn bearing(&self, at: Point) -> &'static str {
+        const POINTS: [&str; 8] = ["east", "south-east", "south", "south-west", "west", "north-west", "north", "north-east"];
+        let a = (at.1 - self.centre.1).atan2(at.0 - self.centre.0);
+        let k = (a / std::f64::consts::FRAC_PI_4).round().rem_euclid(8.0) as usize;
+        POINTS[k % 8]
     }
 
     /// The nearest park to `at` within reach.
@@ -258,6 +336,68 @@ pub fn homeward(places: &Places, at: Point, home: Point) -> Option<Vec<Choice>> 
 /// Whether `time` (the day's share) is dusk: the bridges' hour.
 pub fn at_dusk(time: f64) -> bool {
     time.rem_euclid(1.0) >= DUSK
+}
+
+/// A spur that ends this near a ford goes to the ford; the rest go to a
+/// lake's shore (`models::trails`).
+const AT_FORD: f64 = 40.0;
+/// A lake whose middle is this near a spur's end is the one it goes to.
+const LAKE_NEAR: f64 = 600.0;
+
+/// The wilds' sights: the last point of each spur and climb, and what's
+/// there to look at. A spur to a lake looks at the middle of the nearest
+/// lake, one to a ford across the river, on the way the spur came, and a
+/// climb back at the city.
+fn sights(terrain: &TerrainResponse) -> Vec<Place> {
+    let centre = (terrain.center_x, terrain.center_y);
+    let lakes: Vec<Point> = terrain
+        .lakes
+        .iter()
+        .filter_map(|l| {
+            let ring = l.rings.iter().max_by_key(|r| r.len())?;
+            let n = ring.len().max(1) as f64;
+            Some((ring.iter().map(|p| p.0).sum::<f64>() / n, ring.iter().map(|p| p.1).sum::<f64>() / n))
+        })
+        .collect();
+    terrain
+        .roads
+        .iter()
+        .filter_map(|r| {
+            let climb = r.id.starts_with("wild_climb_");
+            if !climb && !r.id.starts_with("wild_spur_") {
+                return None;
+            }
+            let &end = r.points.last()?;
+            let before = r.points.len().checked_sub(2).and_then(|k| r.points.get(k)).copied();
+            let ford = terrain.fords.iter().any(|f| distance((f.x, f.y), end) <= AT_FORD);
+            let lake = lakes
+                .iter()
+                .copied()
+                .filter(|&l| distance(l, end) <= LAKE_NEAR)
+                .min_by(|a, b| distance(*a, end).total_cmp(&distance(*b, end)));
+            // On the way the trail came, past its end
+            let ahead = |from: Point| {
+                let (dx, dy) = (end.0 - from.0, end.1 - from.1);
+                let d = dx.hypot(dy).max(1e-6);
+                (end.0 + dx / d * 50.0, end.1 + dy / d * 50.0)
+            };
+            let (sight, look) = match (climb, ford, lake) {
+                (true, ..) => (Sight::Top, centre),
+                (false, true, _) => (Sight::Ford, before.map_or(centre, ahead)),
+                (false, false, Some(lake)) => (Sight::Lake, lake),
+                // A spur cut back short of its lake
+                (false, false, None) => (Sight::Lake, before.map_or(centre, ahead)),
+            };
+            Some(Place {
+                kind: PlaceKind::Sight {
+                    id: r.id.clone(),
+                    sight,
+                    look,
+                },
+                at: end,
+            })
+        })
+        .collect()
 }
 
 fn bridge_id(place: &Place) -> String {

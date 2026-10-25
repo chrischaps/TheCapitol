@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::calling::Calling;
+use super::detour::DetourKind;
 use crate::sim::plan::Holdings;
 use crate::sim::Role;
 use log::{Fate, Log, Record};
@@ -525,6 +526,17 @@ pub enum Choice {
         setup: u32,
         #[serde(default)]
         pays: i64,
+    },
+    /// Wander off for about a quarter hour (Callings K1.5,
+    /// [`detour`](crate::citizen::detour)): `detour` is its kind, `to` what
+    /// it goes to (a recipe, a sight, the lane, the paper, a lot), and
+    /// `does` what taking it is, in a few words (`see a lake in the hills
+    /// to the north`). On the stint menu beside the jobs, and on the
+    /// free-time menu beside the places.
+    Detour {
+        detour: DetourKind,
+        to: String,
+        does: String,
     },
 }
 

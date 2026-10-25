@@ -6,9 +6,11 @@
 //! to join, some of them having invited it. Since Callings K1.1 each
 //! citizen has a calling, every birth trade in every style, and is asked
 //! what to work at next over its calling's jobs: at the start of a day,
-//! with nothing done lately or at its shares, and pulled away mid-stint. A
-//! fresh live town asks only work and bank questions (#294), so this is
-//! what a new layer is measured on until the logs hold the rest.
+//! with nothing done lately or at its shares, and pulled away mid-stint.
+//! Since K1.5 a detour or two is on its menu as a stint starts or ends,
+//! and on some of its free time's. A fresh live town asks only work and
+//! bank questions (#294), so this is what a new layer is measured on until
+//! the logs hold the rest.
 //! `capitol-town corpus` writes it as a rules-only citizen's log.
 
 use std::path::Path;
@@ -24,6 +26,7 @@ use super::log::{self, Fate, Log};
 use super::{Cascade, Choice, GuildSeen, Held, Mind, Place, Question, Quote, Situation, Temperament, When, Who, Why};
 use crate::catalog::Catalog;
 use crate::citizen::calling::{self, Calling, Style};
+use crate::citizen::detour::{Detour, DetourKind};
 use crate::citizen::persona::Persona;
 use crate::sim::plan::Holdings;
 use crate::sim::wage::{self, Hire};
@@ -107,7 +110,11 @@ fn round(r: u32) -> Vec<Situation> {
             out.push(stint(&calling, role, n, &h, &catalog, s));
             let Ok(errands) = role.errands(&catalog, &h) else { continue };
             out.push(s(Question::Work, errands.iter().map(|e| e.choice(&catalog)).collect(), 0));
-            out.push(s(Question::FreeTime, vec![Choice::Rest, Choice::Hall], 0));
+            let mut free = vec![Choice::Rest, Choice::Hall];
+            if n % 2 == 1 {
+                free.extend(detours(n));
+            }
+            out.push(s(Question::FreeTime, free, 0));
             // What it has spare at its birth trade, across its calling's
             // jobs (Callings K1.4)
             let goal = errands.first().and_then(|e| e.goal.as_ref());
@@ -287,6 +294,11 @@ fn stint(
             (Why::Pull, Some(favourite), 0.2 * (n % 4) as f32, short)
         }
     };
+    let mut menu = menu;
+    // As a stint starts or ends, a wander off may come first (K1.5)
+    if why != Why::Pull && !menu.is_empty() {
+        menu.extend(detours(n));
+    }
     let carry_on = doing.and_then(|d| menu.iter().position(|c| matches!(c, Choice::Take { job, .. } if job == d.slug())));
     let question = Question::Stint {
         why,
@@ -297,6 +309,41 @@ fn stint(
     let mut situation = s(question, menu, 0);
     situation.carry_on = carry_on;
     situation
+}
+
+/// The detours open to the `n`th citizen (K1.5): the lane and the paper,
+/// and by turns a lake to see, a recipe to try and a neighbour to call on.
+fn detours(n: u32) -> Vec<Choice> {
+    let mut out = vec![
+        Detour {
+            kind: DetourKind::Browse,
+            to: "lane".into(),
+            does: "browse the bazaar lane".into(),
+        },
+        Detour {
+            kind: DetourKind::Read,
+            to: "gazette".into(),
+            does: "read the Gazette at the hall".into(),
+        },
+    ];
+    match n % 3 {
+        0 => out.push(Detour {
+            kind: DetourKind::See,
+            to: format!("wild_spur_{n}"),
+            does: "see a lake in the hills to the north-east".into(),
+        }),
+        1 => out.push(Detour {
+            kind: DetourKind::Try,
+            to: "rope_basic".into(),
+            does: "try making rope".into(),
+        }),
+        _ => out.push(Detour {
+            kind: DetourKind::Call,
+            to: format!("sub_1_0_{n}_L_2"),
+            does: "call on a neighbour".into(),
+        }),
+    }
+    out.iter().map(Detour::choice).collect()
 }
 
 /// `word` with a capital: `Ore`.

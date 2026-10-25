@@ -437,6 +437,18 @@ impl TownReport {
         for c in &self.citizens {
             let _ = writeln!(md, "| {} | {} | {:.1} | {} |", c.name, c.role, c.time.work(), c.time.cells(&columns).join(" | "));
         }
+        // Who wandered off (Callings K1.5; §10 wants 70% a game day)
+        let wandered = self.citizens.iter().filter(|c| c.time.hours_on(Activity::Detour) > 0.0).count();
+        let (detours, work) = self
+            .citizens
+            .iter()
+            .fold((0.0, 0.0), |(d, w), c| (d + c.time.hours_on(Activity::Detour), w + c.time.work()));
+        let share = if work > 0.0 { 100.0 * detours / work } else { 0.0 };
+        let _ = writeln!(
+            md,
+            "\nDetours: {wandered} of {} citizens took one, {share:.1}% of the work.",
+            self.citizens.len()
+        );
         md.push('\n');
     }
 

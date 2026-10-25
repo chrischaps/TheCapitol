@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 use super::{SimBot, STOP_CHECK};
 use crate::bot::BotError;
 use crate::citizen::decide::{Choice, Question};
+use crate::citizen::detour::Detour;
+use crate::sim::activity::Activity;
+use crate::sim::report::Entry;
 use crate::citizen::idle::{self, Place};
 use crate::citizen::schedule;
 use crate::citizen::town::{Standing, Tether};
@@ -30,19 +33,30 @@ const HOME_NEAR: f64 = 50.0;
 
 impl SimBot {
     /// Free time for a citizen: where to spend it, from the places near
-    /// enough (`idle::menu`), and then there until `until`, or for a while
-    /// by its patience. A walk that doesn't get there stays where it got
-    /// to; a lost connection shows at the next step.
-    pub(super) fn idle_time(&mut self, town: Option<&Tether>, holdings: &Holdings, until: Option<Instant>) {
+    /// enough (`idle::menu`) and in its working hours the detours open to
+    /// it (K1.5), and then there until `until`, or for a while by its
+    /// patience. A walk that doesn't get there stays where it got to; a
+    /// lost connection shows at the next step. The game hours a detour
+    /// took, which has an entry of its own.
+    pub(super) fn idle_time(&mut self, town: Option<&Tether>, holdings: &Holdings, until: Option<Instant>) -> f64 {
         let places = match self.bot.walks() {
             Ok(walks) => walks.places().clone(),
-            Err(_) => return self.rest(town, "resting"),
+            Err(_) => {
+                self.rest(town, "resting");
+                return 0.0;
+            }
         };
         let at = self.bot.position();
         let stall = self.bot.state().bazaar().my_shop().map(|s| s.stall_id.clone());
         let time = self.bot.state().time_of_day();
-        let menu = idle::menu(&places, at, time, stall.as_deref());
+        let mut menu = idle::menu(&places, at, time, stall.as_deref());
+        if self.detours_open(self.phase()) {
+            menu.extend(self.detours(holdings));
+        }
         let choice = self.decide(Question::FreeTime, menu, 0, holdings).map(|(_, c)| c);
+        if let Some(d) = choice.as_ref().and_then(Detour::of) {
+            return self.detour_in_free_time(&d, town);
+        }
         let end = until.unwrap_or_else(|| Instant::now() + self.while_there());
         let result = match choice {
             Some(Choice::Hall) => self.bot.go_to_exchange().and_then(|()| {
@@ -74,6 +88,37 @@ impl SimBot {
                 town.health(|h| h.failed(format!("free time: {e}")));
             }
         }
+        0.0
+    }
+
+    /// A detour taken in free time, with its entry, as a round's is: filed
+    /// under [`Activity::Detour`], and a failure as a failed step. The game
+    /// hours it took.
+    fn detour_in_free_time(&mut self, d: &Detour, town: Option<&Tether>) -> f64 {
+        let label = format!("a detour: {}", d.does);
+        if let Some(town) = town {
+            town.health(|h| h.doing(Standing::Working, &label));
+        }
+        let (began, day) = (self.now(), self.day());
+        let result = self.take_detour(d, town);
+        let hours = self.now() - began;
+        self.entries.push(Entry::Spent {
+            label: label.clone(),
+            hours,
+            ok: result.is_ok(),
+            activity: Activity::Detour,
+            setup: false,
+            day,
+        });
+        if let Err(e) = result {
+            if !matches!(e, BotError::Interrupted(_)) {
+                if let Some(town) = town {
+                    town.health(|h| h.failed(format!("{label}: {e}")));
+                }
+                self.entries.push(Entry::Failed { label, why: e.to_string() });
+            }
+        }
+        hours
     }
 
     /// Free time in the night's work (#276): home, if it isn't, and a game
@@ -114,7 +159,7 @@ impl SimBot {
         self.noon_day = Some(today);
         let until = Instant::now() + schedule::real(end - now);
         let holdings = self.holdings();
-        self.idle_time(town, &holdings, Some(until));
+        let _ = self.idle_time(town, &holdings, Some(until));
         true
     }
 

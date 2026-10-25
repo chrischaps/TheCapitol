@@ -1916,7 +1916,7 @@ key = "j"
         assert!(read_stints(&path).is_empty());
         let mut lately = sim::stint::Lately::default();
         lately.add(Role::Builder, 1.25);
-        let ada = Kept { job: Some("builder".into()), run: 0.5, lately };
+        let ada = Kept { job: Some("builder".into()), run: 0.5, lately, seen: ["wild_spur_4".to_string()].into(), ..Kept::default() };
         let stints = BTreeMap::from([("Ada Reeder".to_string(), ada.clone()), ("Bo Tanner".to_string(), Kept::default())]);
         write_stints(&path, &stints).unwrap();
         assert_eq!(read_stints(&path), stints);

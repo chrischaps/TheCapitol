@@ -527,6 +527,7 @@ pub fn label(c: &Choice) -> String {
         Choice::Apply { guild } => format!("join {guild}"),
         Choice::Stay => "stay out".into(),
         Choice::Take { job, .. } => doing(job),
+        Choice::Detour { does, .. } => format!("a detour: {does}"),
     }
 }
 
@@ -656,6 +657,7 @@ pub fn entry(c: &Choice) -> String {
             };
             format!("Take up {} for the next while{setup}{pays}", doing(job))
         }
+        Choice::Detour { does, .. } => format!("Wander off from work for a quarter hour or so: {does}"),
     }
 }
 

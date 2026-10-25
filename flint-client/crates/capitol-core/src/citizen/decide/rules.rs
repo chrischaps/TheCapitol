@@ -82,8 +82,19 @@
 //! with setup still to do has its shortfall charged by [`setup_cost`], a
 //! pull on it adds up to [`PULL`], and the job it's at is worth
 //! [`MOMENTUM`] more until its stint's least length ([`least_stint`]).
+//!
+//! Detours (Callings K1.5, [`detour`]): on the stint menu a draw from the
+//! situation ([`unit`], whim's hash) says whether the end of a stint turns
+//! into a quarter hour's detour first, with a chance of the calling's
+//! `wander` ([`DETOUR`]), a quarter of that while the job it's at still
+//! has its momentum ([`DETOUR_HELD`]). One taken is worth a little more
+//! than the best job on the menu, so the rules' shares are untouched, and
+//! which of them by its kind's taste ([`DetourKind::taste`]) and the whim.
+//! On the free-time menu it's one place more, weighed by `wander` and
+//! taste against the hall, the lane and the park.
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Span, Temperament, Verdict};
+use crate::citizen::detour::DetourKind;
 use crate::sim::wage;
 use crate::sim::{Role, BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
 
@@ -134,6 +145,20 @@ const PULL_HALF: f64 = 150.0;
 const MOMENTUM: f64 = 0.5;
 /// A middling citizen's stint, in game hours.
 const STINT_HOURS: f64 = 1.5;
+/// The chance a stint's end turns into a detour first, a point of
+/// `wander`: a middling wanderer takes one at about every other stint's
+/// end, so most citizens take one in four game hours, and it comes to
+/// under a tenth of their work (K1.5).
+const DETOUR: f64 = 1.0;
+/// What's left of that chance while the job it's at still has its
+/// [`MOMENTUM`]: a session that starts mid-stint mostly gets on with it.
+const DETOUR_HELD: f64 = 0.25;
+/// What a detour taken is worth over the best job on the stint menu, and
+/// what its kind's taste adds to that, to choose between them.
+const DETOUR_OVER: f64 = 0.05;
+const DETOUR_TASTE: f64 = 0.1;
+/// The draw's own salt, apart from every entry's whim.
+const DETOUR_SALT: u64 = u64::MAX;
 
 /// The rules layer. It keeps no state: the same situation gets the same
 /// answer, which is what lets C3.1 replay a log exactly.
@@ -262,6 +287,7 @@ impl Decider for RulesDecider {
                 Choice::Apply { guild: name } => guild(s, i, name),
                 Choice::Stay => (PASS, Decision::plain(i)),
                 Choice::Take { job, setup, pays } => (stint(s, job, *setup, *pays), Decision::plain(i)),
+                Choice::Detour { detour: kind, .. } => (detour(s, i, *kind), Decision::plain(i)),
                 Choice::Post { price, quantity, .. } => {
                     // At its bid's price and a premium, for what it would bid for
                     let bid = price.min as f64;
@@ -332,22 +358,67 @@ fn stint(s: &Situation, job: &str, setup: u32, pays: i64) -> f64 {
     STINT + LEAN * target + chase + pull + if at_it { MOMENTUM } else { 0.0 }
 }
 
+/// A wander off from work (Callings K1.5), of `kind`, as entry `entry`.
+///
+/// - **On the stint menu** the draw ([`unit`] with [`DETOUR_SALT`], one for
+///   the whole menu) takes it when it falls under the chance: the
+///   calling's `wander` times [`DETOUR`], times [`DETOUR_HELD`] while the
+///   job it's at has its momentum. Taken, it's worth [`DETOUR_OVER`] more
+///   than the best job, and up to [`DETOUR_TASTE`] more by its kind's
+///   taste and the whim; not, it's worth less than any job.
+/// - **On the free-time menu** it's a place like the rest: the more the
+///   calling wanders, and the more the kind is to its taste, the better.
+///
+/// A situation with no calling wanders not at all.
+fn detour(s: &Situation, entry: usize, kind: DetourKind) -> f64 {
+    let wander = s.who.calling().map_or(0.0, |c| c.wander.clamp(0.0, 1.0) as f64);
+    let taste = kind.taste(&s.who.temperament) + whim(s, entry);
+    match &s.question {
+        Question::Stint { doing, run, .. } => {
+            let best = s
+                .menu
+                .iter()
+                .filter_map(|c| match c {
+                    Choice::Take { job, setup, pays } => Some(stint(s, job, *setup, *pays)),
+                    _ => None,
+                })
+                .fold(STINT, f64::max);
+            let held = doing.is_some() && f64::from(*run) < least_stint(&s.who.temperament);
+            let chance = DETOUR * wander * if held { DETOUR_HELD } else { 1.0 };
+            if unit(s, DETOUR_SALT) < chance {
+                best + DETOUR_OVER + DETOUR_TASTE * taste.clamp(0.0, 1.0)
+            } else {
+                // Under any job, which is worth STINT at the least
+                0.2 * wander + 0.1 * taste.clamp(0.0, 1.0)
+            }
+        }
+        Question::FreeTime => 0.4 + 0.4 * wander + 0.15 * taste,
+        // A detour's answers on another question's menu fit nothing
+        _ => 0.0,
+    }
+}
+
 /// How much more or less a place appeals today: up to [`WHIM`] either
 /// way, from who's asking, the quarter-hour and the entry. It's drawn from
 /// the situation alone, so a replay of it answers the same (C3.1), but the
 /// same citizen goes somewhere else an hour later.
 fn whim(s: &Situation, entry: usize) -> f64 {
+    (unit(s, entry as u64) * 2.0 - 1.0) * WHIM
+}
+
+/// A number in [0, 1) from who's asking, the quarter-hour and `salt`: the
+/// rules' only draw, from the situation alone.
+fn unit(s: &Situation, salt: u64) -> f64 {
     let quarter = s.when.time_of_day.map_or((s.when.hours * 4.0) as i64, |t| (t * 96.0) as i64);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.who.name.bytes().chain(quarter.to_le_bytes()).chain((entry as u64).to_le_bytes()) {
+    for b in s.who.name.bytes().chain(quarter.to_le_bytes()).chain(salt.to_le_bytes()) {
         h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
     }
     // SplitMix's finish, so neighbouring quarters differ
     h ^= h >> 30;
     h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     h ^= h >> 27;
-    let unit = (h >> 11) as f64 / (1u64 << 53) as f64;
-    (unit * 2.0 - 1.0) * WHIM
+    (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// The best entry, and how sure of it to be.
@@ -1469,6 +1540,169 @@ mod tests {
         // A stint's answer on another question's menu fits nothing
         let s = situation(Question::Work, vec![take(Role::Builder, 0, 0), Choice::Rest], Temperament::default());
         assert_eq!(decide(&s).0.pick, 1);
+    }
+
+    fn detour(kind: DetourKind) -> Choice {
+        Choice::Detour {
+            detour: kind,
+            to: kind.slug().into(),
+            does: format!("{kind:?}"),
+        }
+    }
+
+    /// Of `n` stint ends a game quarter hour apart, how many the rules turn
+    /// into a detour, for `who` wandering `wander`, at `doing` for `run`.
+    fn detours_in(n: usize, wander: f32, doing: Option<Role>, run: f32) -> usize {
+        let c = Calling {
+            wander,
+            ..calling(Role::Builder, Style::Leaner, 5)
+        };
+        let lately = BTreeMap::from([(Role::Builder.slug().to_string(), 1.0)]);
+        let mut menu: Vec<Choice> = ROLES.iter().map(|&job| take(job, 0, 0)).collect();
+        menu.extend(DetourKind::ALL.map(detour));
+        (0..n)
+            .filter(|&q| {
+                let mut s = stint(Some(c.clone()), doing, run, &lately, menu.clone());
+                s.when.time_of_day = Some((q as f64 + 0.5) / 96.0 % 1.0);
+                s.who.name = format!("Citizen {}", q / 96);
+                matches!(s.choice(&decide(&s).0), Choice::Detour { .. })
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_stints_end_turns_into_a_detour_as_often_as_the_calling_wanders() {
+        let n = 960;
+        for wander in [0.0, 0.2, 0.5, 0.9] {
+            let share = detours_in(n, wander, None, 0.0) as f64 / n as f64;
+            assert!((share - DETOUR * f64::from(wander)).abs() < 0.06, "wander {wander}: {share}");
+        }
+        // While the job it's at has its momentum, a quarter as often
+        let t = Temperament::default();
+        let held = detours_in(n, 0.8, Some(Role::Builder), least_stint(&t) as f32 - 0.1) as f64 / n as f64;
+        assert!((held - DETOUR * DETOUR_HELD * 0.8).abs() < 0.05, "{held}");
+        // With no calling (a swarm bot, a log from before callings), never
+        let mut menu = vec![take(Role::Builder, 0, 0), detour(DetourKind::See)];
+        let s = stint(None, None, 0.0, &BTreeMap::new(), menu.clone());
+        assert_eq!(decide(&s).0.pick, 0);
+        // A detour's answer on another question's menu fits nothing
+        menu[0] = Choice::Rest;
+        let s = situation(Question::Work, menu, Temperament::default());
+        assert_eq!(decide(&s).0.pick, 0);
+    }
+
+    #[test]
+    fn a_detour_leaves_the_jobs_as_they_were_and_goes_by_taste() {
+        let c = Calling {
+            wander: 1.0,
+            ..calling(Role::Builder, Style::Specialist, 9)
+        };
+        let lately = BTreeMap::from([(Role::Builder.slug().to_string(), 1.0)]);
+        let jobs: Vec<Choice> = ROLES.iter().map(|&job| take(job, 0, 0)).collect();
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for q in 0..96 {
+            let at = |menu: Vec<Choice>, t: Temperament| {
+                let mut s = stint(Some(c.clone()), None, 0.0, &lately, menu);
+                s.who.temperament = t;
+                s.when.time_of_day = Some((q as f64 + 0.5) / 96.0);
+                let d = decide(&s).0;
+                s.choice(&d).clone()
+            };
+            let mut menu = jobs.clone();
+            menu.extend(DetourKind::ALL.map(detour));
+            // The sociable browse and call, the solitary and bold go out
+            let social = at(menu.clone(), with(|t| t.sociability = 1.0));
+            let solitary = at(menu.clone(), with(|t| {
+                t.sociability = 0.0;
+                t.risk = 1.0;
+            }));
+            for (who, choice) in [("social", social), ("solitary", solitary)] {
+                if let Choice::Detour { detour, .. } = choice {
+                    *seen.entry(format!("{who} {}", detour.slug())).or_default() += 1;
+                } else {
+                    // Not taken, the job is the one it would be with none on the menu
+                    assert_eq!(choice, at(jobs.clone(), Temperament::default()), "quarter {q}");
+                }
+            }
+        }
+        let n = |k: &str| seen.get(k).copied().unwrap_or(0);
+        assert!(n("social browse") + n("social call") > n("social see") * 3, "{seen:?}");
+        assert!(n("solitary see") + n("solitary try") > n("solitary call") * 3, "{seen:?}");
+    }
+
+    #[test]
+    fn in_free_time_a_wanderer_wanders_off_and_a_homebody_seldom() {
+        let free = |wander: f32| {
+            (0..96)
+                .filter(|&q| {
+                    let menu = vec![Choice::Rest, Choice::Hall, Choice::Lane, Choice::Park { park: "p".into() }, detour(DetourKind::Read)];
+                    let mut s = situation(Question::FreeTime, menu, Temperament::default());
+                    s.who.calling = Some(Calling {
+                        wander,
+                        ..calling(Role::Builder, Style::Leaner, 5)
+                    });
+                    s.when.time_of_day = Some((q as f64 + 0.5) / 96.0);
+                    matches!(s.choice(&decide(&s).0), Choice::Detour { .. })
+                })
+                .count()
+        };
+        let (homebody, wanderer) = (free(0.1), free(0.9));
+        assert!(homebody <= 10 && wanderer >= 30, "{homebody} {wanderer}");
+    }
+
+    /// A town of the default mix lives four game hours of stints, each
+    /// asked as its session starts and as each ends, as K1.2's run asks
+    /// them: most of its citizens take a detour (K1.5's Verify: at least
+    /// 70%), and detours take under a tenth of the time.
+    #[test]
+    fn most_of_a_town_wanders_off_within_four_hours() {
+        const HOURS: f64 = 4.0;
+        const QUARTER: f64 = 0.25;
+        let roles = Role::assign(200);
+        let (mut wanderers, mut detour_hours, mut all_hours) = (0, 0.0, 0.0);
+        for (i, &role) in roles.iter().enumerate() {
+            let persona = Persona::seeded(role, 1000 + i as u64);
+            let t = persona.temperament;
+            let jobs: Vec<Role> = crate::sim::stint::menu_jobs(&persona.calling, false);
+            let mut lately = crate::sim::stint::Lately::default();
+            let (mut at, mut last, mut took) = (0.0, f64::NEG_INFINITY, false);
+            // The day's clock at 10x: a game hour is a twentieth of a day
+            let start = (i as f64 * 0.137) % 1.0;
+            let mut doing: Option<Role> = None;
+            while at < HOURS {
+                let open = at - last >= 1.5;
+                let mut menu: Vec<Choice> = jobs.iter().map(|&j| take(j, 0, 0)).collect();
+                if open {
+                    menu.extend(DetourKind::ALL.map(detour));
+                }
+                let run = if doing.is_some() { stint_hours(&t) as f32 } else { 0.0 };
+                let mut s = stint(Some(persona.calling.clone()), doing, run, &lately.question(), menu);
+                s.who.name = format!("Citizen {i}");
+                s.who.temperament = t;
+                s.when.time_of_day = Some((start + at * 0.05) % 1.0);
+                match s.choice(&decide(&s).0).clone() {
+                    Choice::Detour { .. } => {
+                        (took, last) = (true, at);
+                        at += QUARTER;
+                        detour_hours += QUARTER;
+                    }
+                    Choice::Take { job, .. } => {
+                        let job = Role::from_slug(&job).unwrap();
+                        let hours = stint_hours(&t).min(HOURS - at);
+                        lately.add(job, hours);
+                        doing = Some(job);
+                        at += hours;
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            all_hours += at;
+            wanderers += usize::from(took);
+        }
+        let share = wanderers as f64 / roles.len() as f64;
+        assert!(share >= 0.7, "{wanderers} of {} took a detour", roles.len());
+        let time = detour_hours / all_hours;
+        assert!((0.02..0.12).contains(&time), "detours took {:.1}% of the time", time * 100.0);
     }
 
     #[test]

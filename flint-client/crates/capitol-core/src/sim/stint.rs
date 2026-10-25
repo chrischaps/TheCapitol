@@ -15,9 +15,10 @@
 //!   job of the moment's (plan D6).
 //! - **What's kept between sessions** is a [`Kept`], in the side file beside
 //!   the roster (`town.stints.json`), so a casual citizen's half hour still
-//!   adds up to a mix.
+//!   adds up to a mix. Since K1.5 it keeps what a detour reads too: the
+//!   recipes it has made and the places it has been to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -98,7 +99,9 @@ impl Lately {
 }
 
 /// What the side file keeps of a citizen between its sessions: its job, how
-/// long it had run, and what it has done lately.
+/// long it had run, and what it has done lately; and for its detours
+/// (K1.5), the recipes it has made and the sights and parks it has been to,
+/// so "never made" and "hasn't been to" hold across its sessions.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Kept {
     /// [`Role::slug`]; none before its first stint
@@ -109,6 +112,12 @@ pub struct Kept {
     pub run: f64,
     #[serde(default)]
     pub lately: Lately,
+    /// Recipes it has made, by id
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub made: BTreeSet<String>,
+    /// Sights and parks it has been to on a detour, by id
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub seen: BTreeSet<String>,
 }
 
 impl Kept {
@@ -224,6 +233,8 @@ mod tests {
             job: Some("crafter-planks".into()),
             run: 0.5,
             lately: Lately::default(),
+            made: BTreeSet::from(["rope_basic".to_string()]),
+            seen: BTreeSet::from(["wild_climb_3".to_string()]),
         };
         let stint = kept.stint(3.0).unwrap();
         assert_eq!(stint.job, PLANKS);

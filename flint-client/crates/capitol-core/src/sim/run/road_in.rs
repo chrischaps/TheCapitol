@@ -472,7 +472,7 @@ impl SimBot {
 
     /// Looks in at a stall someone else keeps, or a bare one if none is
     /// kept: a bare one counts as well (D10).
-    fn look_in_at_a_stall(&mut self) -> Result<bool, BotError> {
+    pub(super) fn look_in_at_a_stall(&mut self) -> Result<bool, BotError> {
         let me = self.bot.state().me();
         let directory = self.bot.bazaar()?;
         let stall = directory

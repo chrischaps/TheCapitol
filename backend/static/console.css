@@ -54,6 +54,9 @@
   --fl-tax: #c9a00c;
   --fl-other: #8a8070;
   --fl-escrow: #2b4c7e;
+  /* a detour's ink (Callings K1.5): a wildflower rose, apart from
+     trading's gold and the Commons' violet in both themes */
+  --wander: #a8457a;
   /* the units' flows (D2.4), in the money's inks: what's gathered in the
      deposits' green, what's crafted in the grants' blue, what's used up in
      the sinks' gold, reds and browns. Defined once, so each theme's inks
@@ -111,7 +114,8 @@
   --n-other: #6b6150;
   /* a citizen's time by activity (Callings K0.1, K3.3): the gatherers in
      their nodes' inks, the crafts in their materials', building in clay,
-     trading in the accent's gold, the Commons in the fees' violet. Defined
+     trading in the accent's gold, the Commons in the fees' violet,
+     detours in the wander's rose. Defined
      once, so each theme's inks carry through */
   --a-fiber: var(--n-grass);
   --a-wood: var(--n-tree);
@@ -122,7 +126,7 @@
   --a-building: var(--n-clay_bank);
   --a-trading: var(--accent);
   --a-commons: var(--fl-fees);
-  --a-detour: var(--fl-tax);
+  --a-detour: var(--wander);
   --a-road_in: var(--fl-newcomers);
   --a-free: var(--hair);
 }
@@ -168,6 +172,7 @@
     --fl-tax: #facc15;
     --fl-other: #8a8a96;
     --fl-escrow: #e8a24a;
+    --wander: #f08cb8;
     --k-annotation: #c9a227;
     --k-fill: #3b82f6;
     --k-deed: #22c55e;
@@ -248,6 +253,7 @@
   --fl-tax: #facc15;
   --fl-other: #8a8a96;
   --fl-escrow: #e8a24a;
+  --wander: #f08cb8;
   --k-annotation: #c9a227;
   --k-fill: #3b82f6;
   --k-deed: #22c55e;

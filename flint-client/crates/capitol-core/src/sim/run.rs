@@ -17,9 +17,12 @@
 //! its deed at the end of it (#450, [`road_in`]). They answer and post
 //! commissions on the hall's board too (Commons S2.5, [`board`]), take
 //! work for a wage in their working hours (S2.8, [`wages`]), and join the
-//! guilds of their trades and pay into them (S4.5, [`guilds`]).
+//! guilds of their trades and pay into them (S4.5, [`guilds`]). In their
+//! working hours they wander off now and then, for a quarter hour or so
+//! (Callings K1.5, [`detour`]).
 
 mod board;
+mod detour;
 mod guilds;
 mod hire;
 mod idle;
@@ -54,6 +57,7 @@ use crate::catalog::Catalog;
 use crate::citizen::calling::Calling;
 use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Decision, Held, Mind, Place, Question, Situation, When, Who};
+use crate::citizen::detour::Detour;
 use crate::citizen::meet;
 use crate::citizen::persona::{Market, Persona};
 use crate::citizen::phrases::Voice;
@@ -368,6 +372,8 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::Rest | Choice::Hall, None) => true,
         // A stint is taken up as it's chosen (Callings K1.2)
         (Choice::Take { .. }, _) => true,
+        // A detour, from the stint menu or in free time (K1.5)
+        (Choice::Detour { .. }, Some(Action::Detour(_)) | None) => true,
         (Choice::Keep | Choice::Gather { .. } | Choice::Pass | Choice::Stay, _) => return Fate::Passed,
         _ => false,
     };
@@ -456,6 +462,8 @@ struct SimBot {
     /// The lot it last took its stations down on to pack again (#405):
     /// once a lot, so a packing that comes out no better doesn't go round.
     repacked: Option<Uuid>,
+    /// When it last set off on a detour, in the run's game hours (K1.5).
+    last_detour: Option<f64>,
 }
 
 /// What a bot does next.
@@ -477,6 +485,9 @@ enum Action {
     /// Joining a guild, paying in or leaving (S4.5), between its other
     /// business: never a round of its own.
     Guild(guilds::GuildAct),
+    /// A quarter hour off its work for something unrelated (K1.5), taken
+    /// as a stint ends.
+    Detour(Detour),
 }
 
 impl SimBot {
@@ -521,6 +532,7 @@ impl SimBot {
             guilds: guilds::Guilds::new(),
             hiring: hire::Hiring::new(),
             repacked: None,
+            last_detour: None,
         }
     }
 
@@ -629,21 +641,22 @@ impl SimBot {
                     }
                 }
             }
-            // What to work at for the next while (Callings K1.2): asked as
-            // a session starts, as a stint runs its length, and on a pull
-            self.mind_stint(&holdings);
             // The round's decisions, whose outcomes are logged after it (C3.1)
             let mark = self.mind.mark();
+            // What to work at for the next while (Callings K1.2): asked as
+            // a session starts, as a stint runs its length, and on a pull.
+            // As one starts or ends, it may wander off first (K1.5)
+            let detour = self.mind_stint(&holdings, phase);
             // A promise first, then the board, before the road or a trade
-            let board = if self.people { self.choose_board(&holdings) } else { None };
+            let board = if self.people && detour.is_none() { self.choose_board(&holdings) } else { None };
             // Then work for a wage (S2.8): its shift, or work it takes
-            let wage = if board.is_none() { self.choose_wage(&holdings, phase) } else { None };
+            let wage = if board.is_none() && detour.is_none() { self.choose_wage(&holdings, phase) } else { None };
             // Then hiring (K2.4): a box a hire left, or work it offers
-            let hire = if board.is_none() && wage.is_none() { self.choose_hire(&holdings, phase) } else { None };
+            let hire = if board.is_none() && wage.is_none() && detour.is_none() { self.choose_hire(&holdings, phase) } else { None };
             // What to work on, at the job of the moment, then whether to
             // trade first (C1.3). On a shift, the employer's work is its work
             let errand = match self.job().errands_at(&catalog, &holdings, self.commitment()) {
-                _ if wage.is_some() => Ok(None),
+                _ if wage.is_some() || detour.is_some() => Ok(None),
                 Ok(errands) if errands.is_empty() => Ok(None),
                 Ok(errands) => Ok(Some(self.choose_errand(&catalog, &holdings, errands))),
                 Err(stuck) => Err(stuck),
@@ -651,7 +664,7 @@ impl SimBot {
             // The road in first, while a step on it is open (#450): by day and
             // at market hours, and in the night's work what needs no walk
             let road = match &errand {
-                _ if self.road.is_none() || board.is_some() || wage.is_some() => None,
+                _ if self.road.is_none() || board.is_some() || wage.is_some() || detour.is_some() => None,
                 Ok(errand) => self.choose_road(&holdings, errand.as_ref()),
                 Err(_) => self.choose_road(&holdings, None),
             };
@@ -674,6 +687,7 @@ impl SimBot {
             let step = errand.map(|e| e.map(|e| e.step));
             let errand_label = step.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.label(&catalog));
             let action = match (board, wage, road, step, trade) {
+                _ if detour.is_some() => Ok(detour.map(Action::Detour)),
                 (Some(act), ..) => Ok(Some(Action::Board(act))),
                 (None, Some(act), ..) => Ok(Some(Action::Wage(act))),
                 _ if hire.is_some() => Ok(hire.map(Action::Hire)),
@@ -701,6 +715,7 @@ impl SimBot {
                         Action::Wage(act) => self.wage_act(act),
                         Action::Hire(act) => self.hire_act(act),
                         Action::Guild(act) => self.guild_act(act),
+                        Action::Detour(d) => self.take_detour(d, town),
                     };
                     if errand_label.is_some() {
                         self.doing = errand_label;
@@ -822,6 +837,7 @@ impl SimBot {
             Action::Wage(act) => act.label(),
             Action::Hire(act) => act.label(),
             Action::Guild(act) => act.label(),
+            Action::Detour(d) => format!("a detour: {}", d.does),
         }
     }
 
@@ -839,6 +855,7 @@ impl SimBot {
             }
             Action::Road(_) => (Activity::RoadIn, false),
             Action::Market => (Activity::Free, false),
+            Action::Detour(_) => (Activity::Detour, false),
         }
     }
 
@@ -853,12 +870,13 @@ impl SimBot {
         capitol_protocol::rules::day_number(now)
     }
 
-    /// Its free time, and an entry for how long it took (K0.1).
+    /// Its free time, and an entry for how long it took (K0.1), less a
+    /// detour taken in it, which has its own (K1.5).
     fn idle(&mut self, town: Option<&Tether>) {
         let (began, day) = (self.now(), self.day());
-        self.free_time(town);
+        let detour = self.free_time(town);
         self.entries.push(Entry::Idle {
-            hours: self.now() - began,
+            hours: (self.now() - began - detour).max(0.0),
             day,
         });
     }
@@ -1087,11 +1105,13 @@ impl SimBot {
     }
 
     /// Time on its hands: rest where it is, or pass it at the hall. A
-    /// citizen has more places to be (C2.1, [`idle`]).
-    fn free_time(&mut self, town: Option<&Tether>) {
+    /// citizen has more places to be (C2.1, [`idle`]), and may wander off
+    /// on a detour (K1.5): the game hours that took.
+    fn free_time(&mut self, town: Option<&Tether>) -> f64 {
         let holdings = self.holdings();
         if self.night_shift {
-            return self.night_in(town);
+            self.night_in(town);
+            return 0.0;
         }
         if self.persona.is_some() {
             return self.idle_time(town, &holdings, None);
@@ -1107,10 +1127,12 @@ impl SimBot {
                 if self.people {
                     let _ = self.bot.collect_market_box().and_then(|_| self.post_demand());
                 }
-                return self.rest(town, "resting at the hall");
+                self.rest(town, "resting at the hall");
+                return 0.0;
             }
         }
         self.rest(town, "resting");
+        0.0
     }
 
     /// Logs what came of the decisions since `mark` (C3.1), when `action`
@@ -1441,6 +1463,8 @@ impl SimBot {
                 // Anything left in the output would block a different craft.
                 self.bot.collect_output()?;
                 self.bot.craft_at(recipe, at)?;
+                // Made once, it's no longer something new to try (K1.5)
+                self.stints.made.insert(recipe.clone());
                 self.bot.collect_output()
             }
             Step::Place {
