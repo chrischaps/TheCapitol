@@ -21,6 +21,7 @@
 //! crafts. While the input has the keys, Flint gives them to egui alone, so
 //! nothing typed walks, turns or acts (`flint-player`'s `egui_input`).
 
+use super::pad_nav::FollowFocus;
 use std::time::{Duration, Instant};
 
 use capitol_core::chat::Chat;
@@ -214,7 +215,7 @@ impl ChatPanel {
             .min_scrolled_height(place.log)
             .auto_shrink([false, false])
             .stick_to_bottom(true)
-            .show(ui, |ui| {
+            .show_following(ui, |ui| {
                 ui.set_max_width(place.width - 12.0);
                 ui.spacing_mut().item_spacing.y = 3.0;
                 if log.lines(tab).next().is_none() {

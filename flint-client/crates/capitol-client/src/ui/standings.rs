@@ -19,6 +19,7 @@
 //! `capitol_core::standings::Standings`; only a click on a name reaches past
 //! it, as an [`Action`].
 
+use super::pad_nav::FollowFocus;
 use capitol_core::protocol::rest::{LeaderboardEntry, LeaderboardKind};
 use capitol_core::standings::{self as st, Standings};
 use egui::{Align, Color32, Layout, Margin, RichText, Sense, Stroke};
@@ -192,7 +193,7 @@ fn honours(ui: &mut egui::Ui, standings: &Standings, names: f32, action: &mut Op
             .id_salt("capitol_standings")
             .max_height(names)
             .auto_shrink([false, true])
-            .show(ui, |ui| {
+            .show_following(ui, |ui| {
                 for entry in &shown.top {
                     line(ui, entry, action);
                 }

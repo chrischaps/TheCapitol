@@ -16,6 +16,7 @@
 //! drag or zoom, so the price and volume plots always line up and the panel
 //! keeps the wheel.
 
+use super::pad_nav::FollowFocus;
 use capitol_core::market::{Bucket, History};
 use capitol_core::protocol::rest::{Candle, MarketTrade};
 use capitol_core::protocol::rules::market::OrderSide;
@@ -532,7 +533,7 @@ pub fn tape(
         .id_salt("capitol_market_tape")
         .max_height(height - 16.0)
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let trades: Vec<&MarketTrade> = history.recent.iter().collect();
             for (i, trade) in trades.iter().enumerate() {

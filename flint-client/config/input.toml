@@ -26,8 +26,8 @@ game_id = "capitol"
 
 # The pad (controls T2.1, plan D6) plays over the shoulder: the left stick
 # walks, the right stick looks, South acts, North trades, East backs out,
-# the triggers zoom, and the d-pad, Start and Select open the panels. Inside
-# a panel you use the mouse (#331).
+# the triggers zoom, and the d-pad, Start and Select open the panels. With a
+# panel open the d-pad moves round inside it instead (the ui_* actions, #331).
 #
 # Over the shoulder (Direct, T1.3), the way to walk: the keys at ±1 and the
 # left stick, summed. The stick has no deadzone here: the client applies a
@@ -145,6 +145,43 @@ bindings = [{ type = "key", code = "KeyX" }, { type = "gamepad_button", button =
 [actions.market]
 kind = "button"
 bindings = [{ type = "key", code = "KeyM" }, { type = "gamepad_button", button = "DPadRight" }]
+
+# Inside a panel on the pad (#331, ui/pad_nav.rs): with a panel open and the
+# pad the last thing used, the d-pad moves a ring round the panels' parts
+# instead of opening panels, A presses what's ringed (a slot: picks its
+# stack up, or puts it down), X picks up half a stack, and the shoulders hop
+# to the next panel along. B is `back`, as ever.
+[actions.ui_up]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "DPadUp" }]
+
+[actions.ui_down]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "DPadDown" }]
+
+[actions.ui_left]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "DPadLeft" }]
+
+[actions.ui_right]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "DPadRight" }]
+
+[actions.ui_press]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "South" }]
+
+[actions.ui_half]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "West" }]
+
+[actions.ui_next]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "RightTrigger" }]
+
+[actions.ui_prev]
+kind = "button"
+bindings = [{ type = "gamepad_button", button = "LeftTrigger" }]
 
 # The Capitol Gazette (E3.9); the header's Gazette chip and a click on the
 # notice board in the Exchange hall's forecourt do the same.

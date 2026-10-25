@@ -20,6 +20,7 @@
 //! The panel works the `Board` directly. What reaches past it comes back as
 //! an [`Action`]: a call to make, and a name that opens a card.
 
+use super::pad_nav::FollowFocus;
 use capitol_core::catalog::Catalog;
 use capitol_core::chrono::{DateTime, Utc};
 use capitol_core::commissions::{self as cm, Ask, Board, Show, Showing, GRADES};
@@ -85,21 +86,21 @@ pub fn page(ui: &mut egui::Ui, board: &mut Board, view: &View, icons: &mut ItemI
                 .max_height(room)
                 .min_scrolled_height(room)
                 .auto_shrink([false, true])
-                .show(ui, |ui| cards(ui, board, view, icons, &mut action));
+                .show_following(ui, |ui| cards(ui, board, view, icons, &mut action));
         }
         Showing::Post => {
             egui::ScrollArea::vertical()
                 .id_salt("capitol_board_post")
                 .max_height(room + 40.0)
                 .auto_shrink([false, true])
-                .show(ui, |ui| post_form(ui, board, view, icons, &mut action));
+                .show_following(ui, |ui| post_form(ui, board, view, icons, &mut action));
         }
         Showing::Deliver(id) => {
             egui::ScrollArea::vertical()
                 .id_salt("capitol_board_deliver")
                 .max_height(room + 40.0)
                 .auto_shrink([false, true])
-                .show(ui, |ui| deliver_form(ui, board, view, icons, id, &mut action));
+                .show_following(ui, |ui| deliver_form(ui, board, view, icons, id, &mut action));
         }
     }
     action

@@ -30,7 +30,7 @@ The question the A/B answers is this: **which way of moving makes the economy fe
 
 **Non-goals for this plan**
 - Walls. The server doesn't block buildings. That's F1 (#330), a decision for Chris.
-- Moving round inside a panel with the pad. That's F2 (#331). Panels stay mouse-driven.
+- Moving round inside a panel with the pad. That was F2 (#331), built after the plan: see §8.
 - The React and Love2D clients. Both are frozen.
 - Jumping, sprinting, or any speed that click mode doesn't also have.
 - Mouse-look in Click mode.
@@ -135,7 +135,7 @@ The pad does these:
 - zooming (the triggers);
 - opening and closing panels (the d-pad, Start and Select).
 
-Inside a panel you use the mouse. F2 (#331) is the follow-up.
+Inside a panel you used the mouse. F2 (#331) followed: see §8.
 
 ### D7. Walls are out of scope (Chris's choice)
 
@@ -322,7 +322,7 @@ That's about the size of the wilds' W4 to W6 together.
 ## 8. Later (outside this plan)
 
 - **F1, walls** (#330): solid buildings in `walk_step`, if Chris decides for them.
-- **F2, the pad inside panels** (#331).
+- **F2, the pad inside panels** (#331). *Built:* with a panel open and the pad the last thing used, in either mode, the d-pad moves a gold ring between the panels' widgets instead of opening panels (`ui/pad_nav.rs`; the `ui_*` actions). A presses what's ringed, X takes half a stack, the shoulders hop to the next panel along, and B is Back. It rides egui's own focus: the ring picks the next widget from the last frame's rects (egui's cone search, leaving out widgets under another panel, scroll bars, sliders and the panel's own surface), lends it egui's focus for the pass, and a press is an Enter pushed into the pass's input, which a focused widget answers as a click. A panel that comes up takes the ring; with none, it starts in the panel on top. A slot grid needs nothing of its own for the d-pad; A on a slot picks its stack up (`slots`' `Carry`, drawn riding over the ringed slot) and A on another puts it there, as a drop does, a split asking how many first. The trade window and the market take a carried stack as a drop. Every panel's scroll area is `show_following`, which scrolls the ring into view. The shortcut card gains the pad's rows (a whole-d-pad glyph, `{DPad}`). Not built, each with an issue: a pad can't type, set a number or move a slider, or scroll the Deeds Office's list (#517), and a cursor on the left stick needs a Flint hook to feed egui input (#518). Flint takes any egui focus for typing and holds the pads, so the ring hands egui the focus back at the end of each pass (#516).
 - **F3, rebinds that survive a restart** (#332). Flint's user override is saved under one name and loaded under another. Fixed in Flint#85: the player looks for `<config>/flint/input_<game_id>.toml` once the game default sets the id, and saves there. The Capitol's live at `%APPDATA%\flint\input_capitol.toml`.
 - **F4, a controls menu** (#425). Scripts can't start a rebind (`begin_rebind_capture` is Rust-only), so rebinding today means editing that file by hand.
 - **The map in Direct.** If Direct stays, a key that lifts the camera to the map and back.

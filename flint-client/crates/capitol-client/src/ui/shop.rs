@@ -21,6 +21,7 @@
 //! server's rules, so what Buy and Rent say is what they cost. Sales at your
 //! stall and its closing come as toasts (`market_note`), panel or no panel.
 
+use super::pad_nav::FollowFocus;
 use std::collections::HashMap;
 
 use capitol_core::bazaar::{self, Refusal};
@@ -265,7 +266,7 @@ impl ShopPanel {
             .id_salt("capitol_shop_listings")
             .max_height(LISTINGS_HEIGHT)
             .auto_shrink([false, true])
-            .show(ui, |ui| {
+            .show_following(ui, |ui| {
                 for listing in &shop.listings {
                     if let Some(a) = self.buy_row(ui, icons, view, shop, listing) {
                         action = Some(a);
@@ -392,7 +393,7 @@ impl ShopPanel {
             .id_salt("capitol_shop_mine")
             .max_height(LISTINGS_HEIGHT * 0.7)
             .auto_shrink([false, true])
-            .show(ui, |ui| {
+            .show_following(ui, |ui| {
                 if shop.listings.is_empty() {
                     ui.label(theme::dim("Nothing yet. Stock it from your pack below.").size(size::SMALL));
                 }

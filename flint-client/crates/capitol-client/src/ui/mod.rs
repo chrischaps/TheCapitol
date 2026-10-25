@@ -46,6 +46,8 @@
 //!   zone banner and the toasts (P4.5; one line since P8.3).
 //! - [`hints`]: the first-session hints, once per account (P8.3).
 //! - [`shortcuts`]: every control on one card, on `?` or F1 (P8.3).
+//! - [`pad_nav`]: the pad inside a panel (#331): a gold ring the d-pad
+//!   moves between the panels' widgets, and A to press.
 //! - [`dev_overlay`]: the dev overlay on F7 (D5.2): frame times, the net,
 //!   the prediction, the store's counts and the interest cell.
 
@@ -70,6 +72,7 @@ pub mod login;
 pub mod mail;
 pub mod market;
 pub mod market_chart;
+pub mod pad_nav;
 pub mod plot;
 pub mod quality_card;
 pub mod sample;

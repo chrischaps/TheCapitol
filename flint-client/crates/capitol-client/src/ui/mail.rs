@@ -15,6 +15,7 @@
 //! Only what reaches past the mailbox comes back as an [`Action`]: a name
 //! that opens a card, and the ×.
 
+use super::pad_nav::FollowFocus;
 use capitol_core::chrono::{DateTime, Utc};
 use capitol_core::mail::{self, Mail, Showing};
 use capitol_core::protocol::rest::{Correspondent, Letter, LetterBox};
@@ -304,7 +305,7 @@ fn read(ui: &mut egui::Ui, mail: &mut Mail, letter: &Letter, view: &View) -> Opt
         ui.add_space(4.0);
         ink_rule(ui);
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().id_salt("capitol_mail_letter").max_height(room - 96.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("capitol_mail_letter").max_height(room - 96.0).show_following(ui, |ui| {
             ui.label(RichText::new(&letter.body).font(theme::body(HAND)).color(theme::INK));
         });
         ui.add_space(6.0);
@@ -387,7 +388,7 @@ fn write(ui: &mut egui::Ui, mail: &mut Mail, view: &View) -> Option<Action> {
             v.text_cursor.stroke = Stroke::new(1.5_f32, theme::INK);
             v.selection.bg_fill = theme::PAPER_EDGE;
             v.selection.stroke = Stroke::new(1.0_f32, theme::INK);
-            egui::ScrollArea::vertical().id_salt("capitol_mail_pen").max_height(room).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("capitol_mail_pen").max_height(room).show_following(ui, |ui| {
                 let hint = format!("Dear {},", draft.to.name);
                 let pen = egui::TextEdit::multiline(&mut body)
                     .id(Id::new("capitol_mail_pen_field"))

@@ -9,6 +9,7 @@
 //! market box's Collect does. A drop onto the impound does nothing: the
 //! server refuses anything going in (`container_access::impound_refusal`).
 
+use super::pad_nav::FollowFocus;
 use super::hud::grouped;
 use super::icons::ItemIcons;
 use super::slots::Slot;
@@ -131,7 +132,7 @@ fn body(ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View) -> Option<Action>
     }
     let impound = view.impound.map(|c| c.id).unwrap_or_default();
     let tall = ROWS as f32 * (SLOT_SIZE + SLOT_GAP) + 12.0;
-    egui::ScrollArea::vertical().max_height(tall).show(ui, |ui| {
+    egui::ScrollArea::vertical().max_height(tall).show_following(ui, |ui| {
         theme::tray().show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SLOT_GAP, SLOT_GAP);
             for row in held.chunks(COLUMNS) {

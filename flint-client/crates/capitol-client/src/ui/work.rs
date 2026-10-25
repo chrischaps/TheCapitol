@@ -17,6 +17,7 @@
 //! The page reads the session's `capitol_core::wages::Wages`; what reaches
 //! past it comes back as an [`Action`].
 
+use super::pad_nav::FollowFocus;
 use capitol_core::catalog::Catalog;
 use capitol_core::chrono::{DateTime, Utc};
 use capitol_core::protocol::rest::WageOffer;
@@ -86,7 +87,7 @@ pub fn page(ui: &mut egui::Ui, wages: &Wages, view: &View, icons: &mut ItemIcons
         .max_height(room)
         .min_scrolled_height(room)
         .auto_shrink([false, true])
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             if let Some(a) = cards(ui, wages, view, icons, show) {
                 action = Some(a);
             }

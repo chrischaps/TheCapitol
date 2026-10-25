@@ -292,7 +292,7 @@ impl DeedsOffice {
         ui.add_space(2.0);
         ui.scope(|ui| {
             ui.spacing_mut().scroll.dormant_handle_opacity = 0.5;
-            egui::ScrollArea::vertical()
+            let lots = egui::ScrollArea::vertical()
                 .id_salt("capitol_deeds_lots")
                 .max_height(room - 44.0)
                 .drag_to_scroll(false)
@@ -303,6 +303,9 @@ impl DeedsOffice {
                         }
                     }
                 });
+            // Rows out of view aren't laid out, so the pad's ring can't
+            // scroll this list (#517); it does pass its bar by
+            super::pad_nav::note_scroll_bars(ui.ctx(), lots.id);
         });
         action
     }

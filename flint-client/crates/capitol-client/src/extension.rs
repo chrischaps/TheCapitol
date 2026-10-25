@@ -308,6 +308,11 @@ pub struct CapitolExtension {
     /// The pad was the last thing used, over the shoulder: the shortcut
     /// overlay and the road in's cards speak of it (T2.2).
     pad_held: bool,
+    /// The pad inside a panel (#331): the ring the d-pad moves, and
+    /// whether it's up (a panel open, with the pad the last thing used,
+    /// in either mode).
+    pad_nav: ui::pad_nav::PadNav,
+    pad_in_panel: bool,
     /// How you've played each mode (T3.1), or `None` for captures and
     /// offline runs, which keep none.
     controls_stats: Option<crate::controls_stats::ControlsStats>,
@@ -414,6 +419,8 @@ impl CapitolExtension {
             control_mode: None,
             alt_held: false,
             pad_held: false,
+            pad_nav: ui::pad_nav::PadNav::default(),
+            pad_in_panel: false,
             controls_stats: None,
         }
     }
@@ -1645,7 +1652,10 @@ impl CapitolExtension {
     /// as Esc does. With nothing open it does nothing: unlike Esc over the
     /// shoulder, it never frees the cursor, which a pad has no use for.
     fn back(&mut self) {
-        if self.shortcuts.open {
+        let egui = self.shared.egui.lock().ok().and_then(|e| e.clone());
+        if egui.is_some_and(|ctx| ui::slots::drop_carry(&ctx)) {
+            // A stack picked up in a panel (#331) goes back first
+        } else if self.shortcuts.open {
             self.shortcuts.open = false;
         } else if self.session.as_ref().is_some_and(|s| s.placing().is_some()) {
             self.cancel_placing = true;
@@ -1716,20 +1726,32 @@ impl PlayerExtension for CapitolExtension {
         if let Some(juice) = &mut self.juice {
             juice.update(ctx, &self.shared);
         }
+        // Inside a panel the pad moves round it (#331), so its d-pad opens
+        // no other
+        let in_panel = !self.at_login()
+            && self.panel_open()
+            && ctx.input.last_device() == flint_runtime::InputDevice::Gamepad;
+        self.pad_in_panel = in_panel;
+        if in_panel {
+            self.pad_nav.ask(pad_nav_asked(ctx));
+        }
+        let opens = |action: &str| !self.at_login() && !in_panel && ctx.input.is_action_just_pressed(action);
+        let (inventory, crafting) = (opens("inventory"), opens("crafting"));
+        let (exchange, market) = (opens("exchange"), opens("market"));
         // Never while a text field has the keys: egui consumes those.
-        if !self.at_login() && ctx.input.is_action_just_pressed("inventory") {
+        if inventory {
             self.toggle_inventory();
         }
-        if !self.at_login() && ctx.input.is_action_just_pressed("crafting") {
+        if crafting {
             self.toggle_crafting();
         }
         if self.in_world() && ctx.input.is_action_just_pressed("help") {
             self.shortcuts.toggle();
         }
-        if !self.at_login() && ctx.input.is_action_just_pressed("exchange") {
+        if exchange {
             self.exchange.toggle();
         }
-        if !self.at_login() && ctx.input.is_action_just_pressed("market") {
+        if market {
             self.market.toggle();
         }
         // The Gazette (E3.9): G, or a click on its notice board
@@ -2454,6 +2476,8 @@ impl PlayerExtension for CapitolExtension {
 
     fn ui(&mut self, ctx: &egui::Context) {
         ui::theme::install(ctx);
+        // The pad's ring moves and presses before any panel is drawn (#331)
+        self.pad_nav.begin(ctx, self.pad_in_panel);
         // What a tool's tooltip reads its power from (E1.7)
         match &self.session {
             Some(session) => ui::slots::know_catalog(ctx, session.state().catalog()),
@@ -3456,6 +3480,7 @@ impl PlayerExtension for CapitolExtension {
         // nothing here wants it (T1.4)
         let wants = self.wants_cursor();
         self.shared.wants_cursor.store(wants, Ordering::Relaxed);
+        self.pad_nav.end(ctx);
         // Every widget clicked, and everything let go after a drag (a slot
         // filled), makes its sound next frame.
         let (clicked, dropped) =
@@ -3567,6 +3592,23 @@ fn walk_input(ctx: &ExtensionCtx) -> (f64, f64) {
     let x = ctx.input.action_value("walk_x") as f64;
     let y = ctx.input.action_value("walk_y") as f64;
     capitol_core::pad::walk(x, y)
+}
+
+/// What the pad asked inside a panel this frame (#331): the d-pad's way,
+/// A, X and the shoulders, from the `ui_*` actions.
+fn pad_nav_asked(ctx: &ExtensionCtx) -> ui::pad_nav::Asked {
+    use ui::pad_nav::Dir;
+    let pressed = |action: &str| ctx.input.is_action_just_pressed(action);
+    let dir = [("ui_up", Dir::Up), ("ui_down", Dir::Down), ("ui_left", Dir::Left), ("ui_right", Dir::Right)]
+        .into_iter()
+        .find(|(action, _)| pressed(action))
+        .map(|(_, dir)| dir);
+    ui::pad_nav::Asked {
+        dir,
+        press: pressed("ui_press"),
+        half: pressed("ui_half"),
+        hop: pressed("ui_next") as i32 - pressed("ui_prev") as i32,
+    }
 }
 
 /// The walk as the way to go, in server units: against the yaw the camera
@@ -4492,6 +4534,16 @@ mod pad_tests {
             ("DPadRight", "market"),
             ("DPadDown", "exchange"),
             ("RightThumb", "home"),
+            // Inside a panel (#331) the d-pad and A move round it instead,
+            // X takes half and the shoulders hop
+            ("DPadUp", "ui_up"),
+            ("DPadDown", "ui_down"),
+            ("DPadLeft", "ui_left"),
+            ("DPadRight", "ui_right"),
+            ("South", "ui_press"),
+            ("West", "ui_half"),
+            ("RightTrigger", "ui_next"),
+            ("LeftTrigger", "ui_prev"),
         ] {
             let mut i = input();
             i.process_gamepad_button_down(PAD, button);

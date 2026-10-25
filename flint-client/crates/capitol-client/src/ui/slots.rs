@@ -94,6 +94,39 @@ struct Held {
     split: bool,
 }
 
+/// A stack picked up without a drag (#331): the pad's A, or Enter or Space
+/// on a slot in focus, picks it up, and the same on another slot puts it
+/// there. X on the pad picks up half, as a shift-drag does. In egui's
+/// memory, like a drag's payload, so it crosses panels too.
+struct Carry;
+
+impl Carry {
+    fn id() -> Id {
+        Id::new("capitol_slot_carry")
+    }
+
+    fn get(ctx: &egui::Context) -> Option<Held> {
+        ctx.data(|d| d.get_temp(Self::id()))
+    }
+
+    fn set(ctx: &egui::Context, held: Option<Held>) {
+        ctx.data_mut(|d| match held {
+            Some(h) => d.insert_temp(Self::id(), h),
+            None => d.remove::<Held>(Self::id()),
+        });
+    }
+}
+
+/// Puts down a stack picked up without a drag, and a split waiting on its
+/// count. Returns whether there was either: B on the pad does this before
+/// it closes a panel.
+pub fn drop_carry(ctx: &egui::Context) -> bool {
+    let carried = Carry::get(ctx).is_some() || PendingSplit::get(ctx).is_some();
+    Carry::set(ctx, None);
+    PendingSplit::set(ctx, None);
+    carried
+}
+
 /// A split waiting on its count: the stack, where it goes, and how many.
 /// One at a time, in egui's memory, drawn by the grid it's for.
 #[derive(Debug, Clone)]
@@ -107,6 +140,9 @@ struct PendingSplit {
     picks: Vec<(i32, i32)>,
     /// The target slot, to stand the field under
     at: Rect,
+    /// The pass it was asked in: the Enter (or the pad's A) that put the
+    /// stack down doesn't also send it (#331)
+    since: u64,
 }
 
 impl PendingSplit {
@@ -305,6 +341,7 @@ fn split_field(ctx: &egui::Context, container_id: Uuid) -> Option<Move> {
             i.key_pressed(egui::Key::Escape),
         )
     });
+    let enter = enter && pending.since != ctx.cumulative_pass_nr();
     let qualities = picked(&pending.picks);
     if qualities.is_none() {
         pending.quantity = pending.quantity.clamp(1, most);
@@ -327,20 +364,35 @@ fn split_field(ctx: &egui::Context, container_id: Uuid) -> Option<Move> {
 
 /// The item a slot's drag let go of over `response` this frame, if any:
 /// how a panel that isn't a container takes a drop (the trade window, P7.3).
+/// A stack carried without a drag is put down by a press on it (#331).
 pub fn dropped_item(response: &egui::Response) -> Option<SlotItem> {
-    response
-        .dnd_release_payload::<Held>()
-        .map(|held| held.item.clone())
+    if let Some(held) = response.dnd_release_payload::<Held>() {
+        return Some(held.item.clone());
+    }
+    let carried = Carry::get(&response.ctx).filter(|_| response.fake_primary_click)?;
+    Carry::set(&response.ctx, None);
+    Some(carried.item)
 }
 
-/// A slot's item is being dragged over `response`.
+/// A slot's item is being dragged over `response`, or carried to it.
 pub fn item_over(response: &egui::Response) -> bool {
     response.dnd_hover_payload::<Held>().is_some()
+        || (response.has_focus() && Carry::get(&response.ctx).is_some())
 }
 
-/// A slot's item is being dragged anywhere.
+/// A slot's item is being dragged anywhere, or carried.
 pub fn dragging_item(ctx: &egui::Context) -> bool {
-    egui::DragAndDrop::has_payload_of_type::<Held>(ctx)
+    egui::DragAndDrop::has_payload_of_type::<Held>(ctx) || Carry::get(ctx).is_some()
+}
+
+/// What a panel that takes a drop ([`dropped_item`]) senses with: hover
+/// for a drag, and while a stack is carried, a click, so the pad's ring can
+/// go to it and A put the stack down there (#331).
+pub fn drop_sense(ctx: &egui::Context) -> Sense {
+    match Carry::get(ctx) {
+        Some(_) => Sense::click(),
+        None => Sense::hover(),
+    }
 }
 
 /// A station kit: a right click on one places its station.
@@ -390,12 +442,33 @@ impl Slot<'_> {
                 split: shift && item.quantity > 1,
             });
         }
-        let held = egui::DragAndDrop::payload::<Held>(ui.ctx());
+        // Picked up without a drag (#331): A, or Enter or Space in focus
+        let pressed = response.fake_primary_click;
+        let mut carried = Carry::get(ui.ctx());
+        let picked = pressed && carried.is_none() && draggable;
+        if let (true, Some(item)) = (picked, self.item) {
+            let half = super::pad_nav::taking_half(ui.ctx());
+            let held = Held {
+                item: item.clone(),
+                container_id: self.container_id,
+                slot: self.index,
+                split: half && item.quantity > 1,
+            };
+            Carry::set(ui.ctx(), Some(held.clone()));
+            carried = Some(held);
+        }
+        let held = egui::DragAndDrop::payload::<Held>(ui.ctx()).map(|h| (*h).clone()).or(carried.clone());
         let is_source = held
             .as_ref()
             .is_some_and(|h| h.container_id == self.container_id && h.slot == self.index);
+        if pressed && !picked && is_source && carried.is_some() {
+            // The same slot again: put it back
+            Carry::set(ui.ctx(), None);
+            carried = None;
+        }
         let accepts = self.enabled && !is_source;
-        let over = accepts && response.dnd_hover_payload::<Held>().is_some();
+        let carried_here = carried.is_some() && response.has_focus();
+        let over = accepts && (response.dnd_hover_payload::<Held>().is_some() || carried_here);
 
         let look = if !self.enabled {
             Look::Disabled
@@ -423,7 +496,17 @@ impl Slot<'_> {
         }
 
         if let Some(item) = self.item {
-            if held.is_none() {
+            let pad = super::pad_nav::active(ui.ctx());
+            if held.is_none() && pad && response.has_focus() {
+                // The ring's slot says what's in it, as a hover does
+                response.show_tooltip_ui(|ui| {
+                    tooltip(ui, item);
+                    if draggable {
+                        let more = if item.quantity > 1 { ", {X} half of it" } else { "" };
+                        super::shortcuts::keys_row(ui, &format!("{{A}} picks it up{more}"));
+                    }
+                });
+            } else if held.is_none() {
                 let response = if draggable {
                     response.clone().on_hover_cursor(CursorIcon::Grab)
                 } else {
@@ -449,11 +532,22 @@ impl Slot<'_> {
                 paint_held(ui.ctx(), icons, item, shown, at);
             }
         }
+        // A carried stack rides over the ring's slot, lifted up and right
+        if let (Some(c), true) = (&carried, response.has_focus()) {
+            let shown = if c.split { half(c.item.quantity) } else { c.item.quantity };
+            let lift = egui::vec2(SLOT_SIZE, -SLOT_SIZE) * 0.3;
+            paint_held(ui.ctx(), icons, &c.item, shown, rect.center() + lift);
+        }
 
         if !accepts {
             return (None, right);
         }
-        let moved = response.dnd_release_payload::<Held>().and_then(|held| {
+        let put = carried.filter(|_| pressed && !picked);
+        if put.is_some() {
+            Carry::set(ui.ctx(), None);
+        }
+        let dropped = response.dnd_release_payload::<Held>().map(|h| (*h).clone());
+        let moved = dropped.or(put).and_then(|held| {
             if held.split && self.item.is_none() {
                 // Ask how many first: the grid draws the field (`split_field`)
                 PendingSplit::set(
@@ -465,6 +559,7 @@ impl Slot<'_> {
                         container_id: self.container_id,
                         slot: self.index,
                         at: rect,
+                        since: ui.ctx().cumulative_pass_nr(),
                     }),
                 );
                 return None;
@@ -1377,6 +1472,53 @@ mod tests {
         let fiber = rig.inventory.slot(0).unwrap().item_id;
         rig.drag((inv, 0), (inv, 7));
         assert_eq!(rig.moves, [Move::whole(fiber, inv, 7)]);
+    }
+
+    /// The pad's A on the slot in focus, as the ring presses it (#331): its
+    /// Enter, with X's half flag for `half`.
+    fn press(rig: &mut Rig, container: Uuid, slot: usize, half: bool) {
+        let id = Id::new(("capitol_slot", container, slot));
+        rig.ctx.memory_mut(|m| m.request_focus(id));
+        rig.ctx.data_mut(|d| d.insert_temp(super::super::pad_nav::PadNav::half_id(), half));
+        rig.frame(vec![key(egui::Key::Enter)]);
+        rig.frame(vec![]);
+    }
+
+    #[test]
+    fn a_press_picks_a_stack_up_and_a_press_elsewhere_puts_it_there() {
+        let mut rig = Rig::new();
+        let (inv, input) = (rig.inventory.id, rig.input.id);
+        let fiber = rig.inventory.slot(0).unwrap().item_id;
+        press(&mut rig, inv, 0, false);
+        assert!(dragging_item(&rig.ctx), "carried");
+        assert!(rig.moves.is_empty());
+        press(&mut rig, input, 0, false);
+        assert_eq!(rig.moves, [Move::whole(fiber, input, 0)]);
+        assert!(!dragging_item(&rig.ctx), "put down");
+        // The same slot again puts it back, and B drops it
+        press(&mut rig, inv, 3, false);
+        press(&mut rig, inv, 3, false);
+        assert!(!dragging_item(&rig.ctx) && rig.moves.len() == 1);
+        press(&mut rig, inv, 3, false);
+        assert!(drop_carry(&rig.ctx) && !dragging_item(&rig.ctx));
+        // An empty slot picks nothing up
+        press(&mut rig, inv, 1, false);
+        assert!(!dragging_item(&rig.ctx));
+    }
+
+    #[test]
+    fn x_picks_up_half_and_asks_how_many_on_an_empty_slot() {
+        let mut rig = Rig::new();
+        let inv = rig.inventory.id;
+        press(&mut rig, inv, 0, true);
+        press(&mut rig, inv, 7, false);
+        assert!(rig.moves.is_empty(), "the split's field asks first");
+        let pending = PendingSplit::get(&rig.ctx).expect("a split waiting");
+        assert_eq!((pending.slot, pending.quantity), (7, half(pending.item.quantity)));
+        // A on the field's Split sends it, as Enter does
+        rig.frame(vec![key(egui::Key::Enter)]);
+        assert_eq!(rig.moves.len(), 1);
+        assert_eq!(rig.moves[0].split, Some(half(pending.item.quantity)));
     }
 
     fn key(key: egui::Key) -> egui::Event {

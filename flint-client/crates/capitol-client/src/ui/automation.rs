@@ -9,6 +9,7 @@
 //! runs or waits, the form shows what it's set to and only Stop is offered:
 //! the server stops a station to set it up again anyway.
 
+use super::pad_nav::FollowFocus;
 use super::icons::ItemIcons;
 use super::slots::grade_pip;
 use super::theme::{self, size, EMBER, EMBER_HOT, PILL, STATION};
@@ -221,7 +222,7 @@ fn log(ui: &mut egui::Ui, icons: &mut ItemIcons, state: &GameState, production: 
             LOG_HEIGHT
         })
         .auto_shrink([false, true])
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             for made in production.iter().rev() {
                 ui.horizontal(|ui| {
                     let (rect, _) =

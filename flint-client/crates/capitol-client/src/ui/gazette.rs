@@ -22,6 +22,7 @@
 //! kept in `save/gazette.toml`, by server and player, so the header's hint
 //! for a new edition doesn't come back each time you sign in.
 
+use super::pad_nav::FollowFocus;
 use std::path::PathBuf;
 
 use capitol_core::gazette::Reader;
@@ -361,7 +362,7 @@ fn page(ui: &mut egui::Ui, view: &View, open: &mut bool, height: f32, fold: bool
         .max_height(room)
         .min_scrolled_height(room)
         .auto_shrink([false, true])
-        .show(ui, |ui| {
+        .show_following(ui, |ui| {
             // A gutter for the scroll bar, so it never sits on the text
             ui.set_max_width(ui.available_width() - SCROLL_GUTTER);
             masthead(ui, reader);

@@ -21,6 +21,7 @@
 //! header; the window stands bottom centre, between the controls and the
 //! inventory you drag from, so the two of you stay in view above it.
 
+use super::pad_nav::FollowFocus;
 use std::time::Duration;
 
 use super::hud::grouped;
@@ -292,7 +293,7 @@ impl TradePanel {
                 .id_salt("capitol_trade_mine")
                 .auto_shrink([false, true])
                 .max_height(WELL_MAX)
-                .show(ui, |ui| {
+                .show_following(ui, |ui| {
                     for line in view.draft.lines() {
                         let Some(item) = view.inventory.and_then(|i| i.find(line.item_id)) else {
                             continue;
@@ -305,7 +306,7 @@ impl TradePanel {
         });
         let well = inner.response.rect;
         self.well = Some(well);
-        let drop = ui.interact(well, Id::new("capitol_trade_drop"), egui::Sense::hover());
+        let drop = ui.interact(well, Id::new("capitol_trade_drop"), slots::drop_sense(ui.ctx()));
         if dragging {
             let over = slots::item_over(&drop);
             let edge = if over {
@@ -484,7 +485,7 @@ fn theirs(ui: &mut egui::Ui, icons: &mut ItemIcons, open: &OpenTrade) {
             .id_salt("capitol_trade_theirs")
             .auto_shrink([false, true])
             .max_height(WELL_MAX)
-            .show(ui, |ui| {
+            .show_following(ui, |ui| {
                 for item in &open.theirs.items {
                     their_row(ui, icons, item);
                 }

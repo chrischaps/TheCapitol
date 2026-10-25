@@ -13,6 +13,7 @@
 //! the script HUD and for egui alike, by their `fonts/fonts.toml` names, and
 //! makes `body` egui's default face (Flint ADR 0081).
 
+use super::pad_nav::FollowFocus;
 use crate::world::palette;
 use capitol_protocol::rules::Zone;
 use egui::epaint::Shadow;
@@ -578,7 +579,7 @@ pub fn scrolled<R>(
             .max_height(room)
             // A drag is for the slots; the wheel scrolls.
             .drag_to_scroll(false)
-            .show(ui, add);
+            .show_following(ui, add);
         let rect = out.inner_rect;
         if out.state.offset.y + rect.height() < out.content_size.y - 1.0 {
             let foot = egui::Rect::from_min_max(
@@ -918,14 +919,15 @@ pub fn pad_tint(button: &str) -> Option<Color32> {
 /// `Y`) round and ringed in their [`pad_tint`], the sticks (`LS`, `RS`) as
 /// a cap in its well, the shoulders (`LB`, `RB`) and triggers (`LT`, `RT`)
 /// as caps rounded on top, the d-pad (`Up`, `Down`, `Left`, `Right`) as a
-/// cross with that arm lit, and `Start` and `Select` as pills with their
-/// marks. Any other name is a [`keycap`].
+/// cross with that arm lit (`DPad`, every arm: the whole of it, #331), and
+/// `Start` and `Select` as pills with their marks. Any other name is a
+/// [`keycap`].
 pub fn padcap(ui: &mut Ui, name: &str) -> Response {
     let line = ui.painter().layout_no_wrap("A".to_owned(), strong(size::SMALL), TEXT).size().y;
     let h = line + 8.0;
     let width = match name {
         "LB" | "RB" | "LT" | "RT" | "Start" | "Select" => h * 1.2,
-        "A" | "B" | "X" | "Y" | "LS" | "RS" | "Up" | "Down" | "Left" | "Right" => h,
+        "A" | "B" | "X" | "Y" | "LS" | "RS" | "Up" | "Down" | "Left" | "Right" | "DPad" => h,
         _ => return keycap(ui, name),
     };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
@@ -959,7 +961,7 @@ pub fn padcap(ui: &mut Ui, name: &str) -> Response {
             painter.rect(face, rounding, KEYCAP, edge);
             letter(face.center() + egui::vec2(0.0, 1.0), name, size::SMALL - 1.0, TEXT);
         }
-        "Up" | "Down" | "Left" | "Right" => {
+        "Up" | "Down" | "Left" | "Right" | "DPad" => {
             let arm = (h * 0.34).round();
             let reach = h * 0.5 - 0.5;
             let bar = |w: f32, l: f32| egui::Rect::from_center_size(c, egui::vec2(w, l));
@@ -967,14 +969,17 @@ pub fn padcap(ui: &mut Ui, name: &str) -> Response {
             painter.rect(bar(arm, reach * 2.0), 2.0, KEYCAP, edge);
             // Cover the cross's inner edges, so it reads as one piece
             painter.rect_filled(bar(arm - 2.0, arm - 2.0), 0.0, KEYCAP);
-            let way = match name {
-                "Up" => egui::vec2(0.0, -1.0),
-                "Down" => egui::vec2(0.0, 1.0),
-                "Left" => egui::vec2(-1.0, 0.0),
-                _ => egui::vec2(1.0, 0.0),
+            let ways: &[egui::Vec2] = match name {
+                "Up" => &[egui::Vec2::UP],
+                "Down" => &[egui::Vec2::DOWN],
+                "Left" => &[egui::Vec2::LEFT],
+                "Right" => &[egui::Vec2::RIGHT],
+                _ => &[egui::Vec2::UP, egui::Vec2::DOWN, egui::Vec2::LEFT, egui::Vec2::RIGHT],
             };
-            let lit = egui::Rect::from_center_size(c + way * (reach - arm * 0.5), egui::vec2(arm - 3.0, arm - 3.0));
-            painter.rect_filled(lit, 1.5, GOLD);
+            for way in ways {
+                let lit = egui::Rect::from_center_size(c + *way * (reach - arm * 0.5), egui::vec2(arm - 3.0, arm - 3.0));
+                painter.rect_filled(lit, 1.5, GOLD);
+            }
         }
         _ => {
             // Start's three lines, or Select's two windows

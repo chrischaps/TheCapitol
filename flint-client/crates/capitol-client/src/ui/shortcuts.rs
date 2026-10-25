@@ -15,6 +15,7 @@
 //! Over the shoulder a column says what the pad does (T2.2), and whichever
 //! you last used is drawn the brighter.
 
+use super::pad_nav::FollowFocus;
 use super::theme::{self, size};
 use egui::{Align2, Id, Order, RichText};
 
@@ -125,6 +126,11 @@ const PANELS: Group = (
         ("[F7]", "", "Dev overlay"),
         ("[F6]", "", "World layers (admins)"),
         ("[?] or [F1]", "{Select}", "This list"),
+        // Inside a panel, the pad's alone (#331): Click's card leaves these out
+        ("", "{DPad}", "In a panel, move round it"),
+        ("", "{A}", "Press, or pick up and put down"),
+        ("", "{X}", "Pick up half a stack"),
+        ("", "{LB} {RB}", "The next panel along"),
     ],
 );
 
@@ -243,7 +249,7 @@ impl Shortcuts {
                     theme::gold_rule(ui);
                     ui.add_space(10.0);
                     let room = (screen.height() - CHROME).max(160.0);
-                    egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(room).show_following(ui, |ui| {
                         let mut road_in = |ui: &mut egui::Ui| {
                             if road_in_hidden {
                                 ui.add_space(12.0);
@@ -336,6 +342,10 @@ fn group(ui: &mut egui::Ui, (name, rows): Group, keys_width: f32, device: Option
         );
     };
     for (keys, pad, words) in rows {
+        // A row the pad alone has, where there's no pad column
+        if keys.is_empty() && device.is_none() {
+            continue;
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             cell(ui, keys_width, device != Some(true), keys);
@@ -513,6 +523,10 @@ mod tests {
                 assert!(column.contains(&glyph), "{action}'s {glyph} isn't in the pad column");
                 bound.push(glyph);
             }
+        }
+        // The whole d-pad stands for its four arms (#331)
+        if ["Up", "Down", "Left", "Right"].iter().all(|arm| bound.iter().any(|g| g == arm)) {
+            bound.push("DPad".to_owned());
         }
         for glyph in &column {
             assert!(bound.contains(glyph), "{glyph} is in the pad column but bound to nothing");

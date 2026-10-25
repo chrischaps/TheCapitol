@@ -43,6 +43,7 @@
 //! It's edged in gold, as the exchange is: Strands are money. Fills arrive
 //! as toasts (`market_note`) whether the panel is open or not.
 
+use super::pad_nav::FollowFocus;
 use capitol_core::catalog::Catalog;
 use capitol_core::market::{self, Book, ChartKey, Draft, FormRefusal, History, OrderQuote};
 use capitol_core::protocol::rest::{
@@ -524,7 +525,7 @@ impl MarketPanel {
                 .max_height(COLUMN_HEIGHT - 50.0)
                 .min_scrolled_height(COLUMN_HEIGHT - 50.0)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show_following(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     let Some(listings) = view.listings else {
                         ui.label(theme::dim("Asking the market…").size(size::SMALL));
@@ -682,7 +683,7 @@ impl MarketPanel {
                 .max_height(COLUMN_HEIGHT - 32.0)
                 .min_scrolled_height(COLUMN_HEIGHT - 32.0)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show_following(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     let Some(directory) = view.bazaar else {
                         ui.label(theme::dim("Asking the bazaar…").size(size::SMALL));
@@ -850,7 +851,7 @@ impl MarketPanel {
                 .max_height(COLUMN_HEIGHT - 66.0)
                 .min_scrolled_height(COLUMN_HEIGHT - 66.0)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show_following(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     if view.summary.is_none() {
                         ui.label(theme::dim("Asking the market…").size(size::SMALL));
@@ -1447,7 +1448,7 @@ impl MarketPanel {
                 .max_height(COLUMN_HEIGHT - 32.0)
                 .min_scrolled_height(COLUMN_HEIGHT - 32.0)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show_following(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     if view.orders.is_empty() {
                         ui.label(theme::dim("None open.").size(size::SMALL));
@@ -1594,7 +1595,7 @@ impl MarketPanel {
 /// in gold while one is held anywhere, washed and named while it's over the
 /// panel. Returns the stack let go of over it.
 fn drop_zone(ui: &mut egui::Ui, panel: egui::Rect) -> Option<SlotItem> {
-    let drop = ui.interact(panel, Id::new("capitol_market_drop"), Sense::hover());
+    let drop = ui.interact(panel, Id::new("capitol_market_drop"), slots::drop_sense(ui.ctx()));
     if slots::dragging_item(ui.ctx()) {
         let over = slots::item_over(&drop);
         let painter = ui.painter();

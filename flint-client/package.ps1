@@ -104,7 +104,11 @@ CONTROLS
   of a panel. The triggers zoom, the d-pad opens the inventory (up),
   crafting (left), the market (right) and the exchange (down), Start the
   settings and Select the shortcuts; press the right stick for home. The
-  prompts show the pad's buttons once you pick it up.
+  prompts show the pad's buttons once you pick it up. With a panel open,
+  the d-pad moves a gold ring round it and A presses what's ringed: on a
+  slot, A picks the stack up and A again puts it down (X takes half). The
+  shoulder buttons hop to the next panel. Typing and numbers still want
+  the keys.
 
   In both: I inventory, C crafting, X fiber exchange, M the market,
   G the Gazette, L letters, U guilds, Enter to talk, T trade, O nearest
