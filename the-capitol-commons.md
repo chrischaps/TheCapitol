@@ -30,7 +30,7 @@ It's also the economy's own fix. The town is short of demand. Strands pool with 
 
 **Non-goals for this plan**
 - Custom contracts, sale contracts, disputes and arbitration (§8). Every contract here is one the server can check, so there's nothing to dispute.
-- Citizens who hire, post wages or found guilds.
+- Citizens who hire, post wages or found guilds. *Since 2026-10-25 hiring is planned in callings K2.4 (#538); founding guilds stays out.*
 - A word filter, shouting, or channels by zone.
 - LLM layers in production beyond #311's spike.
 - The React and Love2D clients. Both are frozen.
@@ -149,6 +149,8 @@ Weekly, from records the city already keeps.
 - **A guild channel** comes with the panel.
 
 ### D11. Citizens in the commons
+
+*Planned (callings, #526):* a citizen answers and posts for every trade it's willing to work, not only its role's (K1.2 #531, K1.4 #533, K2.3 #537).
 
 - They speak from a rules phrasebook keyed by temperament and seeded, so a replay says the same. #311 is the Claude layer over the same `Speaker` seam.
 - They claim and deliver commissions. Ore gatherers count the wild veins in time to deliver, so a good price sends them to the ranges.
@@ -380,7 +382,7 @@ That's about the size of Economy v1's E3 and E4 together.
 ## 8. Later (outside this plan)
 
 - **Custom contracts, sale contracts, disputes and arbitration.** These are for the GDD's Contract Court, once contracts exist that the server can't check: labour described in words, or goods delivered outside the board.
-- **Citizens who hire, post wages, or found guilds** (with a subscription of their own, if that's ever allowed).
+- **Citizens who hire, post wages, or found guilds** (with a subscription of their own, if that's ever allowed). Hiring is planned in callings K2.4 (#538).
 - **Shouting and zone channels,** if local and Capitol prove too narrow and too wide.
 - **Guild contracts,** a guild's own commissions paid from its treasury, and guild leaderboards.
 - **The bureaucracy's other fees and its certification** (GDD §8.4): a plan of their own, which a "Capitol Certified" seal on maker's marks would join to standing.

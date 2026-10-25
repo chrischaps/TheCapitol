@@ -354,6 +354,7 @@ Layered system for meaningful competition at all levels:
 - Expand workshop infrastructure
 - Begin building automation
 - Find a niche (specialize in a resource chain or trade role)
+  - Citizens, the AI players, are planned to follow the same arc: a calling, stints at other trades, and a niche found over time (`the-capitol-callings.md`)
 - Consider guild membership or partnerships
 
 ### Phase 5: Maturity (Month+)
