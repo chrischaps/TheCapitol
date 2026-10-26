@@ -14,7 +14,9 @@
 //!   and takes the one cheapest a use left, at no more a use than the
 //!   price it decided on for a new one;
 //! - **a standing bid** at the hall when nobody sells one, so whoever makes
-//!   them has someone to sell to. It climbs on meanwhile.
+//!   them has someone to sell to: for the cheapest of the type at its
+//!   worth, the one it would otherwise make, and what a tool crafter makes
+//!   first for sale. It climbs on meanwhile.
 //!
 //! The hall's book doesn't show a tool's wear (#547), so what a citizen
 //! sells there is its freshest spare and it keeps its most worn to use up.
@@ -70,14 +72,20 @@ impl SimBot {
                 _ => None,
             };
         }
-        // Nobody sells one: a bid for the best buy at its worth, once
+        // Nobody sells one: a bid for the cheapest at its worth, once. At
+        // their targets iron is the better buy a use, but nobody sells iron
+        // before the stone tier, and a bid for it would stand unfilled
         let (item, worth) = {
             let catalog = self.bot.state().catalog();
             let of_type = |item: &str| catalog.item_type(item).and_then(|t| t.tool.as_ref()).is_some_and(|t| t.tool_type == tool_type);
             if TOOLS.iter().any(|t| of_type(t) && self.bidding(t)) {
                 return None;
             }
-            tool_offer(catalog, &tool_type, |item| self.worth(item))?
+            TOOLS
+                .into_iter()
+                .filter(|t| of_type(t))
+                .filter_map(|t| Some((t, self.worth(t)?)))
+                .min_by_key(|&(_, worth)| worth)?
         };
         let menu = tool_menu(holdings, item, worth, thrift, true)?;
         match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {

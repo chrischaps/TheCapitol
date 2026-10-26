@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use capitol_protocol::rest::PlaceOrder;
+use capitol_protocol::rest::{PlaceOrder, SlotItem};
 use capitol_protocol::rules::bazaar::{RENT_DAY_SECS, MAX_SHOP_NAME};
 use capitol_protocol::rules::lately::Lately;
 use capitol_protocol::rules::market::OrderSide;
@@ -383,6 +383,7 @@ impl SimBot {
             }
             let listings = self.bot.state().bazaar().my_shop().map_or(0, |s| s.listings.len());
             let n = left.min(stack.quantity);
+            let price = worn_price(price, &stack);
             let listing = bazaar::stock(&stack, n, price, listings).map_err(|e| BotError::Failed(e.message()))?;
             self.bot.stock(listing)?;
             left -= n;
@@ -391,6 +392,16 @@ impl SimBot {
         // Give the stall a moment to show on the bazaar's signs
         self.bot.idle(Duration::from_millis(100))?;
         Ok(())
+    }
+}
+
+/// What a stack is priced at, at `price` new (Callings K2.1): a tool by the
+/// share of its uses it has left, which the stall shows, at least a Strand.
+/// Anything else, `price`.
+fn worn_price(price: i64, stack: &SlotItem) -> i64 {
+    match (stack.durability, stack.max_durability) {
+        (Some(left), Some(most)) if most > 0 && left < most => (price * i64::from(left) / i64::from(most)).max(1),
+        _ => price,
     }
 }
 
@@ -420,6 +431,19 @@ mod tests {
         assert_eq!(shop_name("Ida Smith", "iron_ingot"), "Ida Smith's iron");
         assert_eq!(shop_name("Ida Smith", "iron_ore"), "Ida Smith's ore");
         assert_eq!(shop_name("Ida Smith", "stone_axe"), "Ida Smith's tools");
+    }
+
+    #[test]
+    fn a_worn_tool_is_priced_by_the_uses_it_has_left() {
+        let stack = |durability: Option<i32>, most: Option<i32>| SlotItem {
+            durability,
+            max_durability: most,
+            ..SlotItem::new(Uuid::nil(), "stone_axe".into(), "Stone Axe".into(), 50, 1, 0)
+        };
+        assert_eq!(worn_price(50, &stack(Some(60), Some(60))), 50);
+        assert_eq!(worn_price(50, &stack(Some(30), Some(60))), 25);
+        assert_eq!(worn_price(50, &stack(Some(1), Some(60))), 1);
+        assert_eq!(worn_price(8, &stack(None, None)), 8, "not a tool");
         let long = shop_name("Bartholomew Fitzwilliam-Cartwright", "plank");
         assert_eq!(long.chars().count(), MAX_SHOP_NAME);
     }

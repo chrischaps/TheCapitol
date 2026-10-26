@@ -1396,6 +1396,19 @@ impl SimBot {
         h.plot_spare = spare;
         h.owed = self.owed();
         h.promised = self.board.promised();
+        // Its tools at its stall and on the book (K2.1)
+        let stalled: i64 = state
+            .bazaar()
+            .my_shop()
+            .map_or(0, |shop| shop.listings.iter().filter(|l| is_tool(&l.item_type)).map(|l| l.units.count()).sum());
+        let booked: i32 = state
+            .market()
+            .open_orders()
+            .iter()
+            .filter(|o| o.side == OrderSide::Sell && is_tool(&o.item_type))
+            .map(|o| o.quantity_remaining)
+            .sum();
+        h.tools_on_sale = stalled as i32 + booked;
         h
     }
 

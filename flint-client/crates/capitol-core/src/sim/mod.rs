@@ -257,8 +257,8 @@ pub const TOOLS: [&str; 8] = [
 
 /// The most spare tools a tool crafter makes ahead of selling them
 /// (Callings K2.1): past one of each it holds, [`for_sale`] makes this
-/// many more, then handles. Tools don't stack, and a pack has 24 slots, so
-/// it's small.
+/// many more, those on sale among them, then handles. Tools don't stack,
+/// and a pack has 24 slots, so it's small.
 pub const TOOL_STOCK: i32 = 2;
 
 /// Whether `item` is one of the [`TOOLS`].
@@ -282,11 +282,12 @@ pub fn sell_at(item: &str) -> i32 {
     }
 }
 
-/// What a citizen keeps a stall for, of `item`: [`STALL_AT`] of a good, two
-/// tools (K2.1).
+/// What a citizen keeps a stall for, of `item`: [`STALL_AT`] of a good, one
+/// tool (K2.1). A spare tool in the pack wears: the server works the
+/// freshest of a type, so a tool for sale goes where it doesn't.
 pub fn stall_at(item: &str) -> i32 {
     if is_tool(item) {
-        2
+        1
     } else {
         STALL_AT
     }
@@ -295,12 +296,13 @@ pub fn stall_at(item: &str) -> i32 {
 /// What a tool crafter makes next for sale (Callings K2.1): more of the
 /// tool it holds fewest of among those it holds one of, so it knows how
 /// (ties in [`TOOLS`]' order, so the stone axe and pickaxe a climb wants
-/// come first), while it has fewer than [`TOOL_STOCK`] spare. The tools it
-/// lacks come first on its ladder; while the iron ones wait on a plot and
-/// its stations, it sells stone. `None`: it has its stock, or no tool yet.
+/// come first), while it has fewer than [`TOOL_STOCK`] spare or on sale
+/// ([`Holdings::tools_on_sale`]). The tools it lacks come first on its
+/// ladder; while the iron ones wait on a plot and its stations, it sells
+/// stone. `None`: it has its stock, or no tool yet.
 pub fn for_sale(holdings: &Holdings) -> Option<Goal> {
     let held: Vec<(&str, i32)> = TOOLS.iter().map(|&t| (t, holdings.count(t))).filter(|&(_, n)| n >= 1).collect();
-    let spare: i32 = held.iter().map(|(_, n)| n - 1).sum();
+    let spare: i32 = held.iter().map(|(_, n)| n - 1).sum::<i32>() + holdings.tools_on_sale;
     if spare >= TOOL_STOCK {
         return None;
     }
@@ -1650,6 +1652,12 @@ mod tests {
         let stocked = tool_set(&[("stone_axe", 1), ("stone_pickaxe", 1)]);
         assert_eq!(TOOL_STOCK, 2);
         assert_eq!(last(&stocked), Some(Goal::hold("tool_handle", 1)));
+        // Those on sale at its stall or the hall are its stock too
+        let listed = Holdings {
+            tools_on_sale: TOOL_STOCK,
+            ..tool_set(&[])
+        };
+        assert_eq!(last(&listed), Some(Goal::hold("tool_handle", 1)));
         assert_eq!(last(&tool_set(&[("stone_pickaxe", 1)])), Some(Goal::hold("stone_axe", 2)));
         // A dabble may make one too, when it's nearest to hand
         let dabble = tools.work(&catalog, &h, Commitment::Dabble);
@@ -1729,10 +1737,33 @@ mod tests {
         let tools = Role::Crafter(Craft::Tools);
         let spare = surplus::spare(&h, tools, false, &[tools]);
         assert_eq!(spare, [("stone_axe", 1)]);
-        // One spare is enough to sell, and two to keep a stall for
+        // One spare is enough to sell, or to keep a stall for, so it
+        // doesn't wear in the pack
         let menu = sell_menu(&h, "stone_axe", 1, Some(48), None).unwrap();
         assert_eq!(rules_pick(Question::Sell { item: "stone_axe".into() }, menu, &h, Some(48), None), sold("stone_axe", 1, 48));
-        assert!(stall_menu(&h, "stone_axe", 1, Some(50), true).is_some());
+        let stall = stall_menu(&h, "stone_axe", 1, Some(50), true).unwrap();
+        let patient = Temperament {
+            patience: 1.0,
+            ..Temperament::default()
+        };
+        let s = Situation {
+            who: Who {
+                name: "Bot".into(),
+                role: "crafter-tools".into(),
+                temperament: patient,
+                calling: None,
+            },
+            at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
+            when: When { time_of_day: None, hours: 0.0 },
+            holdings: (&h).into(),
+            market: Vec::new(),
+            question: Question::Sell { item: "stone_axe".into() },
+            menu: stall,
+            carry_on: Some(1),
+        };
+        let d = Cascade::rules().ask(&s, std::time::Instant::now()).decision.unwrap();
+        assert_eq!(d.pick, 0, "even the patient stock a spare tool");
+        assert_eq!(d.price, Some(60), "its target and a little more");
         assert_eq!(stall_menu(&h, "log", 1, Some(50), true), None);
         // A wood gatherer whose axe broke buys one at the ask
         let mut broke = Holdings {

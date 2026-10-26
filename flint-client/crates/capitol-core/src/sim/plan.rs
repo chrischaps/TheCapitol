@@ -90,6 +90,10 @@ pub struct Holdings {
     /// What its claims still want delivered, by item, held or not: none of
     /// it is spare to sell (Callings K1.4).
     pub promised: Vec<(String, i32)>,
+    /// Tools of its own on sale, at its stall or on the hall's book, out of
+    /// its pack (Callings K2.1): a tool crafter's stock for sale counts
+    /// them ([`for_sale`](super::for_sale)).
+    pub tools_on_sale: i32,
 }
 
 impl Holdings {
