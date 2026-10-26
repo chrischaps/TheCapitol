@@ -256,7 +256,7 @@ pub const TOOLS: [&str; 8] = [
 ];
 
 /// The most spare tools a tool crafter makes ahead of selling them
-/// (Callings K2.1): past one of each of its own, [`for_sale`] makes this
+/// (Callings K2.1): past one of each it holds, [`for_sale`] makes this
 /// many more, then handles. Tools don't stack, and a pack has 24 slots, so
 /// it's small.
 pub const TOOL_STOCK: i32 = 2;
@@ -292,21 +292,20 @@ pub fn stall_at(item: &str) -> i32 {
     }
 }
 
-/// What a tool crafter makes next for sale (Callings K2.1), once it holds
-/// one of each of its [`TOOLS`]: more of the one it holds fewest of (ties in
-/// their order, so the stone axe and pickaxe a climb wants come first),
-/// while it has fewer than [`TOOL_STOCK`] spare. `None`: it has its stock,
-/// or not yet its own set.
+/// What a tool crafter makes next for sale (Callings K2.1): more of the
+/// tool it holds fewest of among those it holds one of, so it knows how
+/// (ties in [`TOOLS`]' order, so the stone axe and pickaxe a climb wants
+/// come first), while it has fewer than [`TOOL_STOCK`] spare. The tools it
+/// lacks come first on its ladder; while the iron ones wait on a plot and
+/// its stations, it sells stone. `None`: it has its stock, or no tool yet.
 pub fn for_sale(holdings: &Holdings) -> Option<Goal> {
-    if TOOLS.iter().any(|t| holdings.count(t) < 1) {
-        return None;
-    }
-    let spare: i32 = TOOLS.iter().map(|t| holdings.count(t) - 1).sum();
+    let held: Vec<(&str, i32)> = TOOLS.iter().map(|&t| (t, holdings.count(t))).filter(|&(_, n)| n >= 1).collect();
+    let spare: i32 = held.iter().map(|(_, n)| n - 1).sum();
     if spare >= TOOL_STOCK {
         return None;
     }
-    let fewest = TOOLS.iter().min_by_key(|t| holdings.count(t))?;
-    Some(Goal::hold(fewest, holdings.count(fewest) + 1))
+    let &(fewest, n) = held.iter().min_by_key(|&&(_, n)| n)?;
+    Some(Goal::hold(fewest, n + 1))
 }
 
 /// What a tool costs a use: its `price` over the `uses` it has left. What a
@@ -1627,8 +1626,21 @@ mod tests {
         let catalog = Catalog::fallback();
         let tools = Role::Crafter(Craft::Tools);
         let last = |h: &Holdings| tools.goals(&catalog, h).last().cloned();
-        // Not before it has its own set
+        // Not before it has a tool
         assert_eq!(for_sale(&Holdings::default()), None);
+        // While its iron tools wait, more of the stone ones it holds; those
+        // it lacks still come first on its ladder
+        let mut stone = Holdings {
+            strands: FLOAT,
+            ..Holdings::default()
+        };
+        for t in &TOOLS[..4] {
+            stone.items.insert(t.to_string(), 1);
+        }
+        assert_eq!(for_sale(&stone), Some(Goal::hold("stone_axe", 2)));
+        let goals = tools.goals(&catalog, &stone);
+        assert_eq!(goals.first(), Some(&Goal::hold("iron_pickaxe", 1)));
+        assert_eq!(goals.last(), Some(&Goal::hold("stone_axe", 2)));
         // The stone axe a climb wants first, then the pickaxe
         let h = tool_set(&[]);
         assert_eq!(last(&h), Some(Goal::hold("stone_axe", 2)));
