@@ -475,6 +475,9 @@ struct SimBot {
     /// When it last read the bazaar's signs for a tool, in the run's game
     /// hours (K2.1).
     tools_looked: Option<f64>,
+    /// Tools its standing bids bought since it last collected its market
+    /// box (K2.1): they wait there, not in its pack.
+    boxed_tools: std::collections::HashSet<String>,
 }
 
 /// What a bot does next.
@@ -546,6 +549,7 @@ impl SimBot {
             repacked: None,
             last_detour: None,
             tools_looked: None,
+            boxed_tools: Default::default(),
         }
     }
 
@@ -872,6 +876,7 @@ impl SimBot {
         match action {
             Action::Step(step) => (job, activity::is_setup(catalog, goal, step)),
             Action::Trade(Trade::Buy { item, .. } | Trade::Bid { item, .. } | Trade::Shop { item, .. }) => (job, is_tool(item)),
+            Action::Trade(Trade::Collect) => (job, true),
             Action::Trade(Trade::Sell { .. }) => (job, false),
             Action::Trade(Trade::Stock { .. } | Trade::MakeMarket) => (Activity::Trading, false),
             Action::Trade(Trade::Post { .. }) | Action::Board(_) | Action::Wage(_) | Action::Hire(_) | Action::Guild(_) => {
@@ -1245,6 +1250,9 @@ impl SimBot {
                     MarketEvent::OrderFilled { order, trade } => {
                         if order.side == OrderSide::Buy {
                             self.board.filled(&order.item_type);
+                            if is_tool(&order.item_type) {
+                                self.boxed_tools.insert(order.item_type.clone());
+                            }
                         }
                         self.mind.filled(
                             order.id,
@@ -1533,6 +1541,10 @@ impl SimBot {
     /// what it bought. The walk goes round the canals by their bridges
     /// (#211), and the next step's walk takes the bot back out.
     fn trade(&mut self, trade: &Trade) -> Result<(), BotError> {
+        // These collect the market box, tools and all
+        if matches!(trade, Trade::Sell { .. } | Trade::Buy { .. } | Trade::Bid { .. } | Trade::Collect) {
+            self.boxed_tools.clear();
+        }
         match trade {
             Trade::MakeMarket => return self.make_market(None),
             Trade::Stock { item, quantity, price } => return self.keep_stall(item, *quantity, *price),
@@ -1546,6 +1558,10 @@ impl SimBot {
                 self.post(item, *quantity, *price)?;
             }
             Trade::Shop { stall, item, price } => return self.buy_at_a_stall(stall, item, *price),
+            Trade::Collect => {
+                self.bot.go_to_exchange()?;
+                self.bot.collect_market_box()?;
+            }
             Trade::Sell { .. } | Trade::Buy { .. } => {
                 self.bot.go_to_exchange()?;
                 self.trade_at_the_hall(trade)?;
@@ -1585,7 +1601,7 @@ impl SimBot {
                     grade_rule: None,
                 }
             }
-            Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket | Trade::Post { .. } | Trade::Shop { .. } => {
+            Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket | Trade::Post { .. } | Trade::Shop { .. } | Trade::Collect => {
                 return Err(BotError::Failed(format!("{} isn't a trade at the hall", trade.label())))
             }
             Trade::Buy { item, quantity, price } => PlaceOrder {

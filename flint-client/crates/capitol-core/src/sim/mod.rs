@@ -216,6 +216,10 @@ pub enum Trade {
     /// one cheapest a use left, at no more a use than `price` for a new
     /// one.
     Shop { stall: String, item: String, price: i64 },
+    /// What waits in its market box, collected at the hall: a tool a
+    /// standing bid bought while it was away, which it would otherwise buy
+    /// again (K2.1).
+    Collect,
 }
 
 impl Trade {
@@ -229,6 +233,7 @@ impl Trade {
             Trade::MakeMarket => "make a market".into(),
             Trade::Post { item, .. } => format!("post for {item}"),
             Trade::Shop { item, .. } => format!("buy {item} at a stall"),
+            Trade::Collect => "collect from the market box".into(),
         }
     }
 }

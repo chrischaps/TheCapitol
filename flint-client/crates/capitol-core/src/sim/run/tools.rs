@@ -18,6 +18,10 @@
 //!   worth, the one it would otherwise make, and what a tool crafter makes
 //!   first for sale. It climbs on meanwhile.
 //!
+//! A tool a standing bid bought waits in the market box. With one there of
+//! the type, it goes and collects it rather than buy another: in the soak,
+//! citizens bought two or three axes that way and sold the rest on.
+//!
 //! The hall's book doesn't show a tool's wear (#547), so what a citizen
 //! sells there is its freshest spare and it keeps its most worn to use up.
 //!
@@ -44,12 +48,19 @@ impl SimBot {
             return None;
         }
         let thrift = self.mind.temperament.thrift;
-        let (tool_type, at_the_hall) = {
+        let (tool_type, at_the_hall, boxed) = {
             let catalog = self.bot.state().catalog();
             let tool_type = plan::tool_wanted(catalog, holdings, errand.goal.as_ref()?)?;
             let ask = tool_offer(catalog, &tool_type, |item| self.best(item).1);
-            (tool_type, ask)
+            let boxed = self
+                .boxed_tools
+                .iter()
+                .any(|t| catalog.item_type(t).and_then(|t| t.tool.as_ref()).is_some_and(|t| t.tool_type == tool_type));
+            (tool_type, ask, boxed)
         };
+        if boxed {
+            return Some(Trade::Collect);
+        }
         if let Some((item, ask)) = at_the_hall {
             let menu = tool_menu(holdings, item, ask, thrift, false)?;
             return match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {
