@@ -195,19 +195,35 @@ pub fn next(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Optio
 /// The next step toward `goal`, and whether it's setup: a step toward a
 /// station, a tool or a plot the goal's own work needs, not that work.
 fn step(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Option<(Step, bool)>, Stuck> {
+    let (step, planner) = plan(catalog, holdings, goal);
+    Ok(step?.map(|step| (step, planner.setting_up)))
+}
+
+/// The tool type the next step toward `goal` climbs to (Callings K2.1),
+/// if it's on the way to one: the first the planner found missing, so the
+/// outermost. Buying one of that type cuts the climb short.
+pub fn tool_wanted(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Option<String> {
+    let (step, planner) = plan(catalog, holdings, goal);
+    step.ok().flatten()?;
+    planner.tool
+}
+
+/// Plans the next step toward `goal`, with the planner as it ended.
+fn plan<'a>(catalog: &'a Catalog, holdings: &'a Holdings, goal: &Goal) -> (Result<Option<Step>, Stuck>, Planner<'a>) {
     let mut planner = Planner {
         catalog,
         holdings,
         visiting: Vec::new(),
         setting_up: false,
+        tool: None,
     };
     let step = match goal {
         Goal::Hold { item, n } => planner.obtain(item, *n),
         Goal::Station(station) => planner.station(station),
         Goal::Strands(n) if holdings.strands >= *n => Ok(None),
         Goal::Strands(n) => planner.strands(n - holdings.strands).map(Some),
-    }?;
-    Ok(step.map(|step| (step, planner.setting_up)))
+    };
+    (step, planner)
 }
 
 /// The most steps [`setup`] plays out before it calls a goal out of reach.
@@ -344,6 +360,8 @@ struct Planner<'a> {
     /// The step found is setup: it's toward a station, tool or plot that
     /// something further up needs (D5).
     setting_up: bool,
+    /// The first tool type found missing on the way (K2.1).
+    tool: Option<String>,
 }
 
 impl<'a> Planner<'a> {
@@ -436,6 +454,7 @@ impl<'a> Planner<'a> {
     /// The next step toward holding a tool of `tool_type`: the weakest one,
     /// which is the bootstrap tier.
     fn tool(&mut self, tool_type: &str) -> Result<Step, Stuck> {
+        self.tool.get_or_insert_with(|| tool_type.to_string());
         let tool = self
             .catalog
             .item_types()

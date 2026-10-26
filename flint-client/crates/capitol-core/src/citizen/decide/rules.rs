@@ -101,7 +101,7 @@
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Span, Temperament, Verdict};
 use crate::citizen::detour::DetourKind;
 use crate::sim::{stint as stints, wage};
-use crate::sim::{Role, BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
+use crate::sim::{sell_at, stall_at, Role, BANK_FIBER_AT, LOT, MERCHANT_FLOAT};
 
 /// What "what the rules would do" is worth.
 const SURE: f64 = 0.9;
@@ -195,7 +195,8 @@ impl Decider for RulesDecider {
                     let bid = book.and_then(|q| q.bid).unwrap_or(price.min);
                     let fair = book.and_then(|q| q.last).map_or(1.0, |last| fairness(bid, last, t.thrift));
                     let held = s.holdings.count(item);
-                    let u = SURE * held as f64 / lot(SELL_AT, t.patience) * fair;
+                    // In lots of SELL_AT, or of one tool (K2.1)
+                    let u = SURE * held as f64 / lot(sell_at(item), t.patience) * fair;
                     // A taker of risks asks up toward the ask
                     let reach = (t.risk as f64 - 0.5).max(0.0);
                     let ask = book.and_then(|q| q.ask).unwrap_or(bid).max(bid);
@@ -224,7 +225,9 @@ impl Decider for RulesDecider {
                 Choice::Bid { item, price, quantity } => {
                     // A standing bid at the books' price, a little under it
                     // for the thrifty; they'd sooner gather it themselves.
-                    let w = worth(s, item).unwrap_or(price.min) as f64;
+                    // With no books, the worth the menu was offered at: a
+                    // tool's target before one has traded (K2.1)
+                    let w = worth(s, item).unwrap_or(price.min * 2) as f64;
                     let p = (w * (1.15 - 0.3 * t.thrift as f64)).round() as i64;
                     let want = (LOT as f64 * (1.5 - t.thrift as f64)).round() as i32;
                     let d = Decision {
@@ -237,7 +240,7 @@ impl Decider for RulesDecider {
                 Choice::Stock { item, price, quantity } => {
                     // A stall's price is the books' and a little more, more
                     // for the bold: someone who wants it now pays for that.
-                    let w = worth(s, item).unwrap_or(price.max) as f64;
+                    let w = worth(s, item).unwrap_or(price.min * 2) as f64;
                     let p = (w * (1.05 + 0.3 * t.risk as f64)).round() as i64;
                     let held = s.holdings.count(item);
                     let d = Decision {
@@ -245,9 +248,11 @@ impl Decider for RulesDecider {
                         price: Some(price.clamp(p.max(1))),
                         quantity: Some(quantity.clamp(held)),
                     };
-                    (SURE * held as f64 / lot(STALL_AT, t.patience), d)
+                    (SURE * held as f64 / lot(stall_at(item), t.patience), d)
                 }
-                Choice::Gather { .. } => (0.5 + 0.4 * t.thrift as f64, Decision::plain(i)),
+                // Making a tool rather than buy it is the climb, as
+                // gathering is (K2.1): the thrifty would sooner
+                Choice::Gather { .. } | Choice::Make { .. } => (0.5 + 0.4 * t.thrift as f64, Decision::plain(i)),
                 Choice::Accept | Choice::Counter { .. } | Choice::Pay { .. } | Choice::Decline => trade(s, i, choice),
                 Choice::Rest => (0.8 - 0.2 * t.sociability as f64, Decision::plain(i)),
                 Choice::Hall => (0.4 + 0.4 * t.sociability as f64, Decision::plain(i)),
@@ -699,6 +704,7 @@ fn guild(s: &Situation, i: usize, name: &str) -> (f64, Decision) {
 mod tests {
     use super::super::{Held, Place, Span, Temperament, When, Who};
     use super::*;
+    use crate::sim::{SELL_AT, STALL_AT};
 
     fn situation(question: Question, menu: Vec<Choice>, t: Temperament) -> Situation {
         Situation {

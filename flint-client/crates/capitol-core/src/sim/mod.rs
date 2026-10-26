@@ -212,6 +212,10 @@ pub enum Trade {
     /// A commission on the hall's board for an input its bids haven't
     /// filled (S2.5).
     Post { item: String, quantity: i32, price: i64 },
+    /// A tool bought at `stall`, whose sign lists it (Callings K2.1): the
+    /// one cheapest a use left, at no more a use than `price` for a new
+    /// one.
+    Shop { stall: String, item: String, price: i64 },
 }
 
 impl Trade {
@@ -224,6 +228,7 @@ impl Trade {
             Trade::Stock { item, .. } => format!("stock {item}"),
             Trade::MakeMarket => "make a market".into(),
             Trade::Post { item, .. } => format!("post for {item}"),
+            Trade::Shop { item, .. } => format!("buy {item} at a stall"),
         }
     }
 }
@@ -237,7 +242,9 @@ const BUILD: [&str; 6] = ["workbench", "kiln", "forge", "sawbench", "anvil", "st
 pub const LOT_STATIONS: [&str; 4] = ["kiln", "forge", "sawbench", "anvil"];
 
 /// The tools a tool crafter makes, in order: the stone tier, then iron.
-const TOOLS: [&str; 8] = [
+/// They're on the books a citizen watches ([`watched`]), and it sells
+/// those it has spare and buys one before a climb to it (Callings K2.1).
+pub const TOOLS: [&str; 8] = [
     "stone_axe",
     "stone_pickaxe",
     "stone_hammer",
@@ -247,6 +254,93 @@ const TOOLS: [&str; 8] = [
     "iron_hammer",
     "iron_sickle",
 ];
+
+/// The most spare tools a tool crafter makes ahead of selling them
+/// (Callings K2.1): past one of each of its own, [`for_sale`] makes this
+/// many more, then handles. Tools don't stack, and a pack has 24 slots, so
+/// it's small.
+pub const TOOL_STOCK: i32 = 2;
+
+/// Whether `item` is one of the [`TOOLS`].
+pub fn is_tool(item: &str) -> bool {
+    TOOLS.contains(&item)
+}
+
+/// The books a citizen watches (Callings K2.1): the hall's goods, then the
+/// tools.
+pub fn watched() -> impl Iterator<Item = &'static str> {
+    MARKET_ITEMS.into_iter().chain(TOOLS)
+}
+
+/// What a citizen sells `item` in, at the hall: [`SELL_AT`] of a good, one
+/// tool (K2.1). A tool is one unit to a slot, and dear.
+pub fn sell_at(item: &str) -> i32 {
+    if is_tool(item) {
+        1
+    } else {
+        SELL_AT
+    }
+}
+
+/// What a citizen keeps a stall for, of `item`: [`STALL_AT`] of a good, two
+/// tools (K2.1).
+pub fn stall_at(item: &str) -> i32 {
+    if is_tool(item) {
+        2
+    } else {
+        STALL_AT
+    }
+}
+
+/// What a tool crafter makes next for sale (Callings K2.1), once it holds
+/// one of each of its [`TOOLS`]: more of the one it holds fewest of (ties in
+/// their order, so the stone axe and pickaxe a climb wants come first),
+/// while it has fewer than [`TOOL_STOCK`] spare. `None`: it has its stock,
+/// or not yet its own set.
+pub fn for_sale(holdings: &Holdings) -> Option<Goal> {
+    if TOOLS.iter().any(|t| holdings.count(t) < 1) {
+        return None;
+    }
+    let spare: i32 = TOOLS.iter().map(|t| holdings.count(t) - 1).sum();
+    if spare >= TOOL_STOCK {
+        return None;
+    }
+    let fewest = TOOLS.iter().min_by_key(|t| holdings.count(t))?;
+    Some(Goal::hold(fewest, holdings.count(fewest) + 1))
+}
+
+/// What a tool costs a use: its `price` over the `uses` it has left. What a
+/// buyer weighs tools by, at the hall and at a stall (K2.1).
+pub fn per_use(price: i64, uses: i32) -> f64 {
+    price as f64 / f64::from(uses.max(1))
+}
+
+/// The best buy among the tools of `tool_type` someone asks `price` for
+/// (Callings K2.1): the cheapest a use at its full life, ties in [`TOOLS`]'
+/// order. An iron axe at 130 for 200 uses is a better buy than a stone one
+/// at 50 for 60.
+pub fn tool_offer(catalog: &Catalog, tool_type: &str, price: impl Fn(&str) -> Option<i64>) -> Option<(&'static str, i64)> {
+    let mut best: Option<(&'static str, i64, f64)> = None;
+    for item in TOOLS {
+        let Some(tool) = catalog.item_type(item).and_then(|t| t.tool.as_ref()) else { continue };
+        if tool.tool_type != tool_type {
+            continue;
+        }
+        let Some(p) = price(item) else { continue };
+        let cost = per_use(p, tool.max_durability);
+        if best.is_none_or(|(_, _, c)| cost < c) {
+            best = Some((item, p, cost));
+        }
+    }
+    best.map(|(item, p, _)| (item, p))
+}
+
+/// What `item` is worth when the books can't say (K2.1): a tool's target
+/// price, so the first one can be priced before any has traded. A good
+/// has none: its books say, or nobody prices it.
+pub fn worth_unbooked(catalog: &Catalog, item: &str) -> Option<i64> {
+    is_tool(item).then(|| catalog.item_type(item)?.target_price).flatten()
+}
 
 impl Role {
     /// `n` roles in [`MIX`]'s proportions, by largest remainder, dealt out
@@ -371,7 +465,12 @@ impl Role {
     fn dabble(&self, catalog: &Catalog, holdings: &Holdings) -> Option<Vec<Goal>> {
         let more = |item: &str| Goal::hold(item, holdings.count(item) + 1);
         let products: Vec<Goal> = match self {
-            Role::Crafter(Craft::Tools) => TOOLS.iter().map(|t| Goal::hold(t, 1)).chain([more("tool_handle")]).collect(),
+            Role::Crafter(Craft::Tools) => TOOLS
+                .iter()
+                .map(|t| Goal::hold(t, 1))
+                .chain(for_sale(holdings))
+                .chain([more("tool_handle")])
+                .collect(),
             Role::Builder => BUILD.iter().map(|s| Goal::Station(s.to_string())).chain([more("brick")]).collect(),
             _ => return None,
         };
@@ -390,7 +489,9 @@ impl Role {
     }
 
     /// The role's whole ladder, today's work: a tool crafter's tools and a
-    /// builder's stations, those it lacks, then more of what it makes.
+    /// builder's stations, those it lacks, then more of what it makes. A
+    /// tool crafter with its set makes tools for sale ([`for_sale`],
+    /// Callings K2.1), then handles.
     fn ladder(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
         let more = |item: &str| Goal::hold(item, holdings.count(item) + 1);
         let unmet = |goal: &Goal| plan::next(catalog, holdings, goal) != Ok(None);
@@ -402,12 +503,17 @@ impl Role {
             Role::Gatherer(Gather::Ore) => vec![more("iron_ore")],
             Role::Crafter(Craft::Planks) => vec![more("plank")],
             Role::Crafter(Craft::Ingots) => vec![more("iron_ingot")],
-            Role::Crafter(Craft::Tools) => then(TOOLS.iter().map(|t| Goal::hold(t, 1)).collect(), more("tool_handle")),
+            Role::Crafter(Craft::Tools) => then(
+                TOOLS.iter().map(|t| Goal::hold(t, 1)).collect(),
+                for_sale(holdings).unwrap_or_else(|| more("tool_handle")),
+            ),
             Role::Builder => then(BUILD.iter().map(|s| Goal::Station(s.to_string())).collect(), more("brick")),
         }
     }
 
-    /// What the role makes for others, if it sells anything.
+    /// What the role makes for others, if it sells anything. A tool
+    /// crafter's tools are sold as any citizen's spare tools are
+    /// ([`surplus::spare`], Callings K2.1), so it has none here.
     pub fn product(&self) -> Option<&'static str> {
         match self {
             Role::Gatherer(Gather::Wood) => Some("log"),
@@ -748,11 +854,11 @@ fn splitmix(h: &mut u64) -> u64 {
 
 /// The menu for selling `spare` of `item` before working (E3.8, Callings
 /// K1.4), if there's a question to ask: it has half of [`SELL_AT`] or more
-/// spare ([`surplus::spare`]), someone bids, and it can pay the listing fee
-/// on some. Sell (a price round the bid, up to all it has spare, or as many
+/// spare ([`surplus::spare`]), or a tool (K2.1, [`sell_at`]), someone bids,
+/// and it can pay the listing fee on some. Sell (a price round the bid, up to all it has spare, or as many
 /// as it can pay the fee on at the top price), or keep.
 pub fn sell_menu(holdings: &Holdings, item: &str, spare: i32, bid: Option<i64>, ask: Option<i64>) -> Option<Vec<Choice>> {
-    if spare < SELL_AT / 2 {
+    if spare < (sell_at(item) / 2).max(1) {
         return None;
     }
     let bid = bid?;
@@ -776,13 +882,13 @@ pub fn sell_menu(holdings: &Holdings, item: &str, spare: i32, bid: Option<i64>, 
 
 /// The menu for stocking a stall with `spare` of `item` (C1.5, Callings
 /// K1.4), if there's a question to ask: it has half of [`STALL_AT`] or more
-/// spare, can put a worth to it, and keeps a stall (`keeps`) or can pay
+/// spare, or a tool (K2.1, [`stall_at`]), can put a worth to it, and keeps a stall (`keeps`) or can pay
 /// [`STALL_DAYS`] of rent for one, with what it [`keeps`](kept) back. Stock
 /// (a price round its worth, up to all it has spare), or keep it.
 pub fn stall_menu(holdings: &Holdings, item: &str, spare: i32, worth: Option<i64>, keeps: bool) -> Option<Vec<Choice>> {
     let worth = worth?.max(1);
     let rent = holdings.fees.rent(STALL_DAYS);
-    if spare < STALL_AT / 2 || (!keeps && holdings.strands - kept(holdings) < rent) {
+    if spare < (stall_at(item) / 2).max(1) || (!keeps && holdings.strands - kept(holdings) < rent) {
         return None;
     }
     Some(vec![
@@ -855,6 +961,42 @@ pub fn post_menu(holdings: &Holdings, item: &str, wants: &[&str], bid: i64, open
             Choice::Pass,
         ]
     })
+}
+
+/// How many times a tool's price a citizen wants spare before it buys one
+/// rather than make it (Callings K2.1): 1 for the free-handed, 3 for the
+/// thrifty, by thrift.
+pub fn tool_margin(thrift: f32) -> f64 {
+    1.0 + 2.0 * f64::from(thrift.clamp(0.0, 1.0))
+}
+
+/// The menu for a tool its next step climbs toward (Callings K2.1), if
+/// there's a question to ask: it has Strands to spare over what it
+/// [`kept`] back, [`tool_margin`] times the `price` by its `thrift`. Buy
+/// one (at the hall's ask, or at a stall for up to `price` at its full
+/// life), or leave a standing bid for one about `price` when nobody sells
+/// (`standing`); or make it, as it would have.
+pub fn tool_menu(holdings: &Holdings, item: &str, price: i64, thrift: f32, standing: bool) -> Option<Vec<Choice>> {
+    let price = price.max(1);
+    let budget = holdings.strands - kept(holdings);
+    if (budget as f64) < tool_margin(thrift) * holdings.fees.buy_debit(price, 1) as f64 {
+        return None;
+    }
+    let one = Span::new(1, 1);
+    let take = if standing {
+        Choice::Bid {
+            item: item.to_string(),
+            price: Span::new((price / 2).max(1), price + (price / 2).max(1)),
+            quantity: one,
+        }
+    } else {
+        Choice::Buy {
+            item: item.to_string(),
+            price: Span::new((price / 2).max(1), price),
+            quantity: one,
+        }
+    };
+    Some(vec![take, Choice::Make { item: item.to_string() }])
 }
 
 /// The Strands a bot keeps back from goods and rent: [`FLOOR`] for its
@@ -1462,5 +1604,138 @@ mod tests {
         let tools = Role::Crafter(Craft::Tools).errands(&catalog, &h).unwrap();
         assert_eq!(tools.first().and_then(|e| e.goal.clone()), Some(Goal::hold("stone_axe", 1)));
         assert_eq!(tools.last().and_then(|e| e.goal.clone()), Some(Goal::hold("tool_handle", 1)));
+    }
+
+    /// A tool crafter's holdings with one of each of its tools, and
+    /// `extra` more.
+    fn tool_set(extra: &[(&str, i32)]) -> Holdings {
+        let mut h = Holdings {
+            strands: FLOAT,
+            ..Holdings::default()
+        };
+        for t in TOOLS {
+            h.items.insert(t.into(), 1);
+        }
+        for &(t, n) in extra {
+            *h.items.entry(t.into()).or_insert(0) += n;
+        }
+        h
+    }
+
+    #[test]
+    fn a_tool_crafter_with_its_set_makes_a_few_tools_for_sale_then_handles() {
+        let catalog = Catalog::fallback();
+        let tools = Role::Crafter(Craft::Tools);
+        let last = |h: &Holdings| tools.goals(&catalog, h).last().cloned();
+        // Not before it has its own set
+        assert_eq!(for_sale(&Holdings::default()), None);
+        // The stone axe a climb wants first, then the pickaxe
+        let h = tool_set(&[]);
+        assert_eq!(last(&h), Some(Goal::hold("stone_axe", 2)));
+        assert_eq!(tools.goals(&catalog, &h).len(), 1, "it has every tool of its own");
+        assert_eq!(last(&tool_set(&[("stone_axe", 1)])), Some(Goal::hold("stone_pickaxe", 2)));
+        // Up to its stock, then handles; one sold, it makes another
+        let stocked = tool_set(&[("stone_axe", 1), ("stone_pickaxe", 1)]);
+        assert_eq!(TOOL_STOCK, 2);
+        assert_eq!(last(&stocked), Some(Goal::hold("tool_handle", 1)));
+        assert_eq!(last(&tool_set(&[("stone_pickaxe", 1)])), Some(Goal::hold("stone_axe", 2)));
+        // A dabble may make one too, when it's nearest to hand
+        let dabble = tools.work(&catalog, &h, Commitment::Dabble);
+        assert_eq!(dabble.len(), 1);
+        // Spare tools aren't sold as a product; they're spare
+        assert_eq!(tools.product(), None);
+        let spare = surplus::spare(&stocked, tools, false, &[tools]);
+        assert_eq!(spare, [("stone_axe", 1), ("stone_pickaxe", 1)]);
+    }
+
+    #[test]
+    fn a_buyer_weighs_tools_by_what_a_use_costs() {
+        let catalog = Catalog::fallback();
+        let targets = |item: &str| catalog.item_type(item).and_then(|t| t.target_price);
+        // At their targets an iron axe (130 for 200 uses) beats a stone one
+        // (50 for 60)
+        assert_eq!(tool_offer(&catalog, "axe", targets), Some(("iron_axe", 130)));
+        // Dear iron, and the stone one is the better buy
+        let dear = |item: &str| if item == "iron_axe" { Some(500) } else { targets(item) };
+        assert_eq!(tool_offer(&catalog, "axe", dear), Some(("stone_axe", 50)));
+        // Only what someone offers, of the type
+        let stone_only = |item: &str| (item == "stone_pickaxe").then_some(70);
+        assert_eq!(tool_offer(&catalog, "pickaxe", stone_only), Some(("stone_pickaxe", 70)));
+        assert_eq!(tool_offer(&catalog, "axe", stone_only), None);
+        assert_eq!(tool_offer(&catalog, "saw", targets), None);
+        // A worn tool costs more a use
+        assert!(per_use(50, 10) > per_use(130, 200));
+        assert_eq!(per_use(60, 0), 60.0);
+        // An untraded tool is worth its target; a good, what its books say
+        assert_eq!(worth_unbooked(&catalog, "stone_axe"), Some(50));
+        assert_eq!(worth_unbooked(&catalog, "log"), None);
+        assert!(watched().any(|i| i == "iron_pickaxe") && watched().any(|i| i == "log"));
+    }
+
+    #[test]
+    fn the_worn_out_buy_a_tool_when_they_have_strands_to_spare() {
+        let mut h = Holdings {
+            strands: 200,
+            plot_room: Some(2),
+            ..Holdings::default()
+        };
+        let buy = tool_menu(&h, "stone_axe", 50, 0.5, false).unwrap();
+        assert_eq!(
+            buy,
+            vec![
+                Choice::Buy {
+                    item: "stone_axe".into(),
+                    price: Span::new(25, 50),
+                    quantity: Span::new(1, 1),
+                },
+                Choice::Make { item: "stone_axe".into() },
+            ]
+        );
+        // A standing bid, about the price, when nobody sells
+        let bid = tool_menu(&h, "stone_axe", 50, 0.5, true).unwrap();
+        assert!(matches!(&bid[0], Choice::Bid { price, quantity, .. } if *price == Span::new(25, 75) && quantity.max == 1));
+        // The thrifty want three times the price spare, the free-handed once
+        h.strands = FLOOR + 120;
+        assert!(tool_menu(&h, "stone_axe", 50, 0.0, false).is_some());
+        assert!(tool_menu(&h, "stone_axe", 50, 0.5, false).is_some());
+        assert_eq!(tool_menu(&h, "stone_axe", 50, 1.0, false), None);
+        // Short of a deed's price while it has no plot
+        let homeless = Holdings {
+            strands: 300,
+            deed_cost: 250,
+            ..Holdings::default()
+        };
+        assert_eq!(tool_menu(&homeless, "stone_axe", 50, 0.0, false), None);
+    }
+
+    #[test]
+    fn a_middling_citizen_sells_a_spare_tool_and_buys_one_rather_than_make_it() {
+        let catalog = Catalog::fallback();
+        let mut h = tool_set(&[("stone_axe", 1)]);
+        h.strands = 500;
+        h.plot_room = Some(2);
+        let tools = Role::Crafter(Craft::Tools);
+        let spare = surplus::spare(&h, tools, false, &[tools]);
+        assert_eq!(spare, [("stone_axe", 1)]);
+        // One spare is enough to sell, and two to keep a stall for
+        let menu = sell_menu(&h, "stone_axe", 1, Some(48), None).unwrap();
+        assert_eq!(rules_pick(Question::Sell { item: "stone_axe".into() }, menu, &h, Some(48), None), sold("stone_axe", 1, 48));
+        assert!(stall_menu(&h, "stone_axe", 1, Some(50), true).is_some());
+        assert_eq!(stall_menu(&h, "log", 1, Some(50), true), None);
+        // A wood gatherer whose axe broke buys one at the ask
+        let mut broke = Holdings {
+            strands: 500,
+            plot_room: Some(2),
+            ..Holdings::default()
+        };
+        broke.stations.insert("workbench".into());
+        let wood = Role::Gatherer(Gather::Wood);
+        let goal = wood.goal(&catalog, &broke);
+        assert_eq!(plan::tool_wanted(&catalog, &broke, &goal).as_deref(), Some("axe"));
+        let menu = tool_menu(&broke, "stone_axe", 52, 0.5, false).unwrap();
+        assert_eq!(rules_pick(Question::Buy { item: "stone_axe".into() }, menu, &broke, None, Some(52)), bought("stone_axe", 1, 52));
+        // With an axe, its step isn't toward one
+        broke.tools.insert("axe".into());
+        assert_eq!(plan::tool_wanted(&catalog, &broke, &goal), None);
     }
 }

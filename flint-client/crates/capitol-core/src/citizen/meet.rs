@@ -59,7 +59,7 @@ use super::decide::{Choice, Held, Lot, Mind, Place, Question, Quote, Situation, 
 use super::phrases::Occasion;
 use crate::bot::{Bot, BotError, TRADE_THINK};
 use crate::sim::plan::Holdings;
-use crate::sim::{LOT, MARKET_ITEMS, SELL_AT};
+use crate::sim::{watched, LOT, SELL_AT};
 use crate::state::{Container, GameState, Offer, OpenTrade, StateEvent, Trade, TradeEvent};
 
 /// How long a window may stand with nothing offered before it's closed.
@@ -78,10 +78,10 @@ const ASK_AMONG: usize = 3;
 const EARSHOT: f64 = 15.0;
 
 /// The books a citizen watches, as it sees them: best bid and ask, and the
-/// last trade, of each of [`MARKET_ITEMS`].
+/// last trade, of each of the hall's goods and the tools ([`watched`],
+/// Callings K2.1).
 pub fn quotes(state: &GameState) -> Vec<Quote> {
-    MARKET_ITEMS
-        .iter()
+    watched()
         .map(|item| {
             let book = state.market().book(item);
             Quote {

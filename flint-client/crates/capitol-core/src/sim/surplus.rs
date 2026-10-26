@@ -21,6 +21,9 @@
 //!   Everything else is spare, whatever its stint. The sell and stall
 //!   menus offer it once there's enough to be worth the walk, and a trade
 //!   window lays all of it out.
+//! - **A tool** ([`TOOLS`]) is spare past one of each it holds (Callings
+//!   K2.1): the server uses the best of a type, so a second sits in the
+//!   pack. A tool crafter makes its few for sale ([`for_sale`](super::for_sale)).
 //! - **What it wants** ([`wants`]) is the job at hand's inputs, then those
 //!   of the jobs it leans to most ([`NEAR`]: its favourite and its biggest
 //!   leanings), never what the job at hand makes. Its bids, its posts and
@@ -31,7 +34,7 @@
 
 use super::plan::{Goal, Holdings};
 use super::stint::willing;
-use super::{Role, LOT, MARKET_ITEMS};
+use super::{Role, LOT, MARKET_ITEMS, TOOLS};
 use crate::citizen::calling::Calling;
 
 /// What a citizen keeps back of a good another job it's willing to do
@@ -54,10 +57,11 @@ pub fn selling(job: Role, holdings: &Holdings, goal: Option<&Goal>) -> bool {
 }
 
 /// What a citizen at `doing` has spare to sell, of the goods the hall
-/// trades, the most first (ties in [`MARKET_ITEMS`]' order): what it holds
-/// less what its claims still want, the job at hand's inputs, its product
-/// unless it's `selling` it, and a [`STOCK`] of what its other `willing`
-/// jobs use. Never a good with none spare.
+/// trades, the most first (ties in [`MARKET_ITEMS`]' order, then
+/// [`TOOLS`]'): what it holds less what its claims still want, the job at
+/// hand's inputs, its product unless it's `selling` it, and a [`STOCK`] of
+/// what its other `willing` jobs use. Of each tool, all but one (K2.1).
+/// Never a good with none spare.
 pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role]) -> Vec<(&'static str, i32)> {
     let mut out: Vec<(&'static str, i32)> = MARKET_ITEMS
         .into_iter()
@@ -71,6 +75,10 @@ pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role]) 
             let n = holdings.count(item) - keep;
             (n > 0).then_some((item, n))
         })
+        .chain(TOOLS.into_iter().filter_map(|tool| {
+            let n = holdings.count(tool) - 1 - holdings.promised(tool);
+            (n > 0).then_some((tool, n))
+        }))
         .collect();
     // Stable, so a tie keeps the market's order
     out.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
@@ -172,6 +180,22 @@ mod tests {
         assert!(selling(WOOD, &h, Some(&Goal::Strands(100))));
         assert!(!selling(Role::Builder, &h, Some(&Goal::Station("forge".into()))));
         assert!(!selling(FIBER, &h, Some(&Goal::hold("fiber", 1))), "fiber is banked, not sold");
+    }
+
+    #[test]
+    fn a_tool_is_spare_past_one_of_each_whatever_the_job() {
+        let h = holding(&[("stone_axe", 3), ("iron_pickaxe", 1), ("log", 12)]);
+        for doing in [WOOD, TOOLS, Role::Builder] {
+            let spare = spare(&h, doing, true, &[doing]);
+            assert!(spare.contains(&("stone_axe", 2)), "{doing}: {spare:?}");
+            assert!(spare.iter().all(|(i, _)| *i != "iron_pickaxe"), "{doing}: the one it uses");
+        }
+        // A good outnumbers it, so the logs come first
+        assert_eq!(spare(&h, ORE, true, &[ORE]), [("log", 12), ("stone_axe", 2)]);
+        // What a claim owes isn't spare
+        let mut owing = h.clone();
+        owing.promised = vec![("stone_axe".into(), 1)];
+        assert_eq!(spare(&owing, ORE, true, &[ORE]), [("log", 12), ("stone_axe", 1)]);
     }
 
     #[test]

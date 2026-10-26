@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::super::plan::Holdings;
 use super::super::report::Entry;
-use super::super::{bid_menu, stall_menu, Trade, STALL_DAYS};
+use super::super::{bid_menu, is_tool, stall_menu, worth_unbooked, Trade, STALL_DAYS};
 use super::{Action, SimBot};
 use crate::bazaar;
 use crate::bot::BotError;
@@ -228,13 +228,15 @@ impl SimBot {
         Ok(())
     }
 
-    /// What `item` is worth by the citizen's books.
+    /// What `item` is worth by the citizen's books, or for a tool none has
+    /// traded yet, its target (Callings K2.1).
     pub(super) fn worth(&self, item: &str) -> Option<i64> {
-        meet::worth(self.bot.state(), item)
+        let state = self.bot.state();
+        meet::worth(state, item).or_else(|| worth_unbooked(state.catalog(), item))
     }
 
     /// Whether it has a standing bid up for `item`.
-    fn bidding(&self, item: &str) -> bool {
+    pub(super) fn bidding(&self, item: &str) -> bool {
         self.bot
             .state()
             .market()
@@ -372,7 +374,8 @@ impl SimBot {
             .filter(|i| i.item_type == item)
             .cloned()
             .collect();
-        stacks.sort_by_key(|s| std::cmp::Reverse(s.quantity));
+        // The biggest stacks first; of tools, the freshest (K2.1)
+        stacks.sort_by_key(|s| std::cmp::Reverse((s.quantity, s.durability.unwrap_or(0))));
         let mut left = quantity;
         for stack in stacks {
             if left <= 0 {
@@ -394,6 +397,7 @@ impl SimBot {
 /// A citizen's shop: "Percy Sawyer's logs", shortened to fit.
 fn shop_name(name: &str, item: &str) -> String {
     let goods = match item {
+        _ if is_tool(item) => "tools".to_string(),
         "iron_ore" => "ore".to_string(),
         "iron_ingot" => "iron".to_string(),
         "stone" | "charcoal" => item.to_string(),
@@ -415,6 +419,7 @@ mod tests {
         assert_eq!(shop_name("Percy Sawyer", "log"), "Percy Sawyer's logs");
         assert_eq!(shop_name("Ida Smith", "iron_ingot"), "Ida Smith's iron");
         assert_eq!(shop_name("Ida Smith", "iron_ore"), "Ida Smith's ore");
+        assert_eq!(shop_name("Ida Smith", "stone_axe"), "Ida Smith's tools");
         let long = shop_name("Bartholomew Fitzwilliam-Cartwright", "plank");
         assert_eq!(long.chars().count(), MAX_SHOP_NAME);
     }

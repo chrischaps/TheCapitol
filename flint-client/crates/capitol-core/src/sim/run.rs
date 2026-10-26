@@ -19,7 +19,8 @@
 //! work for a wage in their working hours (S2.8, [`wages`]), and join the
 //! guilds of their trades and pay into them (S4.5, [`guilds`]). In their
 //! working hours they wander off now and then, for a quarter hour or so
-//! (Callings K1.5, [`detour`]).
+//! (Callings K1.5, [`detour`]). One whose work climbs toward a tool buys
+//! one when it can spare the Strands (K2.1, [`tools`]).
 
 mod board;
 mod detour;
@@ -30,6 +31,7 @@ mod merchant;
 mod people;
 pub mod road_in;
 mod stint;
+mod tools;
 mod wages;
 
 pub use road_in::walk_the_road;
@@ -51,7 +53,7 @@ use super::activity::{self, Activity};
 use super::lot;
 use super::plan::{Goal, Holdings, Step, FLOAT};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
-use super::{Errand, Role, Trade, MARKET_ITEMS};
+use super::{is_tool, watched, Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError, NO_WAY};
 use crate::catalog::Catalog;
 use crate::citizen::calling::Calling;
@@ -245,7 +247,8 @@ pub(crate) fn live(
 ) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
     mind.set_scale(scale);
-    for item in MARKET_ITEMS {
+    // The hall's goods and the tools (K2.1)
+    for item in watched() {
         bot.watch_market(item)?;
     }
     // Its stall, if it kept one in an earlier life, and its standing bids
@@ -360,7 +363,7 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
     let acted = match (choice, action) {
         (Choice::Work { .. } | Choice::Bank, Some(Action::Step(_)))
         | (Choice::Sell { .. }, Some(Action::Trade(Trade::Sell { .. })))
-        | (Choice::Buy { .. }, Some(Action::Trade(Trade::Buy { .. })))
+        | (Choice::Buy { .. }, Some(Action::Trade(Trade::Buy { .. } | Trade::Shop { .. })))
         | (Choice::Bid { .. }, Some(Action::Trade(Trade::Bid { .. })))
         | (Choice::Stock { .. }, Some(Action::Trade(Trade::Stock { .. })))
         | (Choice::MakeMarket { .. }, Some(Action::Trade(Trade::MakeMarket)))
@@ -375,7 +378,7 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         (Choice::Take { .. }, _) => true,
         // A detour, from the stint menu or in free time (K1.5)
         (Choice::Detour { .. }, Some(Action::Detour(_)) | None) => true,
-        (Choice::Keep | Choice::Gather { .. } | Choice::Pass | Choice::Stay, _) => return Fate::Passed,
+        (Choice::Keep | Choice::Gather { .. } | Choice::Make { .. } | Choice::Pass | Choice::Stay, _) => return Fate::Passed,
         _ => false,
     };
     match result {
@@ -469,6 +472,9 @@ struct SimBot {
     repacked: Option<Uuid>,
     /// When it last set off on a detour, in the run's game hours (K1.5).
     last_detour: Option<f64>,
+    /// When it last read the bazaar's signs for a tool, in the run's game
+    /// hours (K2.1).
+    tools_looked: Option<f64>,
 }
 
 /// What a bot does next.
@@ -539,6 +545,7 @@ impl SimBot {
             hiring: hire::Hiring::new(),
             repacked: None,
             last_detour: None,
+            tools_looked: None,
         }
     }
 
@@ -858,12 +865,14 @@ impl SimBot {
 
     /// What the report files `action`'s time under (Callings K0.1, plan
     /// D2), and whether it's setup. A step, a sale, a buy and a bid are its
-    /// errand's `job`; a stall and a market are trading; the board, posts and
+    /// errand's `job`, and a tool bought is setup, as making it would be
+    /// (K2.1); a stall and a market are trading; the board, posts and
     /// wages are the Commons; market hours with nothing to trade are free.
     fn activity(action: &Action, job: Activity, goal: Option<&Goal>, catalog: &Catalog) -> (Activity, bool) {
         match action {
             Action::Step(step) => (job, activity::is_setup(catalog, goal, step)),
-            Action::Trade(Trade::Sell { .. } | Trade::Buy { .. } | Trade::Bid { .. }) => (job, false),
+            Action::Trade(Trade::Buy { item, .. } | Trade::Bid { item, .. } | Trade::Shop { item, .. }) => (job, is_tool(item)),
+            Action::Trade(Trade::Sell { .. }) => (job, false),
             Action::Trade(Trade::Stock { .. } | Trade::MakeMarket) => (Activity::Trading, false),
             Action::Trade(Trade::Post { .. }) | Action::Board(_) | Action::Wage(_) | Action::Hire(_) | Action::Guild(_) => {
                 (Activity::Commons, false)
@@ -1070,8 +1079,9 @@ impl SimBot {
 
     /// Asks the mind whether to sell what it has spare before `errand`
     /// (Callings K1.4: whatever job it came of), and if not, whether to buy
-    /// what it would gather. `None`: just do it. A merchant makes its market
-    /// on a stint at trading.
+    /// the tool its step climbs toward (K2.1), or what it would gather.
+    /// `None`: just do it. A merchant makes its market on a stint at
+    /// trading.
     fn choose_trade(&mut self, holdings: &Holdings, errand: &Errand) -> Option<Trade> {
         let job = self.job();
         if self.merchant.is_some() && job == Role::Merchant {
@@ -1079,7 +1089,8 @@ impl SimBot {
         }
         // What a claim of its own wants isn't spare (S2.5): one question at
         // the hall, for the first good someone bids for, then one about a
-        // stall, for the most it has spare
+        // stall, for the most it has spare of what's enough for one (a
+        // good's STALL_AT, or tools, K2.1)
         let spare = self.spare(holdings, errand.goal.as_ref());
         let sale = spare.iter().find_map(|&(item, n)| {
             let (bid, ask) = self.best(item);
@@ -1095,10 +1106,14 @@ impl SimBot {
                 });
             }
         }
-        if let Some(&(item, n)) = spare.first() {
+        let stall = spare.iter().find(|&&(item, n)| n >= (super::stall_at(item) / 2).max(1));
+        if let Some(&(item, n)) = stall {
             if let Some(stock) = self.choose_stall(holdings, item, n) {
                 return Some(stock);
             }
+        }
+        if let Some(tool) = self.choose_tool(holdings, errand) {
+            return Some(tool);
         }
         let Step::Gather { item, .. } = &errand.step else {
             return None;
@@ -1517,6 +1532,7 @@ impl SimBot {
                 self.bot.go_to_exchange()?;
                 self.post(item, *quantity, *price)?;
             }
+            Trade::Shop { stall, item, price } => return self.buy_at_a_stall(stall, item, *price),
             Trade::Sell { .. } | Trade::Buy { .. } => {
                 self.bot.go_to_exchange()?;
                 self.trade_at_the_hall(trade)?;
@@ -1532,11 +1548,17 @@ impl SimBot {
     fn trade_at_the_hall(&mut self, trade: &Trade) -> Result<(), BotError> {
         let order = match trade {
             Trade::Sell { item, quantity, price } => {
+                // The biggest stack; of tools, which don't stack, the
+                // freshest, since the book doesn't show wear (#547)
                 let (item_id, held) = self
                     .bot
                     .state()
                     .inventory()
-                    .and_then(|inv| inv.items().filter(|i| &i.item_type == item).max_by_key(|i| i.quantity))
+                    .and_then(|inv| {
+                        inv.items()
+                            .filter(|i| &i.item_type == item)
+                            .max_by_key(|i| (i.quantity, i.durability.unwrap_or(0)))
+                    })
                     .map(|i| (i.item_id, i.quantity))
                     .ok_or_else(|| BotError::Failed(format!("no {item} to sell")))?;
                 PlaceOrder {
@@ -1550,7 +1572,7 @@ impl SimBot {
                     grade_rule: None,
                 }
             }
-            Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket | Trade::Post { .. } => {
+            Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket | Trade::Post { .. } | Trade::Shop { .. } => {
                 return Err(BotError::Failed(format!("{} isn't a trade at the hall", trade.label())))
             }
             Trade::Buy { item, quantity, price } => PlaceOrder {

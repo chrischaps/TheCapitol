@@ -435,6 +435,8 @@ pub enum Choice {
     Keep,
     /// Don't buy: go and gather it.
     Gather { item: String },
+    /// Don't buy the tool: make it, as its climb would (Callings K2.1).
+    Make { item: String },
     /// Accept the trade as it stands.
     Accept,
     /// Ask for a deal this many Strands better. Needs a price: how many.
