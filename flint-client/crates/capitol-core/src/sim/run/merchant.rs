@@ -222,6 +222,13 @@ impl SimBot {
                 self.float()
             );
         }
+        // At the hall with money: what its home lacks first (K2.3). A post
+        // the court refused is asked about again on the next visit
+        if let Err(e) = self.post_patronage() {
+            if e.is_final() {
+                return Err(e);
+            }
+        }
         let stopped = || town.is_some_and(Tether::stopped);
         let end = Instant::now() + self.wall(SPELL);
         let day_over = |me: &SimBot| matches!(me.phase(), Some(Phase::Home | Phase::Night));

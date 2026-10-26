@@ -67,6 +67,7 @@ use super::voice;
 use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
 use crate::sim::report::{BotRun, Entry};
+use crate::sim::patron;
 use crate::sim::stint::{self, Kept};
 use crate::sim::wage;
 use crate::sim::{self, Activity, Role};
@@ -111,6 +112,9 @@ struct RosterFile {
     /// When citizens trade more (Callings K2.2): `line = 1200`, the Strands
     /// past which a middling citizen's calling leans further to trading.
     trading: Option<TradingFile>,
+    /// When citizens post for their homes (Callings K2.3): `line = 1500`,
+    /// the Strands a middling citizen keeps back before it does.
+    patrons: Option<PatronsFile>,
     #[serde(default, rename = "citizen")]
     citizens: Vec<CitizenFile>,
 }
@@ -124,6 +128,12 @@ struct HiringFile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TradingFile {
+    line: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatronsFile {
     line: Option<i64>,
 }
 
@@ -324,6 +334,9 @@ pub struct Roster {
     /// The Strands past which a middling citizen leans further to trading
     /// (K2.2): `[trading] line`, [`stint::TRADE_LINE`] unless it says.
     pub trade_line: i64,
+    /// The Strands a middling citizen keeps back before it posts for its
+    /// home (K2.3): `[patrons] line`, [`patron::PATRON_LINE`] unless it says.
+    pub patron_line: i64,
     pub citizens: Vec<Citizen>,
 }
 
@@ -343,6 +356,9 @@ pub struct Citizen {
     pub hire_line: i64,
     /// The town's line for trading (K2.2), which its patience weighs.
     pub trade_line: i64,
+    /// The town's line for posting for its home (K2.3), which its thrift
+    /// weighs.
+    pub patron_line: i64,
     key: Key,
 }
 
@@ -388,6 +404,7 @@ impl Roster {
                 callings: calling::Mix::default(),
                 hire_line: wage::HIRE_LINE,
                 trade_line: stint::TRADE_LINE,
+                patron_line: patron::PATRON_LINE,
                 citizens: Vec::new(),
             })
         }
@@ -428,6 +445,10 @@ impl Roster {
         if trade_line < 0 {
             return Err(format!("{}: trading: line is {trade_line}; it must be 0 or more", path.display()));
         }
+        let patron_line = file.patrons.and_then(|p| p.line).unwrap_or(patron::PATRON_LINE);
+        if patron_line < 0 {
+            return Err(format!("{}: patrons: line is {patron_line}; it must be 0 or more", path.display()));
+        }
         let mut citizens = Vec::with_capacity(file.citizens.len());
         for c in file.citizens {
             let what = |problem: &str| format!("{}: citizen {:?} {problem}", path.display(), c.name);
@@ -456,6 +477,7 @@ impl Roster {
                 persona,
                 hire_line,
                 trade_line,
+                patron_line,
                 key,
             });
         }
@@ -468,6 +490,7 @@ impl Roster {
             callings,
             hire_line,
             trade_line,
+            patron_line,
             citizens,
         })
     }
@@ -487,6 +510,7 @@ impl Roster {
             persona: Persona::seeded_in(role, seed(name), &self.mix, &callings),
             hire_line: self.hire_line,
             trade_line: self.trade_line,
+            patron_line: self.patron_line,
             key: Key::Inline(secret.to_string()),
         };
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
@@ -1375,6 +1399,7 @@ fn one_life(
         voice,
         citizen.hire_line,
         citizen.trade_line,
+        citizen.patron_line,
         tether,
     )
 }
@@ -1673,6 +1698,7 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
                     persona: Persona::seeded_in(role, seed(&name), &Mix::default(), &calling::Mix::only(style)),
                     hire_line: wage::HIRE_LINE,
                     trade_line: stint::TRADE_LINE,
+                    patron_line: patron::PATRON_LINE,
                     key: Key::Inline("k".into()),
                 };
                 let text = entry(&citizen, "k");
@@ -1704,6 +1730,18 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
         assert_eq!(Roster::parse(ada, path).unwrap().citizens[0].trade_line, stint::TRADE_LINE);
         assert!(Roster::parse("[trading]\nline = -1\n", path).unwrap_err().contains("0 or more"));
         assert!(Roster::parse("[trading]\nfloat = 3\n", path).is_err());
+    }
+
+    /// Callings K2.3: the town's line for patrons, on each citizen.
+    #[test]
+    fn a_roster_reads_the_towns_line_for_patrons() {
+        let ada = "[[citizen]]\nname = \"Ada Reeder\"\nrole = \"builder\"\nkey = \"k\"\n";
+        let path = Path::new("t.toml");
+        let roster = Roster::parse(&format!("[patrons]\nline = 4000\n\n{ada}"), path).unwrap();
+        assert_eq!((roster.patron_line, roster.citizens[0].patron_line), (4000, 4000));
+        assert_eq!(Roster::parse(ada, path).unwrap().citizens[0].patron_line, patron::PATRON_LINE);
+        assert!(Roster::parse("[patrons]\nline = -1\n", path).unwrap_err().contains("0 or more"));
+        assert!(Roster::parse("[patrons]\nfloor = 3\n", path).is_err());
     }
 
     /// A roster from before callings (K0.2): each citizen keeps the name,

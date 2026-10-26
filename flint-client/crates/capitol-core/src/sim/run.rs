@@ -250,6 +250,7 @@ pub(crate) fn live(
     voice: Voice,
     hire_line: i64,
     trade_line: i64,
+    patron_line: i64,
     town: &Tether,
 ) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
@@ -271,6 +272,8 @@ pub(crate) fn live(
     citizen.persona = Some(persona.clone());
     // The town's line for hiring (K2.4), which its thrift weighs
     citizen.hiring.base_line = hire_line;
+    // And for posting for its home (K2.3)
+    citizen.board.patron_line = patron_line;
     // Its calling, and the stint it was on and what it did lately, from
     // the side file, so a short session still adds up to a mix (K1.2)
     citizen.calling = persona.calling.clone();
@@ -1446,6 +1449,15 @@ impl SimBot {
         h.plot_spare = spare;
         h.owed = self.owed();
         h.promised = self.board.promised();
+        // A kit a claim of its own has promised is a patron's (K2.3): not
+        // its own to put down, so a builder never places the kit it owes
+        for (item, n) in &h.promised {
+            if catalog.station_for_kit(item).is_some() {
+                if let Some(held) = h.items.get_mut(item) {
+                    *held = (*held - n).max(0);
+                }
+            }
+        }
         // Its tools at its stall and on the book (K2.1)
         let stalled: i64 = state
             .bazaar()

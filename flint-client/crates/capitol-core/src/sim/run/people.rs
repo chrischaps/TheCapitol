@@ -319,7 +319,9 @@ impl SimBot {
             result?;
         }
         // What its bids haven't filled in a day, it posts for (S2.5)
-        self.post_wants()
+        self.post_wants()?;
+        // And with money to spare, for what its home lacks (K2.3)
+        self.post_patronage()
     }
 
     /// Leaves a bid for `quantity` of `item` at `price` on the book, to

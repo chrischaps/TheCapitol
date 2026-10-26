@@ -97,6 +97,15 @@ mix = { specialist = 0.4, leaner = 0.4, all-rounder = 0.2 }
 [hiring]
 line = 600
 
+# When citizens post for their homes (Callings K2.3): a citizen with
+# Strands over its line posts commissions, at the hall, for what its home
+# lacks: the kits of its calling's stations, a floor's goods, or the goods
+# its leanings use. The line is this for a middling citizen, half again
+# for the thriftiest and half for the free-handed, and a post never takes
+# it under it.
+[patrons]
+line = 1500
+
 [[citizen]]
 name = "Ada Reeder"
 role = "gatherer-fiber"

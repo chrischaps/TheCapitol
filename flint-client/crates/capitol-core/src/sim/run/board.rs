@@ -24,6 +24,11 @@
 //!   day without a fill posts a commission for it at the bid's price and a
 //!   premium, never with more than [`MAX_POSTS`](crate::sim::MAX_POSTS)
 //!   open ([`SimBot::post_wants`]).
+//! - **A patron's posts** (Callings K2.3, [`patron`]). With Strands over
+//!   its line it posts, at the hall, for what its home lacks: the kits of
+//!   its calling's stations, a floor's goods, or the goods its leanings use
+//!   ([`SimBot::post_patronage`]). A builder answers a kit's commission,
+//!   one kit a claim.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -34,9 +39,10 @@ use capitol_protocol::rules::market::grade_floor;
 use capitol_protocol::rules::{Zone, DAY_LENGTH_SECS};
 use uuid::Uuid;
 
+use super::super::patron::{self, PATRON_LINE};
 use super::super::plan::Holdings;
 use super::super::report::Entry;
-use super::super::{Gather, Role, Trade, Wanted, LOT, POST_DAYS, POST_GRADE};
+use super::super::{stint::lot_for, Gather, Role, Trade, Wanted, LOT, POST_DAYS, POST_GRADE};
 use super::{stint, Action, SimBot};
 use crate::bot::BotError;
 use crate::catalog::Catalog;
@@ -136,6 +142,12 @@ pub(super) struct Board {
     wanting: HashMap<String, (Instant, i64)>,
     /// Commissions it claimed whose goods come from the wilds
     wild: HashSet<Uuid>,
+    /// The Strands a middling citizen keeps back before it posts for its
+    /// home (Callings K2.3): the town's `[patrons] line`, [`PATRON_LINE`]
+    /// unless it says
+    pub(super) patron_line: i64,
+    /// What it passed on posting for as a patron, and when
+    considered: HashMap<String, Instant>,
 }
 
 impl Board {
@@ -149,6 +161,8 @@ impl Board {
             began: Instant::now(),
             wanting: HashMap::new(),
             wild: HashSet::new(),
+            patron_line: PATRON_LINE,
+            considered: HashMap::new(),
         }
     }
 
@@ -323,7 +337,11 @@ impl SimBot {
             let Some(job) = self.answerer(&c.item_type) else { continue };
             let unclaimed = court::unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn);
             let ground = ground(job, &catalog, &c.item_type, c.min_quality);
-            let day_work = day_work(&self.board.made, &c.item_type, worked);
+            // A kit at a time: they don't stack, and a pack has 24 slots
+            let day_work = match catalog.station_for_kit(&c.item_type) {
+                Some(_) => 1,
+                None => day_work(&self.board.made, &c.item_type, worked),
+            };
             // In time: a day's work is a game day's, and a claim runs a court
             // day at most, never past the due date
             let runs = (court::claim_until(now, c.due_at) - now).num_seconds();
@@ -508,6 +526,64 @@ impl SimBot {
             result?;
         }
         Ok(())
+    }
+
+    /// At the hall, a patron's posts (Callings K2.3): with Strands over its
+    /// line, for each thing its home lacks ([`patron::home_wants`]) that it
+    /// has no post of its own up for, asks the mind whether to post a
+    /// commission for it. One it passed isn't asked about again for
+    /// [`ASK_AGAIN`]. What its posts brought is collected from its market
+    /// box first, so it never posts for a kit that came: a market spell
+    /// doesn't collect the box.
+    pub(super) fn post_patronage(&mut self) -> Result<(), BotError> {
+        let Some(me) = self.bot.state().me() else { return Ok(()) };
+        let line = self.patron_line();
+        if self.persona.is_none() || self.bot.state().strands().unwrap_or(0) <= line {
+            return Ok(());
+        }
+        self.bot.collect_market_box()?;
+        let again = self.wall(ASK_AGAIN);
+        self.board.considered.retain(|_, at| at.elapsed() < again);
+        let catalog = self.bot.state().catalog().clone();
+        let lacks = patron::home_wants(&catalog, &self.holdings(), &lot_for(&self.calling), &self.wants());
+        for (item, want) in lacks {
+            let mine: Vec<&Commission> = self
+                .board
+                .commissions
+                .iter()
+                .filter(|c| c.poster_id == me && c.status == CommissionStatus::Open)
+                .collect();
+            if mine.iter().any(|c| c.item_type == item) || self.board.considered.contains_key(&item) {
+                continue;
+            }
+            let open = mine.len();
+            let holdings = self.holdings();
+            let Some(menu) = patron::patron_menu(&holdings, &item, want, self.worth(&item), line, open) else { continue };
+            let mark = self.mind.mark();
+            let pass = menu.len() - 1;
+            let trade = match self.decide(Question::Buy { item: item.clone() }, menu, pass, &holdings) {
+                Some((d, Choice::Post { item, .. })) => match (d.price, d.quantity) {
+                    (Some(price), Some(quantity)) => Trade::Post { item, quantity, price },
+                    _ => continue,
+                },
+                _ => {
+                    self.settle(mark, None, &Ok(()));
+                    self.board.considered.insert(item, Instant::now());
+                    continue;
+                }
+            };
+            let Trade::Post { item, quantity, price } = &trade else { unreachable!() };
+            let result = self.post(item, *quantity, *price);
+            self.settle(mark, Some(&Action::Trade(trade.clone())), &result);
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Its line as a patron: the Strands it keeps back before it posts for
+    /// its home, by thrift ([`patron::patron_line`]).
+    fn patron_line(&self) -> i64 {
+        patron::patron_line(self.board.patron_line, self.mind.temperament.thrift)
     }
 
     /// Posts a commission for `quantity` of `item` at `price` each. At the

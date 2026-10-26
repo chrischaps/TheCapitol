@@ -5,6 +5,8 @@
 //! - [`activity`]: what a bot's time goes on, for the reports (Callings
 //!   K0.1). Pure.
 //! - [`lot`]: where its stations go on its lot. Pure.
+//! - [`patron`]: what a rich citizen's home lacks, which it posts
+//!   commissions for (Callings K2.3). Pure.
 //! - [`plan`]: what a bot does next toward its goal, from the catalog and
 //!   what it holds. Pure.
 //! - [`report`]: the numbers, as markdown and CSV. Pure.
@@ -39,6 +41,7 @@
 pub mod activity;
 pub mod guild;
 pub mod lot;
+pub mod patron;
 pub mod plan;
 pub mod report;
 pub mod run;
@@ -241,6 +244,11 @@ impl Trade {
 /// The stations a builder puts down, in order.
 const BUILD: [&str; 6] = ["workbench", "kiln", "forge", "sawbench", "anvil", "storage_chest"];
 
+/// What a builder answers a commission for (S2.5, Callings K2.3): its
+/// bricks, and the kits of the stations a lot takes, which a patron posts
+/// for. Not a workbench's, which everyone makes for themselves.
+const BUILDS_FOR_OTHERS: [&str; 6] = ["brick", "kiln_kit", "forge_kit", "sawbench_kit", "anvil_kit", "chest_kit"];
+
 /// The stations a builder keeps its lot's room for (#305): every station a
 /// trade puts on a lot, in the order it puts them down. Not the workbench,
 /// which may stand off one, nor the chest, which goes last where it fits.
@@ -345,7 +353,8 @@ pub fn tool_offer(catalog: &Catalog, tool_type: &str, price: impl Fn(&str) -> Op
 /// price, so the first one can be priced before any has traded. A good
 /// has none: its books say, or nobody prices it.
 pub fn worth_unbooked(catalog: &Catalog, item: &str) -> Option<i64> {
-    is_tool(item).then(|| catalog.item_type(item)?.target_price).flatten()
+    let unbooked = is_tool(item) || catalog.station_for_kit(item).is_some();
+    unbooked.then(|| catalog.item_type(item)?.target_price).flatten()
 }
 
 impl Role {
@@ -394,7 +403,9 @@ impl Role {
     /// buy what it would otherwise gather.
     ///
     /// What its claims on commissions still want of it comes before
-    /// anything (S2.5): a promise is kept first.
+    /// anything (S2.5): a promise is kept first. Then a kit in hand for a
+    /// station its lot takes now, which a patron's commission brought
+    /// (Callings K2.3, [`patron::furnish`]).
     ///
     /// The work between them is taken at `commitment` (Callings D5): the
     /// whole ladder, or a dabble's one cheap product.
@@ -403,6 +414,8 @@ impl Role {
         if !self.banks() && holdings.strands < FLOOR {
             goals.insert(0, Goal::Strands(FLOAT));
         }
+        let furnish: Vec<Goal> = patron::furnish(catalog, holdings).into_iter().filter(|g| !goals.contains(g)).collect();
+        goals.splice(0..0, furnish);
         let owed = holdings
             .owed
             .iter()
@@ -676,7 +689,8 @@ impl Role {
 
     /// What the role answers a commission for (S2.5): what it gathers or
     /// makes, and for a fiber gatherer rope too, which it twists from its
-    /// fiber by hand. A merchant answers none: it earns its float.
+    /// fiber by hand. A builder makes a patron's kits too (Callings K2.3),
+    /// as it makes its own. A merchant answers none: it earns its float.
     pub fn answers(&self) -> &'static [&'static str] {
         match self {
             Role::Gatherer(Gather::Fiber) => &["fiber", "rope"],
@@ -685,7 +699,7 @@ impl Role {
             Role::Crafter(Craft::Planks) => &["plank"],
             Role::Crafter(Craft::Ingots) => &["iron_ingot"],
             Role::Crafter(Craft::Tools) => &["tool_handle"],
-            Role::Builder => &["brick"],
+            Role::Builder => &BUILDS_FOR_OTHERS,
             Role::Merchant => &[],
         }
     }
@@ -947,14 +961,7 @@ pub fn post_menu(holdings: &Holdings, item: &str, wants: &[&str], bid: i64, open
     }
     let bid = bid.max(1);
     let top = bid * 2;
-    let budget = holdings.strands - kept(holdings);
-    let mut afford = 2 * LOT;
-    while afford > 0 && {
-        let value = court::commission_value(top, afford);
-        value + court::court_fee(value) > budget
-    } {
-        afford -= 1;
-    }
+    let afford = postable(top, 2 * LOT, holdings.strands - kept(holdings));
     (afford > 0).then(|| {
         vec![
             Choice::Post {
@@ -967,6 +974,19 @@ pub fn post_menu(holdings: &Holdings, item: &str, wants: &[&str], bid: i64, open
             Choice::Pass,
         ]
     })
+}
+
+/// The most of `most` units a commission can be posted for at `price` each
+/// out of `budget`, the court's fee and all (S2.5).
+pub(crate) fn postable(price: i64, most: i32, budget: i64) -> i32 {
+    let mut afford = most;
+    while afford > 0 && {
+        let value = court::commission_value(price, afford);
+        value + court::court_fee(value) > budget
+    } {
+        afford -= 1;
+    }
+    afford.max(0)
 }
 
 /// How many times a tool's price a citizen wants spare before it buys one
@@ -1470,6 +1490,12 @@ mod tests {
         assert!(Role::Merchant.answers().is_empty());
         assert_eq!(Role::Gatherer(Gather::Fiber).answers(), ["fiber", "rope"]);
         assert_eq!(Role::Gatherer(Gather::Ore).answers(), ["iron_ore"]);
+        // A builder makes a patron's kits (K2.3), but not a workbench's
+        let catalog = Catalog::fallback();
+        for item in Role::Builder.answers().iter().filter(|i| **i != "brick") {
+            assert!(catalog.station_for_kit(item).is_some_and(|k| !k.off_plot), "{item}");
+            assert!(worth_unbooked(&catalog, item).is_some(), "{item} has a target to post at");
+        }
     }
 
     #[test]
