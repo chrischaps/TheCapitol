@@ -666,6 +666,7 @@ mod tests {
             production: Vec::new(),
             indoors: false,
             condition: 100,
+            floor: 0,
         }
     }
 
@@ -819,6 +820,9 @@ mod tests {
             corners: Some([(0.0, 0.0), (120.0, 0.0), (120.0, 300.0), (0.0, 300.0)]),
             indoor_room: None,
             yard_room: None,
+            floor_ready_at: None,
+            floors: 0,
+            next_floor: None,
         }
     }
 

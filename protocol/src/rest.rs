@@ -1523,6 +1523,10 @@ pub struct CatalogStationType {
     /// Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub off_plot: bool,
+    /// Whether it may only stand on the ground floor: a fire, which can't
+    /// go upstairs (V3.3). Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ground_only: bool,
 }
 
 /// A resource type (`resource_types`): what a node yields and how fast.
@@ -1634,6 +1638,11 @@ pub struct StationInfo {
     /// not at all until it's repaired.
     #[serde(default = "full_condition")]
     pub condition: i32,
+    /// The storey it stands on (V3.3): 0 the ground, k the kth floor built.
+    /// Upstairs it keeps its real position inside the footprint, so it's
+    /// reached as one on the ground is. Omitted on the ground.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub floor: i32,
 }
 
 fn full_condition() -> i32 {
@@ -1763,6 +1772,10 @@ pub struct PlaceStationRequest {
     pub y: f64,
     /// Kit item ID to consume
     pub kit_item_id: Uuid,
+    /// The storey to put it on, inside the building (V3.3): 0, the ground,
+    /// if left out
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub floor: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3059,6 +3072,60 @@ pub struct PlotInfo {
     /// The stations its yard holds, round the building
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yard_room: Option<i32>,
+    /// The floors built over the ground (V3.3), the last perhaps still going
+    /// up. Each holds `indoor_room` again.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub floors: i32,
+    /// When the last floor is up: until then it's scaffolding, and nothing
+    /// can be placed on it. `None` with no floors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_ready_at: Option<DateTime<Utc>>,
+    /// What the next floor costs (`rules::floors::cost`), at the live
+    /// `floor_permit_scale`. `None` on a lot with no building to build on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_floor: Option<FloorBill>,
+}
+
+impl PlotInfo {
+    /// The storeys a station may go on now: the ground and every floor
+    /// that's up by `now`
+    pub fn open_floors(&self, now: DateTime<Utc>) -> i32 {
+        open_floors(self.floors, self.floor_ready_at, now)
+    }
+}
+
+/// The floors of `floors` that are up by `now`: all but the last while it
+/// goes up, until `ready_at` (V3.3)
+pub fn open_floors(floors: i32, ready_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> i32 {
+    match ready_at {
+        Some(at) if at > now && floors > 0 => floors - 1,
+        _ => floors.max(0),
+    }
+}
+
+/// What a floor costs to build (V3.3, `rules::floors::cost`)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct FloorBill {
+    /// Which floor it is, from 1
+    pub floor: i32,
+    /// The permit, in Strands, at the live `floor_permit_scale`
+    pub permit: i64,
+    /// The building goods, from your pack, lowest grade first
+    pub goods: Vec<crate::ws::ItemCount>,
+    /// How long it takes to go up, in seconds
+    pub build_secs: i64,
+}
+
+/// `POST /plots/{id}/floors`' answer (V3.3): the plot with its new floor
+/// going up, your balance, and the goods it took from your pack
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BuildFloorResponse {
+    pub plot: PlotInfo,
+    pub new_balance: i64,
+    /// What the floor used up, by item type
+    pub used: Vec<crate::ws::ItemCount>,
 }
 
 impl PlotInfo {
@@ -3170,6 +3237,15 @@ pub struct ClaimedPlot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "backend", sqlx(skip))]
     pub guild: Option<PlotGuild>,
+    /// The floors built over its ground (V3.3), the last perhaps still going
+    /// up; `plot_floor_built` keeps it current
+    #[serde(default, skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "backend", sqlx(default))]
+    pub floors: i32,
+    /// When the last floor is up
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "backend", sqlx(default))]
+    pub floor_ready_at: Option<DateTime<Utc>>,
 }
 
 /// `GET /plots/{id}/permissions`, and the response to `PUT` on the same path

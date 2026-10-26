@@ -2178,7 +2178,20 @@ impl PlayerExtension for CapitolExtension {
                 &self.lots,
             );
         }
-        // Floors (V3.3): offline the sample's. Online they come with #475.
+        // Floors (V3.3): online each claimed lot's, the last in scaffolding
+        // until it's up on the server's clock; offline the sample's.
+        if let Some(session) = &self.session {
+            let state = session.state();
+            let now = state
+                .server_time_ms()
+                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
+            for (id, lot) in state.claimed_lots().iter().filter(|(_, l)| l.floors > 0) {
+                let under_way = lot.floor_ready_at.zip(now).is_some_and(|(ready, now)| ready > now);
+                let up = lot.floors - under_way as i32;
+                self.houses
+                    .set_floors(id, up.clamp(0, u8::MAX as i32) as u8, under_way, &self.lots);
+            }
+        }
         for (id, floors, under_way) in buildings.into_iter().flat_map(|b| &b.floors) {
             self.houses.set_floors(id, *floors, *under_way, &self.lots);
         }
@@ -2198,6 +2211,21 @@ impl PlayerExtension for CapitolExtension {
         fires.sort_by_key(|(id, _)| *id);
         let at: Vec<[f64; 2]> = fires.iter().map(|(_, p)| *p).collect();
         self.houses.fires(&at, &self.lots);
+        // The storeys in use, for an open building to show (V3.3)
+        let stations = match (&self.session, buildings) {
+            (Some(session), _) => Some(session.state().stations()),
+            (None, Some(b)) => Some(b.state.stations()),
+            _ => None,
+        };
+        let mut upstairs: Vec<(uuid::Uuid, [f64; 2], u8)> = stations
+            .into_iter()
+            .flatten()
+            .filter(|(_, s)| s.indoors && s.floor > 0)
+            .map(|(id, s)| (*id, [s.x, s.y], s.floor.clamp(0, u8::MAX as i32) as u8))
+            .collect();
+        upstairs.sort_by_key(|(id, _, _)| *id);
+        let up: Vec<([f64; 2], u8)> = upstairs.iter().map(|(_, p, k)| (*p, *k)).collect();
+        self.houses.upstairs(&up);
         let chimneys = self
             .houses
             .chimneys()

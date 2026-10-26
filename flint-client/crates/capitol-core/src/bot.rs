@@ -1346,6 +1346,7 @@ impl Bot {
             x,
             y,
             kit_item_id,
+            floor: 0,
         });
         match self.call("placing a station", request)? {
             RestResponse::PlaceStation(placed) => {

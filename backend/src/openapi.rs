@@ -10,7 +10,7 @@ use capitol_protocol::rest::{
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, RefreshRequest, MoveItemRequest, MoveItemResponse,
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
-    PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerCard, OwnStanding, SendLetter, Correspondent, Letter, LetterBox, Mailbox, LettersUnread, PlayerMeResponse, MutesResponse, MutedPlayer, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
+    PayTaxRequest, PayTaxResponse, BuildFloorResponse, FloorBill, PlaceStationResponse, PlayerCard, OwnStanding, SendLetter, Correspondent, Letter, LetterBox, Mailbox, LettersUnread, PlayerMeResponse, MutesResponse, MutedPlayer, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse,
     StationContainerResponse, StationInfo, StationTool, StationAutomation, Produced, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, GrantRequest, GrantItem, GrantResponse, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
@@ -229,6 +229,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::plots::get_plot_at_position,
         crate::routes::plots::claim_plot,
         crate::routes::plots::pay_tax,
+        crate::routes::plots::build_floor,
         crate::routes::plots::get_permissions,
         crate::routes::plots::update_permissions,
         // Bureaucracy
@@ -427,6 +428,8 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         ClaimPlotResponse,
         PayTaxRequest,
         PayTaxResponse,
+        BuildFloorResponse,
+        FloorBill,
         ClaimedPlot,
         PlotPermissions,
         // Bureaucracy

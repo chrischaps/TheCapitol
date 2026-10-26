@@ -1551,6 +1551,9 @@ struct Shown {
     rising_since: Option<f32>,
     /// The kilns and forges inside, server units.
     fires: Vec<P>,
+    /// The highest storey a station stands on inside (V3.3), 0 the ground:
+    /// an open building shows the storeys up to it.
+    top: u8,
 }
 
 /// Every house in the city, and what needs building again.
@@ -1567,6 +1570,9 @@ pub struct Houses {
     shown: HashMap<String, Shown>,
     /// The fires last given (`fires`), to tell when they change.
     fires_given: Vec<P>,
+    /// The stations upstairs last given (`upstairs`), with how many houses
+    /// were up then, to tell when either changes.
+    upstairs_given: (Vec<(P, u8)>, usize),
     /// The buildings open or opening, by lot id: how far, 0 to 1.
     open: HashMap<String, f32>,
     /// Which of each open building's sides face the camera.
@@ -1705,6 +1711,42 @@ impl Houses {
             if let Some(lot) = lots.get(id) {
                 self.put_up(id, lot);
             }
+        }
+    }
+
+    /// The stations upstairs (V3.3), server units with their storey,
+    /// wherever they are: an open building shows its storeys up to the
+    /// highest one with a station on it.
+    pub fn upstairs(&mut self, stations: &[(P, u8)]) {
+        if self.upstairs_given.0 == stations && self.upstairs_given.1 == self.built.len() {
+            return;
+        }
+        self.upstairs_given = (stations.to_vec(), self.built.len());
+        let mut top: HashMap<String, u8> = HashMap::new();
+        for &(p, floor) in stations {
+            let home = self
+                .built
+                .iter()
+                .find(|(_, up)| up.building.is_some_and(|(fp, _)| fp.contains(p)));
+            if let Some((id, _)) = home {
+                let t = top.entry(id.clone()).or_default();
+                *t = (*t).max(floor);
+            }
+        }
+        let mut changed = false;
+        for (id, s) in self.shown.iter_mut() {
+            let want = top.remove(id).unwrap_or(0);
+            if s.top != want {
+                s.top = want;
+                changed = true;
+            }
+        }
+        for (id, t) in top {
+            self.shown.entry(id).or_default().top = t;
+            changed = true;
+        }
+        if changed {
+            self.open_dirty = true;
         }
     }
 
@@ -1929,9 +1971,9 @@ impl Houses {
                 open: Some(Open {
                     p,
                     eye: self.eye,
-                    // Every station stands on the ground until stations
-                    // carry their storey (V3.3, #475).
-                    shown: 1,
+                    // Up to the highest storey in use (V3.3); the aimed
+                    // one once aiming opens a building (#496)
+                    shown: self.shown.get(id).map_or(1, |s| s.top.saturating_add(1)),
                 }),
                 ..self.look(id)
             };
@@ -2680,6 +2722,28 @@ mod tests {
         assert!(!layer.rising(id));
         assert_eq!(layer.look(id).floors, 2);
         assert!(!layer.sector_mesh(lot.sector).indices.is_empty());
+    }
+
+    /// A station upstairs finds its building, and an open one shows the
+    /// storeys up to it (V3.3)
+    #[test]
+    fn an_open_building_shows_up_to_its_highest_station() {
+        let lots = lots();
+        let (id, lot) = first(Zone::Urban);
+        let fp = footprint(lot).unwrap();
+        let mut layer = Houses::default();
+        layer.sync(1, [id], |_| false, lots);
+        layer.set_floors(id, 2, false, lots);
+        assert_eq!(layer.shown.get(id).map_or(0, |s| s.top), 0);
+        layer.open_dirty = false;
+        layer.upstairs(&[(fp.at(0.0, 0.0), 2), (fp.at(0.0, fp.hy + 40.0), 1)]);
+        assert_eq!(layer.shown[id].top, 2, "the one outside the walls counts for nothing");
+        assert!(layer.open_dirty);
+        layer.open_dirty = false;
+        layer.upstairs(&[(fp.at(0.0, 0.0), 2), (fp.at(0.0, fp.hy + 40.0), 1)]);
+        assert!(!layer.open_dirty, "the same again changes nothing");
+        layer.upstairs(&[]);
+        assert_eq!(layer.shown[id].top, 0);
     }
 
     /// The fires find their buildings, and a chimney stands over each.

@@ -228,6 +228,7 @@ mod tests {
             production: Vec::new(),
             indoors: false,
             condition: 100,
+            floor: 0,
         }
     }
 

@@ -618,7 +618,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     }
                                 }
                                 // M4: Stations
-                                ClientMessage::PlaceStation { station_type, x, y, kit_item_id } => {
+                                ClientMessage::PlaceStation { station_type, x, y, kit_item_id, floor } => {
                                     let kit_uuid = match Uuid::parse_str(&kit_item_id) {
                                         Ok(id) => id,
                                         Err(_) => {
@@ -632,7 +632,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     };
 
-                                    match crate::engine::station_placement::place_station(&state, player_id, &station_type, x, y, kit_uuid).await {
+                                    match crate::engine::station_placement::place_station(&state, player_id, &station_type, x, y, floor, kit_uuid).await {
                                         Ok(result) => {
                                             result.remember(&state).await;
                                             let station_info = result.info;
@@ -647,6 +647,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 y: station_info.y,
                                                 container_id: station_info.container_id.unwrap_or(Uuid::nil()),
                                                 quality: station_info.quality,
+                                                indoors: station_info.indoors,
+                                                floor: station_info.floor,
                                             };
                                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                                         }
@@ -1355,6 +1357,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     Ok(GameEvent::PlotReleased { terrain_id }) => {
                         let msg = ServerMessage::PlotReleased { terrain_id };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    Ok(GameEvent::PlotFloorBuilt { terrain_id, owner_id, floors, floor_ready_at }) => {
+                        let msg = ServerMessage::PlotFloorBuilt { terrain_id, owner_id, floors, floor_ready_at };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     // #131: Property tax, to the plot's owner only, if they take its notice (#138).

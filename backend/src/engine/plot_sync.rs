@@ -194,13 +194,16 @@ struct Existing {
     assessed_value: i32,
     /// Claimed with the road in's deed grant (#440)
     granted: bool,
+    /// What its floors' permits cost (V3.3), which `assessed_value` counts
+    floor_permits: i64,
 }
 
 /// Take a plot from its owner, inside the caller's transaction: its stations
 /// go (their containers and contents with them), and the plot is back to an
-/// unclaimed one with default permissions. Returns the removed stations, for
-/// the caller to drop from the game state and announce. Refunding the deed is
-/// the caller's, as is `plot_released`. Used by a forced terrain commit and by
+/// unclaimed one with default permissions and no floors (V3.3). Returns the
+/// removed stations, for the caller to drop from the game state and
+/// announce. Refunding the deed, and the floors' permits with it, is the
+/// caller's, as is `plot_released`. Used by a forced terrain commit and by
 /// tax foreclosure (#131), which empties the stations into inventories first
 /// (`station_removal::return_plot_stations`, #137).
 pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
@@ -210,7 +213,8 @@ pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uu
         .await?;
     sqlx::query(
         "UPDATE plots SET owner_id = NULL, guild_id = NULL, claimed_at = NULL, assessed_value = 0, granted = FALSE,
-                tax_owed = 0, tax_carry = 0, last_tax_paid = NULL, station_count = 0
+                tax_owed = 0, tax_carry = 0, last_tax_paid = NULL, station_count = 0,
+                floors = 0, floor_ready_at = NULL, floor_permits = 0
          WHERE id = $1",
     )
     .bind(plot_id)
@@ -229,16 +233,18 @@ pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uu
 
 /// Make the `plots` table match `lots`. See the module docs.
 pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) -> Result<SyncReport, SyncError> {
-    let rows: Vec<(Uuid, String, Option<Uuid>, Option<Vec<f64>>, i32, bool)> = sqlx::query_as(
-        "SELECT id, terrain_id, owner_id, corners, assessed_value, granted FROM plots WHERE terrain_id IS NOT NULL",
+    type Row = (Uuid, String, Option<Uuid>, Option<Vec<f64>>, i32, bool, i64);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, terrain_id, owner_id, corners, assessed_value, granted, floor_permits
+         FROM plots WHERE terrain_id IS NOT NULL",
     )
     .fetch_all(db)
     .await?;
     let existing: HashMap<String, Existing> = rows
         .into_iter()
-        .map(|(id, terrain_id, owner_id, corners, assessed_value, granted)| {
+        .map(|(id, terrain_id, owner_id, corners, assessed_value, granted, floor_permits)| {
             let corners = corners_from_column(corners.as_deref());
-            (terrain_id, Existing { id, owner_id, corners, assessed_value, granted })
+            (terrain_id, Existing { id, owner_id, corners, assessed_value, granted, floor_permits })
         })
         .collect();
     let wanted: HashMap<&str, &TerrainPlot> = lots.iter().map(|l| (l.id.as_str(), l)).collect();
@@ -308,15 +314,32 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         took(&mut report.returned_to, returned.containers);
         report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
         // The refund is in this transaction, so a plot is never released
-        // without its owner getting the deed back. A granted plot's deed was
-        // the grant, so the grant goes back, unused, not Strands (#440, D5).
+        // without its owner getting the deed back, and its floors' permits
+        // with it (V3.3), which the assessed value counts. A granted plot's
+        // deed was the grant, so the grant goes back, unused, not Strands
+        // (#440, D5), but the permits were Strands.
         let row = &existing[&c.terrain_id];
         let value = row.assessed_value;
         let (deed, refund) = if row.granted {
             if crate::engine::deed_grants::hand_back_in(&mut tx, c.owner_id, c.plot_id).await? {
                 report.grants_returned.push(c.owner_id);
             }
-            (ReclaimedDeed::Grant, 0)
+            if row.floor_permits > 0 {
+                add_strands_in(
+                    &mut tx,
+                    c.owner_id,
+                    row.floor_permits,
+                    TransactionType::DeedRefund,
+                    Some("Floor permits refunded: the terrain changed under your plot"),
+                    Some(c.plot_id),
+                )
+                .await
+                .map_err(|e| SyncError::Refund(format!("Couldn't refund the permits for plot {}: {e}", c.plot_id)))?;
+                if !report.refunded.contains(&c.owner_id) {
+                    report.refunded.push(c.owner_id);
+                }
+            }
+            (ReclaimedDeed::Grant, row.floor_permits)
         } else if let Some(guild_id) = hall {
             // A hall's deed goes back into its guild's treasury (S4.3)
             let note = "The hall's deed refunded: the terrain changed under it";

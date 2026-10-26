@@ -123,6 +123,7 @@ pub async fn get_nearby_stations(
                 production: production.remove(&station.id).unwrap_or_default(),
                 indoors: station.indoors,
                 condition: weather::shown(station.condition),
+                floor: station.floor,
             })
         })
         .collect();
@@ -159,6 +160,7 @@ pub async fn place_station(
         &req.station_type,
         req.x,
         req.y,
+        req.floor,
         req.kit_item_id,
     )
     .await?;

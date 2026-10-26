@@ -56,6 +56,7 @@ const SERVER_TYPES: &[&str] = &[
     "terrain_updated",
     "plot_claimed",
     "plot_released",
+    "plot_floor_built",
     "tax_delinquent",
     "plot_foreclosed",
     "plot_reclaimed",

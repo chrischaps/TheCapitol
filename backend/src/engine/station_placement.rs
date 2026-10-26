@@ -6,28 +6,38 @@
 //! - the station type exists
 //! - the spot is within the type's `interaction_range` of where you stand
 //! - where it stands ([`site`]):
-//!   - on a lot: the lot is yours, with room on it where the spot is,
-//!     indoors or in the yard (V3.1, #473)
-//!   - on no lot: the type is `off_plot` (only the workbench), and the
-//!     ground is dry (#187)
+//!   - on a lot: the lot is yours; upstairs, the spot is inside the
+//!     building, the storey is built and up, and the type isn't a fire
+//!     (V3.3, #475); and there's room in its place: on its storey indoors,
+//!     or in the yard (V3.1, #473)
+//!   - on no lot: the type is `off_plot` (only the workbench), it's on the
+//!     ground, and the ground is dry (#187)
 //! - you hold its kit
 //! - it's at least `STATION_MIN_SPACING` from every other station in the
-//!   same place: outdoors, or indoors in the same building. A wall stands
-//!   between a station indoors and one out, or one next door.
+//!   same place: outdoors, or indoors on the same storey of the same
+//!   building. A wall stands between a station indoors and one out, or one
+//!   next door, and a floor between one storey and the next.
 //!
 //! A home lot's building stands on `rules::building::footprint`. A station
-//! inside it is indoors (`stations.indoors`), and counts against the
-//! building's room, `plots.indoor_room`; one outside counts against the
-//! yard's, `plots.yard_room` (Plots v2 §5.6). A guild hall has no building,
-//! and its size category's capacity holds for the lot as a whole.
+//! inside it is indoors (`stations.indoors`), and counts against the room of
+//! its storey (`stations.floor`), `plots.indoor_room` on each; one outside
+//! counts against the yard's, `plots.yard_room` (Plots v2 §5.6). A storey
+//! upstairs is a floor the owner built (`floors`), and the last can't be
+//! used until it's up (`floor_ready_at`). A station upstairs keeps its real
+//! position, so it's reached from the street as one on the ground is. A
+//! guild hall has no building, and its size category's capacity holds for
+//! the lot as a whole.
 //!
 //! A station off a plot has no `plot_id`. Only its owner may use it
 //! (`container_access::station_access`), it pays no tax, and no plot's
 //! `station_count` includes it. A terrain change that lays a lot under one
 //! takes it down (`plot_sync`, #188).
 
+use capitol_protocol::rest::open_floors;
+use capitol_protocol::rules::floors::{storey_name, storey_title};
 use capitol_protocol::rules::stacking::Pick;
 use capitol_protocol::rules::{building, in_water, water_name, Zone, STATION_MIN_SPACING};
+use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -50,6 +60,14 @@ pub enum PlacementError {
     NeedsAPlot,
     /// On no lot, in the water of this ring.
     InWater(String),
+    /// Upstairs, but not inside a building (V3.3)
+    NotIndoors,
+    /// Upstairs on a storey the building doesn't have
+    NoSuchFloor(i32),
+    /// Upstairs on the floor still going up
+    FloorUnderWay(i32),
+    /// Upstairs, and the type is a fire (`ground_only`): its name
+    GroundOnly(String),
     KitNotFound,
     WrongKit { expected: String, got: String },
     TooClose,
@@ -71,6 +89,14 @@ impl PlacementError {
             }
             PlacementError::NeedsAPlot => "Must place station on a plot".into(),
             PlacementError::InWater(ring) => format!("Can't build in {}", water_name(ring)),
+            PlacementError::NotIndoors => "Only a building has upstairs".into(),
+            PlacementError::NoSuchFloor(floor) => {
+                format!("This building has no {}", storey_name(*floor).trim_start_matches("the "))
+            }
+            PlacementError::FloorUnderWay(floor) => format!("{} is still going up", storey_title(*floor)),
+            PlacementError::GroundOnly(name) => {
+                format!("A {} needs the ground floor: fire can't go upstairs", name.to_lowercase())
+            }
             PlacementError::KitNotFound => "Kit item not found".into(),
             PlacementError::WrongKit { expected, got } => format!("Wrong item type: expected {expected}, got {got}"),
             PlacementError::TooClose => "Too close to another station".into(),
@@ -108,22 +134,54 @@ pub struct Lot {
     /// Whether the spot is inside the lot's building, or `None` for a lot
     /// with none (a guild hall)
     pub indoors: Option<bool>,
-    /// The stations in the spot's place, indoors or in the yard, or on the
-    /// whole lot where it has no building
+    /// The floors built over the ground, the last perhaps still going up
+    pub floors: i32,
+    /// The floors that are up, which stations may go on
+    pub open_floors: i32,
+    /// The stations in the spot's place, indoors on the storey asked for or
+    /// in the yard, or on the whole lot where it has no building
     pub station_count: i32,
     /// What that place holds
     pub station_capacity: i32,
 }
 
-/// Where a station of a type that may (`off_plot`) or may not stand off a
-/// plot would stand: on `lot`, or on open ground, `water` being the ring whose
-/// water the spot is in, if any. `Ok` is the plot it stands on, `None` for
-/// open ground. Pure, so it can be tested without a database.
-pub fn site(player_id: Uuid, off_plot: bool, lot: Option<&Lot>, water: Option<&str>) -> Result<Option<Uuid>, PlacementError> {
+/// What a station type's rules say about where it may stand
+#[derive(Debug, Clone, Default)]
+pub struct Kind {
+    /// It may stand off a plot (#187)
+    pub off_plot: bool,
+    /// It's a fire: the ground floor only (V3.3)
+    pub ground_only: bool,
+    /// Its name, for a refusal
+    pub name: String,
+}
+
+/// Where a station of `kind` would stand, on storey `floor`: on `lot`, or
+/// on open ground, `water` being the ring whose water the spot is in, if
+/// any. `Ok` is the plot it stands on, `None` for open ground. Pure, so it
+/// can be tested without a database.
+pub fn site(player_id: Uuid, kind: &Kind, floor: i32, lot: Option<&Lot>, water: Option<&str>) -> Result<Option<Uuid>, PlacementError> {
+    if floor < 0 {
+        return Err(PlacementError::NoSuchFloor(floor));
+    }
     match lot {
         Some(lot) => {
             if lot.owner_id != Some(player_id) && !lot.officer {
                 return Err(PlacementError::NotYourPlot);
+            }
+            if floor > 0 {
+                if lot.indoors != Some(true) {
+                    return Err(PlacementError::NotIndoors);
+                }
+                if floor > lot.floors {
+                    return Err(PlacementError::NoSuchFloor(floor));
+                }
+                if floor > lot.open_floors {
+                    return Err(PlacementError::FloorUnderWay(floor));
+                }
+                if kind.ground_only {
+                    return Err(PlacementError::GroundOnly(kind.name.clone()));
+                }
             }
             if lot.station_count >= lot.station_capacity {
                 return Err(PlacementError::PlotFull {
@@ -134,7 +192,8 @@ pub fn site(player_id: Uuid, off_plot: bool, lot: Option<&Lot>, water: Option<&s
             }
             Ok(Some(lot.id))
         }
-        None if !off_plot => Err(PlacementError::NeedsAPlot),
+        None if !kind.off_plot => Err(PlacementError::NeedsAPlot),
+        None if floor > 0 => Err(PlacementError::NotIndoors),
         None => match water {
             Some(ring) => Err(PlacementError::InWater(ring.to_string())),
             None => Ok(None),
@@ -181,6 +240,7 @@ pub async fn place_station(
     station_type: &str,
     x: f64,
     y: f64,
+    floor: i32,
     kit_item_id: Uuid,
 ) -> Result<Placed, PlacementError> {
     let at = match live_position(&state.game, player_id).await {
@@ -198,7 +258,7 @@ pub async fn place_station(
             // The wilds' rivers, streams and lakes too (W4)
             .or_else(|| game.ground.water_at(x, y).map(String::from))
     };
-    let placed = place(&state.db, Request { player_id, station_type, x, y, kit_item_id, at, water: water.as_deref() }).await?;
+    let placed = place(&state.db, Request { player_id, station_type, x, y, floor, kit_item_id, at, water: water.as_deref() }).await?;
     let events = state.game.read().await.event_sender.clone();
     super::tutorial::saw(&state.db, &events, player_id, Did::Placed { at_home: placed.plot_id.is_some() }).await;
     Ok(placed)
@@ -210,6 +270,8 @@ struct Request<'a> {
     station_type: &'a str,
     x: f64,
     y: f64,
+    /// The storey: 0 the ground
+    floor: i32,
     kit_item_id: Uuid,
     /// Where the player stands
     at: (f64, f64),
@@ -241,7 +303,7 @@ async fn place(db: &PgPool, req: Request<'_>) -> Result<Placed, PlacementError> 
 
 /// [`place`] in `tx`, which the caller commits
 async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Result<Placed, PlacementError> {
-    let Request { player_id, station_type, x, y, kit_item_id, at: (px, py), water } = req;
+    let Request { player_id, station_type, x, y, floor, kit_item_id, at: (px, py), water } = req;
     sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(PLACEMENT_LOCK).execute(&mut *tx).await?;
 
     let st: StationType = sqlx::query_as(&format!("SELECT {STATION_TYPE_COLUMNS} FROM station_types WHERE id = $1"))
@@ -255,8 +317,9 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
         return Err(PlacementError::TooFar);
     }
 
-    let lot = lot_at(db, tx, player_id, x, y).await?;
-    let plot_id = site(player_id, st.off_plot, lot.as_ref(), water)?;
+    let lot = lot_at(db, tx, player_id, x, y, floor).await?;
+    let kind = Kind { off_plot: st.off_plot, ground_only: st.ground_only, name: st.name.clone() };
+    let plot_id = site(player_id, &kind, floor, lot.as_ref(), water)?;
 
     let expected_kit = st.kit_item.clone().ok_or_else(|| PlacementError::UnknownType(station_type.to_string()))?;
     let kit_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE")
@@ -276,18 +339,20 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
         return Err(PlacementError::KitNotFound);
     };
 
-    // Only in the same place: indoors in this building, or outdoors
+    // Only in the same place: on this storey indoors in this building, or
+    // outdoors, where every station is on the ground
     let indoors = lot.as_ref().and_then(|l| l.indoors).unwrap_or(false);
     let nearby: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM stations
          WHERE (position_x - $1)^2 + (position_y - $2)^2 < $3
-           AND indoors = $4 AND (NOT $4 OR plot_id = $5)",
+           AND indoors = $4 AND (NOT $4 OR plot_id = $5) AND floor = $6",
     )
     .bind(x)
     .bind(y)
     .bind(STATION_MIN_SPACING * STATION_MIN_SPACING)
     .bind(indoors)
     .bind(plot_id)
+    .bind(floor)
     .fetch_optional(&mut *tx)
     .await?;
     if nearby.is_some() {
@@ -303,8 +368,8 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
 
     let station_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality, kit_maker_id, indoors)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality, kit_maker_id, indoors, floor)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(station_id)
     .bind(station_type)
@@ -315,6 +380,7 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
     .bind(kit_quality)
     .bind(kit_maker)
     .bind(indoors)
+    .bind(floor)
     .execute(&mut *tx)
     .await?;
 
@@ -353,6 +419,7 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
             production: Vec::new(),
             indoors,
             condition: capitol_protocol::rules::weather::FULL as i32,
+            floor,
         },
         plot_id,
     })
@@ -363,19 +430,20 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
 /// spacing test.
 const PLACEMENT_LOCK: i64 = 0x0300_57a7;
 
-/// The lot under (`x`, `y`), with its room for stations, its row locked in
-/// `tx` until the placement commits, as `player_id` would place on it. Which
-/// lot is under a spot only changes with the terrain, so finding it needn't
-/// be in the transaction.
-async fn lot_at(db: &PgPool, tx: &mut PgConnection, player_id: Uuid, x: f64, y: f64) -> Result<Option<Lot>, sqlx::Error> {
+/// The lot under (`x`, `y`), with its room for stations on storey `floor`,
+/// its row locked in `tx` until the placement commits, as `player_id` would
+/// place on it. Which lot is under a spot only changes with the terrain, so
+/// finding it needn't be in the transaction.
+async fn lot_at(db: &PgPool, tx: &mut PgConnection, player_id: Uuid, x: f64, y: f64, floor: i32) -> Result<Option<Lot>, sqlx::Error> {
     let Some(plot) = crate::routes::plots::find_plot_at_position(db, x, y).await? else {
         return Ok(None);
     };
-    type Row = (Option<Uuid>, i32, i32, Option<i32>, Option<i32>, bool);
-    let (owner_id, station_count, station_capacity, indoor_room, yard_room, officer): Row = sqlx::query_as(
+    type Row = (Option<Uuid>, i32, i32, Option<i32>, Option<i32>, bool, i32, Option<DateTime<Utc>>);
+    let (owner_id, station_count, station_capacity, indoor_room, yard_room, officer, floors, floor_ready_at): Row = sqlx::query_as(
         "SELECT p.owner_id, p.station_count, psc.station_capacity, p.indoor_room, p.yard_room,
                 EXISTS (SELECT 1 FROM guild_members m
-                        WHERE m.player_id = $2 AND m.guild_id = p.guild_id AND m.role IN ('leader', 'officer'))
+                        WHERE m.player_id = $2 AND m.guild_id = p.guild_id AND m.role IN ('leader', 'officer')),
+                p.floors, p.floor_ready_at
          FROM plots p
          JOIN plot_size_categories psc ON p.size_category = psc.id
          WHERE p.id = $1
@@ -385,23 +453,39 @@ async fn lot_at(db: &PgPool, tx: &mut PgConnection, player_id: Uuid, x: f64, y: 
     .bind(player_id)
     .fetch_one(&mut *tx)
     .await?;
+    let open_floors = open_floors(floors, floor_ready_at, Utc::now());
     let (Some(indoor_room), Some(yard_room), Some(corners), Some(zone)) =
         (indoor_room, yard_room, plot.quad(), Zone::from_str(&plot.zone_id))
     else {
         // No building: the lot as a whole
-        return Ok(Some(Lot { id: plot.id, owner_id, officer, indoors: None, station_count, station_capacity }));
+        return Ok(Some(Lot {
+            id: plot.id,
+            owner_id,
+            officer,
+            indoors: None,
+            floors: 0,
+            open_floors: 0,
+            station_count,
+            station_capacity,
+        }));
     };
     let indoors = building::indoors(&corners, zone, x, y);
-    let in_place: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stations WHERE plot_id = $1 AND indoors = $2")
-        .bind(plot.id)
-        .bind(indoors)
-        .fetch_one(&mut *tx)
-        .await?;
+    // Outdoors everything is on the ground
+    let storey = if indoors { floor } else { 0 };
+    let in_place: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM stations WHERE plot_id = $1 AND indoors = $2 AND floor = $3")
+            .bind(plot.id)
+            .bind(indoors)
+            .bind(storey)
+            .fetch_one(&mut *tx)
+            .await?;
     Ok(Some(Lot {
         id: plot.id,
         owner_id,
         officer,
         indoors: Some(indoors),
+        floors,
+        open_floors,
         station_count: in_place as i32,
         station_capacity: if indoors { indoor_room } else { yard_room },
     }))
@@ -412,7 +496,20 @@ mod tests {
     use super::*;
 
     fn lot(owner: Option<Uuid>, count: i32) -> Lot {
-        Lot { id: Uuid::from_u128(7), owner_id: owner, officer: false, indoors: Some(true), station_count: count, station_capacity: 4 }
+        Lot {
+            id: Uuid::from_u128(7),
+            owner_id: owner,
+            officer: false,
+            indoors: Some(true),
+            floors: 0,
+            open_floors: 0,
+            station_count: count,
+            station_capacity: 4,
+        }
+    }
+
+    fn kind(off_plot: bool) -> Kind {
+        Kind { off_plot, ground_only: false, name: "Workbench".into() }
     }
 
     /// A hall's officers build on it as its leader does (S4.3)
@@ -420,9 +517,9 @@ mod tests {
     fn a_halls_officers_build_on_it() {
         let (me, leader) = (Uuid::from_u128(1), Uuid::from_u128(2));
         let hall = Lot { officer: true, indoors: None, ..lot(Some(leader), 0) };
-        assert_eq!(site(me, false, Some(&hall), None).unwrap(), Some(Uuid::from_u128(7)));
+        assert_eq!(site(me, &kind(false), 0, Some(&hall), None).unwrap(), Some(Uuid::from_u128(7)));
         let full = Lot { station_count: 4, ..hall };
-        assert!(matches!(site(me, false, Some(&full), None), Err(PlacementError::PlotFull { .. })));
+        assert!(matches!(site(me, &kind(false), 0, Some(&full), None), Err(PlacementError::PlotFull { .. })));
     }
 
     #[test]
@@ -430,29 +527,54 @@ mod tests {
         let me = Uuid::from_u128(1);
         let them = Uuid::from_u128(2);
         for off_plot in [false, true] {
-            assert_eq!(site(me, off_plot, Some(&lot(Some(me), 3)), None).unwrap(), Some(Uuid::from_u128(7)));
-            assert!(matches!(site(me, off_plot, Some(&lot(Some(them), 0)), None), Err(PlacementError::NotYourPlot)));
+            let k = kind(off_plot);
+            assert_eq!(site(me, &k, 0, Some(&lot(Some(me), 3)), None).unwrap(), Some(Uuid::from_u128(7)));
+            assert!(matches!(site(me, &k, 0, Some(&lot(Some(them), 0)), None), Err(PlacementError::NotYourPlot)));
             assert!(
-                matches!(site(me, off_plot, Some(&lot(None, 0)), None), Err(PlacementError::NotYourPlot)),
+                matches!(site(me, &k, 0, Some(&lot(None, 0)), None), Err(PlacementError::NotYourPlot)),
                 "an unclaimed lot is still a lot: claim it first"
             );
             assert!(matches!(
-                site(me, off_plot, Some(&lot(Some(me), 4)), None),
+                site(me, &k, 0, Some(&lot(Some(me), 4)), None),
                 Err(PlacementError::PlotFull { count: 4, capacity: 4, indoors: Some(true) })
             ));
         }
-        let full = site(me, false, Some(&lot(Some(me), 4)), None).unwrap_err();
+        let full = site(me, &kind(false), 0, Some(&lot(Some(me), 4)), None).unwrap_err();
         assert_eq!(full.message(), "No room left indoors (4/4)");
     }
 
     #[test]
     fn off_every_lot_only_an_off_plot_type_goes_and_only_on_dry_ground() {
         let me = Uuid::from_u128(1);
-        assert_eq!(site(me, true, None, None).unwrap(), None, "a workbench in a field");
-        assert!(matches!(site(me, false, None, None), Err(PlacementError::NeedsAPlot)), "a forge in a field");
-        let wet = site(me, true, None, Some("canal_outer")).unwrap_err();
+        assert_eq!(site(me, &kind(true), 0, None, None).unwrap(), None, "a workbench in a field");
+        assert!(matches!(site(me, &kind(false), 0, None, None), Err(PlacementError::NeedsAPlot)), "a forge in a field");
+        let wet = site(me, &kind(true), 0, None, Some("canal_outer")).unwrap_err();
         assert_eq!(wet.message(), "Can't build in the outer canal");
-        assert!(matches!(site(me, false, None, Some("moat")), Err(PlacementError::NeedsAPlot)), "the type first");
+        assert!(matches!(site(me, &kind(false), 0, None, Some("moat")), Err(PlacementError::NeedsAPlot)), "the type first");
+        assert!(matches!(site(me, &kind(true), 1, None, None), Err(PlacementError::NotIndoors)), "no upstairs in a field");
+    }
+
+    /// Upstairs is inside, on a floor that's built and up, and never a fire
+    /// (V3.3, #475)
+    #[test]
+    fn upstairs_is_indoors_on_a_floor_that_is_up_and_never_a_fire() {
+        let me = Uuid::from_u128(1);
+        let two = Lot { floors: 2, open_floors: 1, ..lot(Some(me), 0) };
+        let bench = kind(false);
+        assert_eq!(site(me, &bench, 1, Some(&two), None).unwrap(), Some(Uuid::from_u128(7)));
+        let going_up = site(me, &bench, 2, Some(&two), None).unwrap_err();
+        assert_eq!(going_up.message(), "The second floor is still going up");
+        let none = site(me, &bench, 3, Some(&two), None).unwrap_err();
+        assert_eq!(none.message(), "This building has no third floor");
+        let yard = Lot { indoors: Some(false), ..two.clone() };
+        assert!(matches!(site(me, &bench, 1, Some(&yard), None), Err(PlacementError::NotIndoors)));
+        let kiln = Kind { off_plot: false, ground_only: true, name: "Kiln".into() };
+        let fire = site(me, &kiln, 1, Some(&two), None).unwrap_err();
+        assert_eq!(fire.message(), "A kiln needs the ground floor: fire can't go upstairs");
+        assert_eq!(site(me, &kiln, 0, Some(&two), None).unwrap(), Some(Uuid::from_u128(7)), "downstairs it's fine");
+        let theirs = Lot { owner_id: Some(Uuid::from_u128(2)), ..two.clone() };
+        assert!(matches!(site(me, &bench, 3, Some(&theirs), None), Err(PlacementError::NotYourPlot)), "whose first");
+        assert!(matches!(site(me, &bench, -1, Some(&two), None), Err(PlacementError::NoSuchFloor(-1))));
     }
 
     // These need the local Postgres (`docker-compose up -d`). Each runs in a
@@ -506,7 +628,7 @@ mod tests {
 
     /// A workbench on open ground at (`x`, 0), placed by someone standing there
     fn bench(player_id: Uuid, kit_item_id: Uuid, x: f64) -> Request<'static> {
-        Request { player_id, station_type: "workbench", x, y: 0.0, kit_item_id, at: (x, 0.0), water: None }
+        Request { player_id, station_type: "workbench", x, y: 0.0, floor: 0, kit_item_id, at: (x, 0.0), water: None }
     }
 
     async fn count(db: &PgPool, sql: &str, id: Uuid) -> i64 {
@@ -680,7 +802,7 @@ mod tests {
     }
 
     fn at(player_id: Uuid, kit_item_id: Uuid, x: f64, y: f64) -> Request<'static> {
-        Request { player_id, station_type: "workbench", x, y, kit_item_id, at: (x, y), water: None }
+        Request { player_id, station_type: "workbench", x, y, floor: 0, kit_item_id, at: (x, y), water: None }
     }
 
     /// An urban lot holds 4 indoors and nothing in the yard behind (V3.1, #473)
@@ -724,5 +846,73 @@ mod tests {
         assert_eq!(flags, vec![true, false], "22 apart through the back wall");
         let crowded = place(&db, at(me, k[2], 1090.0, 1110.0)).await.err().unwrap();
         assert!(matches!(crowded, PlacementError::TooClose), "{crowded:?}");
+    }
+
+    /// Each floor holds the building's indoor room again, a place of its
+    /// own: stations stand over each other, the last floor waits until it's
+    /// up, and fire stays on the ground (V3.3, #475)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn each_floor_holds_four_more_over_the_four_below(db: PgPool) {
+        crate::content::sync(&db, &crate::content::load().unwrap()).await.unwrap();
+        let (me, first) = builder(&db, "builder", 50).await;
+        let plot = home(&db, me, "urban", 90.0, 93.0).await;
+        sqlx::query("UPDATE plots SET floors = 2, floor_ready_at = NOW() + INTERVAL '10 minutes' WHERE id = $1")
+            .bind(plot)
+            .execute(&db)
+            .await
+            .unwrap();
+        let k = kits(&db, me, first, 9).await;
+        let spots = [(1017.0, 1015.0), (1072.0, 1015.0), (1017.0, 1070.0), (1072.0, 1070.0)];
+        let up = |kit, (x, y): (f64, f64), floor| Request { floor, ..at(me, kit, x, y) };
+        for (i, &spot) in spots.iter().enumerate() {
+            place(&db, up(k[i], spot, 0)).await.unwrap();
+            let placed = place(&db, up(k[4 + i], spot, 1)).await.unwrap();
+            assert_eq!((placed.plot_id, placed.info.floor, placed.info.indoors), (Some(plot), 1, true), "over the one below");
+        }
+        let full = place(&db, up(k[8], (1045.0, 1042.0), 1)).await.err().unwrap();
+        assert!(matches!(full, PlacementError::PlotFull { count: 4, capacity: 4, indoors: Some(true) }), "{full:?}");
+        let going_up = place(&db, up(k[8], spots[0], 2)).await.err().unwrap();
+        assert!(matches!(going_up, PlacementError::FloorUnderWay(2)), "{going_up:?}");
+        let none = place(&db, up(k[8], spots[0], 3)).await.err().unwrap();
+        assert!(matches!(none, PlacementError::NoSuchFloor(3)), "{none:?}");
+        let floors: Vec<i32> = sqlx::query_scalar("SELECT floor FROM stations WHERE plot_id = $1 ORDER BY floor")
+            .bind(plot)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(floors, vec![0, 0, 0, 0, 1, 1, 1, 1]);
+        let capacity: i32 = sqlx::query_scalar(&format!(
+            "SELECT {} FROM plots p JOIN plot_size_categories psc ON psc.id = p.size_category WHERE p.id = $1",
+            crate::models::STATION_CAPACITY
+        ))
+        .bind(plot)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(capacity, 12, "4 a storey, the one going up counted");
+
+        // Up now: a bench goes on the second floor, but no kiln does
+        sqlx::query("UPDATE plots SET floor_ready_at = NOW() - INTERVAL '1 minute' WHERE id = $1")
+            .bind(plot)
+            .execute(&db)
+            .await
+            .unwrap();
+        place(&db, up(k[8], spots[0], 2)).await.unwrap();
+        let inventory: Uuid =
+            sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1").bind(me).fetch_one(&db).await.unwrap();
+        let kiln = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             VALUES ($1, 'kiln_kit', 50, 1, $2, $3, 20)",
+        )
+        .bind(kiln)
+        .bind(me)
+        .bind(inventory)
+        .execute(&db)
+        .await
+        .unwrap();
+        let fire = place(&db, Request { station_type: "kiln", ..up(kiln, spots[1], 2) }).await.err().unwrap();
+        assert_eq!(fire.message(), "A kiln needs the ground floor: fire can't go upstairs");
     }
 }

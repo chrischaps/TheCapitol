@@ -1400,6 +1400,7 @@
     admin_adjustment: "grants",
     exchange_withdraw: "withdrawals",
     deed_purchase: "deeds",
+    floor_permit: "deeds",
     tax_payment: "tax",
     property_tax: "tax",
     market_fee: "fees",
@@ -1411,7 +1412,7 @@
     grants: { label: "Grants", say: "admins' grants" },
     newcomers: { label: "Newcomers", say: "newcomers' first Strands" },
     withdrawals: { label: "Withdrawals", say: "Strands changed back at the Exchange" },
-    deeds: { label: "Deeds", say: "deeds" },
+    deeds: { label: "Deeds", say: "deeds and floor permits" },
     rent: { label: "Stall rent", say: "stall rent" },
     fees: { label: "Market fees", say: "the market's fees" },
     tax: { label: "Tax", say: "tax" },
@@ -1644,6 +1645,7 @@
     kit_placed: { label: "Kits placed", say: (n) => `set up as ${n === 1 ? "a station" : "stations"}` },
     lost: { label: "Lost", say: "lost with foreclosed or fallen stations" },
     repaired: { label: "Repairs", say: "used repairing stations" },
+    built: { label: "Floors", say: "built into new floors" },
   };
   // The items the stock table names; the quieter ones are counted under it
   const STOCK_ROWS = 20;
@@ -2995,6 +2997,7 @@
     weather_wear_claimed: "--uf-repaired",
     weather_wear_public: "--uf-repaired",
     outdoor_tool_wear: "--uf-worn_out",
+    floor_permit_scale: "--fl-deeds",
   };
   // The knobs as the server last said, and each one's row by key
   let knobs = null;

@@ -306,6 +306,17 @@ pub const KNOBS: &[Knob] = &[
         family: None,
     },
     Knob {
+        key: "floor_permit_scale",
+        label: "Floor permit price",
+        unit: Unit::Multiplier,
+        min: 0.1,
+        max: 10.0,
+        step: 0.01,
+        default: 1.0,
+        chart: "sinks",
+        family: None,
+    },
+    Knob {
         key: "watch_gini",
         label: "Watch: wealth's Gini over",
         unit: Unit::Ratio,
@@ -419,6 +430,8 @@ pub struct Tunables {
     pub weather_wear_public: f64,
     /// How much faster a station's installed tool wears outdoors
     pub outdoor_tool_wear: f64,
+    /// A floor's permit, times `rules::floors::cost`'s (V3.3)
+    pub floor_permit_scale: f64,
 }
 
 impl Default for Tunables {
@@ -433,6 +446,7 @@ impl Default for Tunables {
             weather_wear_claimed: weather::WEAR_CLAIMED,
             weather_wear_public: weather::WEAR_PUBLIC,
             outdoor_tool_wear: weather::OUTDOOR_TOOL_WEAR,
+            floor_permit_scale: 1.0,
         }
     }
 }
@@ -508,6 +522,7 @@ impl Tunables {
             ("weather_wear_claimed", None) => self.weather_wear_claimed,
             ("weather_wear_public", None) => self.weather_wear_public,
             ("outdoor_tool_wear", None) => self.outdoor_tool_wear,
+            ("floor_permit_scale", None) => self.floor_permit_scale,
             ("deed_price", Some(zone)) => self.deed_multiplier(zone),
             ("yield", Some(resource)) => self.yield_multiplier(resource),
             _ => return None,
@@ -545,6 +560,7 @@ impl Tunables {
             ("weather_wear_claimed", None) => self.weather_wear_claimed = value,
             ("weather_wear_public", None) => self.weather_wear_public = value,
             ("outdoor_tool_wear", None) => self.outdoor_tool_wear = value,
+            ("floor_permit_scale", None) => self.floor_permit_scale = value,
             ("deed_price", Some(zone)) => family_map(&mut self.deed_price, zone),
             ("yield", Some(resource)) => family_map(&mut self.yields, resource),
             _ => return Err(TunableError::UnknownKey),
@@ -790,7 +806,7 @@ mod tests {
         let zones = vec!["urban".to_string(), "rural".to_string()];
         let resources = vec!["clay".to_string(), "grass".to_string()];
         let list = TunablesResponse::list(&t, &zones, &resources);
-        assert_eq!(list.knobs.len(), 12 + 2 + 2);
+        assert_eq!(list.knobs.len(), 13 + 2 + 2);
         let clay = list.knobs.iter().find(|k| k.key == "yield.clay").unwrap();
         assert_eq!((clay.value, clay.default, clay.label.as_str()), (3.0, 1.0, "Gather yield: clay"));
         assert!(list.knobs.iter().all(|k| k.base_strands.is_none()));

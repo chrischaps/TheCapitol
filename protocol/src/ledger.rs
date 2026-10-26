@@ -278,10 +278,12 @@ pub enum UnitFlow {
     Lost,
     /// Goods a station's repair used up (V3.2)
     Repaired,
+    /// Goods a floor's building used up (V3.3)
+    Built,
 }
 
 impl UnitFlow {
-    pub const ALL: [UnitFlow; 11] = [
+    pub const ALL: [UnitFlow; 12] = [
         UnitFlow::Gathered,
         UnitFlow::Crafted,
         UnitFlow::Consumed,
@@ -293,6 +295,7 @@ impl UnitFlow {
         UnitFlow::Granted,
         UnitFlow::Lost,
         UnitFlow::Repaired,
+        UnitFlow::Built,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -308,6 +311,7 @@ impl UnitFlow {
             UnitFlow::Granted => "granted",
             UnitFlow::Lost => "lost",
             UnitFlow::Repaired => "repaired",
+            UnitFlow::Built => "built",
         }
     }
 
@@ -323,7 +327,7 @@ impl UnitFlow {
 /// Every `currency_transactions.transaction_type` this build knows, in the
 /// order the console stacks them: faucets, sinks, transfers, escrow. One
 /// missing here is [`StrandFlow::Other`].
-pub const TRANSACTION_TYPES: [&str; 27] = [
+pub const TRANSACTION_TYPES: [&str; 28] = [
     "exchange_deposit",
     "deed_refund",
     "foreclosure_refund",
@@ -339,6 +343,7 @@ pub const TRANSACTION_TYPES: [&str; 27] = [
     "postage",
     "guild_fee",
     "guild_dues",
+    "floor_permit",
     "trade_sent",
     "trade_received",
     "bazaar_purchase",
@@ -381,7 +386,7 @@ impl StrandFlow {
                 StrandFlow::Faucet
             }
             "exchange_withdraw" | "deed_purchase" | "tax_payment" | "property_tax" | "market_fee" | "bazaar_rent"
-            | "court_fee" | "postage" | "guild_fee" | "guild_dues" => StrandFlow::Sink,
+            | "court_fee" | "postage" | "guild_fee" | "guild_dues" | "floor_permit" => StrandFlow::Sink,
             "trade_sent" | "trade_received" | "bazaar_purchase" | "bazaar_sale" => StrandFlow::Transfer,
             "market_escrow" | "market_sale" | "market_refund" | "court_escrow" | "court_payout" | "court_refund"
             | "guild_deposit" | "guild_withdrawal" => StrandFlow::Escrow,

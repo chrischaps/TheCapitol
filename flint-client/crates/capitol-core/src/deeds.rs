@@ -188,6 +188,9 @@ mod tests {
             indoor_room: None,
             yard_room: None,
             owner_citizen: false,
+            floor_ready_at: None,
+            floors: 0,
+            next_floor: None,
         }
     }
 

@@ -405,6 +405,14 @@ pub enum StateEvent {
     LotReleased {
         terrain_id: String,
     },
+    /// A lot has a new floor going up (`plot_floor_built`, V3.3), the last
+    /// of its `floors` up at `floor_ready_at`. [`GameState::claimed_lots`]
+    /// has it; your own plot's room and next floor come with a refetch.
+    FloorBuilt {
+        terrain_id: String,
+        owner_id: Uuid,
+        floors: i32,
+    },
     /// Your plot `terrain_id` owes `tax_owed` in property tax, and is
     /// foreclosed at `forecloses_at` (`tax_delinquent`, #131).
     TaxDelinquent {
@@ -874,6 +882,8 @@ impl GameState {
                 y,
                 container_id,
                 quality,
+                indoors,
+                floor,
             } => {
                 let kind = self.catalog.station_type(station_type);
                 let station = StationInfo {
@@ -893,9 +903,9 @@ impl GameState {
                     tool: None,
                     automation: None,
                     production: Vec::new(),
-                    // `station_placed` doesn't say; the next look round does (#495)
-                    indoors: false,
+                    indoors: *indoors,
                     condition: capitol_protocol::rules::weather::FULL as i32,
+                    floor: *floor,
                 };
                 self.upsert_station(station, &mut out);
                 out.push(StateEvent::StationPlaced {
@@ -1156,10 +1166,29 @@ impl GameState {
                     owner_id: *owner_id,
                     claimed_at: *claimed_at,
                     guild: guild.clone(),
+                    floors: 0,
+                    floor_ready_at: None,
                 };
                 self.claimed.insert(terrain_id.clone(), lot.clone());
                 self.claimed_version += 1;
                 out.push(StateEvent::LotClaimed(lot));
+            }
+            M::PlotFloorBuilt {
+                terrain_id,
+                owner_id,
+                floors,
+                floor_ready_at,
+            } => {
+                if let Some(lot) = self.claimed.get_mut(terrain_id) {
+                    lot.floors = *floors;
+                    lot.floor_ready_at = Some(*floor_ready_at);
+                    self.claimed_version += 1;
+                }
+                out.push(StateEvent::FloorBuilt {
+                    terrain_id: terrain_id.clone(),
+                    owner_id: *owner_id,
+                    floors: *floors,
+                });
             }
             M::PlotReleased { terrain_id } => {
                 if self.claimed.remove(terrain_id).is_some() {

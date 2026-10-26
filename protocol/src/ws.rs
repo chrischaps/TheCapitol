@@ -89,6 +89,9 @@ pub enum ClientMessage {
         x: f64,
         y: f64,
         kit_item_id: String,
+        /// The storey, inside the building (V3.3): the ground if left out
+        #[serde(default, skip_serializing_if = "is_ground")]
+        floor: i32,
     },
     #[serde(rename = "remove_station")]
     RemoveStation { station_id: String },
@@ -172,6 +175,11 @@ pub enum ClientMessage {
     /// the server judges itself.
     #[serde(rename = "tutorial_seen")]
     TutorialSeen { step: Step },
+}
+
+/// A storey of 0, the ground, left out of `place_station`
+fn is_ground(floor: &i32) -> bool {
+    *floor == 0
 }
 
 impl ClientMessage {
@@ -358,6 +366,12 @@ pub enum ServerMessage {
         container_id: Uuid,
         /// The station's quality, the station term for crafts made here
         quality: i32,
+        /// Inside its lot's building (V3.1, #495)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        indoors: bool,
+        /// The storey it stands on (V3.3): the ground if left out
+        #[serde(default, skip_serializing_if = "is_ground")]
+        floor: i32,
     },
     #[serde(rename = "station_removed")]
     StationRemoved { station_id: Uuid },
@@ -488,6 +502,16 @@ pub enum ServerMessage {
     /// with `force` released it, or it was foreclosed for unpaid tax (#131).
     #[serde(rename = "plot_released")]
     PlotReleased { terrain_id: String },
+    /// The lot `terrain_id` has a new floor going up (V3.3): it has `floors`
+    /// over the ground now, the last up at `floor_ready_at`. Broadcast, so
+    /// everyone's drawing of it gains the scaffolding, then the storey.
+    #[serde(rename = "plot_floor_built")]
+    PlotFloorBuilt {
+        terrain_id: String,
+        owner_id: Uuid,
+        floors: i32,
+        floor_ready_at: DateTime<Utc>,
+    },
     // #131: Property tax, sent to the plot's owner only. Both wait for an
     // owner who's offline and are sent when they next subscribe (#138).
     /// Your plot `terrain_id` owes `tax_owed` strands of property tax. At
@@ -528,7 +552,8 @@ pub enum ServerMessage {
     /// comes first). What of yours found no room went to your impound (#141),
     /// `impounded`, and `lost` found no room even there. The deed came back
     /// as `deed` says: `refund` strands to you, to your guild's treasury for
-    /// a hall, or as the road in's grant to spend again (`refund` 0).
+    /// a hall, or as the road in's grant to spend again. `refund` counts
+    /// its floors' permits too (V3.3), which a granted plot's are, alone.
     /// `plot_released` goes to everyone. One that happened while you were
     /// away, as a startup's always is, is sent as you come back.
     #[serde(rename = "plot_reclaimed")]
@@ -938,6 +963,7 @@ impl ServerMessage {
             ServerMessage::TerrainUpdated => "terrain_updated",
             ServerMessage::PlotClaimed { .. } => "plot_claimed",
             ServerMessage::PlotReleased { .. } => "plot_released",
+            ServerMessage::PlotFloorBuilt { .. } => "plot_floor_built",
             ServerMessage::TaxDelinquent { .. } => "tax_delinquent",
             ServerMessage::PlotForeclosed { .. } => "plot_foreclosed",
             ServerMessage::PlotReclaimed { .. } => "plot_reclaimed",

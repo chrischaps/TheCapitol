@@ -280,7 +280,7 @@ pub async fn repair(
     let mut flows = ledger::Flows::new();
     let mut used = Vec::new();
     for (item_type, n) in &bill {
-        take_lowest(&mut tx, inventory_id, item_type, *n).await?;
+        take_lowest(&mut tx, inventory_id, item_type, *n, "A repair").await?;
         flows.add(item_type, UnitFlow::Repaired, *n as i64);
         used.push(ItemCount { item_type: item_type.clone(), quantity: *n });
     }
@@ -295,8 +295,15 @@ pub async fn repair(
 }
 
 /// Take `n` `item_type` units from the stacks in `container`, the lowest
-/// grade first across them all, or refuse with what's short
-async fn take_lowest(conn: &mut PgConnection, container: Uuid, item_type: &str, n: i32) -> Result<(), AppError> {
+/// grade first across them all, or refuse with what's short, saying what
+/// needed them (`"A repair"`)
+pub(crate) async fn take_lowest(
+    conn: &mut PgConnection,
+    container: Uuid,
+    item_type: &str,
+    n: i32,
+    what: &str,
+) -> Result<(), AppError> {
     let stacks: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM items WHERE container_id = $1 AND item_type = $2 ORDER BY slot_index, id FOR UPDATE")
             .bind(container)
@@ -306,7 +313,7 @@ async fn take_lowest(conn: &mut PgConnection, container: Uuid, item_type: &str, 
     let held = units::units_of_many(conn, &stacks).await?;
     let plan = plan_take(&stacks, &held, n).ok_or_else(|| {
         let have: i64 = held.values().map(Units::count).sum();
-        AppError::BadRequest(format!("A repair needs {n} {item_type}, and you have {have}"))
+        AppError::BadRequest(format!("{what} needs {n} {item_type}, and you have {have}"))
     })?;
     let takes: Vec<(Uuid, &Units, &Units)> = plan.iter().map(|(id, taken, left)| (*id, taken, left)).collect();
     units::write_takes(conn, &takes).await?;

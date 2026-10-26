@@ -215,6 +215,13 @@ pub enum GameEvent {
     PlotReleased {
         terrain_id: String,
     },
+    /// A new floor going up on a lot (V3.3), to everyone
+    PlotFloorBuilt {
+        terrain_id: String,
+        owner_id: Uuid,
+        floors: i32,
+        floor_ready_at: DateTime<Utc>,
+    },
     // #131: Property tax, to the plot's owner only. Each is also queued as
     // `notice_id` (#138): the connection sends it only if it takes the notice.
     TaxDelinquent {

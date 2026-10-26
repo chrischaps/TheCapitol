@@ -404,14 +404,16 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<F
     if let Some(guild_id) = hall {
         super::guilds::lock(&mut tx, guild_id).await.map_err(|e| e.to_string())?;
     }
-    let row: Option<(Option<Uuid>, i32, i32, Option<String>, String, bool, Option<Uuid>)> = sqlx::query_as(
-        "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id, granted, guild_id FROM plots WHERE id = $1 FOR UPDATE",
+    type Row = (Option<Uuid>, i32, i32, Option<String>, String, bool, Option<Uuid>, i64);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id, granted, guild_id, floor_permits
+         FROM plots WHERE id = $1 FOR UPDATE",
     )
     .bind(plot_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id, zone_id, granted, guild)) = row else {
+    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id, zone_id, granted, guild, floor_permits)) = row else {
         return Ok(None);
     };
     if guild != hall {
@@ -433,10 +435,12 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<F
     gazette::record_deed(&mut tx, plot_id, &zone_id, DeedEvent::Foreclosed, owner_id)
         .await
         .map_err(|e| e.to_string())?;
-    // A granted plot was never paid for, so its debt is written off against
-    // nothing: free land never becomes Strands (#440, plan D5). The grant
+    // The deed less the debt, its floors' permits counted (V3.3). A granted
+    // plot's deed was never paid for, so only its permits are refunded, less
+    // the debt: free land never becomes Strands (#440, plan D5). The grant
     // stays spent.
-    let refund = if granted { 0 } else { (assessed_value as i64 - tax_owed).max(0) };
+    let paid = if granted { floor_permits } else { assessed_value as i64 };
+    let refund = (paid - tax_owed).max(0);
     // A hall's refund goes into its guild's treasury (S4.3)
     if let Some(guild_id) = guild {
         let note = format!("The hall foreclosed for {tax_owed} Strands of unpaid tax: its deed refunded less the debt");

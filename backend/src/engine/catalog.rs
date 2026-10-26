@@ -45,6 +45,7 @@ pub fn build(game: &GameState) -> CatalogResponse {
             description: t.description.clone(),
             kit: t.kit_item.clone(),
             off_plot: t.off_plot,
+            ground_only: t.ground_only,
         })
         .collect();
     station_types.sort_by(|a, b| a.id.cmp(&b.id));
@@ -151,6 +152,7 @@ mod tests {
                 description: None,
                 kit_item: Some("workbench_kit".into()),
                 off_plot: true,
+                ground_only: false,
             },
         );
         game.container_types.insert(

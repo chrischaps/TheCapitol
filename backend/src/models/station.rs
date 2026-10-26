@@ -20,11 +20,13 @@ pub struct StationType {
     pub kit_item: Option<String>,
     /// May it stand off a plot, on dry ground no lot covers (#187)?
     pub off_plot: bool,
+    /// Only on the ground floor: a fire, which can't go upstairs (V3.3)
+    pub ground_only: bool,
 }
 
 /// The columns of [`StationType`], for `SELECT {STATION_TYPE_COLUMNS} FROM station_types`.
 pub const STATION_TYPE_COLUMNS: &str =
-    "id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item, off_plot";
+    "id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item, off_plot, ground_only";
 
 /// Station instance in the world (from database)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -43,12 +45,14 @@ pub struct Station {
     pub indoors: bool,
     /// Its condition as the weather last left it (V3.2), 0 to 100
     pub condition: f64,
+    /// The storey it stands on: 0 the ground (V3.3)
+    pub floor: i32,
 }
 
 /// The columns of [`Station`], for `SELECT {STATION_COLUMNS} FROM stations`.
 /// The table keeps the name `kit_quality`; code calls it `quality`.
 pub const STATION_COLUMNS: &str =
-    "id, station_type, owner_id, position_x, position_y, plot_id, placed_at, kit_quality AS quality, indoors, condition";
+    "id, station_type, owner_id, position_x, position_y, plot_id, placed_at, kit_quality AS quality, indoors, condition, floor";
 
 /// Station runtime state for game engine
 #[derive(Debug, Clone, Serialize, Deserialize)]

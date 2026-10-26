@@ -186,9 +186,12 @@ pub enum DeedEvent {
     Foreclosed,
     /// Claimed by a guild as its hall (S4.3), its leader signing
     Hall(Uuid),
+    /// A new floor going up on the lot (V3.3): which, from 1
+    Floor(i32),
 }
 
-/// Note a deed claimed or foreclosed. Call it in the transaction that does it.
+/// Note a deed claimed or foreclosed, or a floor begun. Call it in the
+/// transaction that does it.
 pub async fn record_deed(
     conn: &mut PgConnection,
     plot_id: Uuid,
@@ -196,20 +199,24 @@ pub async fn record_deed(
     kind: DeedEvent,
     player_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let (kind, guild_id) = match kind {
-        DeedEvent::Claimed => ("claimed", None),
-        DeedEvent::Granted => ("granted", None),
-        DeedEvent::Foreclosed => ("foreclosed", None),
-        DeedEvent::Hall(guild_id) => ("hall", Some(guild_id)),
+    let (kind, guild_id, floor) = match kind {
+        DeedEvent::Claimed => ("claimed", None, None),
+        DeedEvent::Granted => ("granted", None, None),
+        DeedEvent::Foreclosed => ("foreclosed", None, None),
+        DeedEvent::Hall(guild_id) => ("hall", Some(guild_id), None),
+        DeedEvent::Floor(floor) => ("floor", None, Some(floor)),
     };
-    sqlx::query("INSERT INTO deed_events (plot_id, zone_id, kind, player_id, guild_id) VALUES ($1, $2, $3, $4, $5)")
-        .bind(plot_id)
-        .bind(zone_id)
-        .bind(kind)
-        .bind(player_id)
-        .bind(guild_id)
-        .execute(conn)
-        .await?;
+    sqlx::query(
+        "INSERT INTO deed_events (plot_id, zone_id, kind, player_id, guild_id, floor) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(plot_id)
+    .bind(zone_id)
+    .bind(kind)
+    .bind(player_id)
+    .bind(guild_id)
+    .bind(floor)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -267,6 +274,8 @@ pub struct DayRecords {
     pub settlers: Vec<Settler>,
     /// The guilds that took a hall (S4.3), in the order they did
     pub halls: Vec<String>,
+    /// Who began a floor (V3.3), with which, in the order they did
+    pub floors: Vec<(Settler, i32)>,
     /// The day on the hall's board (S2.4)
     pub board: Board,
     /// On a week's last day, the week (`rules::week_of`) and its boards'
@@ -430,7 +439,9 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
                     claimed_by_people += n;
                 }
             }
-            _ => entry.1 += n,
+            "foreclosed" => entry.1 += n,
+            // Floors have their own line (V3.3)
+            _ => {}
         }
     }
 
@@ -464,6 +475,20 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     let halls: Vec<String> = sqlx::query_scalar(
         "SELECT g.name FROM deed_events d JOIN guilds g ON g.id = d.guild_id
          WHERE d.kind = 'hall' AND d.at >= $1 AND d.at < $2
+         ORDER BY d.at, d.id",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+
+    let floors: Vec<(String, bool, bool, String, f32, f32, Option<i32>)> = sqlx::query_as(
+        "SELECT p.name, p.gazette_named, COALESCE(a.kind = 'citizen', FALSE), d.zone_id, pl.world_x, pl.world_y, d.floor
+         FROM deed_events d
+         JOIN players p ON p.id = d.player_id
+         LEFT JOIN accounts a ON a.id = p.account_id
+         JOIN plots pl ON pl.id = d.plot_id
+         WHERE d.kind = 'floor' AND d.at >= $1 AND d.at < $2
          ORDER BY d.at, d.id",
     )
     .bind(start)
@@ -519,6 +544,12 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
             })
             .collect(),
         halls,
+        floors: floors
+            .into_iter()
+            .map(|(name, named, citizen, zone, x, y, floor)| {
+                (Settler { name: named.then_some(name), citizen, zone, x: x as f64, y: y as f64 }, floor.unwrap_or(1))
+            })
+            .collect(),
         work: work
             .into_iter()
             .map(|(player_id, name, named, citizen, item_type, item_name, quantity)| Work {
@@ -864,6 +895,7 @@ pub fn compose(records: &DayRecords) -> Gazette {
     }
     deeds_story.push_str(&settled(&records.settlers));
     deeds_story.push_str(&halls_taken(&records.halls));
+    deeds_story.push_str(&going_up(&records.floors));
 
     // The front page: the biggest story the day has
     let big_move = movers.first().filter(|m| m.change_pct.abs() >= FRONT_PAGE_MOVE);
@@ -1428,6 +1460,29 @@ fn settled(settlers: &[Settler]) -> String {
     format!(" Settled, with the deed the road in earns: {}{tail}.", homes.join("; "))
 }
 
+/// The floors begun (V3.3), by builder and where: " Going up: Ada, a
+/// second floor on a house on a street to the north; and one more."
+fn going_up(floors: &[(Settler, i32)]) -> String {
+    if floors.is_empty() {
+        return String::new();
+    }
+    let builds: Vec<String> = floors
+        .iter()
+        .take(SETTLERS_NAMED)
+        .map(|(s, floor)| {
+            let storey = rules::floors::storey_name(*floor);
+            let storey = storey.strip_prefix("the ").map(|n| format!("a {n}")).unwrap_or(storey);
+            format!("{}, {storey} on {}", name_of(s.name.as_deref(), s.citizen), home_of(s))
+        })
+        .collect();
+    let tail = match floors.len().saturating_sub(SETTLERS_NAMED) {
+        0 => String::new(),
+        1 => "; and one more".to_string(),
+        n => format!("; and {} more", count_word(n as i64, false)),
+    };
+    format!(" Going up: {}{tail}.", builds.join("; "))
+}
+
 /// The guilds that took a hall (S4.3), by name: " The Weavers' Guild took a
 /// hall in the guild district." or " The Ore Guild, The Ropewalk and The
 /// Weavers' Guild took halls in the guild district."
@@ -1710,6 +1765,7 @@ mod tests {
             ],
             // The fixture's day predates the road in's deed (#448)
             settlers: Vec::new(),
+            floors: Vec::new(),
             board: busy_board(),
             week: None,
         }
@@ -1893,6 +1949,37 @@ mod tests {
             compose(&three).deeds_story
         );
         assert!(!compose(&DayRecords { day: DAY, ..Default::default() }).deeds_story.contains("guild district"));
+    }
+
+    /// A floor begun makes the land column (V3.3), named as its builder
+    /// lets the paper name them, and isn't counted as a deed
+    #[test]
+    fn floors_going_up_are_in_the_land_column() {
+        let at = |dx: f64, dy: f64| (rules::CENTER_X + dx, rules::CENTER_Y + dy);
+        let builder = |name: &str, citizen, zone: &str, (x, y): (f64, f64)| Settler {
+            name: Some(name.into()),
+            citizen,
+            zone: zone.into(),
+            x,
+            y,
+        };
+        let records = DayRecords {
+            day: DAY,
+            floors: vec![
+                (builder("Ada", false, "urban", at(1500.0, 0.0)), 2),
+                (builder("Cy", true, "suburban", at(0.0, -2500.0)), 1),
+            ],
+            ..Default::default()
+        };
+        let g = compose(&records);
+        assert!(
+            g.deeds_story.ends_with(
+                " Going up: Ada, a second floor on a yard east of the tower; Citizen Cy, a first floor on a house on a street to the north."
+            ),
+            "{}",
+            g.deeds_story
+        );
+        assert!(!compose(&DayRecords { day: DAY, ..Default::default() }).deeds_story.contains("Going up"));
     }
 
     /// The hall's board makes a column (S2.4): what's wanted by the Strands

@@ -13,13 +13,16 @@
 //! tests in the server's order (`handle_place_station` in
 //! `backend/src/ws/connection.rs`):
 //! - within 75 of you
-//! - on a lot: one you own (the terrain lot, B7), with room on it where the
-//!   spot is: indoors, inside the building that comes with the deed, or in
-//!   the yard (V3.1, #473)
+//! - on a lot: one you own (the terrain lot, B7); upstairs, inside its
+//!   building, on a floor that's built and up, and not a fire (the
+//!   catalog's `ground_only`, V3.3, #475); with room where the spot is:
+//!   indoors on that storey, inside the building that comes with the deed,
+//!   or in the yard (V3.1, #473)
 //! - on no lot: a type that may stand off a plot (the catalog's
-//!   `off_plot`, only the workbench), on dry ground (#187)
-//! - at least 50 from every other station in the same place: in the same
-//!   building, or both outdoors. A wall stands between the two.
+//!   `off_plot`, only the workbench), on the ground, on dry ground (#187)
+//! - at least 50 from every other station in the same place: on the same
+//!   storey of the same building, or both outdoors. A wall stands between
+//!   the two, and a floor between storeys.
 //!
 //! Your own plots come from the store; whether any lot covers the spot, and
 //! whether it's water, come from `/terrain`. Without a terrain, every spot
@@ -32,8 +35,10 @@
 
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
+
 use capitol_protocol::rest::{PlotInfo, SlotItem, StationInfo};
-use capitol_protocol::rules::{self, building, Zone, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
+use capitol_protocol::rules::{self, building, floors, Zone, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_protocol::terrain::{quad_contains, TerrainResponse};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
@@ -71,6 +76,14 @@ pub enum Refusal {
     NeedsAPlot,
     /// On no lot, but in the water.
     InWater,
+    /// Upstairs, but not inside a building (V3.3).
+    NotIndoors,
+    /// Upstairs on a storey the building doesn't have.
+    NoSuchFloor(i32),
+    /// Upstairs on the floor still going up.
+    FloorUnderWay(i32),
+    /// Upstairs, and it's a fire.
+    GroundOnly,
     /// Under 50 units from another station.
     TooClose,
 }
@@ -86,16 +99,38 @@ impl Refusal {
             Refusal::PlotFull { capacity, indoors: Some(false) } => format!("No room left in the yard ({capacity}/{capacity})"),
             Refusal::NeedsAPlot => "This only goes on a plot you own".into(),
             Refusal::InWater => "Not on the water".into(),
+            Refusal::NotIndoors => "Only a building has upstairs".into(),
+            Refusal::NoSuchFloor(floor) => {
+                format!("This building has no {}", floors::storey_name(*floor).trim_start_matches("the "))
+            }
+            Refusal::FloorUnderWay(floor) => format!("{} is still going up", floors::storey_title(*floor)),
+            Refusal::GroundOnly => "Fire can't go upstairs".into(),
             Refusal::TooClose => "Too close to another station".into(),
         }
     }
 }
 
-/// Whether a station can go down at `at` (server units), for the player
-/// `me` standing at `you`. `plots` may hold anyone's; only `me`'s count.
-/// `off_plot` is whether the station type may stand off a plot, and
-/// `terrain` tells open ground from a lot and from water.
-/// `Ok` names the plot the station would stand on, `None` for open ground.
+/// What's being put down, as far as where it may go: whether its type may
+/// stand off a plot, whether it's a fire (`ground_only`), and the storey
+/// asked for, judged at `now` on the server's clock (V3.3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub off_plot: bool,
+    pub ground_only: bool,
+    /// 0, the ground, or the kth floor
+    pub floor: i32,
+    pub now: DateTime<Utc>,
+}
+
+impl Placement {
+    /// On the ground, where a fire may go and no floor's readiness matters
+    pub fn ground(off_plot: bool) -> Self {
+        Placement { off_plot, ground_only: false, floor: 0, now: DateTime::<Utc>::MIN_UTC }
+    }
+}
+
+/// [`check_placement`] on the ground floor. `off_plot` is whether the
+/// station type may stand off a plot.
 pub fn check<'a>(
     at: [f64; 2],
     you: [f64; 2],
@@ -105,7 +140,27 @@ pub fn check<'a>(
     plots: &[PlotInfo],
     terrain: Option<&TerrainResponse>,
 ) -> Result<Option<Uuid>, Refusal> {
+    check_placement(at, you, me, Placement::ground(off_plot), stations, plots, terrain)
+}
+
+/// Whether a station can go down at `at` (server units), as `what` says,
+/// for the player `me` standing at `you`. `plots` may hold anyone's; only
+/// `me`'s count. `terrain` tells open ground from a lot and from water.
+/// `Ok` names the plot the station would stand on, `None` for open ground.
+pub fn check_placement<'a>(
+    at: [f64; 2],
+    you: [f64; 2],
+    me: Uuid,
+    what: Placement,
+    stations: impl IntoIterator<Item = &'a StationInfo>,
+    plots: &[PlotInfo],
+    terrain: Option<&TerrainResponse>,
+) -> Result<Option<Uuid>, Refusal> {
     let [x, y] = at;
+    let floor = what.floor;
+    if floor < 0 {
+        return Err(Refusal::NoSuchFloor(floor));
+    }
     // Every seeded type's range is 75; the server tests the type's own.
     if (x - you[0]).hypot(y - you[1]) > STATION_INTERACTION_RANGE {
         return Err(Refusal::TooFar);
@@ -116,13 +171,31 @@ pub fn check<'a>(
         .find(|p| p.owner_id == Some(me) && p.contains(x, y))
     {
         Some(plot) => {
-            // Its building's room where the spot is, or the lot's as a whole
-            let (count, capacity, indoors) = match Building::of(plot) {
+            let building = Building::of(plot);
+            if floor > 0 {
+                if !building.is_some_and(|b| b.contains((x, y))) {
+                    return Err(Refusal::NotIndoors);
+                }
+                if floor > plot.floors {
+                    return Err(Refusal::NoSuchFloor(floor));
+                }
+                if floor > plot.open_floors(what.now) {
+                    return Err(Refusal::FloorUnderWay(floor));
+                }
+                if what.ground_only {
+                    return Err(Refusal::GroundOnly);
+                }
+            }
+            // Its building's room where the spot is, on its storey, or the
+            // lot's as a whole
+            let (count, capacity, indoors) = match building {
                 Some(b) => {
                     let indoors = b.contains((x, y));
                     let count = stations
                         .iter()
-                        .filter(|s| plot.contains(s.x, s.y) && b.contains((s.x, s.y)) == indoors)
+                        .filter(|s| {
+                            plot.contains(s.x, s.y) && b.contains((s.x, s.y)) == indoors && s.floor == floor
+                        })
                         .count() as i32;
                     let room = if indoors { b.indoor_room } else { b.yard_room };
                     (count, room as i32, Some(indoors))
@@ -143,8 +216,11 @@ pub fn check<'a>(
             {
                 return Err(Refusal::NotYourPlot);
             }
-            if !off_plot {
+            if !what.off_plot {
                 return Err(Refusal::NeedsAPlot);
+            }
+            if floor > 0 {
+                return Err(Refusal::NotIndoors);
             }
             let center = (terrain.center_x, terrain.center_y);
             if rules::in_water(center, &terrain.water_rings, (x, y)).is_some()
@@ -155,10 +231,12 @@ pub fn check<'a>(
             None
         }
     };
-    // Only in the same place: in the same building, or both outdoors
-    let place = building_at(x, y, plots, terrain);
+    // Only in the same place: on the same storey of the same building, or
+    // both outdoors, where everything is on the ground
+    let place = building_at(x, y, plots, terrain).map(|f| (f, floor));
     if stations.iter().any(|s| {
-        (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING && building_at(s.x, s.y, plots, terrain) == place
+        (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING
+            && building_at(s.x, s.y, plots, terrain).map(|f| (f, s.floor)) == place
     }) {
         return Err(Refusal::TooClose);
     }
@@ -233,6 +311,8 @@ pub enum Note {
 #[derive(Debug, Clone)]
 pub struct Placing {
     kit: Kit,
+    /// The storey it goes on: 0, the ground, until a panel picks one (#477)
+    floor: i32,
     phase: Phase,
     notes: Vec<Note>,
     done: bool,
@@ -242,6 +322,7 @@ impl Placing {
     pub fn new(kit: Kit) -> Self {
         Self {
             kit,
+            floor: 0,
             phase: Phase::Aiming,
             notes: Vec::new(),
             done: false,
@@ -254,6 +335,16 @@ impl Placing {
 
     pub fn phase(&self) -> &Phase {
         &self.phase
+    }
+
+    /// The storey it goes on (V3.3)
+    pub fn floor(&self) -> i32 {
+        self.floor
+    }
+
+    /// Put it on storey `floor` instead: 0 the ground, k the kth floor
+    pub fn on_floor(&mut self, floor: i32) {
+        self.floor = floor.max(0);
     }
 
     /// The station is down, or the kit has gone.
@@ -272,15 +363,22 @@ impl Placing {
         let (Some(me), Some(you)) = (state.me(), state.local_player()) else {
             return Err(Refusal::TooFar);
         };
-        let off_plot = state
-            .catalog()
-            .station_type(&self.kit.station_type)
-            .is_some_and(|t| t.off_plot);
-        check(
+        let kind = state.catalog().station_type(&self.kit.station_type);
+        let now = state
+            .server_time_ms()
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        let what = Placement {
+            off_plot: kind.is_some_and(|t| t.off_plot),
+            ground_only: kind.is_some_and(|t| t.ground_only),
+            floor: self.floor,
+            now,
+        };
+        check_placement(
             at,
             [you.x, you.y],
             me,
-            off_plot,
+            what,
             state.stations().values(),
             state.plots(),
             terrain,
@@ -309,6 +407,7 @@ impl Placing {
             x: at[0],
             y: at[1],
             kit_item_id: self.kit.item_id.to_string(),
+            floor: self.floor,
         })
     }
 
@@ -395,6 +494,7 @@ mod tests {
             production: Vec::new(),
             indoors: false,
             condition: 100,
+            floor: 0,
         }
     }
 
@@ -428,6 +528,9 @@ mod tests {
             indoor_room: None,
             yard_room: None,
             owner_citizen: false,
+            floor_ready_at: None,
+            floors: 0,
+            next_floor: None,
         }
     }
 
@@ -601,6 +704,43 @@ mod tests {
         assert_eq!(crowded, Err(Refusal::TooClose), "41 from one in the yard");
     }
 
+    /// Each floor is a place of its own over the one below, the last can't
+    /// be used until it's up, and fire stays on the ground (V3.3, #475)
+    #[test]
+    fn upstairs_is_a_storey_of_its_own() {
+        let mut home = plot(10, 1000.0, 1000.0, Some(ME), 9);
+        home.corners = Some([(1000.0, 1000.0), (1130.0, 1000.0), (1130.0, 1130.0), (1000.0, 1130.0)]);
+        home.bounds = Bounds::new(1000.0, 1000.0, 1130.0, 1130.0);
+        (home.indoor_room, home.yard_room, home.station_capacity) = (Some(4), Some(3), 15);
+        let now: DateTime<Utc> = "2026-10-25T12:00:00Z".parse().unwrap();
+        (home.floors, home.floor_ready_at) = (2, Some(now + chrono::Duration::minutes(10)));
+        let on = |floor, mut s: StationInfo| {
+            (s.floor, s.indoors) = (floor, true);
+            s
+        };
+        // 55 apart each way, inside the house's walls (6 to 84 back)
+        let spots = [(1030.0, 1020.0), (1090.0, 1020.0), (1030.0, 1075.0), (1090.0, 1075.0)];
+        let ground: Vec<StationInfo> = spots.iter().map(|&(x, y)| station(x, y)).collect();
+        let first: Vec<StationInfo> = ground.iter().take(3).map(|s| on(1, s.clone())).collect();
+        let all: Vec<StationInfo> = ground.iter().chain(&first).cloned().collect();
+        let bench = |floor| Placement { off_plot: true, ground_only: false, floor, now };
+        let at = |what, (x, y): (f64, f64)| check_placement([x, y], [x, y], ME, what, &all, &[home.clone()], None);
+
+        assert_eq!(at(bench(1), spots[3]), Ok(Some(home.id)), "over the one below, and the first floor has room");
+        assert_eq!(at(bench(1), (1092.0, 1050.0)), Err(Refusal::TooClose), "upstairs, beside one upstairs");
+        assert_eq!(at(bench(0), (1060.0, 1052.0)), Err(Refusal::PlotFull { capacity: 4, indoors: Some(true) }));
+        let going_up = at(bench(2), spots[0]);
+        assert_eq!(going_up, Err(Refusal::FloorUnderWay(2)));
+        assert_eq!(going_up.unwrap_err().words(), "The second floor is still going up");
+        let later = Placement { now: now + chrono::Duration::minutes(11), ..bench(2) };
+        assert_eq!(at(later, spots[0]), Ok(Some(home.id)), "up now");
+        let none = at(bench(3), spots[0]).unwrap_err();
+        assert_eq!(none.words(), "This building has no third floor");
+        assert_eq!(at(bench(1), (1060.0, 1110.0)), Err(Refusal::NotIndoors), "the yard has no upstairs");
+        let kiln = Placement { off_plot: false, ground_only: true, ..bench(1) };
+        assert_eq!(at(kiln, spots[3]), Err(Refusal::GroundOnly));
+    }
+
     #[test]
     fn a_full_plot_takes_no_more() {
         let full = plot(10, 1000.0, 1000.0, Some(ME), 16);
@@ -731,6 +871,7 @@ mod tests {
                     x: 1120.0,
                     y: 1040.0,
                     kit_item_id: KIT.to_string(),
+                    floor: 0,
                 })
             );
             assert!(

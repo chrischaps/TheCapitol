@@ -63,6 +63,9 @@ pub enum TransactionType {
     GuildDeposit,
     /// An officer's draw from a guild's treasury (S4.2)
     GuildWithdrawal,
+    /// A floor's permit, to the Capitol: a sink (V3.3). The plot's assessed
+    /// value counts it, and a release refunds it as part of the deed.
+    FloorPermit,
 }
 
 impl TransactionType {
@@ -95,6 +98,7 @@ impl TransactionType {
             TransactionType::GuildDues => "guild_dues",
             TransactionType::GuildDeposit => "guild_deposit",
             TransactionType::GuildWithdrawal => "guild_withdrawal",
+            TransactionType::FloorPermit => "floor_permit",
         }
     }
 }
@@ -410,7 +414,7 @@ mod tests {
             ExchangeDeposit, ExchangeWithdraw, TradeReceived, TradeSent, AdminAdjustment, DeedPurchase, DeedRefund,
             ForeclosureRefund, TaxPayment, PropertyTax, MarketEscrow, MarketFee, MarketRefund, MarketSale, BazaarRent,
             BazaarPurchase, BazaarSale, BazaarRefund, CourtFee, CourtEscrow, CourtPayout, CourtRefund, Postage,
-            GuildFee, GuildDues, GuildDeposit, GuildWithdrawal,
+            GuildFee, GuildDues, GuildDeposit, GuildWithdrawal, FloorPermit,
         ];
         let mut written: Vec<&str> = all.iter().map(|t| t.as_str()).collect();
         assert!(written.iter().all(|t| StrandFlow::of(t) != StrandFlow::Other));

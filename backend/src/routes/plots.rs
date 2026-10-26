@@ -12,12 +12,13 @@ use uuid::Uuid;
 
 use capitol_protocol::rules::Zone;
 use capitol_protocol::rest::{
-    ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PlotGuild,
+    BuildFloorResponse, ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PlotGuild,
     PositionQuery,
 };
 
 use crate::engine::currency::{announce_balances, subtract_strands_in, TransactionType};
 use crate::engine::deed_grants;
+use crate::engine::floors;
 use crate::engine::gazette::{self, DeedEvent};
 use crate::engine::property_tax::pay_tax_debt;
 use crate::engine::tutorial::{self, Did};
@@ -34,6 +35,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/{id}", get(get_plot))
         .route("/{id}/claim", post(claim_plot))
         .route("/{id}/pay-tax", post(pay_tax))
+        .route("/{id}/floors", post(build_floor))
         .route("/{id}/permissions", get(get_permissions))
         .route("/{id}/permissions", put(update_permissions))
         .route("/at", get(get_plot_at_position))
@@ -139,9 +141,10 @@ pub async fn list_claimed_plots(State(state): State<AppState>) -> Result<Json<Ve
 /// An owned plot with no `claimed_at` (none should have one) reads as claimed
 /// long ago, at the Unix epoch. A guild's hall names its guild (S4.3).
 async fn claimed_plots(db: &PgPool) -> Result<Vec<ClaimedPlot>, sqlx::Error> {
-    type Row = (String, Uuid, DateTime<Utc>, Option<Uuid>, Option<String>, Option<String>);
+    type Row = (String, Uuid, DateTime<Utc>, Option<Uuid>, Option<String>, Option<String>, i32, Option<DateTime<Utc>>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT p.terrain_id, p.owner_id, COALESCE(p.claimed_at, 'epoch'::timestamptz), g.id, g.name, g.tag
+        "SELECT p.terrain_id, p.owner_id, COALESCE(p.claimed_at, 'epoch'::timestamptz), g.id, g.name, g.tag,
+                p.floors, p.floor_ready_at
          FROM plots p
          LEFT JOIN guilds g ON g.id = p.guild_id
          WHERE p.owner_id IS NOT NULL AND p.terrain_id IS NOT NULL
@@ -151,11 +154,13 @@ async fn claimed_plots(db: &PgPool) -> Result<Vec<ClaimedPlot>, sqlx::Error> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(terrain_id, owner_id, claimed_at, id, name, tag)| ClaimedPlot {
+        .map(|(terrain_id, owner_id, claimed_at, id, name, tag, floors, floor_ready_at)| ClaimedPlot {
             terrain_id,
             owner_id,
             claimed_at,
             guild: plot_guild(id, name, tag),
+            floors,
+            floor_ready_at,
         })
         .collect())
 }
@@ -203,7 +208,7 @@ async fn plot_info(state: &AppState, plot_id: Uuid) -> Result<PlotInfo, AppError
                 p.bounds_min_x, p.bounds_min_y, p.bounds_max_x, p.bounds_max_y,
                 p.size_category, p.plot_type, p.owner_id, p.claimed_at,
                 p.assessed_value, p.last_tax_paid, p.tax_owed, p.station_count,
-                p.terrain_id, p.corners, p.indoor_room, p.yard_room, p.guild_id,
+                p.terrain_id, p.corners, p.indoor_room, p.yard_room, p.floors, p.floor_ready_at, p.guild_id,
                 pl.name as owner_name, COALESCE(acc.kind = 'citizen', FALSE) AS owner_citizen,
                 {STATION_CAPACITY} AS station_capacity, z.deed_cost, g.name AS guild_name, g.tag AS guild_tag
          FROM plots p
@@ -325,6 +330,59 @@ pub async fn pay_tax(
     announce_balances(&events, [(player_id, new_balance)]);
     let plot = plot_info(&state, plot_id).await?;
     Ok(Json(PayTaxResponse { plot, new_balance }))
+}
+
+/// Build the next floor on your plot (V3.3, #475)
+///
+/// The permit in Strands and the building goods from your pack, lowest
+/// grade first (`next_floor` on the plot says what). It goes up over 15
+/// minutes times the floor, and the next waits for it.
+#[utoipa::path(
+    post,
+    path = "/plots/{id}/floors",
+    params(
+        ("id" = Uuid, Path, description = "Plot ID")
+    ),
+    responses(
+        (status = 200, description = "The floor is going up", body = BuildFloorResponse),
+        (status = 400, description = "No building, the last floor still going up, or short of Strands or goods"),
+        (status = 403, description = "Not your plot"),
+        (status = 404, description = "Plot not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Plots"
+)]
+pub async fn build_floor(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(plot_id): Path<Uuid>,
+) -> Result<Json<BuildFloorResponse>, AppError> {
+    let player_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(auth_user.account_id)
+        .fetch_one(&state.db)
+        .await?;
+    let built = floors::build(
+        &state.db,
+        &state.tunables.get(),
+        state.config.sim_tick_scale,
+        player_id,
+        plot_id,
+        Utc::now(),
+    )
+    .await?;
+    let events = state.game.read().await.event_sender.clone();
+    if let Some(terrain_id) = built.terrain_id {
+        let _ = events.send(GameEvent::PlotFloorBuilt {
+            terrain_id,
+            owner_id: player_id,
+            floors: built.floors,
+            floor_ready_at: built.floor_ready_at,
+        });
+    }
+    announce_balances(&events, [(player_id, built.new_balance)]);
+    let _ = events.send(GameEvent::InventoryUpdated { player_id, container_id: built.inventory_id, slots: vec![] });
+    let plot = plot_info(&state, plot_id).await?;
+    Ok(Json(BuildFloorResponse { plot, new_balance: built.new_balance, used: built.used }))
 }
 
 const NOT_CLAIMABLE: &str = "This zone does not allow plot ownership";

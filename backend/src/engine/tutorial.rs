@@ -762,12 +762,12 @@ mod tests {
         let home = stack(&db, ada, pack, 1, "workbench_kit", 1).await;
 
         stand(&db, ada, (0.0, 0.0)).await;
-        place_station(&state, ada, "workbench", 0.0, 0.0, out).await.unwrap();
+        place_station(&state, ada, "workbench", 0.0, 0.0, 0, out).await.unwrap();
         assert_eq!(done(&db, ada).await, Steps::from_iter([Step::PlaceWorkbench]));
 
         let lot = crate::engine::plot_sync::tests::plot(&db, Some(ada), 0).await;
         stand(&db, ada, (8000.0, 6800.0)).await;
-        let placed = place_station(&state, ada, "workbench", 8000.0, 6800.0, home).await.unwrap();
+        let placed = place_station(&state, ada, "workbench", 8000.0, 6800.0, 0, home).await.unwrap();
         assert_eq!(placed.plot_id, Some(lot));
         assert_eq!(done(&db, ada).await, Steps::from_iter([Step::PlaceWorkbench, Step::PlaceAtHome]));
     }
@@ -813,7 +813,7 @@ mod tests {
                 .await
                 .unwrap();
             stand(&db, who, at).await;
-            let bench = place_station(&state, who, "workbench", at.0, at.1, kit).await.unwrap();
+            let bench = place_station(&state, who, "workbench", at.0, at.1, 0, kit).await.unwrap();
             assert_eq!(bench.plot_id, Some(lot));
             assert!(done(&db, who).await.has(Step::PlaceAtHome));
             assert_eq!(finished_at(&db, who).await, None, "a station isn't the end");

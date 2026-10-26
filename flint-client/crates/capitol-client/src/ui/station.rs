@@ -899,6 +899,8 @@ pub fn sample() -> GameState {
         y: 0.0,
         container_id: BOX,
         quality: 60,
+        floor: 0,
+        indoors: false,
     });
     state.apply_ws(&ServerMessage::StationOpened {
         player_id: ME,
@@ -978,6 +980,8 @@ pub fn chest_of_yours(state: &mut GameState) {
         y: 0.0,
         container_id: BOX,
         quality: 50,
+        floor: 0,
+        indoors: false,
     });
     state.apply_ws(&ServerMessage::StationOpened {
         player_id: ME,
@@ -1065,6 +1069,8 @@ pub fn at_adas_bench(state: &mut GameState) {
         y: 0.0,
         container_id: boxed,
         quality: 70,
+        floor: 0,
+        indoors: false,
     });
     state.apply_ws(&ServerMessage::StationOpened {
         player_id: ME,

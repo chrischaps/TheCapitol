@@ -689,6 +689,8 @@ pub fn sample(target: [f32; 2], camera: [f32; 2]) -> GameState {
             y,
             container_id: Uuid::nil(),
             quality: 60,
+            floor: 0,
+            indoors: false,
         });
     };
     let mid = (types.len() as f32 - 1.0) / 2.0;
@@ -767,6 +769,8 @@ pub fn automation_sample(target: [f32; 2], camera: [f32; 2]) -> GameState {
             y,
             container_id: Uuid::nil(),
             quality: 60,
+            floor: 0,
+            indoors: false,
         });
         let recipe = capitol_core::station::recipes_at(state.recipes(), kind)
             .next()

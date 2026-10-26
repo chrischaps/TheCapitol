@@ -39,9 +39,10 @@ pub const PLOT_COLUMNS: &str = "id, zone_id, grid_x, grid_y, world_x, world_y,
 
 /// A plot's station capacity, as SQL over `plots p` joined to its
 /// `plot_size_categories psc` (Plots v2 §5.6, V3.1, #473): its building's
-/// room indoors plus its yard's, or, for a lot with no building (a guild
-/// hall), its size category's.
-pub const STATION_CAPACITY: &str = "COALESCE(p.indoor_room + p.yard_room, psc.station_capacity)";
+/// room indoors on every storey, the ground and each floor (V3.3, #475),
+/// plus its yard's; or, for a lot with no building (a guild hall), its size
+/// category's.
+pub const STATION_CAPACITY: &str = "COALESCE(p.indoor_room * (1 + p.floors) + p.yard_room, psc.station_capacity)";
 
 /// The flattened `corners` column as four points, if it holds them.
 pub fn corners_from_column(column: Option<&[f64]>) -> Option<[(f64, f64); 4]> {
@@ -138,6 +139,9 @@ pub struct PlotWithJoins {
     /// Its building's room (V3.1, #473), `None` for a guild hall's
     pub indoor_room: Option<i32>,
     pub yard_room: Option<i32>,
+    /// Its floors (V3.3, #475), the last up at `floor_ready_at`
+    pub floors: i32,
+    pub floor_ready_at: Option<DateTime<Utc>>,
     /// The zone's `deed_cost`, joined from `zones`, before the zone's deed
     /// price tunable (D6.1): [`PlotWithJoins::to_plot_info`] applies it.
     pub deed_cost: Option<i32>,
@@ -178,6 +182,10 @@ impl PlotWithJoins {
             corners: corners_from_column(self.corners.as_deref()),
             indoor_room: self.indoor_room,
             yard_room: self.yard_room,
+            floors: self.floors,
+            floor_ready_at: self.floor_ready_at,
+            next_floor: crate::engine::floors::builds_up(self.indoor_room, self.guild_id)
+                .then(|| crate::engine::floors::bill(self.floors + 1, tunables)),
         }
     }
 }

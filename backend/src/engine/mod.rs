@@ -51,6 +51,7 @@ pub mod tunables;
 pub mod units;
 pub mod watches;
 pub mod weather;
+pub mod floors;
 pub mod trading;
 pub mod tutorial;
 pub mod wages;

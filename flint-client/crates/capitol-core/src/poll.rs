@@ -341,6 +341,11 @@ impl Poller {
             {
                 self.request(Fetch::Plots)
             }
+            // A floor of yours, from this client or another: its room and
+            // the next floor's price are the server's (V3.3)
+            StateEvent::FloorBuilt { owner_id, .. } if state.me() == Some(*owner_id) => {
+                self.request(Fetch::Plots)
+            }
             _ => {}
         }
         // Not `request`: with nothing in flight, the store already has it.

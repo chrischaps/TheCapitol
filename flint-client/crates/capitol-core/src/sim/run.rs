@@ -1425,6 +1425,7 @@ impl SimBot {
             .values()
             .filter(|s| !mine(s.id))
             .chain(staying.iter().map(|(_, s)| s))
+            .filter(|s| s.floor == 0)
             .map(|s| (s.x, s.y))
             .collect();
         if !lot::repack_frees(&plot, &fixed, moving.len(), still as usize) {
@@ -1809,15 +1810,18 @@ impl SimBot {
         }
     }
 
-    /// Where the stations it knows of stand: its own, and those it has seen
-    /// nearby.
+    /// Where the stations it knows of stand on the ground: its own, and
+    /// those it has seen nearby. One upstairs (V3.3) is in a place of its
+    /// own, over the spots a citizen packs, which are all on the ground
+    /// until citizens build floors (#478).
     fn stations_at(&self) -> Vec<(f64, f64)> {
         self.bot
             .state()
             .stations()
             .values()
+            .chain(self.stations.values())
+            .filter(|s| s.floor == 0)
             .map(|s| (s.x, s.y))
-            .chain(self.stations.values().map(|s| (s.x, s.y)))
             .collect()
     }
 
@@ -2109,6 +2113,7 @@ mod tests {
             production: Vec::new(),
             indoors: false,
             condition: 100,
+            floor: 0,
         };
         (kind.into(), info)
     }

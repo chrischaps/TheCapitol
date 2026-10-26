@@ -167,5 +167,6 @@ fn station(state: &GameState, n: u128, kind: &str, at: P, owner: Uuid, indoors: 
         production: Vec::new(),
         indoors,
         condition,
+        floor: 0,
     }
 }

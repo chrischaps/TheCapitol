@@ -17,6 +17,11 @@
 //! each, not through the wall. So the spots go indoors first, packed in the
 //! footprint round the stations inside, then in the yard, packed round the
 //! footprint and the stations outside ([`Building`]).
+//!
+//! A building may have floors (V3.3, #475), each another place with the
+//! indoor room again. Every spot here is on the ground, and `taken` is the
+//! stations on the ground: one upstairs takes none of the room below it.
+//! Citizens build upward with #478.
 
 use capitol_protocol::rest::PlotInfo;
 use capitol_protocol::rules::{building, Zone};
@@ -330,6 +335,9 @@ mod tests {
             corners: Some(corners),
             indoor_room: None,
             yard_room: None,
+            floor_ready_at: None,
+            floors: 0,
+            next_floor: None,
         }
     }
 

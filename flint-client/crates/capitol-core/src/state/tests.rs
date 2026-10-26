@@ -81,6 +81,7 @@ fn station(id: Uuid, owner: Uuid) -> StationInfo {
         production: Vec::new(),
         indoors: false,
         condition: 100,
+        floor: 0,
     }
 }
 
@@ -135,6 +136,9 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
         indoor_room: None,
         yard_room: None,
         owner_citizen: false,
+        floor_ready_at: None,
+        floors: 0,
+        next_floor: None,
     }
 }
 
@@ -227,6 +231,7 @@ fn test_for(message: &M) -> fn() {
         M::TerrainUpdated => terrain_updated_is_reported,
         M::PlotClaimed { .. } => plot_claimed_is_reported,
         M::PlotReleased { .. } => plot_released_drops_it_from_my_plots,
+        M::PlotFloorBuilt { .. } => a_floor_built_is_kept_on_the_claimed_lot,
         M::TaxDelinquent { .. } => tax_messages_are_reported,
         M::PlotForeclosed { .. } => tax_messages_are_reported,
         M::PlotReclaimed { .. } => plot_reclaimed_is_reported,
@@ -281,7 +286,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 83, "one fixture per ServerMessage variant");
+    assert_eq!(count, 84, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,6 +1069,8 @@ fn station_placed_fills_in_from_the_catalog() {
         y: 8360.0,
         container_id: STATION_BOX,
         quality: 82,
+        floor: 0,
+        indoors: false,
     });
     assert_eq!(
         events,
@@ -1684,6 +1691,8 @@ fn plot_claimed_is_reported() {
         terrain_id: "sub_2_0_3_L_4".into(),
         owner_id: OTHER,
         claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),
+        floor_ready_at: None,
+        floors: 0,
     };
     assert_eq!(
         state.apply_ws(&M::PlotClaimed {
@@ -1705,6 +1714,8 @@ fn claimed_lots_are_the_list_then_kept_by_ws() {
         terrain_id: id.into(),
         owner_id,
         claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),
+        floor_ready_at: None,
+        floors: 0,
     };
     let v0 = state.claimed_version();
     assert_eq!(
@@ -1734,6 +1745,43 @@ fn claimed_lots_are_the_list_then_kept_by_ws() {
     state.apply_rest(&R::ClaimedPlots(vec![lot("sub_3", OTHER)]));
     let ids: Vec<_> = state.claimed_lots().keys().cloned().collect();
     assert_eq!(ids, ["sub_3"]);
+}
+
+/// A floor going up is kept on the claimed lot, so the house can draw its
+/// scaffolding, then the storey (V3.3); a lot nobody holds is only reported
+#[test]
+fn a_floor_built_is_kept_on_the_claimed_lot() {
+    let mut state = connected();
+    state.apply_rest(&R::ClaimedPlots(vec![ClaimedPlot {
+        guild: None,
+        terrain_id: "urb_3_12_4".into(),
+        owner_id: OTHER,
+        claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),
+        floor_ready_at: None,
+        floors: 0,
+    }]));
+    let v0 = state.claimed_version();
+    let ready: chrono::DateTime<chrono::Utc> = "2026-10-17T19:00:00Z".parse().unwrap();
+    let built = |id: &str| M::PlotFloorBuilt {
+        terrain_id: id.into(),
+        owner_id: OTHER,
+        floors: 1,
+        floor_ready_at: ready,
+    };
+    assert_eq!(
+        state.apply_ws(&built("urb_3_12_4")),
+        vec![StateEvent::FloorBuilt {
+            terrain_id: "urb_3_12_4".into(),
+            owner_id: OTHER,
+            floors: 1,
+        }]
+    );
+    let lot = &state.claimed_lots()["urb_3_12_4"];
+    assert_eq!((lot.floors, lot.floor_ready_at), (1, Some(ready)));
+    assert!(state.claimed_version() > v0);
+    let v1 = state.claimed_version();
+    state.apply_ws(&built("farm_9"));
+    assert_eq!(state.claimed_version(), v1);
 }
 
 #[test]
@@ -2162,6 +2210,8 @@ fn placing_a_station_by_rest_adds_it() {
         y: 8320.0,
         container_id: STATION_BOX,
         quality: 50,
+        floor: 0,
+        indoors: false,
     });
     assert_eq!(
         events,
@@ -2362,6 +2412,8 @@ fn a_placed_station_takes_its_kind_from_the_catalog() {
         y: 8300.0,
         container_id: Uuid::from_u128(78),
         quality: 82,
+        floor: 0,
+        indoors: false,
     });
     let placed = &state.stations()[&station];
     assert_eq!(placed.category, "storage");
