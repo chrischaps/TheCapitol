@@ -28,6 +28,12 @@
 //! whether it's water, come from `/terrain`. Without a terrain, every spot
 //! off your plots is refused as [`Refusal::NotYourPlot`].
 //!
+//! **Where it would stand (V3.5, #477)** is [`spot`]: indoors on a storey,
+//! upstairs, in the yard or on open ground, with the room left there, for
+//! the ghost to say. The storey is the player's to pick (PgUp and PgDn,
+//! [`Placing::step_storey`]); [`Placing::aim`] holds it to the building
+//! under the ghost, so off a building it's the ground.
+//!
 //! A click where they all pass sends `place_station` over the socket. The
 //! REST route places the station in the database but not in the game
 //! state, so it has to be the socket. The server answers `station_placed`
@@ -47,6 +53,7 @@ use crate::catalog::Catalog;
 use crate::sim::lot::Building;
 use crate::state::{answers, GameState, StateEvent};
 
+pub mod repair;
 pub mod visit;
 pub use visit::{approach, is_storage, recipes_at, Visit};
 
@@ -186,22 +193,7 @@ pub fn check_placement<'a>(
                     return Err(Refusal::GroundOnly);
                 }
             }
-            // Its building's room where the spot is, on its storey, or the
-            // lot's as a whole
-            let (count, capacity, indoors) = match building {
-                Some(b) => {
-                    let indoors = b.contains((x, y));
-                    let count = stations
-                        .iter()
-                        .filter(|s| {
-                            plot.contains(s.x, s.y) && b.contains((s.x, s.y)) == indoors && s.floor == floor
-                        })
-                        .count() as i32;
-                    let room = if indoors { b.indoor_room } else { b.yard_room };
-                    (count, room as i32, Some(indoors))
-                }
-                None => (plot.station_count, plot.station_capacity, None),
-            };
+            let (count, capacity, indoors) = room_at(plot, building.as_ref(), (x, y), floor, &stations);
             if count >= capacity {
                 return Err(Refusal::PlotFull { capacity, indoors });
             }
@@ -241,6 +233,107 @@ pub fn check_placement<'a>(
         return Err(Refusal::TooClose);
     }
     Ok(plot)
+}
+
+/// The stations in the place `p` is in on `plot` and the room that place
+/// has: its building's, indoors on `floor` or in the yard, or the lot's as
+/// a whole with no building. And which it is: indoors (`Some(true)`), the
+/// yard (`Some(false)`), or the whole lot (`None`).
+fn room_at(
+    plot: &PlotInfo,
+    building: Option<&Building>,
+    p: (f64, f64),
+    floor: i32,
+    stations: &[&StationInfo],
+) -> (i32, i32, Option<bool>) {
+    match building {
+        Some(b) => {
+            let indoors = b.contains(p);
+            let count = stations
+                .iter()
+                .filter(|s| plot.contains(s.x, s.y) && b.contains((s.x, s.y)) == indoors && s.floor == floor)
+                .count() as i32;
+            let room = if indoors { b.indoor_room } else { b.yard_room };
+            (count, room as i32, Some(indoors))
+        }
+        None => (plot.station_count, plot.station_capacity, None),
+    }
+}
+
+/// Where a station put down at a point would stand, for the ghost to say
+/// (V3.5, #477), with the room left there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spot {
+    /// Off every lot
+    OpenGround,
+    /// On a lot that isn't yours
+    NotYours,
+    /// Inside your building on storey `floor`, of `floors` built (the last
+    /// perhaps still going up): `left` of its `room` free on that storey
+    Indoors { floor: i32, floors: i32, left: i32, room: i32 },
+    /// In your yard, round the building
+    Yard { left: i32, room: i32 },
+    /// On a plot of yours with no building of its own (a guild's hall)
+    Plot { left: i32, room: i32 },
+}
+
+impl Spot {
+    /// The ghost's line over its verdict: "Indoors · 3 of 4 left", or
+    /// `None` where there's nothing to say of the place.
+    pub fn words(&self) -> Option<String> {
+        let left = |left: &i32, room: &i32| format!("{} of {room} left", left.max(&0));
+        match self {
+            Spot::NotYours => None,
+            Spot::OpenGround => Some("Open ground · the weather wears it fast".into()),
+            Spot::Indoors { floor: 0, left: l, room, .. } => Some(format!("Indoors · {}", left(l, room))),
+            Spot::Indoors { floor, left: l, room, .. } => {
+                Some(format!("Upstairs on {} · {}", floors::storey_name(*floor), left(l, room)))
+            }
+            Spot::Yard { left: l, room } => Some(format!("In the yard · {}", left(l, room))),
+            Spot::Plot { left: l, room } => Some(format!("On your plot · {}", left(l, room))),
+        }
+    }
+
+    /// How to pick another storey, inside a building with floors.
+    pub fn storey_hint(&self) -> Option<&'static str> {
+        match self {
+            Spot::Indoors { floors, .. } if *floors > 0 => Some("PgUp and PgDn change storey"),
+            _ => None,
+        }
+    }
+}
+
+/// Where a station would stand at `at` (server units) on storey `floor`,
+/// for `me`: inside one of my buildings, in my yard, or elsewhere. Off a
+/// building the storey is the ground, and in one it's held to the floors
+/// built.
+pub fn spot<'a>(
+    at: [f64; 2],
+    me: Uuid,
+    floor: i32,
+    stations: impl IntoIterator<Item = &'a StationInfo>,
+    plots: &[PlotInfo],
+    terrain: Option<&TerrainResponse>,
+) -> Spot {
+    let [x, y] = at;
+    let Some(plot) = plots.iter().find(|p| p.owner_id == Some(me) && p.contains(x, y)) else {
+        let on_a_lot = match terrain {
+            Some(t) => t.terrain_plots.iter().any(|lot| quad_contains(&lot.corners, x, y)),
+            None => plots.iter().any(|p| p.contains(x, y)),
+        };
+        return if on_a_lot { Spot::NotYours } else { Spot::OpenGround };
+    };
+    let stations: Vec<&StationInfo> = stations.into_iter().collect();
+    let building = Building::of(plot);
+    let indoors = building.as_ref().is_some_and(|b| b.contains((x, y)));
+    let floor = if indoors { floor.clamp(0, plot.floors.max(0)) } else { 0 };
+    let (count, room, place) = room_at(plot, building.as_ref(), (x, y), floor, &stations);
+    let left = room - count;
+    match place {
+        Some(true) => Spot::Indoors { floor, floors: plot.floors.max(0), left, room },
+        Some(false) => Spot::Yard { left, room },
+        None => Spot::Plot { left, room },
+    }
 }
 
 /// The footprint of the building `(x, y)` is inside, or `None` outdoors: a
@@ -311,7 +404,10 @@ pub enum Note {
 #[derive(Debug, Clone)]
 pub struct Placing {
     kit: Kit,
-    /// The storey it goes on: 0, the ground, until a panel picks one (#477)
+    /// The storey the player asked for (PgUp and PgDn, V3.5)
+    want: i32,
+    /// The storey it goes on where it's aimed: [`Placing::want`] held to
+    /// the building there, the ground off one
     floor: i32,
     phase: Phase,
     notes: Vec<Note>,
@@ -322,6 +418,7 @@ impl Placing {
     pub fn new(kit: Kit) -> Self {
         Self {
             kit,
+            want: 0,
             floor: 0,
             phase: Phase::Aiming,
             notes: Vec::new(),
@@ -345,6 +442,33 @@ impl Placing {
     /// Put it on storey `floor` instead: 0 the ground, k the kth floor
     pub fn on_floor(&mut self, floor: i32) {
         self.floor = floor.max(0);
+        self.want = self.floor;
+    }
+
+    /// The storey asked for, which [`Placing::aim`] holds to the building
+    pub fn want(&self) -> i32 {
+        self.want
+    }
+
+    /// Ask for the storey `by` above (or below) the one it's on, as PgUp
+    /// and PgDn do. It's held to the building when next aimed.
+    pub fn step_storey(&mut self, by: i32) {
+        self.want = self.floor.saturating_add(by).max(0);
+    }
+
+    /// Aim at `at`: the storey asked for, held to the floors of my
+    /// building there (the ground off one), and where it would stand.
+    pub fn aim(&mut self, at: [f64; 2], state: &GameState, terrain: Option<&TerrainResponse>) -> Spot {
+        let Some(me) = state.me() else {
+            self.floor = 0;
+            return Spot::NotYours;
+        };
+        let spot = spot(at, me, self.want, state.stations().values(), state.plots(), terrain);
+        self.floor = match spot {
+            Spot::Indoors { floor, .. } => floor,
+            _ => 0,
+        };
+        spot
     }
 
     /// The station is down, or the kit has gone.
@@ -397,6 +521,7 @@ impl Placing {
         if self.phase != Phase::Aiming || self.done {
             return None;
         }
+        self.aim(at, state, terrain);
         if let Err(why) = self.check(at, state, terrain) {
             self.notes.push(Note::Refused(why));
             return None;
@@ -741,6 +866,39 @@ mod tests {
         assert_eq!(at(kiln, spots[3]), Err(Refusal::GroundOnly));
     }
 
+    /// The ghost says where it would stand and the room left there (V3.5):
+    /// indoors on a storey, upstairs, the yard, or open ground, with the
+    /// storey held to the building
+    #[test]
+    fn the_spot_says_indoors_upstairs_or_the_yard_and_the_room_left() {
+        let mut home = plot(10, 1000.0, 1000.0, Some(ME), 4);
+        home.corners = Some([(1000.0, 1000.0), (1130.0, 1000.0), (1130.0, 1130.0), (1000.0, 1130.0)]);
+        home.bounds = Bounds::new(1000.0, 1000.0, 1130.0, 1130.0);
+        (home.indoor_room, home.yard_room, home.station_capacity, home.floors) = (Some(4), Some(3), 11, 1);
+        let mut up = station(1030.0, 1020.0);
+        (up.floor, up.indoors) = (1, true);
+        let stations = [station(1030.0, 1020.0), station(1090.0, 1020.0), station(1060.0, 1110.0), up];
+        let plots = [home.clone()];
+        let at = |p: [f64; 2], floor| spot(p, ME, floor, &stations, &plots, None);
+        let inside = [1060.0, 1060.0];
+        assert_eq!(at(inside, 0), Spot::Indoors { floor: 0, floors: 1, left: 2, room: 4 });
+        assert_eq!(at(inside, 0).words().unwrap(), "Indoors · 2 of 4 left");
+        assert_eq!(at(inside, 1).words().unwrap(), "Upstairs on the first floor · 3 of 4 left");
+        assert_eq!(at(inside, 5), at(inside, 1), "held to the floors built");
+        assert_eq!(at(inside, 0).storey_hint(), Some("PgUp and PgDn change storey"));
+        let yard = at([1060.0, 1100.0], 1);
+        assert_eq!(yard, Spot::Yard { left: 2, room: 3 }, "the yard is the ground");
+        assert_eq!(yard.words().unwrap(), "In the yard · 2 of 3 left");
+        assert_eq!(yard.storey_hint(), None);
+        assert_eq!(at([500.0, 500.0], 0), Spot::OpenGround);
+        let theirs = [plot(11, 400.0, 400.0, Some(THEM), 0)];
+        assert_eq!(spot([500.0, 500.0], ME, 0, [], &theirs, None), Spot::NotYours);
+        assert_eq!(Spot::NotYours.words(), None);
+        // No floors: nothing to change
+        home.floors = 0;
+        assert_eq!(spot(inside, ME, 0, &stations, &[home], None).storey_hint(), None);
+    }
+
     #[test]
     fn a_full_plot_takes_no_more() {
         let full = plot(10, 1000.0, 1000.0, Some(ME), 16);
@@ -889,6 +1047,39 @@ mod tests {
                     station_id: Uuid::from_u128(71)
                 }]
             );
+        }
+
+        /// PgUp asks for the storey above, held to the floors built, and
+        /// the click sends the storey it's on (V3.5)
+        #[test]
+        fn a_click_upstairs_sends_the_storey_asked_for() {
+            let mut state = world();
+            let mut home = plot(10, 1000.0, 1000.0, Some(ME), 0);
+            home.corners = Some([(1000.0, 1000.0), (1200.0, 1000.0), (1200.0, 1200.0), (1000.0, 1200.0)]);
+            (home.indoor_room, home.yard_room, home.station_capacity, home.floors) = (Some(4), Some(4), 12, 1);
+            state.apply_rest(&RestResponse::Plots(ListPlotsResponse { plots: vec![home], total: 1 }));
+            let mut p = placing();
+            let inside = [1120.0, 1040.0];
+            p.step_storey(1);
+            p.step_storey(1);
+            assert_eq!(p.want(), 1, "a step from where it's aimed");
+            assert!(matches!(p.aim(inside, &state, None), Spot::Indoors { floor: 1, .. }));
+            p.step_storey(1);
+            assert_eq!(p.aim(inside, &state, None), Spot::Indoors { floor: 1, floors: 1, left: 4, room: 4 }, "no second floor");
+            let Some(ClientMessage::PlaceStation { floor, .. }) = p.place(inside, &state, None, Instant::now()) else {
+                panic!("{:?}", p.take_notes())
+            };
+            assert_eq!(floor, 1);
+            // Out in the yard it's the ground, and back inside upstairs again
+            let mut p = placing();
+            p.step_storey(1);
+            assert!(matches!(p.aim([1100.0, 1150.0], &state, None), Spot::Yard { .. }));
+            assert_eq!(p.floor(), 0);
+            p.aim(inside, &state, None);
+            assert_eq!(p.floor(), 1);
+            p.step_storey(-3);
+            p.aim(inside, &state, None);
+            assert_eq!(p.floor(), 0);
         }
 
         #[test]

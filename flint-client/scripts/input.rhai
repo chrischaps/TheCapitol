@@ -659,9 +659,29 @@ fn draw_placement(p, now) {
     draw_text_opts(at.x - m.width / 2.0, top, line, size, #{
         font: "strong", color: [lc[0], lc[1], lc[2], 0.95],
     });
+    // Where it would stand and the room left there (V3.5): indoors,
+    // upstairs, the yard or open ground, in the gold of what's yours
+    let next = top + m.height + 4.0;
+    if p.place != () {
+        let pm = measure_text_ex(p.place, 13.0, "body", 0.0);
+        draw_text_opts(at.x - pm.width / 2.0 + 1.0, next + 1.0, p.place, 13.0, #{
+            font: "body", color: [0.0, 0.0, 0.0, 0.55],
+        });
+        draw_text_opts(at.x - pm.width / 2.0, next, p.place, 13.0, #{
+            font: "body", color: [0.95, 0.84, 0.55, 0.95],
+        });
+        next += pm.height + 3.0;
+    }
+    if p.storey != () {
+        let sm = measure_text_ex(p.storey, 12.0, "body", 0.0);
+        draw_text_opts(at.x - sm.width / 2.0, next, p.storey, 12.0, #{
+            font: "body", color: [0.95, 0.84, 0.55, 0.65],
+        });
+        next += sm.height + 3.0;
+    }
     let hint = p.kit + " · right-click or Esc to stop";
     let hm = measure_text_ex(hint, 12.0, "body", 0.0);
-    draw_text_opts(at.x - hm.width / 2.0, top + m.height + 4.0, hint, 12.0, #{
+    draw_text_opts(at.x - hm.width / 2.0, next, hint, 12.0, #{
         font: "body", color: [0.88, 0.88, 0.88, 0.6],
     });
 }

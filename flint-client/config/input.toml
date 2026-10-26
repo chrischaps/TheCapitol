@@ -244,6 +244,16 @@ bindings = [{ type = "key", code = "Enter" }]
 kind = "button"
 bindings = [{ type = "key", code = "Enter" }, { type = "key", code = "NumpadEnter" }]
 
+# While placing a station (V3.5): the storey above or below inside your
+# building, held to the floors built. The ghost says which it's on.
+[actions.storey_up]
+kind = "button"
+bindings = [{ type = "key", code = "PageUp" }]
+
+[actions.storey_down]
+kind = "button"
+bindings = [{ type = "key", code = "PageDown" }]
+
 # Open the nearest station, walking to it if it's out of reach (P6.3).
 # The same as clicking it, and a key captures can press.
 [actions.station]

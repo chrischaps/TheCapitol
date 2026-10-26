@@ -32,6 +32,12 @@
 //!   recipe and keeps to it. The box is theirs, so it can't be dragged
 //!   from and Fill and Clear are gone; the line under the recipe says the
 //!   work goes into their box and what you're paid for each.
+//! - **Its condition (V3.5, #477)**, under the box and its tool, or over
+//!   the box once it's under 25, with a badge in the header: a bar of what the
+//!   weather has left of it, where it stands (indoors, upstairs, out on a
+//!   plot or on open ground) and, below 25 or at 0, what that stops. Worn
+//!   at all, Repair, with the bill (`capitol_core::station::repair`, the
+//!   server's) against your pack, for anyone who has it open.
 //! - **Return to inventory**, for the owner: a recycling bin in gold
 //!   (`theme::recycle_bin`, #488). The server puts the whole kit back in
 //!   your inventory (#88), and what's in the box with it (#489): your things
@@ -50,7 +56,7 @@ use super::crafting::{blocked_box, craft_label, needs, picker, preview, under_wa
 use super::hire;
 use super::icons::ItemIcons;
 use super::slots::{Move, Slot, SlotGrid};
-use super::theme::{self, size, EMBER, STATION};
+use super::theme::{self, size, EMBER, ENOUGH, SHORT, STATION};
 use capitol_core::automation::{Draft, Status};
 use capitol_core::chrono::{DateTime, Utc};
 use capitol_core::craft::{self, Check, Phase};
@@ -59,7 +65,8 @@ use capitol_core::protocol::rules::wages::Work;
 use capitol_core::protocol::rest::{RecipeInfo, SlotItem, WageOffer, WageShift};
 use capitol_core::wages::{self as wg, Wages};
 use capitol_core::state::{Activity, GameState};
-use capitol_core::station;
+use capitol_core::protocol::rules::weather;
+use capitol_core::station::{self, repair, repair::Shelter, repair::State as RepairState};
 use egui::{Align2, Id};
 use uuid::Uuid;
 
@@ -116,6 +123,8 @@ pub enum Action {
     StopAutomation(Uuid),
     /// Something on the Hire tab, or Stop on your shift (S2.7)
     Wages(hire::Act),
+    /// Mend the station to full, for goods from your pack (V3.5)
+    Repair(Uuid),
 }
 
 /// The right-hand column's two tabs at a station of yours.
@@ -173,6 +182,10 @@ pub struct View<'a> {
     pub now: DateTime<Utc>,
     /// Signed in. Offline it's a sample, and nothing is sent.
     pub online: bool,
+    /// A repair is out (V3.5).
+    pub repairing: bool,
+    /// Why the last repair was refused, if it was just now.
+    pub repair_refused: Option<&'a str>,
 }
 
 impl View<'_> {
@@ -328,6 +341,14 @@ impl StationPanel {
             Some(("On shift", theme::GOLD.gamma_multiply(0.35)))
         } else if matches!(status, Status::Paused(_)) {
             Some(("Paused", EMBER.gamma_multiply(0.35)))
+        } else if let Some(worn) = state
+            .open_station_info()
+            .map(|i| RepairState::of(i.condition))
+            .filter(|w| *w != RepairState::Sound)
+        {
+            // V3.5: worn by the weather
+            let words = if worn == RepairState::WornOut { "Worn out" } else { "Needs repair" };
+            Some((words, EMBER.gamma_multiply(0.35)))
         } else if storage {
             Some(("Storage", theme::PILL))
         } else {
@@ -749,6 +770,12 @@ fn station_box(
 ) -> Option<Action> {
     let state = view.state;
     let mut action = None;
+    // Worn past working on its own, its condition and Repair come first
+    let worn = state.open_station_info().is_some_and(|i| RepairState::of(i.condition) != RepairState::Sound);
+    if worn {
+        action = condition(ui, view);
+        ui.add_space(4.0);
+    }
     ui.label(theme::label(if storage { "Storage" } else { "Station box" }));
     match state.station_container() {
         Some(c) => {
@@ -770,8 +797,102 @@ fn station_box(
     } else if let Some(a) = tool_slot(ui, icons, state, idle) {
         action = Some(a);
     }
+    if !worn {
+        ui.add_space(8.0);
+        if let Some(a) = condition(ui, view) {
+            action = Some(a);
+        }
+    }
     action
 }
+
+/// The station's condition under the header (V3.5): a bar of it, where it
+/// stands, what wear stops, and Repair with its bill while it's worn.
+fn condition(ui: &mut egui::Ui, view: &View) -> Option<Action> {
+    let state = view.state;
+    let info = state.open_station_info()?;
+    let me = state.me();
+    // Only your own plots are known: a station of yours off them is on
+    // open ground, and anyone else's is just outdoors
+    let on_a_plot = (me.is_some() && Some(info.owner_id) == me)
+        .then(|| state.plots().iter().any(|p| p.contains(info.x, info.y)));
+    let shelter = Shelter::of(info, on_a_plot);
+    let worn = RepairState::of(info.condition);
+    let mut action = None;
+    ui.label(theme::label("Condition"));
+    ui.horizontal(|ui| {
+        condition_bar(ui, info.condition);
+        ui.label(theme::text(format!("{}%", info.condition.clamp(0, 100))).size(size::SMALL));
+    });
+    ui.label(theme::dim(shelter.words()).size(size::LABEL));
+    if let Some(words) = worn.words() {
+        ui.label(egui::RichText::new(words).color(if worn == RepairState::WornOut { SHORT } else { EMBER }).size(size::LABEL));
+    }
+    if info.condition >= weather::FULL as i32 {
+        ui.add_space(4.0);
+        return None;
+    }
+    ui.add_space(4.0);
+    let needs = repair::needs(state.catalog(), state.recipes(), info, state.inventory());
+    theme::well().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(theme::dim("Repair takes").size(size::LABEL));
+            if needs.is_empty() {
+                ui.label(theme::text("nothing").size(size::LABEL));
+            }
+            for (i, need) in needs.iter().enumerate() {
+                let ink = if need.short() == 0 { ENOUGH } else { SHORT };
+                let sep = if i + 1 < needs.len() { "," } else { "" };
+                ui.label(egui::RichText::new(format!("{} {}", need.need, need.name)).color(ink).size(size::LABEL))
+                    .on_hover_text(format!("You hold {}", need.held));
+                ui.label(theme::dim(format!("(you hold {}){sep}", need.held)).size(size::LABEL));
+            }
+        });
+        let short = needs.iter().any(|n| n.short() > 0);
+        let (label, enabled) = match () {
+            _ if view.repairing => ("Repairing…".to_string(), false),
+            _ if short => ("Not enough to repair it".to_string(), false),
+            _ => ("Repair".to_string(), true),
+        };
+        ui.add_space(2.0);
+        if theme::accent_button(ui, &label, STATION, enabled && view.online)
+            .on_hover_text("Back to 100%, for a share of what its kit took, the lowest grade first")
+            .clicked()
+            && enabled
+        {
+            action = Some(Action::Repair(info.id));
+        }
+        if let Some(why) = view.repair_refused {
+            ui.add_space(4.0);
+            theme::error_box(ui, why);
+        }
+    });
+    ui.add_space(4.0);
+    action
+}
+
+/// A short bar of `condition`, green going to gold and then to red as it
+/// falls, with a tick at the 25 under which it stops working on its own.
+fn condition_bar(ui: &mut egui::Ui, condition: i32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(CONDITION_BAR, 6.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, theme::BAR_TRACK);
+    let k = (condition.clamp(0, 100) as f32) / 100.0;
+    let ink = if k >= 0.5 {
+        theme::GOLD.lerp_to_gamma(ENOUGH, (k - 0.5) * 2.0)
+    } else {
+        SHORT.lerp_to_gamma(theme::GOLD, k * 2.0)
+    };
+    let mut filled = rect;
+    filled.set_width(rect.width() * k);
+    painter.rect_filled(filled, 3.0, ink);
+    let x = rect.left() + rect.width() * weather::NEEDS_REPAIR as f32 / 100.0;
+    painter.line_segment([egui::pos2(x, rect.top() - 1.0), egui::pos2(x, rect.bottom() + 1.0)], (1.0, theme::GRADE_TICK));
+}
+
+/// The condition bar's width, in points.
+const CONDITION_BAR: f32 = 96.0;
 
 /// The open station is yours.
 fn mine(state: &GameState) -> bool {
@@ -964,6 +1085,32 @@ pub fn empty_the_box(state: &mut GameState) {
     }));
 }
 
+/// `--station-panel-sample repair` and `worn` (V3.5): [`sample`]'s
+/// workbench out on open ground, worn by the weather to 18 (`repair`), with
+/// the fiber its repair takes in your pack, or to 0 with too little (`worn`).
+pub fn worn_out_there(state: &mut GameState, which: &str) {
+    use capitol_core::net::RestResponse;
+    use capitol_core::protocol::rest::{ContainerResponse, ContainersResponse};
+    use capitol_core::protocol::ws::ServerMessage;
+    let condition = if which == "worn" { 0 } else { 18 };
+    state.apply_ws(&ServerMessage::StationCondition { station_id: Uuid::from_u128(0x235), condition });
+    if which == "worn" {
+        let catalog = capitol_core::catalog::Catalog::fallback();
+        let item = |n: u128, slot, kind: &str, quality, quantity| {
+            SlotItem::new(Uuid::from_u128(n), kind.into(), catalog.item_name(kind), quality, quantity, slot)
+        };
+        state.apply_rest(&RestResponse::Containers(ContainersResponse {
+            containers: vec![ContainerResponse {
+                id: Uuid::from_u128(0x2351),
+                container_type: "player_inventory".into(),
+                slot_count: 24,
+                layout_columns: 6,
+                slots: vec![item(1, 0, "fiber", 52, 2), item(4, 3, "stone", 47, 9)],
+            }],
+        }));
+    }
+}
+
 /// [`sample`] at an empty storage chest of yours instead, whose panel is
 /// one box wide, for its footer's recycling bin (#488).
 pub fn chest_of_yours(state: &mut GameState) {
@@ -1120,6 +1267,8 @@ mod tests {
             wages,
             now: Utc::now(),
             online: true,
+            repairing: false,
+            repair_refused: None,
         };
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
@@ -1246,6 +1395,25 @@ mod tests {
         let mut panel = StationPanel::default();
         run_with(&mut panel, &state, None, SMALL, None);
         assert_eq!(panel.shift_recipe, None);
+    }
+
+    /// A worn station (V3.5) shows its condition and Repair, and the panel
+    /// still fits the small screen beside the inventory
+    #[test]
+    fn a_worn_station_shows_repair_and_still_fits() {
+        for which in ["repair", "worn"] {
+            let mut state = sample();
+            worn_out_there(&mut state, which);
+            let info = state.open_station_info().unwrap();
+            assert!(info.condition < 25, "{which}");
+            let needs = repair::needs(state.catalog(), state.recipes(), info, state.inventory());
+            assert_eq!(needs.iter().map(|n| (n.item_type.as_str(), n.need)).collect::<Vec<_>>(), vec![("fiber", 3)]);
+            assert_eq!(needs[0].short() > 0, which == "worn", "{which}: {needs:?}");
+            for beside in [None, Some(small_inventory())] {
+                let mut panel = craft_tab();
+                on_screen(run(&mut panel, &state, SMALL, beside), SMALL);
+            }
+        }
     }
 
     #[test]

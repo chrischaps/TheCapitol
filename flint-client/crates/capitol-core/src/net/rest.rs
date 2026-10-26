@@ -124,6 +124,9 @@ pub enum RestRequest {
     RemoveStation { station_id: Uuid },
     /// `GET /stations/{id}/container`
     StationContainer { station_id: Uuid },
+    /// `POST /stations/{id}/repair`: back to full, for goods from your pack
+    /// (V3.2, V3.5)
+    RepairStation { station_id: Uuid },
     /// `PUT /stations/{id}/automation`: what your station makes on its own (E4.2)
     ConfigureAutomation {
         station_id: Uuid,
@@ -155,6 +158,8 @@ pub enum RestRequest {
         plot_id: Uuid,
         request: PayTaxRequest,
     },
+    /// `POST /plots/{id}/floors`: build the next floor (V3.3, V3.5)
+    BuildFloor { plot_id: Uuid },
     /// `GET /plots/{id}/permissions`
     PlotPermissions { plot_id: Uuid },
     /// `PUT /plots/{id}/permissions`
@@ -340,6 +345,8 @@ pub enum RestResponse {
     PlotAt(Option<PlotInfo>),
     ClaimPlot(ClaimPlotResponse),
     PayTax(PayTaxResponse),
+    BuildFloor(BuildFloorResponse),
+    RepairStation(RepairStationResponse),
     /// The current permissions, from both `GET` and `PUT`
     PlotPermissions(PlotPermissions),
     Zones(ZonesResponse),
@@ -481,6 +488,8 @@ impl RestRequest {
             | Withdraw(_)
             | ClaimPlot { .. }
             | PayTax { .. }
+            | BuildFloor { .. }
+            | RepairStation { .. }
             | Subscribe(_)
             | Grant(_)
             | PlaceOrder(_)
@@ -619,6 +628,7 @@ impl RestRequest {
             PlaceStation(_) => "/stations/place".into(),
             RemoveStation { station_id } => format!("/stations/{station_id}"),
             StationContainer { station_id } => format!("/stations/{station_id}/container"),
+            RepairStation { station_id } => format!("/stations/{station_id}/repair"),
             ConfigureAutomation { station_id, .. } => format!("/stations/{station_id}/automation"),
             StartAutomation { station_id } => format!("/stations/{station_id}/automation/start"),
             StopAutomation { station_id } => format!("/stations/{station_id}/automation/stop"),
@@ -630,6 +640,7 @@ impl RestRequest {
             PlotAt(_) => "/plots/at".into(),
             ClaimPlot { plot_id, .. } => format!("/plots/{plot_id}/claim"),
             PayTax { plot_id, .. } => format!("/plots/{plot_id}/pay-tax"),
+            BuildFloor { plot_id } => format!("/plots/{plot_id}/floors"),
             PlotPermissions { plot_id } | UpdatePlotPermissions { plot_id, .. } => {
                 format!("/plots/{plot_id}/permissions")
             }
@@ -801,6 +812,8 @@ impl RestRequest {
             Q::PlotAt(_) => A::PlotAt(de(body)?),
             Q::ClaimPlot { .. } => A::ClaimPlot(de(body)?),
             Q::PayTax { .. } => A::PayTax(de(body)?),
+            Q::BuildFloor { .. } => A::BuildFloor(de(body)?),
+            Q::RepairStation { .. } => A::RepairStation(de(body)?),
             Q::PlotPermissions { .. } | Q::UpdatePlotPermissions { .. } => {
                 A::PlotPermissions(de(body)?)
             }
@@ -1137,6 +1150,8 @@ mod tests {
                 "POST",
                 format!("/plots/{id}/pay-tax"),
             ),
+            (RestRequest::BuildFloor { plot_id: id }, "POST", format!("/plots/{id}/floors")),
+            (RestRequest::RepairStation { station_id: id }, "POST", format!("/stations/{id}/repair")),
             (
                 RestRequest::UpdatePlotPermissions {
                     plot_id: id,

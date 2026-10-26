@@ -855,7 +855,9 @@ fn spawn_ghost(ctx: &mut ExtensionCtx, kind: &'static str, ok: bool) -> Option<E
 }
 
 /// Write the ghost's transform and opacity onto its entity. It hovers and
-/// breathes. While asking it breathes faster, as if about to settle.
+/// breathes. While asking it breathes faster, as if about to settle. It
+/// stands on the ground whatever storey it's for, as stations do; its
+/// words say the storey ([#548](https://github.com/chrischaps/TheCapitol/issues/548)).
 fn place_ghost(world: &mut flint_ecs::FlintWorld, g: &Ghost, asking: bool) {
     let [x, z] = g.at;
     let rate = if asking { 7.0 } else { 2.2 };

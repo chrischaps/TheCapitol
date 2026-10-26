@@ -3113,7 +3113,8 @@ pub struct FloorBill {
     pub permit: i64,
     /// The building goods, from your pack, lowest grade first
     pub goods: Vec<crate::ws::ItemCount>,
-    /// How long it takes to go up, in seconds
+    /// How long it takes to go up, in game seconds: on the wall clock a
+    /// dev server's `SIM_TICK_SCALE` shortens it, as `floor_ready_at` shows
     pub build_secs: i64,
 }
 

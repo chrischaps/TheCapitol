@@ -208,9 +208,23 @@ struct Args {
     /// Offline, open the station panel (#235) on a sample workbench of
     /// yours, beside the inventory and crafting panels, on its `craft` or
     /// `automation` tab, or `empty` (the craft tab, its box empty) or `chest`
-    /// (an empty chest of yours), so its recycling bin may be pressed (#488). Check it at --width 1280 --height 720 at 150%
+    /// (an empty chest of yours), so its recycling bin may be pressed (#488),
+    /// or `repair` (worn to 18 by the weather, the fiber to mend it in your
+    /// pack) or `worn` (at 0, short of it), for its condition (V3.5). Check it at --width 1280 --height 720 at 150%
     #[arg(long, value_name = "TAB", requires = "offline")]
     station_panel_sample: Option<String>,
+    /// Offline, open the plot panel on an urban lot of yours with a
+    /// building (V3.5): `next` (a floor up, the second's bill open, all it
+    /// takes in your pack), `short` (short of it) or `going-up` (the second
+    /// floor going up). Check it at --width 1280 --height 720 at 150%
+    #[arg(long, value_name = "WHICH", requires = "offline")]
+    plot_panel_sample: Option<String>,
+    /// With --building-sample, place a station from `KIT` (`workbench_kit`,
+    /// `kiln_kit`...) on your lot there, offline: the ghost says indoors,
+    /// upstairs or the yard and the room left, and PgUp and PgDn pick the
+    /// storey (V3.5). Nothing is placed. For captures
+    #[arg(long, value_name = "KIT", requires = "building_sample")]
+    place_sample: Option<String>,
     /// No sound. Captures (--exit-after) are silent anyway
     #[arg(long)]
     mute: bool,
@@ -432,6 +446,8 @@ fn main() -> Result<()> {
         .with_chat_sample(args.chat_sample && args.offline.is_some())
         .with_hints_sample(args.hints_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_station_panel_sample(args.station_panel_sample.as_deref())
+        .with_plot_panel_sample(args.plot_panel_sample.as_deref())
+        .with_place_sample(args.place_sample.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)

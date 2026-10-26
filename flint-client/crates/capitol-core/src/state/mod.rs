@@ -451,6 +451,15 @@ pub enum StateEvent {
         station_type: String,
         terrain_id: String,
     },
+    /// Your station wore past `rules::weather::NEEDS_REPAIR` (it won't work
+    /// on its own) or to 0 (out of use) in the weather (`station_condition`,
+    /// V3.2, V3.5). Not sent for a repair, or a station that was already
+    /// under the mark.
+    StationWorn {
+        station_id: Uuid,
+        station_type: String,
+        condition: i32,
+    },
     /// Your station on public land wore out in the weather and fell down
     /// (`station_collapsed`, V3.2): its kit is lost, and its tool and box
     /// went to your impound. `StationRemoved` comes alongside.
@@ -951,7 +960,17 @@ impl GameState {
             // V3.2: the weather wore it past 25 or 0, or it was repaired
             M::StationCondition { station_id, condition } => {
                 if let Some(station) = self.stations.get_mut(station_id) {
+                    let was = station.condition;
                     station.condition = *condition;
+                    let need = capitol_protocol::rules::weather::NEEDS_REPAIR;
+                    let crossed = (*condition < need && was >= need) || (*condition <= 0 && was > 0);
+                    if crossed && self.me == Some(station.owner_id) {
+                        out.push(StateEvent::StationWorn {
+                            station_id: *station_id,
+                            station_type: station.station_type.clone(),
+                            condition: *condition,
+                        });
+                    }
                 }
             }
             // Kept on the station for E4.4's automation panel
@@ -1444,6 +1463,20 @@ impl GameState {
                     out.push(StateEvent::PlotsUpdated);
                 }
                 self.set_strands(paid.new_balance, &mut out);
+            }
+            // The floor going up (V3.5): `plot_floor_built` tells the lot's
+            // drawing, and the pack's refetch the goods it took
+            R::BuildFloor(built) => {
+                if self.learn_plot(&built.plot) {
+                    out.push(StateEvent::PlotsUpdated);
+                }
+                self.set_strands(built.new_balance, &mut out);
+            }
+            // `station_condition` says the same to everyone
+            R::RepairStation(repaired) => {
+                if let Some(station) = self.stations.get_mut(&repaired.station_id) {
+                    station.condition = repaired.condition;
+                }
             }
             R::ClaimPlot(claim) => {
                 self.learn_plot(&claim.plot);

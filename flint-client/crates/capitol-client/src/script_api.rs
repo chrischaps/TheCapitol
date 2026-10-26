@@ -341,6 +341,12 @@ pub struct PlacementMark {
     pub ok: bool,
     /// Why not, in words, when it can't.
     pub why: Option<String>,
+    /// Where it would stand and the room left there (V3.5): "Indoors · 3
+    /// of 4 left", "Upstairs on the first floor · 4 of 4 left", "In the
+    /// yard · 2 of 8 left", or "Open ground".
+    pub place: Option<String>,
+    /// How to pick another storey, inside a building with floors.
+    pub storey: Option<String>,
     /// The click went out, and the server hasn't answered.
     pub asking: bool,
     /// Where you stand (world metres) and how far you can place (metres).
@@ -1280,10 +1286,12 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("owned".into(), p.owned.into());
         m.into()
     });
-    // `cap_placing() -> #{ kind, kit, x, z, radius, ok, why, asking, you_x,
-    // you_z, reach, spacing, crowding, plots } or ()`: the station being
-    // placed. `x`/`z` are the ghost's (or () off the ground), `why` the
-    // reason it can't go there (or ()), `crowding` the [x, z] of stations
+    // `cap_placing() -> #{ kind, kit, x, z, radius, ok, why, place, storey,
+    // asking, you_x, you_z, reach, spacing, crowding, plots } or ()`: the
+    // station being placed. `x`/`z` are the ghost's (or () off the ground),
+    // `why` the reason it can't go there (or ()), `place` where it would
+    // stand with the room left (V3.5, or ()), `storey` how to pick another
+    // storey (or ()), `crowding` the [x, z] of stations
     // near it, `plots` your plots as four [x, z] corners each. World
     // metres throughout. () when nothing is being placed.
     let placement = shared.placement.clone();
@@ -1399,6 +1407,8 @@ fn placement_map(p: &PlacementMark) -> rhai::Map {
         "why".into(),
         p.why.clone().map_or_else(unit, rhai::Dynamic::from),
     );
+    m.insert("place".into(), p.place.clone().map_or_else(unit, rhai::Dynamic::from));
+    m.insert("storey".into(), p.storey.clone().map_or_else(unit, rhai::Dynamic::from));
     m.insert("asking".into(), p.asking.into());
     m.insert(
         "you_x".into(),
@@ -1670,6 +1680,8 @@ mod tests {
             radius: 1.95,
             ok: false,
             why: Some("Too far from you".into()),
+            place: Some("In the yard · 2 of 8 left".into()),
+            storey: None,
             asking: false,
             you: None,
             reach: 7.5,

@@ -228,6 +228,11 @@ pub struct CapitolExtension {
     station_panel_sample: Option<capitol_core::state::GameState>,
     /// Its offers, for the Hire tab and a shift (S2.7)
     station_panel_wages: Option<capitol_core::wages::Wages>,
+    /// `--plot-panel-sample`: a lot of yours with a building, offline (V3.5).
+    plot_panel_sample: Option<ui::plot::Sample>,
+    /// `--place-sample`: the kit placed on your lot in `--building-sample`,
+    /// and the placement once the sample's lots are claimed (V3.5).
+    place_sample: Option<(String, Option<capitol_core::station::Placing>)>,
     /// The Standings page was open last frame: opening it asks for the
     /// boards again, as a new week's may be up (S3.2)
     reading_standings: bool,
@@ -384,6 +389,8 @@ impl CapitolExtension {
             impound_sample: None,
             station_panel_sample: None,
             station_panel_wages: None,
+            plot_panel_sample: None,
+            place_sample: None,
             reading_standings: false,
             station_panel_tab: None,
             hall: world::hall::HallLayer::default(),
@@ -906,7 +913,8 @@ impl CapitolExtension {
     /// (`craft` or `automation`; `empty`, craft with the box empty, or
     /// `chest`, an empty chest of yours, for the recycling bin, #488;
     /// `hire`, the Hire tab with an offer of yours worked, or `shift`, on a
-    /// shift at Ada's workbench, S2.7),
+    /// shift at Ada's workbench, S2.7; `repair`, worn to 18 out on open
+    /// ground with the fiber to mend it, or `worn`, at 0 without, V3.5),
     /// with the inventory and crafting panels open beside it
     /// (`--station-panel-sample`, #235).
     pub fn with_station_panel_sample(mut self, tab: Option<&str>) -> Self {
@@ -916,6 +924,7 @@ impl CapitolExtension {
                 "empty" => ui::station::empty_the_box(&mut state),
                 "chest" => ui::station::chest_of_yours(&mut state),
                 "shift" => ui::station::at_adas_bench(&mut state),
+                "repair" | "worn" => ui::station::worn_out_there(&mut state, tab),
                 _ => {}
             }
             self.station_panel_sample = Some(state);
@@ -926,6 +935,27 @@ impl CapitolExtension {
                 _ => ui::station::Tab::Craft,
             });
             self.inventory.open = true;
+        }
+        self
+    }
+
+    /// Offline, the plot panel on a lot of yours with a building, building
+    /// upward (`--plot-panel-sample`, V3.5): `next`, `short` or `going-up`.
+    pub fn with_plot_panel_sample(mut self, which: Option<&str>) -> Self {
+        if let (Some(which), None) = (which, &self.session) {
+            self.plot_panel_sample = Some(ui::plot::sample(which));
+            if which != "going-up" {
+                self.plot_panel.bill.open();
+            }
+        }
+        self
+    }
+
+    /// Offline, with `--building-sample`, place a station from `kit` on
+    /// your lot there (`--place-sample`, V3.5).
+    pub fn with_place_sample(mut self, kit: Option<&str>) -> Self {
+        if let (Some(kit), None) = (kit, &self.session) {
+            self.place_sample = Some((kit.to_owned(), None));
         }
         self
     }
@@ -2002,7 +2032,11 @@ impl PlayerExtension for CapitolExtension {
             if sample.is_none() && ctx.clock.total_time > 0.5 && !self.lots.is_empty() {
                 let t = ctx.camera.target;
                 let focus = crate::coords::to_server(t.x, t.z);
-                *sample = Some(crate::building_sample::Buildings::new((focus[0], focus[1]), &self.lots));
+                let mut b = crate::building_sample::Buildings::new((focus[0], focus[1]), &self.lots);
+                if self.place_sample.is_some() {
+                    b.give_yours_a_floor();
+                }
+                *sample = Some(b);
             }
             if let Some(b) = sample {
                 let none = std::collections::HashSet::new();
@@ -2010,6 +2044,38 @@ impl PlayerExtension for CapitolExtension {
                 b.tick(dt);
                 self.stations
                     .update(ctx, &b.state, None, &none, &[], dt, &self.shared);
+                // `--place-sample`: the ghost on your lot, nothing placed
+                if let Some((kit, placing)) = &mut self.place_sample {
+                    if placing.is_none() {
+                        let kind = b.state.catalog().station_for_kit(kit).map(|t| t.id.clone());
+                        *placing = kind.map(|station_type| {
+                            capitol_core::station::Placing::new(capitol_core::station::Kit {
+                                item_id: uuid::Uuid::from_u128(0x4771),
+                                item_name: b.state.catalog().item_name(kit),
+                                station_type,
+                            })
+                        });
+                    }
+                    if let Some(p) = placing {
+                        if ctx.input.is_action_just_pressed("storey_up") {
+                            p.step_storey(1);
+                        }
+                        if ctx.input.is_action_just_pressed("storey_down") {
+                            p.step_storey(-1);
+                        }
+                        let _ = self.shared.place_at.lock().ok().and_then(|mut c| c.take());
+                        let hover = self.shared.place_hover.lock().ok().and_then(|h| *h);
+                        let target = hover.map(|[x, z]| crate::coords::to_server(x, z));
+                        let terrain = self.built.as_ref();
+                        let spot = target.map(|at| p.aim(at, &b.state, terrain));
+                        let (mut mark, view) = placement_mark(p, &b.state, terrain, target, spot);
+                        self.stations.ghost(ctx, view, dt);
+                        mark.at = view.and(self.stations.ghost_at());
+                        if let Ok(mut shared) = self.shared.placement.lock() {
+                            *shared = Some(mark);
+                        }
+                    }
+                }
             }
         } else if let Some(sample) = &mut self.station_sample {
             // Placed once the camera has settled on its shot.
@@ -3010,7 +3076,12 @@ impl PlayerExtension for CapitolExtension {
                     paying: session.paying(),
                     refused: session
                         .claim_refused(now)
-                        .or_else(|| session.pay_refused(now)),
+                        .or_else(|| session.pay_refused(now))
+                        .or_else(|| session.floor_refused(now)),
+                    upward: picked.and_then(|p| {
+                        capitol_core::plot::upward(p, state.me(), state.utc_now(), state.strands(), state.inventory(), state.catalog())
+                    }),
+                    building: session.building_floor(),
                     deed: picked.map_or(capitol_core::deeds::DeedOffer::None, |p| {
                         capitol_core::deeds::offer(p, state.tutorial())
                     }),
@@ -3035,6 +3106,7 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::plot::Action::Claim(id)) => session.claim_plot(id),
                     Some(ui::plot::Action::ClaimWithDeed(id)) => session.claim_with_grant(id),
                     Some(ui::plot::Action::PayTax(id, amount)) => session.pay_tax(id, amount),
+                    Some(ui::plot::Action::BuildFloor(id)) => session.build_floor(id),
                     Some(ui::plot::Action::AboutZone(zone)) => {
                         self.zone_card.open_one(&zone);
                         session.ask_zone_facts();
@@ -3078,6 +3150,8 @@ impl PlayerExtension for CapitolExtension {
                     wages: Some(session.wages()),
                     now: session.state().utc_now(),
                     online: true,
+                    repairing: session.repairing(),
+                    repair_refused: session.repair_refused(now),
                 };
                 match self
                     .station
@@ -3106,6 +3180,7 @@ impl PlayerExtension for CapitolExtension {
                     Some(StationAction::StopAutomation(id)) => session.stop_automation(id),
                     Some(StationAction::Wages(ui::hire::Act::Ask(ask))) => session.wage_act(ask),
                     Some(StationAction::Wages(ui::hire::Act::LookUp(draft))) => session.wages_mut().look_up(&draft),
+                    Some(StationAction::Repair(id)) => session.repair_station(id),
                     None => {}
                 }
                 let state = session.state();
@@ -3304,6 +3379,8 @@ impl PlayerExtension for CapitolExtension {
                 wages: self.station_panel_wages.as_ref(),
                 now: capitol_core::chrono::Utc::now(),
                 online: false,
+                repairing: false,
+                repair_refused: None,
             };
             self.station.show(ctx, &mut self.icons, &view, 0.0);
             if let Some(tab) = self.station_panel_tab.take() {
@@ -3311,6 +3388,25 @@ impl PlayerExtension for CapitolExtension {
             }
 
             self.inventory.show(ctx, &mut self.icons, state.catalog(), state.inventory(), None, 0.0);
+        }
+        if let Some(sample) = &self.plot_panel_sample {
+            let me = Some(uuid::Uuid::from_u128(0xca9));
+            let catalog = capitol_core::catalog::Catalog::fallback();
+            let now = capitol_core::chrono::Utc::now();
+            let upward = capitol_core::plot::upward(&sample.plot, me, now, Some(sample.strands), Some(&sample.pack), &catalog);
+            let view = ui::plot::View {
+                plot: Some(&sample.plot),
+                offer: Offer::Yours,
+                strands: Some(sample.strands),
+                claiming: false,
+                paying: false,
+                refused: None,
+                deed: capitol_core::deeds::DeedOffer::None,
+                hire: None,
+                upward,
+                building: false,
+            };
+            let _ = self.plot_panel.show(ctx, &view, None);
         }
         if let Some((log, chat, me, state, hints)) = &mut self.chat_sample {
             let phase = capitol_core::craft::Phase::Idle;
@@ -4089,6 +4185,32 @@ fn plots(
                 };
                 (format!("Your {name} fell down"), body)
             }
+            PlotNote::Worn { station_type, condition } => {
+                let name = session
+                    .state()
+                    .catalog()
+                    .station_type(&station_type)
+                    .map_or_else(|| station_type.replace('_', " "), |t| t.name.clone());
+                capitol_core::station::repair::worn_words(&name, condition)
+            }
+            PlotNote::Repaired { station_type, used } => {
+                let catalog = session.state().catalog();
+                let name = catalog
+                    .station_type(&station_type)
+                    .map_or_else(|| "Station".to_string(), |t| t.name.clone());
+                capitol_core::station::repair::repaired_words(&name, &ui::impound::counted(catalog, &used))
+            }
+            PlotNote::FloorGoingUp { floor, secs } => {
+                let room = session
+                    .state()
+                    .plots()
+                    .iter()
+                    .find(|p| p.floors == floor && session.state().me().is_some() && p.owner_id == session.state().me())
+                    .and_then(|p| p.indoor_room)
+                    .unwrap_or(0);
+                capitol_core::plot::going_up_words(floor, secs, room)
+            }
+            PlotNote::FloorUp { floor, room } => capitol_core::plot::floor_up_words(floor, room),
             PlotNote::NoneThere => ("No plot here".into(), "Alt-click a lot to see its deed".into()),
             PlotNote::Unanswered => ("Couldn't look".into(), "The server didn't say what's here".into()),
             PlotNote::TaxOwed {
@@ -4264,7 +4386,7 @@ fn placing(
     now: Instant,
     dt: f32,
 ) {
-    use crate::coords::{to_server, to_world, S};
+    use crate::coords::to_server;
     let click = shared.place_at.lock().ok().and_then(|mut p| p.take());
     if let Some([x, z]) = click {
         let [x, y] = to_server(x, z);
@@ -4286,59 +4408,27 @@ fn placing(
         ctx.fire_event("placement_note", data);
     }
 
+    // PgUp and PgDn: the storey above or below, inside your building (V3.5)
+    if session.placing().is_some() {
+        if ctx.input.is_action_just_pressed("storey_up") {
+            session.step_storey(1);
+        }
+        if ctx.input.is_action_just_pressed("storey_down") {
+            session.step_storey(-1);
+        }
+    }
     let hover = shared.place_hover.lock().ok().and_then(|h| *h);
-    let state = session.state();
-    let mark = session.placing().map(|p| {
+    let target = session.placing().and_then(|p| {
+        // Asking, the ghost holds where the click was; otherwise it's the cursor.
         let asking = match p.phase() {
             PlacePhase::Asking { at, .. } => Some(*at),
             PlacePhase::Aiming => None,
         };
-        // Asking, the ghost holds where the click was; otherwise it's the cursor.
-        let target = asking.or_else(|| hover.map(|[x, z]| to_server(x, z)));
-        let check = target.map(|at| p.check(at, state, terrain));
-        let ok = matches!(check, Some(Ok(_)));
-        let station_type = p.kit().station_type.as_str();
-        let crowding = target.map_or_else(Vec::new, |[x, y]| {
-            state
-                .stations()
-                .values()
-                .filter(|s| (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING * 2.0)
-                .map(|s| to_world(s.x, s.y))
-                .collect()
-        });
-        let me = state.me();
-        let plots = state
-            .plots()
-            .iter()
-            .filter(|plot| me.is_some() && plot.owner_id == me)
-            .filter_map(|plot| plot.corners)
-            .map(|c| c.map(|(x, y)| to_world(x, y)))
-            .collect();
-        let view = target.map(|[x, y]| GhostView {
-            kind: crate::stations::kind_of(station_type),
-            at: to_world(x, y),
-            ok,
-            asking: asking.is_some(),
-        });
-        let mark = PlacementMark {
-            kind: crate::stations::kind_of(station_type),
-            kit: p.kit().item_name.clone(),
-            at: None,
-            radius: crate::stations::ring_radius(station_type),
-            ok,
-            why: match &check {
-                Some(Err(why)) => Some(why.words()),
-                _ => None,
-            },
-            asking: asking.is_some(),
-            you: state.local_player().map(|you| to_world(you.x, you.y)),
-            reach: STATION_INTERACTION_RANGE as f32 * S,
-            spacing: STATION_MIN_SPACING as f32 * S,
-            crowding,
-            plots,
-        };
-        (mark, view)
+        asking.or_else(|| hover.map(|[x, z]| to_server(x, z)))
     });
+    let spot = target.and_then(|at| session.aim_placing(at, terrain));
+    let state = session.state();
+    let mark = session.placing().map(|p| placement_mark(p, state, terrain, target, spot));
     let view = mark.as_ref().and_then(|(_, v)| *v);
     stations.ghost(ctx, view, dt);
     let mark = mark.map(|(mut m, _)| {
@@ -4348,6 +4438,72 @@ fn placing(
     if let Ok(mut shared) = shared.placement.lock() {
         *shared = mark;
     }
+}
+
+/// What the scripts draw round the station being placed, and the ghost,
+/// for `p` aimed at `target` (server units) where `spot` says it would
+/// stand: online from the session, offline from `--place-sample`.
+fn placement_mark(
+    p: &capitol_core::station::Placing,
+    state: &capitol_core::state::GameState,
+    terrain: Option<&TerrainResponse>,
+    target: Option<[f64; 2]>,
+    spot: Option<capitol_core::station::Spot>,
+) -> (PlacementMark, Option<GhostView>) {
+    use crate::coords::{to_world, S};
+    let asking = matches!(p.phase(), PlacePhase::Asking { .. });
+    let check = target.map(|at| p.check(at, state, terrain));
+    let ok = matches!(check, Some(Ok(_)));
+    let station_type = p.kit().station_type.as_str();
+    // Only those in the same place count: on its storey indoors, or
+    // outdoors, as the spacing does (V3.5)
+    let same_place = |s: &capitol_core::protocol::rest::StationInfo| match spot {
+        Some(capitol_core::station::Spot::Indoors { floor, .. }) => s.indoors && s.floor == floor,
+        Some(capitol_core::station::Spot::Yard { .. } | capitol_core::station::Spot::OpenGround) => !s.indoors,
+        _ => true,
+    };
+    let crowding = target.map_or_else(Vec::new, |[x, y]| {
+        state
+            .stations()
+            .values()
+            .filter(|s| (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING * 2.0 && same_place(s))
+            .map(|s| to_world(s.x, s.y))
+            .collect()
+    });
+    let me = state.me();
+    let plots = state
+        .plots()
+        .iter()
+        .filter(|plot| me.is_some() && plot.owner_id == me)
+        .filter_map(|plot| plot.corners)
+        .map(|c| c.map(|(x, y)| to_world(x, y)))
+        .collect();
+    let view = target.map(|[x, y]| GhostView {
+        kind: crate::stations::kind_of(station_type),
+        at: to_world(x, y),
+        ok,
+        asking,
+    });
+    let mark = PlacementMark {
+        kind: crate::stations::kind_of(station_type),
+        kit: p.kit().item_name.clone(),
+        at: None,
+        radius: crate::stations::ring_radius(station_type),
+        ok,
+        why: match &check {
+            Some(Err(why)) => Some(why.words()),
+            _ => None,
+        },
+        place: spot.and_then(|s| s.words()),
+        storey: spot.and_then(|s| s.storey_hint()).map(str::to_owned),
+        asking,
+        you: state.local_player().map(|you| to_world(you.x, you.y)),
+        reach: STATION_INTERACTION_RANGE as f32 * S,
+        spacing: STATION_MIN_SPACING as f32 * S,
+        crowding,
+        plots,
+    };
+    (mark, view)
 }
 
 /// What a gather or a craft made, for the scripts: `item_name`,

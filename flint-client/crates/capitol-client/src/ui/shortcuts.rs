@@ -67,6 +67,7 @@ const CLICK: [Group; 3] = [
             ("[Click] a station, or [O]", "", "Open it, or the nearest"),
             ("[Enter], crafting", "", "Craft what's set"),
             ("Right-click a kit", "", "Place its station"),
+            ("[PgUp] [PgDn]", "", "Placing: the storey"),
             ("[Esc] or right-click", "", "Stop placing"),
             ("[Alt] + [Click] a plot", "", "See its deed"),
             ("[Shift] + [Click] a player", "", "Ask them to trade"),
@@ -100,6 +101,7 @@ const DIRECT: [Group; 3] = [
             ("[E] a station, or [O]", "{A}", "Open it, or the nearest"),
             ("[Enter], crafting", "", "Craft what's set"),
             ("Right-click a kit", "", "Place its station"),
+            ("[PgUp] [PgDn]", "", "Placing: the storey"),
             ("[Esc] or right-click", "{B}", "Stop placing"),
             ("[Alt] + [Click] a plot", "", "See its deed"),
             ("[E] a player", "{A}", "See their card"),
@@ -442,6 +444,8 @@ mod tests {
         Some(match code {
             "Equal" => "+".into(),
             "Minus" => "-".into(),
+            "PageUp" => "PgUp".into(),
+            "PageDown" => "PgDn".into(),
             c => c.strip_prefix("Key").unwrap_or(c).into(),
         })
     }

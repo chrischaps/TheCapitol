@@ -15,7 +15,7 @@
 //! The server URL, the last email and the token are kept in
 //! `save/session.toml` ([`SessionFile`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -68,6 +68,9 @@ const CLAIM_TAG: Tag = 31;
 const PAY_TAX_TAG: Tag = 32;
 /// The tag on the zone card's facts (#444).
 const ZONE_FACTS_TAG: Tag = 33;
+/// The tags on building a floor and repairing a station (V3.5, #477).
+const FLOOR_TAG: Tag = 35;
+const REPAIR_TAG: Tag = 36;
 const FREE_LOTS_TAG: Tag = 34;
 
 /// The tag on the exchange panel's deposits and withdrawals (P7.2). The
@@ -207,6 +210,18 @@ pub struct Session {
     paying: Option<Uuid>,
     /// Why the last tax payment was refused, and when.
     pay_refused: Option<(String, Instant)>,
+    /// The plot a floor is being bought for (V3.5).
+    building_floor: Option<Uuid>,
+    /// Why the last floor wasn't built, and when.
+    floor_refused: Option<(String, Instant)>,
+    /// Your floors going up, by plot: the storey and when it's up, so the
+    /// toast says when it is. Only those seen going up are kept, so a sign
+    /// in doesn't toast the floors built while you were away.
+    rising: HashMap<Uuid, (i32, capitol_core::chrono::DateTime<capitol_core::chrono::Utc>)>,
+    /// The station a repair is out for (V3.5).
+    repairing: Option<Uuid>,
+    /// Why the last repair was refused, and when.
+    repair_refused: Option<(String, Instant)>,
     /// Plots you claimed since the frame last took them.
     /// Plots claimed since the frame last asked, and whether the deed the
     /// road in earned paid for each (#448).
@@ -403,6 +418,16 @@ pub enum PlotNote {
         station_type: String,
         impounded: Vec<ItemCount>,
     },
+    /// Your `station_type` wore past 25 (it won't work on its own) or to 0
+    /// (out of use) in the weather (V3.5).
+    Worn { station_type: String, condition: i32 },
+    /// You repaired your `station_type`, and it used `used` (V3.5).
+    Repaired { station_type: String, used: Vec<ItemCount> },
+    /// The `floor`th floor you bought is going up, for `secs` more (V3.5).
+    FloorGoingUp { floor: i32, secs: i64 },
+    /// The `floor`th floor of yours is up, with `room` more stations
+    /// indoors (V3.5).
+    FloorUp { floor: i32, room: i32 },
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -489,6 +514,11 @@ impl Session {
             claiming: None,
             claim_refused: None,
             paying: None,
+            building_floor: None,
+            floor_refused: None,
+            rising: HashMap::new(),
+            repairing: None,
+            repair_refused: None,
             pay_refused: None,
             claimed: Vec::new(),
             claiming_with_grant: false,
@@ -1413,6 +1443,75 @@ impl Session {
         self.paying.is_some()
     }
 
+    /// Builds the next floor on `plot_id` (V3.5), unless one is being
+    /// bought already. The server charges the permit and the goods.
+    pub fn build_floor(&mut self, plot_id: Uuid) {
+        if self.auth.phase() != Phase::InWorld || self.building_floor.is_some() {
+            return;
+        }
+        tracing::info!("plot: building a floor on {plot_id}");
+        self.building_floor = Some(plot_id);
+        self.floor_refused = None;
+        self.net.rest(RestRequest::BuildFloor { plot_id }, FLOOR_TAG);
+    }
+
+    /// A floor is being bought.
+    pub fn building_floor(&self) -> bool {
+        self.building_floor.is_some()
+    }
+
+    /// Why the last floor wasn't built, while it's fresh.
+    pub fn floor_refused(&self, now: Instant) -> Option<&str> {
+        self.floor_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
+    /// Repairs `station_id` to full (V3.5), unless a repair is out. The
+    /// goods come from your pack.
+    pub fn repair_station(&mut self, station_id: Uuid) {
+        if self.auth.phase() != Phase::InWorld || self.repairing.is_some() {
+            return;
+        }
+        tracing::info!("station: repairing {station_id}");
+        self.repairing = Some(station_id);
+        self.repair_refused = None;
+        self.net.rest(RestRequest::RepairStation { station_id }, REPAIR_TAG);
+    }
+
+    /// A repair is out.
+    pub fn repairing(&self) -> bool {
+        self.repairing.is_some()
+    }
+
+    /// Why the last repair was refused, while it's fresh.
+    pub fn repair_refused(&self, now: Instant) -> Option<&str> {
+        self.repair_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
+    /// Your floors that are up since the last frame (V3.5): a toast each.
+    /// Each floor seen going up is kept until the server's clock passes
+    /// its time.
+    fn note_floors_up(&mut self) {
+        let now = self.state.utc_now();
+        let me = self.state.me();
+        for plot in self.state.plots().iter().filter(|p| me.is_some() && p.owner_id == me) {
+            if let Some(at) = plot.floor_ready_at.filter(|at| *at > now && plot.floors > 0) {
+                self.rising.insert(plot.id, (plot.floors, at));
+            }
+        }
+        let up: Vec<Uuid> = self.rising.iter().filter(|(_, (_, at))| *at <= now).map(|(id, _)| *id).collect();
+        for id in up {
+            let Some((floor, _)) = self.rising.remove(&id) else { continue };
+            let room = self.state.plot(id).and_then(|p| p.indoor_room).unwrap_or(0);
+            self.plot_notes.push(PlotNote::FloorUp { floor, room });
+        }
+    }
+
     /// Why the server refused the last tax payment, for a few seconds after.
     pub fn pay_refused(&self, now: Instant) -> Option<&str> {
         self.pay_refused
@@ -2296,6 +2395,21 @@ impl Session {
         self.placing.as_ref()
     }
 
+    /// Ask for the storey `by` above (or below) the one the placement is on
+    /// (PgUp and PgDn, V3.5).
+    pub fn step_storey(&mut self, by: i32) {
+        if let Some(placing) = &mut self.placing {
+            placing.step_storey(by);
+        }
+    }
+
+    /// Aim the placement at `at` (server units): its storey held to the
+    /// building there, and where it would stand (V3.5).
+    pub fn aim_placing(&mut self, at: [f64; 2], terrain: Option<&TerrainResponse>) -> Option<station::Spot> {
+        let placing = self.placing.as_mut()?;
+        Some(placing.aim(at, &self.state, terrain))
+    }
+
     /// A click at `(x, y)` server units while placing: put the station there,
     /// if it can go there. `terrain` tells open ground from a lot (#187).
     pub fn place(&mut self, now: Instant, x: f64, y: f64, terrain: Option<&TerrainResponse>) {
@@ -2895,6 +3009,49 @@ impl Session {
                 NetEvent::Rest(tag, Err(e)) if *tag > CHART_TAG => {
                     tracing::warn!("market: the chart's history failed: {e}");
                 }
+                NetEvent::Rest(FLOOR_TAG, Ok(RestResponse::BuildFloor(built))) => {
+                    tracing::info!(
+                        "plot: floor {} going up on {}, {} Strands left",
+                        built.plot.floors,
+                        built.plot.id,
+                        built.new_balance
+                    );
+                    self.building_floor = None;
+                    let secs = built
+                        .plot
+                        .floor_ready_at
+                        .map_or(0, |at| (at - self.state.utc_now()).num_seconds().max(0));
+                    self.plot_notes.push(PlotNote::FloorGoingUp { floor: built.plot.floors, secs });
+                }
+                NetEvent::Rest(FLOOR_TAG, result) => {
+                    let why = match result {
+                        Err(e) => refusal(e),
+                        Ok(_) => "The server's answer didn't make sense".into(),
+                    };
+                    tracing::info!("plot: floor refused: {why}");
+                    self.floor_refused = Some((why, now));
+                    if let Some(plot_id) = self.building_floor.take() {
+                        self.net.rest(RestRequest::Plot { plot_id }, PLOT_TAG);
+                    }
+                }
+                NetEvent::Rest(REPAIR_TAG, Ok(RestResponse::RepairStation(repaired))) => {
+                    tracing::info!("station: repaired {}", repaired.station_id);
+                    self.repairing = None;
+                    let station_type = self
+                        .state
+                        .station(repaired.station_id)
+                        .map_or_else(String::new, |s| s.station_type.clone());
+                    self.plot_notes.push(PlotNote::Repaired { station_type, used: repaired.used.clone() });
+                }
+                NetEvent::Rest(REPAIR_TAG, result) => {
+                    let why = match result {
+                        Err(e) => refusal(e),
+                        Ok(_) => "The server's answer didn't make sense".into(),
+                    };
+                    tracing::info!("station: repair refused: {why}");
+                    self.repair_refused = Some((why, now));
+                    self.repairing = None;
+                }
                 NetEvent::Rest(PAY_TAX_TAG, Ok(RestResponse::PayTax(paid))) => {
                     tracing::info!(
                         "plot: paid tax on {}, {} still owed, {} Strands left",
@@ -3043,6 +3200,19 @@ impl Session {
                         .push(PlotNote::Displaced {
                             station_type: station_type.clone(),
                         }),
+                    // Past 25 an automated station's pause says it already
+                    StateEvent::StationWorn { station_id, station_type, condition } => {
+                        let running = self.state.station(*station_id).is_some_and(|s| {
+                            capitol_core::automation::Status::of(s.automation.as_ref())
+                                == capitol_core::automation::Status::Running
+                        });
+                        if *condition <= 0 || !running {
+                            self.plot_notes.push(PlotNote::Worn {
+                                station_type: station_type.clone(),
+                                condition: *condition,
+                            });
+                        }
+                    }
                     StateEvent::StationCollapsed {
                         station_type,
                         impounded,
@@ -3203,6 +3373,7 @@ impl Session {
             self.tend_board();
             self.tend_work_walk();
             self.tend_wages(now);
+            self.note_floors_up();
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -3288,6 +3459,11 @@ impl Session {
             self.claim_refused = None;
             self.paying = None;
             self.pay_refused = None;
+            self.building_floor = None;
+            self.floor_refused = None;
+            self.rising.clear();
+            self.repairing = None;
+            self.repair_refused = None;
             self.claimed.clear();
             self.plot_notes.clear();
             self.automation_notes.clear();

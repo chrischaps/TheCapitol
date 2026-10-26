@@ -1871,10 +1871,26 @@ fn station_condition_updates_the_station() {
         stations: vec![station(STATION, ME)],
     }));
     assert_eq!(state.station(STATION).map(|s| s.condition), Some(100));
-    state.apply_ws(&M::StationCondition { station_id: STATION, condition: 24 });
+    let worn = |condition| StateEvent::StationWorn { station_id: STATION, station_type: "workbench".into(), condition };
+    // Yours, past 25 and then to 0: each said once (V3.5)
+    assert_eq!(state.apply_ws(&M::StationCondition { station_id: STATION, condition: 24 }), vec![worn(24)]);
     assert_eq!(state.station(STATION).map(|s| s.condition), Some(24));
+    assert_eq!(state.apply_ws(&M::StationCondition { station_id: STATION, condition: 0 }), vec![worn(0)]);
+    // A repair, by its answer and then by everyone's message, says nothing
+    let events = state.apply_rest(&R::RepairStation(capitol_protocol::rest::RepairStationResponse {
+        station_id: STATION,
+        condition: 100,
+        used: vec![],
+    }));
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(state.station(STATION).map(|s| s.condition), Some(100));
+    assert!(state.apply_ws(&M::StationCondition { station_id: STATION, condition: 100 }).is_empty());
     // A station we don't know of is ignored
     state.apply_ws(&M::StationCondition { station_id: CHEST, condition: 0 });
+    // Someone else's wearing out isn't ours to hear of
+    let theirs = Uuid::from_u128(0x7e);
+    state.apply_rest(&R::NearbyStations(NearbyStationsResponse { stations: vec![station(theirs, Uuid::from_u128(0xbee))] }));
+    assert!(state.apply_ws(&M::StationCondition { station_id: theirs, condition: 10 }).is_empty());
 }
 
 #[test]
@@ -2191,6 +2207,25 @@ fn a_tax_warning_and_a_payment_keep_the_picked_plot_true() {
         ]
     );
     assert_eq!(state.picked_plot().unwrap().tax_owed, 20);
+}
+
+/// A floor built (V3.5): the picked plot shows it going up, and the
+/// permit leaves the balance
+#[test]
+fn a_floor_built_keeps_the_picked_plot_true() {
+    let mut state = connected();
+    let mine = plot(Some(ME));
+    state.apply_rest(&R::PlotAt(Some(mine.clone())));
+    let mut built = mine;
+    built.floors = 1;
+    built.floor_ready_at = Some("2026-10-25T12:15:00Z".parse().unwrap());
+    let events = state.apply_rest(&R::BuildFloor(capitol_protocol::rest::BuildFloorResponse {
+        plot: built,
+        new_balance: 600,
+        used: vec![],
+    }));
+    assert_eq!(events, vec![StateEvent::PlotsUpdated, StateEvent::CurrencyChanged { balance: 600 }]);
+    assert_eq!(state.picked_plot().unwrap().floors, 1);
 }
 
 #[test]

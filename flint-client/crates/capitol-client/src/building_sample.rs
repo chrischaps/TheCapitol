@@ -12,12 +12,19 @@
 //!   a kiln or forge among them working, so there's a chimney over it; and
 //!   on a lot with a yard, two out in the weather at falling conditions,
 //!   the last needing repair.
+//! - **Yours, for `--place-sample` (V3.5):** the nearest lot is in the
+//!   store as a plot of yours, with the floors it was dealt, 4 indoors a
+//!   storey and a yard as its zone's median holds (none in the city, 4 in
+//!   the suburb, 10 on a farm), and you stand in its building, so a ghost
+//!   placed there judges its room as the server would.
 
 use crate::world::plots::Lot;
 use capitol_core::net::{ConnectionState, RestResponse};
 use capitol_core::protocol::rest::{
-    AutomationMode, AutomationState, NearbyStationsResponse, RecipesResponse, StationAutomation, StationInfo,
+    AutomationMode, AutomationState, Bounds, ListPlotsResponse, NearbyStationsResponse, PlotInfo, RecipesResponse,
+    StationAutomation, StationInfo,
 };
+use capitol_core::protocol::ws::{PlayerPosition, ServerMessage};
 use capitol_core::protocol::rules::{building, Zone};
 use capitol_core::state::GameState;
 use std::collections::{HashMap, HashSet};
@@ -108,6 +115,52 @@ impl Buildings {
             }
         }
         state.apply_rest(&RestResponse::NearbyStations(NearbyStationsResponse { stations }));
+        // The nearest is yours: in the store as your plot, and you in it
+        if let Some((_, id, corners, f)) = near.first() {
+            let zone = lots[*id].zone;
+            let built = floors.iter().find(|(l, _, _)| l == *id).map_or(0, |(_, k, _)| *k as i32);
+            let yard = match zone {
+                Zone::Urban => 0,
+                Zone::Suburban => 4,
+                _ => 10,
+            };
+            let xs = corners.map(|c| c.0);
+            let ys = corners.map(|c| c.1);
+            let min = |v: [f64; 4]| v.into_iter().fold(f64::MAX, f64::min);
+            let max = |v: [f64; 4]| v.into_iter().fold(f64::MIN, f64::max);
+            let centre = mid(mid(f[0], f[1]), mid(f[2], f[3]));
+            let plot = PlotInfo {
+                guild: None,
+                id: Uuid::from_u128(0x5a_1000),
+                zone_id: zone.as_str().into(),
+                world_x: centre.0,
+                world_y: centre.1,
+                bounds: Bounds::new(min(xs), min(ys), max(xs), max(ys)),
+                size_category: "medium".into(),
+                plot_type: "standard".into(),
+                owner_id: Some(me),
+                owner_name: Some("You".into()),
+                claimed_at: None,
+                assessed_value: 1000,
+                tax_owed: 0,
+                forecloses_at: None,
+                deed_cost: Some(1000),
+                station_count: 6,
+                station_capacity: 4 * (1 + built) + yard,
+                terrain_id: Some((*id).clone()),
+                corners: Some(*corners),
+                indoor_room: Some(4),
+                yard_room: Some(yard),
+                owner_citizen: false,
+                floor_ready_at: None,
+                floors: built,
+                next_floor: None,
+            };
+            state.apply_rest(&RestResponse::Plots(ListPlotsResponse { plots: vec![plot], total: 1 }));
+            state.apply_ws(&ServerMessage::Positions {
+                players: vec![PlayerPosition { id: me, name: "You".into(), x: centre.0, y: centre.1, citizen: false, tag: None }],
+            });
+        }
         Self {
             claimed: near.iter().map(|(_, id, _, _)| (*id).clone()).collect(),
             mine: near.first().map(|(_, id, _, _)| (*id).clone()).into_iter().collect(),
@@ -115,6 +168,24 @@ impl Buildings {
             state,
             time: 0.0,
         }
+    }
+
+    /// Your lot with at least one floor, for `--place-sample` to go up to
+    /// (V3.5): in the drawing and in the store.
+    pub fn give_yours_a_floor(&mut self) {
+        let Some(id) = self.mine.iter().next().cloned() else { return };
+        match self.floors.iter_mut().find(|(l, _, _)| *l == id) {
+            Some((_, built, _)) => *built = (*built).max(1),
+            None => self.floors.push((id.clone(), 1, false)),
+        }
+        let built = self.floors.iter().find(|(l, _, _)| *l == id).map_or(1, |(_, k, _)| *k as i32);
+        let mut plots = self.state.plots().to_vec();
+        for p in plots.iter_mut().filter(|p| p.terrain_id.as_deref() == Some(id.as_str())) {
+            p.station_capacity += 4 * (built - p.floors);
+            p.floors = built;
+        }
+        let total = plots.len() as i64;
+        self.state.apply_rest(&RestResponse::Plots(ListPlotsResponse { plots, total }));
     }
 
     /// Moves on by `dt`: the floor under way finishes at [`FINISH`].
