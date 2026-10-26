@@ -19,9 +19,12 @@
 //! footprint and the stations outside ([`Building`]).
 //!
 //! A building may have floors (V3.3, #475), each another place with the
-//! indoor room again. Every spot here is on the ground, and `taken` is the
-//! stations on the ground: one upstairs takes none of the room below it.
-//! Citizens build upward with #478.
+//! indoor room again. [`spots`] and [`room`] are the ground's, and their
+//! `taken` the stations on the ground: one upstairs takes none of the room
+//! below it. [`spots_for`] and [`room_upstairs`] take the floors that are up
+//! too, each storey packed round its own stations, so a citizen puts its
+//! stations indoors on the ground, then upstairs, then in the yard, and
+//! never a fire upstairs (#478).
 
 use capitol_protocol::rest::PlotInfo;
 use capitol_protocol::rules::{building, Zone};
@@ -29,6 +32,10 @@ use capitol_protocol::terrain::quad_contains;
 
 /// A point in server units.
 type P = (f64, f64);
+
+/// Where a station stands on a lot, and on which storey: 0, the ground, or
+/// the kth floor (V3.3).
+pub type Spot = (P, i32);
 
 /// How far apart stations go on a plot: just over `STATION_MIN_SPACING`.
 pub const SPOT_SPACING: f64 = 55.0;
@@ -152,6 +159,21 @@ impl Building {
         })
     }
 
+    /// The spots on its `open` floors, storey by storey and best first on
+    /// each, round the stations at `upstairs`: as many as each storey's
+    /// indoor room has left, at most `left`.
+    fn upstairs(&self, upstairs: &[Spot], open: i32, left: usize) -> Vec<Spot> {
+        let mut out = Vec::new();
+        for floor in 1..=open.max(0) {
+            let on: Vec<P> = upstairs.iter().filter(|s| s.1 == floor).map(|s| s.0).collect();
+            let free = self.indoor_room.saturating_sub(on.len()).min(left);
+            if free > 0 {
+                out.extend(ordered(self.footprint, &on, free, None).into_iter().map(|p| (p, floor)));
+            }
+        }
+        out
+    }
+
     /// Whether `p` is inside it.
     pub fn contains(&self, p: (f64, f64)) -> bool {
         quad_contains(&self.footprint, p.0, p.1)
@@ -262,6 +284,59 @@ pub fn room(plot: &PlotInfo, taken: &[(f64, f64)]) -> i32 {
     (indoors + yard).min(left(plot)) as i32
 }
 
+/// How many more stations `plot`'s `open` floors take, round the stations
+/// at `upstairs` (those on the ground are left out): each storey's indoor
+/// room less what stands on it, packed as [`room`] packs the ground, all
+/// within what the lot's capacity has left. None on a lot with no building.
+pub fn room_upstairs(plot: &PlotInfo, upstairs: &[Spot], open: i32) -> i32 {
+    let Some(b) = Building::of(plot) else {
+        return 0;
+    };
+    let left = left(plot);
+    let mut n = 0;
+    for floor in 1..=open.max(0) {
+        let on: Vec<P> = upstairs.iter().filter(|s| s.1 == floor).map(|s| s.0).collect();
+        let free = b.indoor_room.saturating_sub(on.len()).min(left);
+        n += pack(&ordered(b.footprint, &on, free, None), &on, free).len();
+    }
+    n.min(left) as i32
+}
+
+/// Every spot on `plot` a station could go, best first, round the stations
+/// at `taken` on their storeys, with `open` floors up (#478): indoors on the
+/// ground, then upstairs, then in the yard. A `fire` (`ground_only`) never
+/// goes upstairs. Any other station goes upstairs before it takes the
+/// ground's last `keep` spots indoors, which are left for the fires still
+/// to come: an urban lot has no yard to put a kiln in. Like [`spots`], they
+/// aren't spaced from each other.
+pub fn spots_for(plot: &PlotInfo, taken: &[Spot], open: i32, fire: bool, keep: usize) -> Vec<Spot> {
+    let ground: Vec<P> = taken.iter().filter(|s| s.1 == 0).map(|s| s.0).collect();
+    let on_ground = |spots: Vec<P>| spots.into_iter().map(|p| (p, 0)).collect::<Vec<Spot>>();
+    let Some(b) = Building::of(plot) else {
+        return on_ground(spots(plot, &ground));
+    };
+    let split = b.split(plot, &ground);
+    let indoors = match split.indoor_left {
+        0 => Vec::new(),
+        n => on_ground(ordered(b.footprint, &split.inside, n, None)),
+    };
+    let yard = match split.yard_left {
+        0 => Vec::new(),
+        n => on_ground(ordered(corners(plot), &split.outside, n, Some(&b.footprint))),
+    };
+    let up = if fire { Vec::new() } else { b.upstairs(taken, open, left(plot)) };
+    let mut out = Vec::new();
+    if fire || split.indoor_left > keep {
+        out.extend(indoors);
+        out.extend(up);
+    } else {
+        out.extend(up);
+        out.extend(indoors);
+    }
+    out.extend(yard);
+    out
+}
+
 /// Whether taking down the `movable` stations on `plot` and putting them back
 /// where [`spots`] packs them leaves room for `still` more, round the
 /// stations at `fixed` (#405). A kiln placed in the middle of a narrow lot
@@ -368,6 +443,63 @@ mod tests {
         plot.station_count = 4;
         assert_eq!(room(&plot, &four), 0);
         assert!(spots(&plot, &four).is_empty());
+    }
+
+    /// A full urban workshop with a floor up: the room upstairs is the
+    /// building's again, packed round what's on that storey, and only a
+    /// floor that's up counts (#478)
+    #[test]
+    fn a_floor_up_has_the_buildings_room_again() {
+        let mut plot = home("urban", 90.0, 93.0, 4, 0);
+        plot.floors = 1;
+        plot.station_capacity = 8;
+        let ground: Vec<Spot> = pack(&spots(&plot, &[]), &[], 4).into_iter().map(|p| (p, 0)).collect();
+        plot.station_count = 4;
+        assert_eq!(room_upstairs(&plot, &ground, 1), 4);
+        assert_eq!(room_upstairs(&plot, &ground, 0), 0, "the floor is still going up");
+        // One upstairs takes its storey's room, not the ground's
+        let up = (ground[0].0, 1);
+        let mut taken = ground.clone();
+        taken.push(up);
+        plot.station_count = 5;
+        assert_eq!(room_upstairs(&plot, &taken, 1), 3);
+        let all = spots_for(&plot, &taken, 1, false, 0);
+        assert!(!all.is_empty() && all.iter().all(|s| s.1 == 1), "{all:?}");
+        assert!(all.iter().all(|s| clear(s.0, up.0)), "spaced round the one upstairs");
+        // A fire has nowhere to go
+        assert!(spots_for(&plot, &taken, 1, true, 0).is_empty());
+        // A lot with no building has no upstairs
+        let mut lot_only = lot(turned(200.0, 145.0, 0.3), 0);
+        lot_only.floors = 1;
+        assert_eq!(room_upstairs(&lot_only, &[], 1), 0);
+    }
+
+    /// Indoors on the ground first, then upstairs, then the yard; but the
+    /// ground's last spots indoors are kept for the fires still to come
+    #[test]
+    fn upstairs_before_the_ground_the_fires_want() {
+        let mut plot = home("suburban", 130.0, 130.0, 4, 3);
+        plot.floors = 1;
+        plot.station_capacity = 11;
+        let b = Building::of(&plot).unwrap();
+        let place = |s: &Spot| match (s.1, b.contains(s.0)) {
+            (0, true) => "ground",
+            (0, false) => "yard",
+            _ => "upstairs",
+        };
+        let order = |spots: Vec<Spot>| {
+            let mut out: Vec<&str> = spots.iter().map(place).collect();
+            out.dedup();
+            out
+        };
+        assert_eq!(order(spots_for(&plot, &[], 1, false, 0)), ["ground", "upstairs", "yard"]);
+        assert_eq!(order(spots_for(&plot, &[], 1, true, 0)), ["ground", "yard"]);
+        // Two down indoors, two fires to come: the bench goes upstairs
+        let two: Vec<Spot> = pack(&ordered(b.footprint, &[], 2, None), &[], 2).into_iter().map(|p| (p, 0)).collect();
+        plot.station_count = 2;
+        assert_eq!(order(spots_for(&plot, &two, 1, false, 2)), ["upstairs", "ground", "yard"]);
+        assert_eq!(order(spots_for(&plot, &two, 1, false, 1)), ["ground", "upstairs", "yard"]);
+        assert_eq!(order(spots_for(&plot, &two, 1, true, 2)), ["ground", "yard"]);
     }
 
     /// Indoors first, then the yard, each spaced only within its own place:

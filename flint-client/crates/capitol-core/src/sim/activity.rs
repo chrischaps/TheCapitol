@@ -176,7 +176,7 @@ impl std::fmt::Display for Activity {
 /// work, not setup.
 pub fn is_setup(catalog: &Catalog, goal: Option<&Goal>, step: &Step) -> bool {
     match step {
-        Step::Claim => true,
+        Step::Claim | Step::Floor | Step::Repair { .. } => true,
         Step::Place { station, .. } => goal != Some(&Goal::Station(station.clone())),
         Step::Craft { recipe, .. } => {
             let Some(made) = catalog

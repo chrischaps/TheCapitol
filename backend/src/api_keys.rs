@@ -177,6 +177,9 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("DELETE", "stations", [_])
         | ("PUT", "stations", [_, "automation"])
         | ("POST", "stations", [_, "automation", "start" | "stop"])
+        // Mending a station the weather wore: a citizen repairs its own on
+        // its key (Plots v2 V3.6, #478)
+        | ("POST", "stations", [_, "repair"])
         // Reading a letter of your own: a citizen does it on the road in (#450)
         | ("POST", "letters", [_, "read"])
         // Working for a wage: a citizen takes the work and stops its shift
@@ -195,6 +198,8 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("DELETE", "bazaar", ["listings", _])
         | ("POST", "plots", [_, "claim" | "pay-tax"])
         | ("PUT", "plots", [_, "permissions"])
+        // Building upward: a permit and goods, as a claim is (V3.6, #478)
+        | ("POST", "plots", [_, "floors"])
         // The hall's board: a citizen posts, claims and delivers on its key
         // (Commons S2.5)
         | ("POST", "commissions", [] | [_, "deliver" | "claim"])
@@ -396,11 +401,13 @@ mod tests {
         assert_eq!(rest(Method::POST, "/stations/abc/automation/start"), Some(Play));
         assert_eq!(rest(Method::POST, "/stations/abc/automation/stop"), Some(Play));
         assert_eq!(rest(Method::POST, "/stations/abc/automation/pause"), None);
+        assert_eq!(rest(Method::POST, "/stations/abc/repair"), Some(Play));
         assert_eq!(rest(Method::POST, "/exchange/deposit"), Some(Trade));
         assert_eq!(rest(Method::POST, "/exchange/withdraw"), Some(Trade));
         assert_eq!(rest(Method::POST, "/plots/abc/claim"), Some(Trade));
         assert_eq!(rest(Method::POST, "/plots/abc/pay-tax"), Some(Trade));
         assert_eq!(rest(Method::PUT, "/plots/abc/permissions"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/plots/abc/floors"), Some(Trade));
         assert_eq!(rest(Method::GET, "/market/orders"), Some(Read));
         assert_eq!(rest(Method::POST, "/market/orders"), Some(Trade));
         assert_eq!(rest(Method::DELETE, "/market/orders/abc"), Some(Trade));

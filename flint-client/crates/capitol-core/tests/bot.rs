@@ -1030,3 +1030,95 @@ fn a_persons_sell_order_fills_in_a_town_within_a_game_hour() {
         }
     }
 }
+
+/// Puts `kind` down from its kit on our first plot, on the first of
+/// `sim::lot::spots_for` that takes it, as a citizen does (#478).
+fn place_on_lot(bot: &mut Bot, kind: &str, kit: &str, open: i32, fire: bool) -> capitol_core::protocol::rest::StationInfo {
+    use capitol_core::sim::lot;
+    let plot = bot.state().plots().first().cloned().expect("a plot");
+    let taken: Vec<lot::Spot> = bot.state().stations().values().map(|s| ((s.x, s.y), s.floor)).collect();
+    let spots = lot::spots_for(&plot, &taken, open, fire, 0);
+    let kit = stack_of(bot, kit);
+    for ((x, y), floor) in spots.into_iter().take(8) {
+        if bot.walk_to(x, y).is_err() {
+            continue;
+        }
+        match bot.place_station_on(kind, kit, x, y, floor) {
+            Ok(placed) => return placed,
+            Err(BotError::Rest { .. }) => continue,
+            Err(e) => panic!("placing a {kind}: {e}"),
+        }
+    }
+    panic!("nowhere took a {kind}");
+}
+
+/// V3.6 (#478), the citizens' floors through `Bot`: an urban lot's four
+/// ground spots take a builder's kiln, forge, sawbench and anvil indoors,
+/// leaving none for its chest. A floor goes up from the goods in the pack
+/// and the permit, and once it's up the chest goes upstairs, where a fire
+/// never would. The server's `SIM_TICK_SCALE` should be 10 or so: at 1 the
+/// floor takes 15 real minutes.
+#[test]
+#[ignore = "needs a local stack with DEV_GRANTS=on and SIM_TICK_SCALE=10: docker-compose up -d, then cargo run in backend/"]
+fn a_builder_fills_an_urban_workshop_and_builds_up_for_its_chest() {
+    use capitol_core::poll::Fetch;
+    use capitol_core::protocol::rest::open_floors;
+    use capitol_core::sim::lot;
+
+    let mut bot = Bot::sign_in(live(), &Account::numbered(&format!("upward{}", stamp()), 1)).expect("signed in");
+    let kits = [("kiln", "kiln_kit"), ("forge", "forge_kit"), ("sawbench", "sawbench_kit"), ("anvil", "anvil_kit")];
+    let mut grant: Vec<(&str, i32, i32)> = kits.iter().map(|&(_, kit)| (kit, 1, 60)).collect();
+    grant.extend([("chest_kit", 1, 60), ("plank", 30, 50), ("brick", 45, 50), ("iron_nails", 15, 50)]);
+    granted(&mut bot, 20_000, &grant);
+
+    // The nearest urban lot with a building
+    let here = bot.position();
+    let plot = bot
+        .unclaimed_plots("urban", here)
+        .expect("listed urban lots")
+        .into_iter()
+        .find(|p| p.deed_cost.is_some() && lot::Building::of(p).is_some_and(|b| b.indoor_room == 4 && b.yard_room == 0))
+        .expect("an urban lot of 4 indoors");
+    bot.claim_plot(plot.id).expect("claimed");
+    bot.refetch(Fetch::Plots);
+    bot.settle().expect("settled");
+
+    // The four indoors on the ground, and no room left for the chest
+    let ground = lot::Building::of(&plot).unwrap();
+    for (kind, kit) in kits {
+        let fire = matches!(kind, "kiln" | "forge");
+        let placed = place_on_lot(&mut bot, kind, kit, 0, fire);
+        assert!(placed.floor == 0 && ground.contains((placed.x, placed.y)), "{kind} indoors on the ground: {placed:?}");
+    }
+    let mine = bot.state().plots().first().cloned().unwrap();
+    let taken: Vec<lot::Spot> = bot.state().stations().values().map(|s| ((s.x, s.y), s.floor)).collect();
+    assert!(lot::spots_for(&mine, &taken, mine.floors, false, 0).is_empty(), "a full urban lot");
+    let bill = mine.next_floor.clone().expect("an urban lot may go up");
+
+    // The first floor, from the pack and the permit
+    let before = bot.state().strands().unwrap();
+    let built = bot.build_floor(mine.id).expect("built a floor");
+    assert_eq!(built.plot.floors, 1);
+    assert_eq!(built.new_balance, before - bill.permit);
+    let ready = built.plot.floor_ready_at.expect("it goes up over time");
+    // Up, by the server's clock
+    let wait = Instant::now() + Duration::from_secs(300);
+    loop {
+        let now = bot.state().server_time_ms().and_then(chrono::DateTime::from_timestamp_millis).expect("the server's clock");
+        if open_floors(1, Some(ready), now) == 1 {
+            break;
+        }
+        assert!(Instant::now() < wait, "the floor isn't up in 5 minutes: run the server at SIM_TICK_SCALE=10 (up at {ready})");
+        bot.idle(Duration::from_secs(2)).expect("waited");
+    }
+    bot.refetch(Fetch::Plots);
+    bot.settle().expect("settled");
+
+    // A fire has nowhere to go, and the chest goes upstairs
+    let mine = bot.state().plots().first().cloned().unwrap();
+    let taken: Vec<lot::Spot> = bot.state().stations().values().map(|s| ((s.x, s.y), s.floor)).collect();
+    assert!(lot::spots_for(&mine, &taken, 1, true, 0).is_empty(), "no fire upstairs");
+    let chest = place_on_lot(&mut bot, "storage_chest", "chest_kit", 1, false);
+    assert_eq!(chest.floor, 1, "{chest:?}");
+    assert!(ground.contains((chest.x, chest.y)));
+}

@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
-    AutomationMode, BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuyListing, ClosedStall, CollectRequest,
+    AutomationMode, BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuildFloorResponse, BuyListing, ClosedStall, CollectRequest,
     CollectResponse, ConfigureAutomation, DepositRequest, DepositResponse, GrantRequest, GrantResponse,
     HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder, MarketSummaryResponse, MoveItemRequest,
     MyOrdersQuery, MyStallResponse, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest, RentStall,
@@ -1341,12 +1341,25 @@ impl Bot {
         x: f64,
         y: f64,
     ) -> Result<StationInfo, BotError> {
+        self.place_station_on(station_type, kit_item_id, x, y, 0)
+    }
+
+    /// [`place_station`](Self::place_station) on a storey: 0, the ground, or
+    /// the kth floor of the building it's inside (V3.3, #478).
+    pub fn place_station_on(
+        &mut self,
+        station_type: &str,
+        kit_item_id: Uuid,
+        x: f64,
+        y: f64,
+        floor: i32,
+    ) -> Result<StationInfo, BotError> {
         let request = RestRequest::PlaceStation(PlaceStationRequest {
             station_type: station_type.to_string(),
             x,
             y,
             kit_item_id,
-            floor: 0,
+            floor,
         });
         match self.call("placing a station", request)? {
             RestResponse::PlaceStation(placed) => {
@@ -1356,6 +1369,35 @@ impl Bot {
                 Ok(placed.station)
             }
             other => Err(unexpected("placing a station", &other)),
+        }
+    }
+
+    /// Repairs `station_id` from the pack, over REST (V3.2, #478): the server
+    /// takes the bill's goods, lowest grade first. Stand within its reach
+    /// first. Returns its condition after, 100.
+    pub fn repair_station(&mut self, station_id: Uuid) -> Result<i32, BotError> {
+        match self.call("repairing a station", RestRequest::RepairStation { station_id })? {
+            RestResponse::RepairStation(repaired) => {
+                self.refetch(Fetch::Containers);
+                self.settle()?;
+                Ok(repaired.condition)
+            }
+            other => Err(unexpected("repairing a station", &other)),
+        }
+    }
+
+    /// Builds the next floor of our `plot_id`, over REST (V3.3, #478): the
+    /// permit in Strands and the goods from the pack. It goes up over time
+    /// (`floor_ready_at`).
+    pub fn build_floor(&mut self, plot_id: Uuid) -> Result<BuildFloorResponse, BotError> {
+        match self.call("building a floor", RestRequest::BuildFloor { plot_id })? {
+            RestResponse::BuildFloor(built) => {
+                self.refetch(Fetch::Containers);
+                self.refetch(Fetch::Plots);
+                self.settle()?;
+                Ok(built)
+            }
+            other => Err(unexpected("building a floor", &other)),
         }
     }
 

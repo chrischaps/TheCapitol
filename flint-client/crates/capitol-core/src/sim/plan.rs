@@ -18,6 +18,13 @@
 //!   bot not on the road (the sim's swarm) buys its plot with Strands,
 //!   which come from depositing fiber, once it holds [`FLOAT`] over the
 //!   deed's price, so it can still buy and sell after (#294)
+//! - a station the work needs that's worn under 25 is repaired first, once
+//!   the bot holds the goods its repair takes ([`Holdings::worn`], #478)
+//! - a station with no room left for it on the bot's lot goes upstairs: on
+//!   an urban lot whose building may go up, once the bot holds the permit
+//!   and its [`FLOAT`] over it, it makes the floor's goods and builds the
+//!   next floor ([`Holdings::floor`], Plots v2 §5.8, #478). A fire never
+//!   goes upstairs ([`Holdings::upstairs`])
 //!
 //! Since a step is taken before the next is planned, the inputs a craft uses
 //! up (the rope a handle takes, say) are simply missing next time, and made
@@ -62,6 +69,16 @@ pub struct Holdings {
     pub stations: HashSet<String>,
     /// The bot's plot, if it has one: how many more stations it takes.
     pub plot_room: Option<i32>,
+    /// How much of [`plot_room`](Self::plot_room) is upstairs, where a fire
+    /// (`ground_only`) can't go (V3.3, #478).
+    pub upstairs: i32,
+    /// The next floor its lot may go up by (Plots v2 §5.8, #478): on an
+    /// urban lot of its own with a building, and none going up. `None`, it
+    /// builds no floor: outside the city, a swarm bot, or one going up.
+    pub floor: Option<Upward>,
+    /// Its stations under 25 (`rules::weather::NEEDS_REPAIR`), by type, with
+    /// what a repair takes now (V3.2, #478): the work at one waits for it.
+    pub worn: HashMap<String, Vec<(String, i32)>>,
     /// How much of [`plot_room`](Self::plot_room) its calling doesn't want
     /// for its own stations: a station that may stand off a plot goes on
     /// the plot only into this (#499), and so does one its calling doesn't
@@ -106,10 +123,32 @@ impl Holdings {
         self.lot_for.as_ref().is_none_or(|kept| kept.contains(station))
     }
 
+    /// What the next floor takes of `item_type`, while it's building up
+    /// (#478): its lot is full, a floor may go up, and it holds the permit
+    /// and its [`FLOAT`]. A builder keeps that much back from the market.
+    pub fn building_up(&self, item_type: &str) -> i32 {
+        match &self.floor {
+            Some(up) if self.plot_room == Some(0) && self.strands >= up.permit + FLOAT => {
+                up.goods.iter().filter(|(item, _)| item == item_type).map(|(_, n)| n).sum()
+            }
+            _ => 0,
+        }
+    }
+
     /// What its claims still want delivered of `item_type`.
     pub fn promised(&self, item_type: &str) -> i32 {
         self.promised.iter().filter(|(item, _)| item == item_type).map(|(_, n)| n).sum()
     }
+}
+
+/// The next floor a lot may go up by, as the planner needs it: the
+/// permit, the goods and the room it adds upstairs (`PlotInfo::next_floor`,
+/// V3.3).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Upward {
+    pub permit: i64,
+    pub goods: Vec<(String, i32)>,
+    pub room: i32,
 }
 
 /// What a bot is after.
@@ -161,6 +200,10 @@ pub enum Step {
     },
     /// Buy the deed to a plot.
     Claim,
+    /// Build its lot's next floor (#478).
+    Floor,
+    /// Repair its own station of this type (#478).
+    Repair { station: String },
     /// Deposit every fiber stack at the exchange, for Strands.
     Deposit,
 }
@@ -182,6 +225,8 @@ impl Step {
             }
             Step::Place { station, .. } => format!("place {station}"),
             Step::Claim => "claim a plot".into(),
+            Step::Floor => "build a floor".into(),
+            Step::Repair { station } => format!("repair {station}"),
             Step::Deposit => "deposit fiber".into(),
         }
     }
@@ -297,7 +342,7 @@ pub fn setup(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Setu
                         }
                     }
                 }
-                Step::Gather { .. } | Step::Deposit => {}
+                Step::Gather { .. } | Step::Deposit | Step::Floor | Step::Repair { .. } => {}
             }
         }
         take(catalog, &mut h, &step);
@@ -334,6 +379,7 @@ pub(crate) fn take(catalog: &Catalog, h: &mut Holdings, step: &Step) {
             h.stations.insert(station.clone());
             if *on_plot {
                 h.plot_room = h.plot_room.map(|room| room - 1);
+                h.upstairs = h.upstairs.min(h.plot_room.unwrap_or(0).max(0));
                 // One its calling keeps the lot for was wanted already
                 if h.lot_for.is_none() || !h.keeps_room_for(station) {
                     h.plot_spare = (h.plot_spare - 1).max(0);
@@ -348,6 +394,26 @@ pub(crate) fn take(catalog: &Catalog, h: &mut Holdings, step: &Step) {
             }
             h.plot_room = Some(CLAIMED_ROOM);
             h.plot_spare = 0;
+        }
+        // It goes up over time: the estimate takes the room upstairs as
+        // there at once
+        Step::Floor => {
+            if let Some(up) = h.floor.take() {
+                h.strands -= up.permit;
+                for (item, n) in &up.goods {
+                    add(h, item, -n);
+                }
+                h.plot_room = h.plot_room.map(|room| room + up.room);
+                h.plot_spare += up.room;
+                h.upstairs += up.room;
+            }
+        }
+        Step::Repair { station } => {
+            if let Some(bill) = h.worn.remove(station) {
+                for (item, n) in &bill {
+                    add(h, item, -n);
+                }
+            }
         }
         Step::Deposit => {
             let fiber = h.items.remove(FIBER).unwrap_or(0);
@@ -412,6 +478,10 @@ impl<'a> Planner<'a> {
                 let step = self.station(station)?.ok_or_else(|| {
                     Stuck(format!("the {station} is owned but not counted"))
                 });
+                return self.set_up(step);
+            }
+            if let Some(bill) = self.holdings.worn.get(station) {
+                let step = self.repair(station, bill);
                 return self.set_up(step);
             }
         }
@@ -515,7 +585,9 @@ impl<'a> Planner<'a> {
                     station: station.to_string(),
                     on_plot: true,
                 })),
-                Some(_) => Err(Stuck(format!("the plot's room is kept for its calling's stations, not a {station}"))),
+                Some(_) => self.upward(kind.ground_only, || {
+                    Stuck(format!("the plot's room is kept for its calling's stations, not a {station}"))
+                }),
                 None => Err(Stuck(format!("the lot it would buy is for its calling's stations, not a {station}"))),
             };
         }
@@ -523,13 +595,18 @@ impl<'a> Planner<'a> {
         if self.holdings.plot_room.is_none() {
             self.setting_up = true;
         }
-        match self.holdings.plot_room {
+        // A fire has only the ground's room
+        let room = match self.holdings.plot_room {
+            Some(room) if kind.ground_only => Some(room - self.holdings.upstairs),
+            room => room,
+        };
+        match room {
             Some(room) if room > 0 => Ok(Some(Step::Place {
                 kit,
                 station: station.to_string(),
                 on_plot: true,
             })),
-            Some(_) => Err(Stuck(format!("the plot has no room for a {station}"))),
+            Some(_) => self.upward(kind.ground_only, || Stuck(format!("the plot has no room for a {station}"))),
             // The road in's deed is its first plot (#450): nothing saved for it
             None if self.holdings.road_deed == Some(Grant::Open) => Ok(Some(Step::Claim)),
             None if self.holdings.road_deed == Some(Grant::Unearned) => Err(Stuck(format!(
@@ -538,6 +615,41 @@ impl<'a> Planner<'a> {
             None if self.holdings.strands >= self.holdings.deed_cost + FLOAT => Ok(Some(Step::Claim)),
             None => self.strands(self.holdings.deed_cost + FLOAT - self.holdings.strands).map(Some),
         }
+    }
+
+    /// The next step toward room upstairs for a station its lot has no room
+    /// for (Plots v2 §5.8, #478): the next floor's goods, then the floor.
+    /// Only on a lot that may go up ([`Holdings::floor`]), for a station
+    /// that isn't a `fire`, and once it holds the permit and its [`FLOAT`]:
+    /// it never saves for a floor. Otherwise it's `stuck`.
+    fn upward(&mut self, fire: bool, stuck: impl Fn() -> Stuck) -> Result<Option<Step>, Stuck> {
+        let Some(up) = self.holdings.floor.as_ref().filter(|_| !fire) else {
+            return Err(stuck());
+        };
+        if self.holdings.strands < up.permit + FLOAT {
+            let Stuck(why) = stuck();
+            return Err(Stuck(format!("{why} until it holds a floor's permit, {}", up.permit)));
+        }
+        self.setting_up = true;
+        for (item, n) in &up.goods {
+            if let Some(step) = self.obtain(item, *n)? {
+                return Ok(Some(step));
+            }
+        }
+        Ok(Some(Step::Floor))
+    }
+
+    /// The next step toward repairing its `station`: the goods the `bill`
+    /// names, then the repair (#478).
+    fn repair(&mut self, station: &str, bill: &[(String, i32)]) -> Result<Step, Stuck> {
+        for (item, n) in bill {
+            if let Some(step) = self.obtain(item, *n)? {
+                return Ok(step);
+            }
+        }
+        Ok(Step::Repair {
+            station: station.to_string(),
+        })
     }
 
     /// The next step toward `short` more Strands: fiber, then the exchange.
@@ -994,5 +1106,95 @@ mod tests {
                 assert_eq!(role.goal(&catalog, h), role.goals_at(&catalog, h, Commitment::Full)[0], "{role}");
             }
         }
+    }
+
+    // Floors and repairs (Plots v2 §5.8, #478)
+
+    /// An urban builder with its four on a full lot that may go up, its
+    /// chest's kit in hand, and `strands`
+    fn urban_builder(strands: i64) -> Holdings {
+        let mut h = with(holding(&[("chest_kit", 1)]), &["axe", "pickaxe", "hammer", "sickle"], &BUILD[..5]);
+        h.plot_room = Some(0);
+        h.lot_for = Some(crate::sim::LOT_STATIONS.iter().map(|s| s.to_string()).collect());
+        h.strands = strands;
+        h.floor = Some(Upward {
+            permit: 400,
+            goods: vec![("plank".into(), 30), ("brick".into(), 45), ("iron_nails".into(), 15)],
+            room: 4,
+        });
+        h
+    }
+
+    /// A chest with no room for it goes upstairs: with the permit and its
+    /// float, the floor's goods, then the floor, then the chest on it
+    #[test]
+    fn a_full_urban_lot_builds_up_for_the_chest() {
+        let catalog = Catalog::fallback();
+        let chest = Goal::Station("storage_chest".into());
+        // It never saves for a floor
+        let poor = urban_builder(400 + FLOAT - 1);
+        assert!(next(&catalog, &poor, &chest).is_err());
+        assert_eq!(poor.building_up("brick"), 0);
+        // With the permit and its float, the goods first
+        let mut h = urban_builder(400 + FLOAT);
+        assert_eq!(h.building_up("brick"), 45);
+        let first = next(&catalog, &h, &chest).unwrap().unwrap();
+        assert!(matches!(first, Step::Gather { .. } | Step::Craft { .. }), "{first:?}");
+        h.items.extend([("plank".into(), 30), ("brick".into(), 45), ("iron_nails".into(), 15)]);
+        assert_eq!(next(&catalog, &h, &chest), Ok(Some(Step::Floor)));
+        assert!(step(&catalog, &h, &chest).unwrap().unwrap().1, "a floor is setup");
+        // Up, it has the room for the chest, and the permit and goods are spent
+        take(&catalog, &mut h, &Step::Floor);
+        assert_eq!((h.plot_room, h.upstairs, h.strands, h.floor.is_none()), (Some(4), 4, FLOAT, true));
+        assert_eq!(h.count("brick"), 0);
+        assert_eq!(
+            next(&catalog, &h, &chest),
+            Ok(Some(Step::Place {
+                kit: "chest_kit".into(),
+                station: "storage_chest".into(),
+                on_plot: true,
+            }))
+        );
+        // A lot that may not go up (outside the city, or one going up)
+        h = urban_builder(10_000);
+        h.floor = None;
+        assert!(next(&catalog, &h, &chest).is_err());
+    }
+
+    /// A fire has only the ground's room, and never builds up for it
+    #[test]
+    fn a_fire_never_goes_upstairs() {
+        let catalog = Catalog::fallback();
+        let mut h = urban_builder(10_000);
+        h.stations.remove("kiln");
+        h.items.insert("kiln_kit".into(), 1);
+        h.items.extend([("plank".into(), 30), ("brick".into(), 45), ("iron_nails".into(), 15)]);
+        h.plot_room = Some(4);
+        h.upstairs = 4;
+        let kiln = Goal::Station("kiln".into());
+        assert!(next(&catalog, &h, &kiln).is_err());
+        h.upstairs = 3;
+        assert!(matches!(next(&catalog, &h, &kiln), Ok(Some(Step::Place { on_plot: true, .. }))));
+    }
+
+    /// Work at a station worn under 25 mends it first, once it holds the
+    /// repair's goods, and makes them if it doesn't
+    #[test]
+    fn work_at_a_worn_station_repairs_it_first() {
+        let catalog = Catalog::fallback();
+        let mut h = with(holding(&[("log", 4)]), &["axe", "pickaxe", "hammer", "sickle"], &["workbench", "sawbench"]);
+        let planks = Goal::hold("plank", 1);
+        let sound = next(&catalog, &h, &planks).unwrap().unwrap();
+        assert!(matches!(sound, Step::Craft { .. }), "{sound:?}");
+        h.worn.insert("sawbench".into(), vec![("log".into(), 1)]);
+        let repair = Step::Repair { station: "sawbench".into() };
+        assert_eq!(next(&catalog, &h, &planks), Ok(Some(repair.clone())));
+        take(&catalog, &mut h, &repair);
+        assert_eq!((h.count("log"), h.worn.is_empty()), (3, true));
+        assert_eq!(next(&catalog, &h, &planks), Ok(Some(sound)));
+        // Without the goods, they come first
+        h.worn.insert("sawbench".into(), vec![("rope".into(), 1)]);
+        let step = next(&catalog, &h, &planks).unwrap().unwrap();
+        assert!(!matches!(step, Step::Repair { .. } | Step::Craft { station: Some(_), .. }), "{step:?}");
     }
 }

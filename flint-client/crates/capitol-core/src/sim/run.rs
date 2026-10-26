@@ -51,7 +51,7 @@ use uuid::Uuid;
 
 use super::activity::{self, Activity};
 use super::lot;
-use super::plan::{Goal, Holdings, Step, FLOAT};
+use super::plan::{Goal, Holdings, Step, Upward, FLOAT};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{is_tool, watched, Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError, NO_WAY};
@@ -78,6 +78,13 @@ pub(super) const DEFAULT_DEED: i64 = 500;
 const PLOT_ZONES: [&str; 2] = ["rural", "suburban"];
 /// The most spots on its lot a bot walks to before it gives up on placing.
 const PLACE_TRIES: usize = 8;
+/// A citizen home for the night repairs its stations on its lot under this,
+/// when it holds what the repair takes (Plots v2 §5.8, #478). Under 25 its
+/// work at one makes the goods first ([`Holdings::worn`]).
+const MEND_BELOW: i32 = 50;
+/// How long a station whose repair the server refused is left alone, in
+/// game hours (#478).
+const REPAIR_RETRY_HOURS: f64 = 1.0;
 /// Walks out to look for a resource before the gather gives up.
 const MAX_EXPLORES: usize = 6;
 /// Spots an explore picks before it gives up on ones it has no way to.
@@ -478,6 +485,10 @@ struct SimBot {
     /// Tools its standing bids bought since it last collected its market
     /// box (K2.1): they wait there, not in its pack.
     boxed_tools: std::collections::HashSet<String>,
+    /// Its stations whose repair the server refused, by type, and when, in
+    /// the run's game hours (#478): left for [`REPAIR_RETRY_HOURS`], so a
+    /// refusal isn't asked again every round.
+    refused_repairs: HashMap<String, f64>,
 }
 
 /// What a bot does next.
@@ -550,6 +561,7 @@ impl SimBot {
             last_detour: None,
             tools_looked: None,
             boxed_tools: Default::default(),
+            refused_repairs: HashMap::new(),
         }
     }
 
@@ -1026,6 +1038,14 @@ impl SimBot {
                 }
             }
         }
+        // Home, its stations there that the weather has worn (#478)
+        if !town.stopped() {
+            match self.mend() {
+                Ok(_) => {}
+                Err(e) if e.is_final() => return Err(e),
+                Err(e) => town.health(|h| h.failed(format!("repairing its stations: {e}"))),
+            }
+        }
         Ok(())
     }
 
@@ -1394,8 +1414,30 @@ impl SimBot {
         h.stations.extend(self.stations.keys().cloned());
         // What fits on the lot, not just its capacity: a narrow suburban lot
         // runs out of ground first (#305). One that would take the rest of
-        // its chain packed again is ([`Self::repack`], #405)
-        h.plot_room = state.plots().first().map(|p| lot::room(p, &self.stations_at()));
+        // its chain packed again is ([`Self::repack`], #405). Its floors
+        // that are up have their own room, where no fire goes (#478)
+        let now = self.server_now();
+        if let Some(plot) = state.plots().first() {
+            let left = (plot.station_capacity - plot.station_count).max(0);
+            let upstairs = lot::room_upstairs(plot, &self.stations_placed(), plot.open_floors(now));
+            let room = (lot::room(plot, &self.stations_at()) + upstairs).min(left);
+            h.plot_room = Some(room);
+            h.upstairs = upstairs.min(room);
+            h.floor = self.upward(plot, now);
+        }
+        // Its own under 25: the work at one mends it first (#478), but not
+        // one whose repair was refused lately
+        let now_hours = self.now();
+        for (kind, s) in &self.stations {
+            let condition = state.station(s.id).map_or(s.condition, |s| s.condition);
+            let refused = self.refused_repairs.get(kind).is_some_and(|&at| now_hours - at < REPAIR_RETRY_HOURS);
+            if condition < capitol_protocol::rules::weather::NEEDS_REPAIR && !refused {
+                let bill = repair_bill(catalog, kind, condition);
+                if !bill.is_empty() {
+                    h.worn.insert(kind.clone(), bill);
+                }
+            }
+        }
         // Past what its calling still wants for its own, the room a
         // workbench may take, so it stays home (#499), and a dabble's
         // station outside its calling (D6)
@@ -1418,6 +1460,32 @@ impl SimBot {
             .sum();
         h.tools_on_sale = stalled as i32 + booked;
         h
+    }
+
+    /// The next floor its `plot` may go up by (Plots v2 §5.8, #478): a
+    /// citizen's urban lot with a building, and none going up. Not outside
+    /// the city, where the yard is cheap room, nor for a swarm bot, so the
+    /// E2.7 sim's numbers stay comparable.
+    fn upward(&self, plot: &capitol_protocol::rest::PlotInfo, now: chrono::DateTime<chrono::Utc>) -> Option<Upward> {
+        if self.persona.is_none() || Zone::from_str(&plot.zone_id) != Some(Zone::Urban) || plot.open_floors(now) < plot.floors {
+            return None;
+        }
+        let bill = plot.next_floor.as_ref()?;
+        Some(Upward {
+            permit: bill.permit,
+            goods: bill.goods.iter().map(|g| (g.item_type.clone(), g.quantity)).collect(),
+            room: plot.indoor_room.unwrap_or(0).max(0),
+        })
+    }
+
+    /// The server's clock now, or this machine's before it's known.
+    fn server_now(&self) -> chrono::DateTime<chrono::Utc> {
+        let ms = self.bot.state().server_time_ms().unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64)
+        });
+        chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default()
     }
 
     /// How many of its calling's stations for a lot it has yet to place
@@ -1451,7 +1519,7 @@ impl SimBot {
             .map(|(kind, s)| (kind.clone(), state.station(s.id).cloned().unwrap_or_else(|| s.clone())))
             .collect();
         let (moving, staying): (Vec<_>, Vec<_>) =
-            ours.into_iter().partition(|(_, s)| idle(s) && plot.contains(s.x, s.y));
+            ours.into_iter().partition(|(_, s)| idle(s) && s.floor == 0 && plot.contains(s.x, s.y));
         if moving.is_empty() {
             return Ok(0);
         }
@@ -1525,6 +1593,8 @@ impl SimBot {
                 on_plot,
             } => self.place(kit, station, *on_plot),
             Step::Claim => self.claim(),
+            Step::Floor => self.build_floor(),
+            Step::Repair { station } => self.repair(station),
             Step::Deposit => {
                 let deposit = self.bot.deposit_fiber()?;
                 self.entries.push(Entry::Deposited {
@@ -1806,7 +1876,7 @@ impl SimBot {
             .inventory()
             .and_then(|inv| inv.items().find(|i| i.item_type == kit).map(|i| i.item_id))
             .ok_or_else(|| BotError::Failed(format!("no {kit} in the inventory")))?;
-        let spots: Vec<(f64, f64)> = if on_plot {
+        let spots: Vec<lot::Spot> = if on_plot {
             let plot = self
                 .bot
                 .state()
@@ -1814,12 +1884,21 @@ impl SimBot {
                 .first()
                 .cloned()
                 .ok_or_else(|| BotError::Failed("no plot".into()))?;
-            // The lot's own shape, not its box, packed round what's on it (#305)
-            let mut spots = lot::spots(&plot, &self.stations_at());
+            // The lot's own shape, not its box, packed round what's on it
+            // (#305): indoors, then upstairs, then the yard (#478), and the
+            // ground's last indoor spots left for the fires still to come
+            let catalog = self.bot.state().catalog();
+            let fire = |kind: &str| catalog.station_type(kind).is_some_and(|t| t.ground_only);
+            let keep = super::stint::lot_for(&self.calling)
+                .into_iter()
+                .filter(|&kind| kind != station && fire(kind) && !self.stations.contains_key(kind))
+                .count();
+            let open = plot.open_floors(self.server_now());
+            let mut spots = lot::spots_for(&plot, &self.stations_placed(), open, fire(station), keep);
             spots.truncate(PLACE_TRIES);
             spots
         } else {
-            off_lot_spots(self.bot.position(), &self.stations_at())
+            off_lot_spots(self.bot.position(), &self.stations_at()).into_iter().map(|p| (p, 0)).collect()
         };
         if spots.is_empty() {
             return Err(BotError::Failed(format!("no room on the plot for a {station}")));
@@ -1828,7 +1907,7 @@ impl SimBot {
         let mut passed: Vec<String> = Vec::new();
         let tried = spots.len();
         let mut last = None;
-        for (x, y) in spots {
+        for ((x, y), floor) in spots {
             match self.bot.walk_to(x, y) {
                 Ok(()) => {}
                 Err(e @ BotError::Blocked { .. }) => {
@@ -1838,7 +1917,7 @@ impl SimBot {
                 }
                 Err(e) => return Err(e),
             }
-            match self.bot.place_station(station, kit_id, x, y) {
+            match self.bot.place_station_on(station, kit_id, x, y, floor) {
                 Ok(placed) => {
                     self.stations.insert(station.to_string(), placed);
                     return Ok(());
@@ -1863,17 +1942,102 @@ impl SimBot {
 
     /// Where the stations it knows of stand on the ground: its own, and
     /// those it has seen nearby. One upstairs (V3.3) is in a place of its
-    /// own, over the spots a citizen packs, which are all on the ground
-    /// until citizens build floors (#478).
+    /// own, over the ground's spots ([`Self::stations_placed`]).
     fn stations_at(&self) -> Vec<(f64, f64)> {
+        self.stations_placed().into_iter().filter(|s| s.1 == 0).map(|s| s.0).collect()
+    }
+
+    /// Where the stations it knows of stand, each on its storey (#478).
+    fn stations_placed(&self) -> Vec<lot::Spot> {
         self.bot
             .state()
             .stations()
             .values()
             .chain(self.stations.values())
-            .filter(|s| s.floor == 0)
-            .map(|s| (s.x, s.y))
+            .map(|s| ((s.x, s.y), s.floor))
             .collect()
+    }
+
+    /// Builds its lot's next floor (Plots v2 §5.8, #478), for a station its
+    /// chain needs and its lot has no room for.
+    fn build_floor(&mut self) -> Result<(), BotError> {
+        let plot = self.bot.state().plots().first().map(|p| p.id).ok_or_else(|| BotError::Failed("no plot".into()))?;
+        self.bot.build_floor(plot)?;
+        Ok(())
+    }
+
+    /// Repairs its own `kind` of station, at it (#478).
+    fn repair(&mut self, kind: &str) -> Result<(), BotError> {
+        let s = self.stations.get(kind).cloned().ok_or_else(|| BotError::Failed(format!("no {kind} of ours is known")))?;
+        self.bot.walk_to(s.x, s.y + 10.0)?;
+        let condition = match self.bot.repair_station(s.id) {
+            Ok(condition) => condition,
+            Err(e @ BotError::Rest { .. }) => {
+                self.refused_repairs.insert(kind.to_string(), self.now());
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
+        self.refused_repairs.remove(kind);
+        if let Some(ours) = self.stations.get_mut(kind) {
+            ours.condition = condition;
+        }
+        Ok(())
+    }
+
+    /// Home for the night, repairs its stations on its lot that are under
+    /// [`MEND_BELOW`], those it holds the goods for (Plots v2 §5.8, #478).
+    /// One under 25 it hasn't the goods for waits for its work, which makes
+    /// them ([`Holdings::worn`]). How many it repaired.
+    fn mend(&mut self) -> Result<usize, BotError> {
+        let state = self.bot.state();
+        let Some(plot) = state.plots().first().cloned() else {
+            return Ok(0);
+        };
+        let catalog = state.catalog().clone();
+        let holdings = self.holdings();
+        let mut due: Vec<(String, i32)> = self
+            .stations
+            .iter()
+            .map(|(kind, s)| (kind, state.station(s.id).unwrap_or(s)))
+            .filter(|(_, s)| s.condition < MEND_BELOW && plot.contains(s.x, s.y))
+            .map(|(kind, s)| (kind.clone(), s.condition))
+            .collect();
+        // The most worn first, while the goods last
+        due.sort_by_key(|&(_, condition)| condition);
+        let (began, day) = (self.now(), self.day());
+        let mut held = holdings.items;
+        let mut mended = 0;
+        for (kind, condition) in due {
+            let bill = repair_bill(&catalog, &kind, condition);
+            if bill.is_empty() || bill.iter().any(|(item, n)| held.get(item).copied().unwrap_or(0) < *n) {
+                continue;
+            }
+            match self.repair(&kind) {
+                Ok(()) => {
+                    for (item, n) in &bill {
+                        *held.entry(item.clone()).or_insert(0) -= n;
+                    }
+                    mended += 1;
+                }
+                // Refused (its bill came out one more than ours, say): left
+                // for another night
+                Err(BotError::Rest { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // In the report's steps, so a soak shows repairs and when
+        if mended > 0 {
+            self.entries.push(Entry::Spent {
+                label: format!("repair its stations ({mended})"),
+                hours: self.now() - began,
+                ok: true,
+                activity: Activity::Building,
+                setup: true,
+                day,
+            });
+        }
+        Ok(mended)
     }
 
     /// Takes down its own stations near it that stand off its lot (#488).
@@ -2130,6 +2294,15 @@ fn ring(x: f64, y: f64, r: f64) -> Vec<(f64, f64)> {
 fn still_wanted(calling: &Calling, owned: impl Fn(&str) -> bool) -> i32 {
     let placed = super::stint::lot_for(calling).into_iter().filter(|kind| owned(kind)).count() as i32;
     (super::stint::room_for(calling) - placed).max(0)
+}
+
+/// What a repair of a `station` type at `condition` takes, as the server
+/// will bill it or more (#478): the condition shown is the server's rounded
+/// up, so a bill at the shown one can come out one under the server's
+/// (`station::repair`), and a citizen holding just that would be refused
+/// every round. Billed a point more worn, it never is.
+fn repair_bill(catalog: &Catalog, station: &str, condition: i32) -> Vec<(String, i32)> {
+    crate::station::repair::bill(catalog, catalog.recipes(), station, (condition - 1).max(0))
 }
 
 /// A lot as a round's holdings see it (Callings D6): the stations its room

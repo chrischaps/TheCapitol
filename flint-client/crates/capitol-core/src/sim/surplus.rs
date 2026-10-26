@@ -59,9 +59,10 @@ pub fn selling(job: Role, holdings: &Holdings, goal: Option<&Goal>) -> bool {
 /// What a citizen at `doing` has spare to sell, of the goods the hall
 /// trades, the most first (ties in [`MARKET_ITEMS`]' order, then
 /// [`TOOLS`]'): what it holds less what its claims still want, the job at
-/// hand's inputs, its product unless it's `selling` it, and a [`STOCK`] of
-/// what its other `willing` jobs use. Of each tool, all but one (K2.1).
-/// Never a good with none spare.
+/// hand's inputs, its product unless it's `selling` it, a builder's next
+/// floor's goods while it builds up ([`Holdings::building_up`]), and a
+/// [`STOCK`] of what its other `willing` jobs use. Of each tool, all but
+/// one (K2.1). Never a good with none spare.
 pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role]) -> Vec<(&'static str, i32)> {
     let mut out: Vec<(&'static str, i32)> = MARKET_ITEMS
         .into_iter()
@@ -71,7 +72,9 @@ pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role]) 
                 return None;
             }
             let others = willing.iter().any(|&job| job != doing && job.uses().contains(&item));
-            let keep = holdings.promised(item) + if others { STOCK } else { 0 };
+            // A builder building up keeps the floor's goods (#478)
+            let floor = if doing == Role::Builder { holdings.building_up(item) } else { 0 };
+            let keep = holdings.promised(item) + floor + if others { STOCK } else { 0 };
             let n = holdings.count(item) - keep;
             (n > 0).then_some((item, n))
         })
@@ -162,6 +165,28 @@ mod tests {
         assert_eq!(spare(&h, WOOD, true, &[WOOD]), [("iron_ore", 18)]);
         // Owed with some kept for a job besides
         assert!(spare(&h, WOOD, true, &[WOOD, INGOTS]).is_empty());
+    }
+
+    /// A builder building up keeps the floor's bricks back from the
+    /// market, and sells the rest (#478)
+    #[test]
+    fn a_builder_building_up_keeps_the_floors_bricks() {
+        let mut h = holding(&[("brick", 60)]);
+        h.plot_room = Some(0);
+        h.strands = 600;
+        h.floor = Some(crate::sim::plan::Upward {
+            permit: 400,
+            goods: vec![("plank".into(), 30), ("brick".into(), 45)],
+            room: 4,
+        });
+        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder]), [("brick", 15)]);
+        // Not at the builder's job, nor without the permit, nor with room
+        assert_eq!(spare(&h, WOOD, true, &[WOOD]), [("brick", 60)]);
+        h.strands = 300;
+        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder]), [("brick", 60)]);
+        h.strands = 600;
+        h.plot_room = Some(1);
+        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder]), [("brick", 60)]);
     }
 
     #[test]
