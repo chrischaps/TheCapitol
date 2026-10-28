@@ -49,7 +49,7 @@ use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
 use uuid::Uuid;
 
-use capitol_protocol::rules::stacking::Pick;
+use capitol_protocol::rules::stacking::{Pick, Units};
 
 use super::activity::{self, Activity};
 use super::grade;
@@ -1705,11 +1705,14 @@ impl SimBot {
     }
 
     fn trade_at_the_hall(&mut self, trade: &Trade) -> Result<(), BotError> {
-        let mut stands = matches!(trade, Trade::Sell { stands: true, .. });
-        let order = match trade {
-            Trade::Sell { item, quantity, price, .. } => {
+        // Each order, and whether it stands rather than waits for a fill
+        let mut orders: Vec<(PlaceOrder, bool)> = Vec::new();
+        match trade {
+            Trade::Sell { item, quantity, price, stands } => {
                 // Its work keeps the best of what it uses for its own crafts
                 let keeps_best = self.job().uses().contains(&item.as_str()) || self.wants().contains(&item.as_str());
+                // What its claims want stays in hand
+                let free = !self.board.promised().iter().any(|(i, _)| i == item);
                 let holdings = self.holdings();
                 let state = self.bot.state();
                 // The biggest stack; of tools, which don't stack, the
@@ -1725,34 +1728,7 @@ impl SimBot {
                     })
                     .cloned()
                     .ok_or_else(|| BotError::Failed(format!("no {item} to sell")))?;
-                let (price, quantity, qualities) = if is_tool(item) {
-                    (people::worn_price(*price, &stack), (*quantity).min(stack.quantity), None)
-                } else {
-                    // A good sells by grade (#429): one grade's units, named,
-                    // at that grade's price
-                    let market = state.market();
-                    let book = market.book(item);
-                    let at = grade::sale_quality(book, market.trades(item).next().map(|t| t.quality));
-                    let asking = market.open_orders().iter().any(|o| o.side == OrderSide::Sell && &o.item_type == item);
-                    let most = (*quantity).min(stack.quantity);
-                    let lot = super::sell_at(item);
-                    let Some(sale) = grade::plan_sale(&stack.units, most, lot, *price, at, book, keeps_best, asking) else {
-                        // Its ask is up, and no bid takes anything else at its price
-                        return Ok(());
-                    };
-                    // The listing fee is paid as it's placed (#294)
-                    let mut n = sale.units.count() as i32;
-                    while n > 0 && holdings.fees.listing_fee(sale.price * n as i64) > holdings.strands {
-                        n -= 1;
-                    }
-                    let pick = if keeps_best { Pick::Lowest } else { Pick::Best };
-                    let Some(units) = sale.units.pick(n, pick) else {
-                        return Ok(());
-                    };
-                    stands |= sale.stands;
-                    (sale.price, n, Some(units))
-                };
-                PlaceOrder {
+                let sell = |price: i64, quantity: i32, qualities: Option<Units>| PlaceOrder {
                     side: OrderSide::Sell,
                     item_type: item.clone(),
                     price,
@@ -1762,42 +1738,79 @@ impl SimBot {
                     min_grade: None,
                     grade_rule: None,
                     min_durability: None,
+                };
+                if is_tool(item) {
+                    let price = people::worn_price(*price, &stack);
+                    orders.push((sell(price, (*quantity).min(stack.quantity), None), *stands));
+                } else {
+                    // A good sells by grade (#429): its lowest into the bids,
+                    // a grade someone bids for into that bid, and its best
+                    // standing at its premium, every unit named
+                    let market = state.market();
+                    let plan = grade::plan_sale(
+                        &stack.units,
+                        (*quantity).min(stack.quantity),
+                        super::sell_at(item),
+                        *price,
+                        market.book(item),
+                        market.trades(item).next().map(|t| t.quality),
+                        keeps_best,
+                        market.open_orders().iter().any(|o| o.side == OrderSide::Sell && &o.item_type == item),
+                        free,
+                    );
+                    // The listing fee is paid as each is placed (#294)
+                    let mut strands = holdings.strands;
+                    let pick = if keeps_best { Pick::Lowest } else { Pick::Best };
+                    for (sale, standing) in [(plan.stand, true), (plan.sell, false)] {
+                        let Some(sale) = sale else { continue };
+                        let mut n = sale.units.count() as i32;
+                        while n > 0 && holdings.fees.listing_fee(sale.price * n as i64) > strands {
+                            n -= 1;
+                        }
+                        let Some(units) = sale.units.pick(n, pick) else { continue };
+                        strands -= holdings.fees.listing_fee(sale.price * n as i64);
+                        orders.push((sell(sale.price, n, Some(units)), standing));
+                    }
                 }
             }
             Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket | Trade::Post { .. } | Trade::Shop { .. } | Trade::Collect => {
                 return Err(BotError::Failed(format!("{} isn't a trade at the hall", trade.label())))
             }
-            Trade::Buy { item, quantity, price } => PlaceOrder {
-                side: OrderSide::Buy,
-                item_type: item.clone(),
-                price: *price,
-                quantity: *quantity,
-                item_id: None,
-                qualities: None,
-                min_grade: None,
-                grade_rule: None,
-                min_durability: self.uses_wanted(item, *price),
-            },
-        };
-        let placed = self.bot.place_order(order)?;
-        let id = placed.id;
-        // An ask to open the book stands, till it fills or goes stale (#501),
-        // and so does a grade nobody bids its price for (#429)
-        if stands {
-            self.mind.placed(id);
-            return Ok(());
+            Trade::Buy { item, quantity, price } => orders.push((
+                PlaceOrder {
+                    side: OrderSide::Buy,
+                    item_type: item.clone(),
+                    price: *price,
+                    quantity: *quantity,
+                    item_id: None,
+                    qualities: None,
+                    min_grade: None,
+                    grade_rule: None,
+                    min_durability: self.uses_wanted(item, *price),
+                },
+                false,
+            )),
         }
-        let closed = |s: &crate::state::GameState| s.market().order(id).is_some_and(|o| o.status != OrderStatus::Open);
-        if self.bot.until("a fill", FILL_WAIT, |s, _| closed(s)).is_err() {
-            match self.bot.cancel_order(id) {
-                Ok(_) => {}
-                // It filled as we asked
-                Err(BotError::Rest { source, .. }) if source.status().is_some_and(|s| s < 500) => {}
-                Err(e) => return Err(e),
+        for (order, stands) in orders {
+            let id = self.bot.place_order(order)?.id;
+            // An ask to open the book stands, till it fills or goes stale
+            // (#501), and so does a grade's ask at its premium (#429)
+            if stands {
+                self.mind.placed(id);
+                continue;
             }
+            let closed = |s: &crate::state::GameState| s.market().order(id).is_some_and(|o| o.status != OrderStatus::Open);
+            if self.bot.until("a fill", FILL_WAIT, |s, _| closed(s)).is_err() {
+                match self.bot.cancel_order(id) {
+                    Ok(_) => {}
+                    // It filled as we asked
+                    Err(BotError::Rest { source, .. }) if source.status().is_some_and(|s| s < 500) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            // Bought units, or an unsold remainder, are in the market box
+            self.bot.collect_market_box()?;
         }
-        // Bought units, or an unsold remainder, are in the market box
-        self.bot.collect_market_box()?;
         Ok(())
     }
 
