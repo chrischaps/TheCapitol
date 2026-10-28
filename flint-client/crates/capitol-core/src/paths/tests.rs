@@ -508,6 +508,12 @@ fn print_click_times() {
     let (_, graph) = world();
     let land = graph.ground.land().clone();
     let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    for way in [Way::On, Way::Off] {
+        let start = Instant::now();
+        let reach = graph.reach(way);
+        let reached = reach.toward.iter().filter(|&&t| t != Toward::Nowhere).count();
+        eprintln!("the wilds' reach {way:?}: {reached} cells in {:?}", start.elapsed());
+    }
     let mut rng = 0x2545_f491_4f6c_dd1du64;
     let mut next = || {
         rng ^= rng << 13;
@@ -542,7 +548,8 @@ fn print_click_times() {
 /// At #347, 4439 of 4511, all but 4 of the rest given up on by the grid
 /// (#521), and 4 a leg the server slides on (#520). Since #520, 4443: the
 /// 68 left are all given up on by the grid. Since #567 re-planned the tin
-/// and the outcrops by #520's test, 4460: 51 given up on.
+/// and the outcrops by #520's test, 4460: 51 given up on. Since #521's
+/// flood of the wilds, all 4511, in a quarter of the time.
 #[test]
 #[ignore]
 fn print_wild_node_reach() {
@@ -618,19 +625,28 @@ fn there_and_back(graph: &WalkGraph, nodes: &[(String, Point)]) -> Vec<Result<()
 /// wild nodes: about 100 of 13,500.
 const WILD_SAMPLE: usize = 131;
 
-/// Of the wild nodes the backend planted, a sample walked there and back
-/// (#520): every leg of every route the graph plans, the server walks
-/// straight, with no slide. A route the grid gives up on (#521) has no legs,
-/// so it's left to `print_wild_node_reach`.
+/// Of the wild nodes the backend planted, a sample walked there and back:
+/// the graph finds a way to every one, however far round the crests (#521),
+/// and every leg of it the server walks straight, with no slide (#520).
 #[test]
 fn the_server_walks_every_leg_to_the_wild_nodes() {
     let (_, graph) = world();
     let nodes = wild_nodes(&wilds_sql(), WILD_SAMPLE);
     let outcomes = there_and_back(graph, &nodes);
-    let no_way = |e: &&String| e.ends_with("Unreachable") || e.ends_with("Stranded");
-    let stopped: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).filter(|e| !no_way(e)).collect();
-    let reached = outcomes.iter().filter(|o| o.is_ok()).count();
-    eprintln!("{reached} of {} wild nodes there and back", nodes.len());
-    assert!(stopped.is_empty(), "{} routes the server stopped: {stopped:#?}", stopped.len());
-    assert!(reached * 10 >= nodes.len() * 9, "only {reached} of {} wild nodes reached", nodes.len());
+    let failed: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
+    eprintln!("{} of {} wild nodes there and back", nodes.len() - failed.len(), nodes.len());
+    assert!(failed.is_empty(), "{} not: {failed:#?}", failed.len());
+}
+
+/// The wild nodes the grid's search gave up on (#521), far round the crests
+/// of the eastern ranges from a trail, and one in the west: there and back
+/// by the wilds' flood.
+#[test]
+fn the_nodes_far_round_the_crests_go_there_and_back() {
+    let (_, graph) = world();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    for node in [(15678.2, 5647.9), (15850.2, 5970.6), (16101.4, 6211.3), (15418.6, 5081.3), (3050.8, 4418.3)] {
+        walk(graph, hall, node);
+        walk(graph, node, hall);
+    }
 }

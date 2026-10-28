@@ -49,7 +49,7 @@ pub struct TerrainSource {
 #[derive(Default)]
 struct Walks {
     built: Option<Arc<WalkGraph>>,
-    building: Option<mpsc::Receiver<WalkGraph>>,
+    building: Option<mpsc::Receiver<Arc<WalkGraph>>>,
 }
 
 impl Walks {
@@ -60,9 +60,13 @@ impl Walks {
         let (tx, rx) = mpsc::channel();
         let spawned = std::thread::Builder::new().name("walk-graph".into()).spawn(move || {
             let start = Instant::now();
-            let graph = WalkGraph::new(&terrain);
+            let graph = Arc::new(WalkGraph::new(&terrain));
             tracing::info!("walk graph: {} nodes in {:.2?}", graph.len(), start.elapsed());
-            let _ = tx.send(graph);
+            let _ = tx.send(graph.clone());
+            // Then the wilds' reach, so a click into them needn't wait for it (#521)
+            let start = Instant::now();
+            graph.warm();
+            tracing::info!("walk graph: the wilds' reach in {:.2?}", start.elapsed());
         });
         if let Err(e) = spawned {
             tracing::warn!("walk graph: couldn't start its thread ({e}); walks go straight");
@@ -74,7 +78,7 @@ impl Walks {
         if let Some(rx) = &self.building {
             match rx.try_recv() {
                 Ok(graph) => {
-                    self.built = Some(Arc::new(graph));
+                    self.built = Some(graph);
                     self.building = None;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}

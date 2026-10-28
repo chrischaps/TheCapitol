@@ -21,9 +21,10 @@
 //!   server's own test, run along the line more finely than the server's
 //!   steps, so a leg it lets through the server walks from wherever on it
 //!   the walk begins (#280). Otherwise it joins the graph at the nearest
-//!   nodes in sight (in a straight line, or by A* over a grid when none is:
-//!   a vein up a scree, a valley floor a kilometre from its trail), crosses
-//!   it by A*, and leaves it the same way. Where there's no way,
+//!   nodes in sight (in a straight line, or when none is, by the wilds'
+//!   flood out from the graph, [`Reach`], to a vein up a scree or a valley
+//!   floor a kilometre round the crests from its trail, else by A* over a
+//!   grid), crosses it by A*, and leaves it the same way. Where there's no way,
 //!   [`WalkGraph::plan`] says which end it's at.
 //! - **The waypoints** are pulled tight. A stretch becomes one leg while its
 //!   straight line is walkable, no slower than the way round, and within
@@ -47,7 +48,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use capitol_protocol::land;
 use capitol_protocol::rules::ground::{self, Footing, Ground};
@@ -110,18 +111,27 @@ const GRID_SIGHT: f64 = 30.0;
 /// them all against the ridge.
 const GRID_TARGETS: usize = 16;
 /// The most cells it looks at before it gives up: a pocket of ground walled
-/// by crests, say, where since #347 no wild node is planted. Most ways out
-/// of the ranges take under 9000, but about one wild node in 60 is far
-/// round the crests from a trail and takes more, so it's given up on
-/// ([#521](https://github.com/chrischaps/TheCapitol/issues/521)). Giving up
-/// can take most of a second, which is why the Flint client plans a click
-/// on a thread of its own ([`Planning`], #348).
+/// by crests, say, where since #347 no wild node is planted. About one wild
+/// node in 60 is far enough round the crests from a trail to take more,
+/// which is why the wilds go by [`Reach`] first since #521, and the grid is
+/// left to what the flood doesn't cover: a pond's bank on the farms, or a
+/// pocket. Giving up can take most of a second, which is why the Flint
+/// client plans a click on a thread of its own ([`Planning`], #348).
 const GRID_CELLS: usize = 20_000;
 /// How many of the grid's cells it looks at between asking whether the walk
 /// is still wanted ([`WalkGraph::plan_unless`]).
 const GRID_ASK: usize = 64;
 /// The slowest the cost lets a leg go, as a share of full speed.
 const SLOWEST: f64 = 0.05;
+/// The side of [`Reach`]'s cells: the backend's flood's (#347).
+const REACH_CELL: f64 = 25.0;
+/// How far inside the rural edge [`Reach`] starts, so its cells by the
+/// farms' lanes see their nodes.
+const REACH_MARGIN: f64 = 300.0;
+/// How many cells round a point [`Reach`] looks for one in sight.
+const REACH_AROUND: i64 = 2;
+/// A cell's eight neighbours, as steps along a grid.
+const NEIGHBOURS: [(i64, i64); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
 
 type Point = (f64, f64);
 
@@ -144,6 +154,10 @@ pub struct WalkGraph {
     /// Each node's neighbours, and the cost of the way there.
     edges: Vec<Vec<(u32, f64)>>,
     buckets: HashMap<(i64, i64), Vec<u32>>,
+    /// The walk onto the graph from the wilds, and off it to them (#521),
+    /// flooded the first time a walk needs each.
+    reach_on: OnceLock<Reach>,
+    reach_off: OnceLock<Reach>,
 }
 
 /// Why [`WalkGraph::plan`] found no way.
@@ -155,9 +169,7 @@ pub enum NoWay {
     /// ([#522](https://github.com/chrischaps/TheCapitol/issues/522)).
     Stranded,
     /// No way from the graph to where it ends: in such a pocket, where since
-    /// #347 no wild node is planted, or too far round the crests for the
-    /// grid's search, as about one wild node in 60 is
-    /// ([#521](https://github.com/chrischaps/TheCapitol/issues/521)).
+    /// #347 no wild node is planted, in a lake, or up a crag.
     Unreachable,
 }
 
@@ -243,6 +255,8 @@ impl WalkGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             buckets: HashMap::new(),
+            reach_on: OnceLock::new(),
+            reach_off: OnceLock::new(),
         };
         let mut ids = HashMap::new();
         for road in &terrain.roads {
@@ -595,7 +609,8 @@ impl WalkGraph {
     }
 
     /// The ways between `p` and the graph, running `way`: straight lines to
-    /// the nodes in sight, or one over the grid when none is.
+    /// the nodes in sight, or when none is, the wilds' [`Reach`], or else a
+    /// search over the grid.
     fn access(&self, p: Point, way: Way, gone: &dyn Fn() -> bool) -> Result<Vec<Access>, Gone> {
         for radius in ACCESS_RADII {
             let found: Vec<Access> = self
@@ -610,7 +625,61 @@ impl WalkGraph {
                 return Ok(found);
             }
         }
+        if let Some(access) = self.access_by_reach(p, way) {
+            return Ok(vec![access]);
+        }
         Ok(self.access_by_grid(p, way, gone)?.into_iter().collect())
+    }
+
+    /// Floods the wilds' [`Reach`] both ways now, rather than at the first
+    /// walk that needs it: a second or so on every core. The Flint client
+    /// does it on the thread that built the graph (#521).
+    pub fn warm(&self) {
+        self.reach(Way::On);
+        self.reach(Way::Off);
+    }
+
+    /// The flood of the wilds running `way`, made now if it's the first.
+    fn reach(&self, way: Way) -> &Reach {
+        let cell = match way {
+            Way::On => &self.reach_on,
+            Way::Off => &self.reach_off,
+        };
+        cell.get_or_init(|| Reach::flood(self, way))
+    }
+
+    /// A way between `p` and the graph by the wilds' [`Reach`]: a straight
+    /// line to a reached cell within [`REACH_AROUND`] cells, then that cell's
+    /// chain to its node. None where `p` is off the flood: in the city, the
+    /// farms, or a pocket walled by crests.
+    fn access_by_reach(&self, p: Point, way: Way) -> Option<Access> {
+        if distance(self.center, p) < Frame::TABLE.rural_edge() - REACH_MARGIN {
+            return None;
+        }
+        let reach = self.reach(way);
+        let at = reach.cell_of(p)?;
+        let (cell, cost) = reach
+            .around(at, REACH_AROUND)
+            .filter(|&k| reach.toward[k] != Toward::Nowhere)
+            .filter_map(|k| {
+                let (a, b) = way.order(p, reach.centre(k));
+                self.walkable(a, b).then(|| (k, self.cost(a, b) + reach.cost[k] as f64))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))?;
+        let mut via = Vec::new();
+        let mut k = cell;
+        let node = loop {
+            via.push(reach.centre(k));
+            match reach.toward[k] {
+                Toward::Cell(next) => k = next as usize,
+                Toward::Node(node) => break node,
+                Toward::Nowhere => return None,
+            }
+        };
+        if way == Way::Off {
+            via.reverse();
+        }
+        Some(Access { node, cost, via })
     }
 
     /// The nodes within `radius` worth trying from `p`: the nearest few, and
@@ -829,6 +898,159 @@ impl WalkGraph {
         legs.dedup();
         legs
     }
+}
+
+/// Where a cell of [`Reach`] goes next on its way to the graph.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Toward {
+    /// The flood never got there.
+    Nowhere,
+    /// The cell beside it, a step nearer the graph.
+    Cell(u32),
+    /// The node it sees.
+    Node(u32),
+}
+
+/// The walk between the graph and every cell of the wilds a walker can get
+/// to, one way (#521): a flood out from the nodes over a grid of
+/// [`REACH_CELL`], the backend's own flood's (#347), each step a line the
+/// server walks. A wild node far round the crests from a trail is a few
+/// cells from a reached one, and its way onto the graph is the reached
+/// cells' chain, with no search. Built the first time a walk needs it, in a
+/// second or so on every core, and kept.
+#[derive(Debug)]
+struct Reach {
+    /// The centre of cell (0, 0), and the cells across.
+    origin: Point,
+    cols: usize,
+    toward: Vec<Toward>,
+    /// The walk from each reached cell's centre to the graph (or back), as
+    /// [`WalkGraph::cost`] has it.
+    cost: Vec<f32>,
+}
+
+impl Reach {
+    /// Floods the wilds, and a strip of the rural ring inside them, from the
+    /// graph's nodes, running `way`.
+    fn flood(graph: &WalkGraph, way: Way) -> Self {
+        let edge = Frame::TABLE.world_edge();
+        let cols = (2.0 * edge / REACH_CELL).ceil() as usize;
+        let origin = (graph.center.0 - edge + REACH_CELL / 2.0, graph.center.1 - edge + REACH_CELL / 2.0);
+        let mut reach = Reach { origin, cols, toward: vec![Toward::Nowhere; cols * cols], cost: vec![f32::INFINITY; cols * cols] };
+        let inner = Frame::TABLE.rural_edge() - REACH_MARGIN;
+        let open: Vec<bool> = (0..cols * cols)
+            .map(|k| {
+                let c = reach.centre(k);
+                distance(graph.center, c) >= inner
+                    && rules::in_world(c.0, c.1)
+                    && !matches!(graph.ground.footing(c.0, c.1), Footing::Blocked(_))
+            })
+            .collect();
+
+        // The cells that see a node: the ring the flood starts from
+        let mut seen: Vec<(usize, u32)> = Vec::new();
+        for (i, &node) in graph.nodes.iter().enumerate() {
+            if graph.edges[i].is_empty() || distance(graph.center, node) < inner - GRID_SIGHT {
+                continue;
+            }
+            for k in reach.cells_near(node, GRID_SIGHT) {
+                if open[k] {
+                    seen.push((k, i as u32));
+                }
+            }
+        }
+        let tested = on_every_core(&seen, |&(k, i)| {
+            let (a, b) = way.order(reach.centre(k), graph.nodes[i as usize]);
+            graph.walkable(a, b).then(|| graph.cost(a, b))
+        });
+        let mut ring = Vec::new();
+        for (&(k, i), cost) in seen.iter().zip(tested) {
+            let Some(cost) = cost else { continue };
+            if (cost as f32) < reach.cost[k] {
+                if reach.toward[k] == Toward::Nowhere {
+                    ring.push(k);
+                }
+                reach.toward[k] = Toward::Node(i);
+                reach.cost[k] = cost as f32;
+            }
+        }
+        ring.sort_unstable();
+
+        // Then out a ring of cells at a time, each step tested on every core
+        while !ring.is_empty() {
+            let steps: Vec<(usize, usize)> = ring
+                .iter()
+                .flat_map(|&k| reach.neighbours(k).map(move |n| (k, n)))
+                .filter(|&(_, n)| open[n] && reach.toward[n] == Toward::Nowhere)
+                .collect();
+            let tested = on_every_core(&steps, |&(k, n)| {
+                let (a, b) = way.order(reach.centre(n), reach.centre(k));
+                graph.walkable(a, b).then(|| graph.cost(a, b))
+            });
+            ring.clear();
+            for (&(k, n), cost) in steps.iter().zip(tested) {
+                if let (Some(cost), Toward::Nowhere) = (cost, reach.toward[n]) {
+                    reach.toward[n] = Toward::Cell(k as u32);
+                    reach.cost[n] = reach.cost[k] + cost as f32;
+                    ring.push(n);
+                }
+            }
+        }
+        reach
+    }
+
+    fn centre(&self, k: usize) -> Point {
+        let (i, j) = (k % self.cols, k / self.cols);
+        (self.origin.0 + i as f64 * REACH_CELL, self.origin.1 + j as f64 * REACH_CELL)
+    }
+
+    /// The cell `p` is in, as (column, row), if it's on the grid.
+    fn cell_of(&self, p: Point) -> Option<(i64, i64)> {
+        let i = ((p.0 - self.origin.0) / REACH_CELL).round() as i64;
+        let j = ((p.1 - self.origin.1) / REACH_CELL).round() as i64;
+        let n = self.cols as i64;
+        ((0..n).contains(&i) && (0..n).contains(&j)).then_some((i, j))
+    }
+
+    /// The cells within `around` cells of (i, j), on the grid.
+    fn around(&self, (i, j): (i64, i64), around: i64) -> impl Iterator<Item = usize> + '_ {
+        let n = self.cols as i64;
+        (-around..=around)
+            .flat_map(move |dj| (-around..=around).map(move |di| (i + di, j + dj)))
+            .filter(move |&(a, b)| (0..n).contains(&a) && (0..n).contains(&b))
+            .map(move |(a, b)| (b * n + a) as usize)
+    }
+
+    /// The cells whose centres are within `radius` of `p`.
+    fn cells_near(&self, p: Point, radius: f64) -> Vec<usize> {
+        let Some(at) = self.cell_of(p) else { return Vec::new() };
+        let around = (radius / REACH_CELL).ceil() as i64;
+        self.around(at, around).filter(|&k| distance(self.centre(k), p) <= radius).collect()
+    }
+
+    fn neighbours(&self, k: usize) -> impl Iterator<Item = usize> + '_ {
+        let n = self.cols as i64;
+        let (i, j) = ((k % self.cols) as i64, (k / self.cols) as i64);
+        NEIGHBOURS
+            .into_iter()
+            .map(move |(di, dj)| (i + di, j + dj))
+            .filter(move |&(a, b)| (0..n).contains(&a) && (0..n).contains(&b))
+            .map(move |(a, b)| (b * n + a) as usize)
+    }
+}
+
+/// `f` of each of `items`, in order, shared out over the cores.
+fn on_every_core<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if cores == 1 || items.len() < 256 {
+        return items.iter().map(f).collect();
+    }
+    let chunk = items.len().div_ceil(cores);
+    std::thread::scope(|scope| {
+        let f = &f;
+        let parts: Vec<_> = items.chunks(chunk).map(|part| scope.spawn(move || part.iter().map(f).collect::<Vec<R>>())).collect();
+        parts.into_iter().flat_map(|part| part.join().expect("a flood's thread")).collect()
+    })
 }
 
 /// The walk graphs built in this process, newest last, so a swarm of bots
