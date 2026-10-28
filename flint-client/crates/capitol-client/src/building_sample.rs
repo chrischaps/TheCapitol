@@ -5,11 +5,14 @@
 //! - **The lots:** the [`LOTS`] nearest with a building of the rules' own,
 //!   each claimed. The nearest is yours, so it opens from 25 m, and the
 //!   rest from 10.
-//! - **Floors:** an urban lot has none to three, by its id, and the second
-//!   urban lot has one under way in scaffolding, which finishes [`FINISH`]
-//!   seconds in and rises.
+//! - **Floors:** an urban lot has none to three, by its id (yours one at
+//!   least), and the second urban lot has one under way in scaffolding,
+//!   which finishes [`FINISH`] seconds in and rises.
 //! - **Stations:** four indoors on each lot, in a square inside the walls,
-//!   a kiln or forge among them working, so there's a chimney over it; and
+//!   a kiln or forge among them working, so there's a chimney over it; on
+//!   an urban lot with floors (yours has one at least), a workbench on its
+//!   top storey, right over one of the ground's, as the server lets it
+//!   stand, with room beside it for a ghost (#548); and
 //!   on a lot with a yard, two out in the weather at falling conditions,
 //!   the last needing repair.
 //! - **Yours, for `--place-sample` (V3.5):** the nearest lot is in the
@@ -80,10 +83,16 @@ impl Buildings {
         let mut yard_k = 0;
         for (k, (_, id, corners, f)) in near.iter().enumerate() {
             let owner = if k == 0 { me } else { someone };
+            let mut top = 0;
             if lots[*id].zone == Zone::Urban {
-                let built = (crate::world::houses::Seed::of(id).unit() * 4.0) as u8;
+                let mut built = (crate::world::houses::Seed::of(id).unit() * 4.0) as u8;
+                if k == 0 {
+                    // Yours has an upstairs, with stations on it (#548)
+                    built = built.max(1);
+                }
                 floors.push(((*id).clone(), built, urban == 1));
                 urban += 1;
+                top = built;
             }
             // Four indoors, in a square inside the walls.
             let at = |s: f64, t: f64| {
@@ -96,6 +105,13 @@ impl Buildings {
                 n += 1;
                 let kind = KINDS[(k + j) % KINDS.len()];
                 stations.push(station(&state, n, kind, at(s, t), owner, true, 100));
+            }
+            // One on the top storey, over the ground's back corner, clear of
+            // its front one for a ghost upstairs
+            if top > 0 {
+                n += 1;
+                let up = station(&state, n, "workbench", at(0.27, 0.7), owner, true, 100);
+                stations.push(StationInfo { floor: top as i32, ..up });
             }
             // Two in the yard, if there's room behind the building.
             let back = mid(f[2], f[3]);

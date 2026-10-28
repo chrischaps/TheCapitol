@@ -578,7 +578,7 @@ impl CapitolExtension {
     fn focus_mark(&self, f: &capitol_core::focus::Focus) -> script_api::FocusMark {
         use capitol_core::focus::Kind;
         let mut at = crate::coords::to_world(f.at.0, f.at.1);
-        let (mut r, mut top) = (0.0, 0.0);
+        let (mut r, mut top, mut base) = (0.0, 0.0, 0.0);
         match f.kind {
             Kind::Node => {
                 (r, top) = (1.0, 1.4);
@@ -589,7 +589,7 @@ impl CapitolExtension {
             Kind::Station => {
                 (r, top) = (1.0, 1.6);
                 if let Some(s) = self.shared.stations.lock().ok().and_then(|ss| ss.iter().find(|s| s.id == f.id).cloned()) {
-                    (at, r, top) = (s.at, s.radius, s.top + 0.5);
+                    (at, r, top, base) = (s.at, s.radius, s.top + 0.5, s.base);
                 }
             }
             Kind::Player => {
@@ -611,6 +611,7 @@ impl CapitolExtension {
             shift_label: f.shift_label.clone(),
             at,
             r,
+            base,
             top,
         }
     }
@@ -2004,7 +2005,7 @@ impl PlayerExtension for CapitolExtension {
             let me = self.shared.follow.lock().ok().and_then(|f| *f);
             let produced = session.take_produced();
             self.stations
-                .update(ctx, session.state(), me, &placed, &produced, dt, &self.shared);
+                .update(ctx, session.state(), &self.houses, me, &placed, &produced, dt, &self.shared);
             if let Some(kind) = &self.place_on_arrival {
                 let kit = session
                     .state()
@@ -2023,6 +2024,7 @@ impl PlayerExtension for CapitolExtension {
                 session,
                 &self.shared,
                 &mut self.stations,
+                &self.houses,
                 self.built.as_ref(),
                 now,
                 dt,
@@ -2043,7 +2045,7 @@ impl PlayerExtension for CapitolExtension {
                 let dt = ctx.clock.delta_time.min(0.1) as f32;
                 b.tick(dt);
                 self.stations
-                    .update(ctx, &b.state, None, &none, &[], dt, &self.shared);
+                    .update(ctx, &b.state, &self.houses, None, &none, &[], dt, &self.shared);
                 // `--place-sample`: the ghost on your lot, nothing placed
                 if let Some((kit, placing)) = &mut self.place_sample {
                     if placing.is_none() {
@@ -2069,8 +2071,9 @@ impl PlayerExtension for CapitolExtension {
                         let terrain = self.built.as_ref();
                         let spot = target.map(|at| p.aim(at, &b.state, terrain));
                         let (mut mark, view) = placement_mark(p, &b.state, terrain, target, spot);
-                        self.stations.ghost(ctx, view, dt);
+                        self.stations.ghost(ctx, view, &self.houses, dt);
                         mark.at = view.and(self.stations.ghost_at());
+                        mark.base = self.stations.ghost_lift().unwrap_or(0.0);
                         if let Ok(mut shared) = self.shared.placement.lock() {
                             *shared = Some(mark);
                         }
@@ -2097,7 +2100,7 @@ impl PlayerExtension for CapitolExtension {
                     None => Vec::new(),
                 };
                 self.stations
-                    .update(ctx, state, None, &none, &produced, dt, &self.shared);
+                    .update(ctx, state, &self.houses, None, &none, &produced, dt, &self.shared);
             }
         }
         if let Some(sample) = &mut self.citizen_sample {
@@ -2290,7 +2293,9 @@ impl PlayerExtension for CapitolExtension {
             .map(|(id, s)| (*id, [s.x, s.y], s.floor.clamp(0, u8::MAX as i32) as u8))
             .collect();
         upstairs.sort_by_key(|(id, _, _)| *id);
-        let up: Vec<([f64; 2], u8)> = upstairs.iter().map(|(_, p, k)| (*p, *k)).collect();
+        // The ghost's storey too, so you see the floor it would stand on
+        let ghost = self.stations.ghost_upstairs();
+        let up: Vec<([f64; 2], u8)> = upstairs.iter().map(|(_, p, k)| (*p, *k)).chain(ghost).collect();
         self.houses.upstairs(&up);
         let chimneys = self
             .houses
@@ -4382,6 +4387,7 @@ fn placing(
     session: &mut Session,
     shared: &Shared,
     stations: &mut Stations,
+    houses: &world::houses::Houses,
     terrain: Option<&TerrainResponse>,
     now: Instant,
     dt: f32,
@@ -4430,9 +4436,10 @@ fn placing(
     let state = session.state();
     let mark = session.placing().map(|p| placement_mark(p, state, terrain, target, spot));
     let view = mark.as_ref().and_then(|(_, v)| *v);
-    stations.ghost(ctx, view, dt);
+    stations.ghost(ctx, view, houses, dt);
     let mark = mark.map(|(mut m, _)| {
         m.at = view.and(stations.ghost_at());
+        m.base = stations.ghost_lift().unwrap_or(0.0);
         m
     });
     if let Ok(mut shared) = shared.placement.lock() {
@@ -4483,11 +4490,16 @@ fn placement_mark(
         at: to_world(x, y),
         ok,
         asking,
+        floor: match spot {
+            Some(capitol_core::station::Spot::Indoors { floor, .. }) => floor.clamp(0, u8::MAX as i32) as u8,
+            _ => 0,
+        },
     });
     let mark = PlacementMark {
         kind: crate::stations::kind_of(station_type),
         kit: p.kit().item_name.clone(),
         at: None,
+        base: 0.0,
         radius: crate::stations::ring_radius(station_type),
         ok,
         why: match &check {

@@ -67,8 +67,16 @@
 //! after the cursor rather than snapping to it. Once the click is sent it
 //! holds still and breathes until the server answers. When the station
 //! lands, the ghost is gone and the real one drops into its place.
+//!
+//! **Upstairs (#548).** A station on a storey over the ground stands on
+//! that storey's boards ([`storey_lift`], from `world::houses`), and so
+//! does the ghost of one, gliding up and down as PgUp and PgDn pick the
+//! storey. Its marks follow it up: each [`StationMark`] carries the lift
+//! as `base`, so the rings, the gold, the ember and the pick are drawn on
+//! its floor, not on the ground under it.
 
-use crate::coords::{to_server, to_world};
+use crate::coords::{layer, to_server, to_world};
+use crate::world::houses::Houses;
 use crate::script_api::{Shared, StationMark};
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{glow, hex, lit_glow, mix, WEATHERED};
@@ -125,6 +133,9 @@ struct Station {
     entity: EntityId,
     kind: &'static str,
     at: [f32; 2],
+    /// How far over the ground it stands, m: its storey's boards upstairs
+    /// ([`storey_lift`]), 0 on the ground floor.
+    lift: f32,
     yaw: f32,
     arrival: Arrival,
     /// 0 to 1: how far it has arrived. Falls back to 0 as it goes.
@@ -180,6 +191,8 @@ pub struct GhostView {
     pub ok: bool,
     /// The click went out: hold still until the server answers.
     pub asking: bool,
+    /// The storey it would stand on, 0 the ground (V3.5's PgUp and PgDn).
+    pub floor: u8,
 }
 
 struct Ghost {
@@ -188,6 +201,10 @@ struct Ghost {
     /// The tint its mesh wears now.
     ok: bool,
     at: [f32; 2],
+    /// The storey it's for, and how far over the ground it hovers for it,
+    /// m: eased toward [`storey_lift`], so a change of storey glides.
+    floor: u8,
+    lift: f32,
     /// 0 to 1: faded in. Falls back to 0 as placement ends.
     shown: f32,
     /// Seconds shown, for its breathing.
@@ -200,18 +217,46 @@ const GHOST_OPACITY: f32 = 0.6;
 const GHOST_HOVER: f32 = 0.18;
 const GHOST_FADE: f32 = 5.0;
 const GHOST_FOLLOW: f32 = 22.0;
+/// How fast the ghost climbs or drops to a new storey, per second.
+const GHOST_CLIMB: f32 = 9.0;
+/// A storey's height, m, where no building that's up stands over a
+/// station upstairs (one still growing, say): about the houses' own.
+const NOMINAL_STOREY: f32 = 2.8;
+
+/// How far over the ground (m) a station on storey `floor` at `p` (server
+/// units) stands: on that storey's boards in the building over it, and 0
+/// on the ground floor, which stands on the ground as the yard's do (#548).
+/// Where no building is up over it, a nominal storey's height each.
+pub fn storey_lift(houses: &Houses, p: [f64; 2], floor: u8) -> f32 {
+    if floor == 0 {
+        return 0.0;
+    }
+    let [x, z] = to_world(p[0], p[1]);
+    let ground = crate::world::land::ground_y([x, z]);
+    match houses.floor_y(p, floor) {
+        Some(y) => (y - ground).max(0.0),
+        None => layer::PLOT - layer::GROUND + floor as f32 * NOMINAL_STOREY,
+    }
+}
+
+/// A station's storey as the server keeps it, 0 the ground.
+fn storey(floor: i32) -> u8 {
+    floor.clamp(0, u8::MAX as i32) as u8
+}
 
 impl Stations {
     /// Place every station for this frame from `state`. `me` is where you
     /// stand in world metres, `placed` the stations placed since last
     /// frame. Writes the stations for the scripts into `shared`.
     /// `produced` are the stations that made something on their own since
-    /// last frame.
+    /// last frame. `houses` says where each storey's boards are, for the
+    /// stations upstairs.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         ctx: &mut ExtensionCtx,
         state: &GameState,
+        houses: &Houses,
         me: Option<[f32; 3]>,
         placed: &HashSet<Uuid>,
         produced: &[Uuid],
@@ -243,6 +288,7 @@ impl Stations {
                         entity,
                         kind,
                         at,
+                        lift: 0.0,
                         yaw: facing(at, *id),
                         arrival: if placed.contains(id) {
                             Arrival::Drop
@@ -269,6 +315,11 @@ impl Stations {
                 }
             };
             station.present = true;
+            station.lift = if info.indoors {
+                storey_lift(houses, [info.x, info.y], storey(info.floor))
+            } else {
+                0.0
+            };
             station.wear = if info.indoors {
                 0.0
             } else {
@@ -312,6 +363,7 @@ impl Stations {
                 id: id.to_string(),
                 kind: station.kind,
                 at: station.at,
+                base: station.lift,
                 radius: footprint(station.kind),
                 in_reach: near,
                 reach: station.reach * smooth(station.shown),
@@ -350,8 +402,9 @@ impl Stations {
     }
 
     /// The ghost of the station being placed. `None` (placement over, or
-    /// the cursor off the ground) fades it out, and it goes.
-    pub fn ghost(&mut self, ctx: &mut ExtensionCtx, view: Option<GhostView>, dt: f32) {
+    /// the cursor off the ground) fades it out, and it goes. Upstairs it
+    /// hovers over its storey's boards in the building `houses` has there.
+    pub fn ghost(&mut self, ctx: &mut ExtensionCtx, view: Option<GhostView>, houses: &Houses, dt: f32) {
         if !self.meshes {
             return;
         }
@@ -381,6 +434,8 @@ impl Stations {
                 kind,
                 ok: view.ok,
                 at: view.at,
+                floor: view.floor,
+                lift: storey_lift(houses, to_server(view.at[0], view.at[1]), view.floor),
                 shown: 0.0,
                 age: 0.0,
             });
@@ -395,6 +450,9 @@ impl Stations {
             ghost.at[0] += (view.at[0] - ghost.at[0]) * k;
             ghost.at[1] += (view.at[1] - ghost.at[1]) * k;
         }
+        ghost.floor = view.floor;
+        let want = storey_lift(houses, to_server(ghost.at[0], ghost.at[1]), view.floor);
+        ghost.lift += (want - ghost.lift) * (1.0 - (-GHOST_CLIMB * dt).exp());
         ghost.age += dt;
         ghost.shown = (ghost.shown + dt * GHOST_FADE).min(1.0);
         place_ghost(ctx.world, ghost, view.asking);
@@ -403,6 +461,20 @@ impl Stations {
     /// Where the ghost is drawn, world metres, while there is one.
     pub fn ghost_at(&self) -> Option<[f32; 2]> {
         self.ghost.as_ref().map(|g| g.at)
+    }
+
+    /// How far over the ground the ghost hovers for its storey, m, while
+    /// there is one: where its marks are drawn.
+    pub fn ghost_lift(&self) -> Option<f32> {
+        self.ghost.as_ref().map(|g| g.lift)
+    }
+
+    /// The ghost's storey and where it is, server units, while it's for a
+    /// storey over the ground: an open building shows the storeys up to it,
+    /// as it does up to a station.
+    pub fn ghost_upstairs(&self) -> Option<([f64; 2], u8)> {
+        let g = self.ghost.as_ref().filter(|g| g.floor > 0)?;
+        Some((to_server(g.at[0], g.at[1]), g.floor))
     }
 
     /// The chimneys over the fires indoors, by station (V3.4), from
@@ -505,7 +577,7 @@ impl Station {
             self.at[1] - ox * sin + oz * cos,
         ];
         let mut t = toml::Table::new();
-        let top = crate::world::land::ground_y(self.at) + oy;
+        let top = crate::world::land::ground_y(self.at) + self.lift + oy;
         t.insert("position".into(), vec3([x, top, z]));
         t.insert("rotation_quat".into(), vec4([0.0, 0.0, 0.0, 1.0]));
         t.insert("scale".into(), vec3([1.0, 1.0, 1.0]));
@@ -855,9 +927,8 @@ fn spawn_ghost(ctx: &mut ExtensionCtx, kind: &'static str, ok: bool) -> Option<E
 }
 
 /// Write the ghost's transform and opacity onto its entity. It hovers and
-/// breathes. While asking it breathes faster, as if about to settle. It
-/// stands on the ground whatever storey it's for, as stations do; its
-/// words say the storey ([#548](https://github.com/chrischaps/TheCapitol/issues/548)).
+/// breathes, over the boards of the storey it's for (#548). While asking
+/// it breathes faster, as if about to settle.
 fn place_ghost(world: &mut flint_ecs::FlintWorld, g: &Ghost, asking: bool) {
     let [x, z] = g.at;
     let rate = if asking { 7.0 } else { 2.2 };
@@ -866,7 +937,7 @@ fn place_ghost(world: &mut flint_ecs::FlintWorld, g: &Ghost, asking: bool) {
     let mut t = toml::Table::new();
     t.insert(
         "position".into(),
-        vec3([x, crate::world::land::ground_y([x, z]) + GHOST_HOVER * k + bob, z]),
+        vec3([x, crate::world::land::ground_y([x, z]) + g.lift + GHOST_HOVER * k + bob, z]),
     );
     let (sin, cos) = (facing_plain([x, z]) * 0.5).sin_cos();
     t.insert("rotation_quat".into(), vec4([0.0, sin, 0.0, cos]));
@@ -980,13 +1051,13 @@ fn spawn(ctx: &mut ExtensionCtx, id: Uuid, kind: &'static str) -> Option<EntityI
 fn place(world: &mut flint_ecs::FlintWorld, s: &Station) {
     let [x, z] = s.at;
     let k = s.shown.clamp(0.0, 1.0);
-    let (lift, [across, up]) = match s.arrival {
+    let (fall, [across, up]) = match s.arrival {
         Arrival::Rise => (0.0, [0.7 + 0.3 * smooth(k), smooth(k)]),
         Arrival::Drop => drop(k),
     };
     let mut t = toml::Table::new();
-    let ground = crate::world::land::ground_y([x, z]);
-    t.insert("position".into(), vec3([x, ground + lift, z]));
+    let floor = crate::world::land::ground_y([x, z]) + s.lift;
+    t.insert("position".into(), vec3([x, floor + fall, z]));
     // Its yaw, then its lean in the weather, forward or back by its yaw.
     let (sy, cy) = (s.yaw * 0.5).sin_cos();
     let side = if (s.yaw * 7.0).sin() < 0.0 { -1.0 } else { 1.0 };

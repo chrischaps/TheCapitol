@@ -1538,6 +1538,9 @@ struct Up {
     /// Its building, the rules' footprint, and how tall it stands, metres:
     /// what opens. `None` for a guild hall's.
     building: Option<(Rect, f32)>,
+    /// Each of its blocks and the height of a storey in it, metres: where
+    /// each storey's boards are (`floor_y`, #548).
+    storeys: Vec<(Rect, f32)>,
 }
 
 /// What a lot's building shows past its plan, as the layer was told.
@@ -1650,7 +1653,9 @@ impl Houses {
         let Some(house) = build(id, lot, 1.0, &look) else {
             return;
         };
-        let building = plan(id, lot).and_then(|plan| {
+        let plan = plan(id, lot);
+        let storeys = plan.iter().flat_map(|p| &p.blocks).map(|b| (b.rect, b.storey)).collect();
+        let building = plan.and_then(|plan| {
             let tall = plan.blocks.iter().map(|b| look.storeys(b) as f32 * b.storey).fold(0.0, f32::max);
             Some((plan.building?, tall))
         });
@@ -1661,6 +1666,7 @@ impl Houses {
                 sector: lot.sector,
                 house,
                 building,
+                storeys,
             },
         );
     }
@@ -1712,6 +1718,24 @@ impl Houses {
                 self.put_up(id, lot);
             }
         }
+    }
+
+    /// Where storey `floor`'s boards are in the building over `p` (server
+    /// units), world metres: what a station upstairs stands on, and the
+    /// ghost of one (#548). The storey's height is that of the block `p` is
+    /// in, since a house and its wing may differ. `None` where no building
+    /// that's up stands over `p`.
+    pub fn floor_y(&self, p: P, floor: u8) -> Option<f32> {
+        let up = self
+            .built
+            .values()
+            .find(|up| up.building.is_some_and(|(fp, _)| fp.contains(p)))?;
+        let (_, storey) = up
+            .storeys
+            .iter()
+            .find(|(r, _)| r.contains(p))
+            .or_else(|| up.storeys.first())?;
+        Some(FLOOR + floor as f32 * storey)
     }
 
     /// The stations upstairs (V3.3), server units with their storey,
@@ -2744,6 +2768,28 @@ mod tests {
         assert!(!layer.open_dirty, "the same again changes nothing");
         layer.upstairs(&[]);
         assert_eq!(layer.shown[id].top, 0);
+    }
+
+    /// A station upstairs stands on its storey's boards, a storey a floor,
+    /// over the ground floor's, and there's no upstairs off the building
+    /// (#548)
+    #[test]
+    fn each_storey_has_its_boards_a_storey_up() {
+        let lots = lots();
+        let (id, lot) = first(Zone::Urban);
+        let fp = footprint(lot).unwrap();
+        let storey = plan(id, lot).unwrap().blocks[0].storey;
+        let mut layer = Houses::default();
+        let inside = fp.at(0.0, 0.0);
+        assert_eq!(layer.floor_y(inside, 1), None, "nothing up yet");
+        layer.sync(1, [id], |_| false, lots);
+        layer.set_floors(id, 2, false, lots);
+        assert_eq!(layer.floor_y(inside, 0), Some(FLOOR));
+        let first = layer.floor_y(inside, 1).unwrap();
+        let second = layer.floor_y(inside, 2).unwrap();
+        assert!((first - FLOOR - storey).abs() < 1e-4);
+        assert!((second - first - storey).abs() < 1e-4);
+        assert_eq!(layer.floor_y(fp.at(0.0, fp.hy + 40.0), 1), None, "the yard has no upstairs");
     }
 
     /// The fires find their buildings, and a chimney stands over each.

@@ -335,6 +335,9 @@ pub struct PlacementMark {
     /// Where the ghost is, world metres (X, Z). `None` while the cursor is
     /// off the ground.
     pub at: Option<[f32; 2]>,
+    /// How far over the ground the ghost hovers, metres: its storey's
+    /// boards upstairs (#548), 0 on the ground. Its rings are drawn there.
+    pub base: f32,
     /// Its ring's radius, metres, as the in-range ring's.
     pub radius: f32,
     /// It can go down where the ghost is.
@@ -401,7 +404,10 @@ pub struct FocusMark {
     pub at: [f32; 2],
     /// The ring round it, metres: a node's or a station's own, else 0.
     pub r: f32,
-    /// How high over the ground its prompt hangs, metres.
+    /// How far over the ground its ring is, metres: a station upstairs's
+    /// floor (#548), else 0.
+    pub base: f32,
+    /// How high over its ring its prompt hangs, metres.
     pub top: f32,
 }
 
@@ -434,13 +440,16 @@ pub struct StationMark {
     pub kind: &'static str,
     /// Where it stands, world metres (X, Z).
     pub at: [f32; 2],
+    /// How far over the ground it stands, metres: its storey's boards
+    /// upstairs (#548), 0 on the ground. Its marks are drawn from there.
+    pub base: f32,
     /// The in-range ring's radius, metres: just round the model.
     pub radius: f32,
     /// You're within its interaction range (`capitol_core::station`).
     pub in_reach: bool,
     /// 0 to 1: the ring, eased toward `in_reach`.
     pub reach: f32,
-    /// How far over the ground its top is, m: where its ember floats.
+    /// How far over its base its top is, m: where its ember floats.
     pub top: f32,
     /// Yours, and waiting (E4.4): why, in a few words ("Out of iron ore").
     pub paused: Option<String>,
@@ -905,6 +914,7 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("x".into(), (f.at[0] as f64).into());
         m.insert("z".into(), (f.at[1] as f64).into());
         m.insert("r".into(), (f.r as f64).into());
+        m.insert("base".into(), (f.base as f64).into());
         m.insert("top".into(), (f.top as f64).into());
         m.into()
     });
@@ -1402,6 +1412,7 @@ fn placement_map(p: &PlacementMark) -> rhai::Map {
     m.insert("x".into(), p.at.map_or_else(unit, |a| (a[0] as f64).into()));
     m.insert("z".into(), p.at.map_or_else(unit, |a| (a[1] as f64).into()));
     m.insert("radius".into(), (p.radius as f64).into());
+    m.insert("base".into(), (p.base as f64).into());
     m.insert("ok".into(), p.ok.into());
     m.insert(
         "why".into(),
@@ -1442,6 +1453,7 @@ fn station_map(s: &StationMark) -> rhai::Map {
     m.insert("kind".into(), s.kind.into());
     m.insert("x".into(), (s.at[0] as f64).into());
     m.insert("z".into(), (s.at[1] as f64).into());
+    m.insert("base".into(), (s.base as f64).into());
     m.insert("radius".into(), (s.radius as f64).into());
     m.insert("in_reach".into(), s.in_reach.into());
     m.insert("reach".into(), (s.reach as f64).into());
@@ -1677,6 +1689,7 @@ mod tests {
             kind: "forge",
             kit: "Forge Kit".into(),
             at: Some([1.0, 2.0]),
+            base: 0.0,
             radius: 1.95,
             ok: false,
             why: Some("Too far from you".into()),
@@ -1740,6 +1753,7 @@ mod tests {
             id: id.into(),
             kind: "workbench",
             at: [x, 0.0],
+            base: 0.0,
             radius: 1.5,
             in_reach: false,
             reach: 0.0,
@@ -1845,6 +1859,7 @@ mod tests {
             shift_label: Some("Trade with Ada".into()),
             at: [1.5, -2.0],
             r: 0.85,
+            base: 0.0,
             top: 0.0,
         });
         let words: String = engine.eval(r#"let f = cap_focus(); `${f.kind} ${f.label} / ${f.shift_label} at ${f.x}, ${f.z}`"#).unwrap();

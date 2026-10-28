@@ -228,7 +228,10 @@ fn on_update() {
     deeds = deeds.filter(|d| t - d.born < deed_life());
     trades = trades.filter(|d| t - d.born < trade_life());
     if cap_at_login() { return; }
-    // The ghost follows the ground under the cursor.
+    // The ghost follows the ground under the cursor. Upstairs it hovers
+    // over that spot on its storey's floor (#548): following the floor's
+    // point under the cursor instead would carry it out of the building
+    // as it rose, back to the ground's storey.
     if cap_placing() != () {
         let h = pick();
         if h == () { cap_place_off(); } else { cap_place_hover(h[0], h[1]); }
@@ -282,7 +285,7 @@ fn open_card(click) {
     true
 }
 fn open_station(click) {           // P6.3
-    let s = cap_station_at(click.x, click.z);
+    let s = station_under(click.x, click.z);
     if s == () { return false; }
     cap_open_station(s.id);
     true
@@ -499,7 +502,7 @@ fn on_draw_ui() {
     if placing != () { draw_placement(placing, now); }
     // While placing, a station under the cursor is in the ghost's way, not
     // a thing to open.
-    let over = if hover != () && placing == () { cap_station_at(hover[0], hover[1]) } else { () };
+    let over = if hover != () && placing == () { station_under(hover[0], hover[1]) } else { () };
     for s in cap_stations() {
         // One under the cursor shows its ring, faintly if it's out of reach.
         if over != () && over.id == s.id && s.reach < hover_reach() { s.reach = hover_reach(); }
@@ -625,8 +628,10 @@ fn draw_placement(p, now) {
         dashed_ring(p.you_x, p.you_z, y, p.reach, rc, ra, 1.5, 48, now * 0.08);
     }
     if !ghost { return; }
+    // From here on the marks are the ghost's: on its storey's floor (#548).
+    y += p.base;
     // Each station it's too close to: the ground it keeps clear, red when
-    // the ghost is inside it, faint otherwise.
+    // the ghost is inside it, faint otherwise. Only those on its storey.
     for s in p.crowding {
         let near = dist(p.x, p.z, s[0], s[1]) < p.spacing;
         let sc = if near { place_red() } else { [0.9, 0.9, 0.9] };
@@ -704,6 +709,34 @@ fn pick() {
     screen_to_ground(mouse_x(), mouse_y(), cap_ground_y())
 }
 
+// The point under the cursor `base` metres over the ground, as [x, z]: on
+// a floor upstairs (#548). The city is flat, where the buildings are.
+fn pick_at(base) {
+    screen_to_ground(mouse_x(), mouse_y(), cap_ground_y() + base)
+}
+
+// The station under the cursor, (gx, gz) the ground under it, or (). One
+// upstairs (#548) is found where the cursor meets its own floor, not the
+// ground beneath it, and stands in front of the ground's: the highest of
+// those whose rings hold the cursor, then the nearest.
+fn station_under(gx, gz) {
+    let found = ();
+    let best_base = -1.0;
+    let best_d = 0.0;
+    for s in cap_stations() {
+        let q = if s.base > 0.01 { pick_at(s.base) } else { [gx, gz] };
+        if q == () { continue; }
+        let d = dist(q[0], q[1], s.x, s.z);
+        if d > s.radius { continue; }
+        if s.base > best_base + 0.01 || (s.base > best_base - 0.01 && d < best_d) {
+            found = s;
+            best_base = s.base;
+            best_d = d;
+        }
+    }
+    found
+}
+
 // A world line from (ax, ay, az) to (bx, by, bz), each end lifted by the
 // land under it, so a mark at cap_mark_y() lies on a hill as on the street.
 // Keep its segments short (a metre or two) where the land is steep.
@@ -730,7 +763,7 @@ fn dashed_ring(cx, cz, y, r, c, alpha, width, dashes, turn) {
 // and brightens as `reach` eases up, React's half-alpha orange at full,
 // with four marks outside it turning a quarter turn every eight seconds.
 fn draw_station_ring(s, now) {
-    let y = cap_mark_y();
+    let y = cap_mark_y() + s.base;
     let c = station_orange();
     let k = s.reach;
     let r = s.radius * (1.2 - 0.2 * k);
@@ -749,7 +782,7 @@ fn draw_station_ring(s, now) {
 fn draw_station_ember(s, over, now) {
     let seed = s.x * 1.7 + s.z * 0.9;
     let bob = 0.08 * (now * 1.3 + seed).sin();
-    let p = world_to_screen(s.x, cap_ground_at(s.x, s.z) + s.top + 0.55 + bob, s.z);
+    let p = world_to_screen(s.x, cap_ground_at(s.x, s.z) + s.base + s.top + 0.55 + bob, s.z);
     if !p.visible { return; }
     // Over your gold mark, which it always has: only yours have embers.
     if s.mine { p.y -= mine_mark_height() + 12.0; }
@@ -790,7 +823,7 @@ fn draw_station_worn(s, over, now) {
     let fade = ((mine_mark_far() - d) / (mine_mark_far() - mine_mark_near())).max(0.0).min(1.0);
     fade *= (s.top * 2.0).min(1.0);
     if fade <= 0.01 { return; }
-    let p = world_to_screen(s.x, cap_ground_at(s.x, s.z) + s.top * 0.6, s.z);
+    let p = world_to_screen(s.x, cap_ground_at(s.x, s.z) + s.base + s.top * 0.6, s.z);
     if !p.visible { return; }
     // Beside the station, clear of the gold and the ember over it.
     let seed = s.x * 0.9 + s.z * 1.3;
@@ -839,7 +872,7 @@ fn draw_station_mine(s, over, now) {
     // It comes in with the station as it rises or drops into place.
     fade *= (s.top * 2.0).min(1.0);
     if fade <= 0.01 { return; }
-    let ground = cap_ground_at(s.x, s.z);
+    let ground = cap_ground_at(s.x, s.z) + s.base;
     let p = world_to_screen(s.x, ground + s.top + 0.5, s.z);
     if !p.visible { return; }
     // A fine stem down to the station's top, like a surveyor's pin, so up
@@ -1287,7 +1320,7 @@ fn draw_pad_glyph_width(name, h) {
 // own prompts, above.
 fn draw_focus(f, now) {
     if f.kind == "hall" || f.kind == "board" || f.kind == "office" || f.kind == "stall" { return; }
-    let y = cap_mark_y();
+    let y = cap_mark_y() + f.base;
     let c = gold();
     let r = f.r * (1.0 + 0.04 * (now * 2.4).sin());
     ring(f.x, f.z, y, r, c, 0.85, 2.0, 48);
@@ -1330,7 +1363,7 @@ fn draw_aim(k) {
 // node or a station, under someone's feet, clear of the name over them.
 // With a pad in your hands, (A) and (Y) instead (T2.2).
 fn draw_focus_prompt(f) {
-    let ground = cap_ground_at(f.x, f.z);
+    let ground = cap_ground_at(f.x, f.z) + f.base;
     let at = world_to_screen(f.x, ground + f.top, f.z);
     if !at.visible { return; }
     // With a pad in your hands, A acts and Y trades (T2.2)
