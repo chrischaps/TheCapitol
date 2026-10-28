@@ -56,6 +56,8 @@ static CRAFTS: LazyLock<Mutex<BTreeMap<String, Crafts>>> = LazyLock::new(Default
 /// it alone while it reads the flows and fixes its database snapshot, a few
 /// milliseconds, so the two agree. Tokio's lock is fair: once a snapshot
 /// asks, new writes queue behind it, so a busy server can't starve it.
+/// Each test keeps its own ([`gate`]).
+#[cfg(not(test))]
 static GATE: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 /// When this process first kept books: two snapshots with different boots
 /// have different flows.
@@ -119,7 +121,7 @@ pub struct Committing {
 impl Committing {
     pub async fn begin() -> Committing {
         LazyLock::force(&BOOTED_MS);
-        Committing { _gate: GATE.read().await }
+        Committing { _gate: gate().read().await }
     }
 
     /// The write committed: count its flows.
@@ -147,11 +149,24 @@ fn add_crafts(all: &mut BTreeMap<String, Crafts>, flows: &Flows) {
 
 // The database tests run side by side in one process, each on a thread of
 // its own (sqlx's test runtime is current-thread), so each reads the flows
-// its own writes counted
+// its own writes counted, and keeps a gate of its own for them. With one gate
+// for the process, a test's snapshot waited on every other test's commits, to
+// databases it doesn't read, and under ci.sh full's load that came to the
+// whole GATE_WAIT (#569).
 #[cfg(test)]
 thread_local! {
     static TEST_FLOWS: std::cell::RefCell<BTreeMap<(String, UnitFlow), i64>> = Default::default();
     static TEST_CRAFTS: std::cell::RefCell<BTreeMap<String, Crafts>> = Default::default();
+    static TEST_GATE: &'static RwLock<()> = Box::leak(Box::default());
+}
+
+/// The gate between unit writes and snapshots: the process's, or in a test
+/// its thread's.
+fn gate() -> &'static RwLock<()> {
+    #[cfg(not(test))]
+    return &GATE;
+    #[cfg(test)]
+    return TEST_GATE.with(|gate| *gate);
 }
 
 /// Commits `tx`, then counts `flows`.
@@ -211,7 +226,7 @@ pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await?;
-    let gate = tokio::time::timeout(GATE_WAIT, GATE.write()).await.ok();
+    let gate = tokio::time::timeout(GATE_WAIT, gate().write()).await.ok();
     let units_settled = gate.is_some();
     let unit_flows = flows_now();
     let crafts = crafts_now();
@@ -502,30 +517,37 @@ mod tests {
         let mut flows = Flows::new();
         flows.add("ledger_test_widget", UnitFlow::Granted, 5);
         let committing = Committing::begin().await;
-        assert!(GATE.try_write().is_err(), "shut to a snapshot while it commits");
+        assert!(gate().try_write().is_err(), "shut to a snapshot while it commits");
         committing.done(flows);
         assert_eq!(flows_now()["ledger_test_widget"]["granted"], 5);
-        // A write dropped uncounted (its commit failed) opens it too. Other
-        // tests may hold it shared for a moment, so wait for them.
+        // A write dropped uncounted (its commit failed) opens it too
         drop(Committing::begin().await);
-        let gate = tokio::time::timeout(GATE_WAIT, GATE.write()).await;
-        assert!(gate.is_ok());
+        assert!(gate().try_write().is_ok());
     }
 
-    /// Unit writes that never stop while snapshots are taken (#408): every
-    /// snapshot settles, and every one agrees with the first.
+    /// Unit writes that never stop while snapshots are taken (#408): no
+    /// snapshot is starved, and every one agrees with the first. A snapshot
+    /// may still read unsettled when a commit holds the gate past
+    /// [`GATE_WAIT`], as one can on a machine too busy to answer it (#569),
+    /// so the writers time how long each holds it: a snapshot that didn't
+    /// settle must have met such a commit, never only a stream of quick ones.
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn snapshots_settle_while_writes_never_stop(db: PgPool) {
         use crate::engine::plot_sync::tests::player;
         use capitol_protocol::ledger::reconcile;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
 
         let ada = player(&db, "ada", 100).await;
         let bag = container(&db, "player_inventory", Some(ada), None).await;
         let stack = put(&db, ada, bag, 0, "fiber", 1).await;
+        // The longest any write held the gate, in milliseconds
+        let longest = Arc::new(AtomicU64::new(0));
         let writers: Vec<_> = (0..4)
             .map(|_| {
                 let db = db.clone();
+                let longest = longest.clone();
                 tokio::spawn(async move {
                     for _ in 0..60 {
                         let mut tx = db.begin().await.unwrap();
@@ -536,7 +558,12 @@ mod tests {
                             .unwrap();
                         let mut flows = Flows::new();
                         flows.add("fiber", UnitFlow::Granted, 1);
-                        commit(tx, flows).await.unwrap();
+                        // commit's own steps, with the hold timed
+                        let committing = Committing::begin().await;
+                        let held = std::time::Instant::now();
+                        tx.commit().await.unwrap();
+                        longest.fetch_max(held.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        committing.done(flows);
                     }
                 })
             })
@@ -544,17 +571,27 @@ mod tests {
 
         let first = books(&db).await.unwrap();
         let mut taken = 1;
+        let mut unsettled = Vec::new();
         while !writers.iter().all(|w| w.is_finished()) {
             let now = books(&db).await.unwrap();
-            assert!(now.units_settled, "snapshot {taken}");
-            let units = reconcile(&first, &now).units;
-            assert!(units.holds(), "snapshot {taken}: {units:#?}");
+            if now.units_settled {
+                let units = reconcile(&first, &now).units;
+                assert!(units.holds(), "snapshot {taken}: {units:#?}");
+            } else {
+                unsettled.push(taken);
+            }
             taken += 1;
         }
         for writer in writers {
             writer.await.unwrap();
         }
+        let longest = longest.load(Ordering::Relaxed);
+        assert!(
+            unsettled.is_empty() || longest >= GATE_WAIT.as_millis() as u64,
+            "snapshots {unsettled:?} of {taken} didn't settle, and no write held the gate past {GATE_WAIT:?} (the longest {longest} ms)"
+        );
         let last = books(&db).await.unwrap();
+        assert!(last.units_settled);
         assert!(reconcile(&first, &last).units.holds());
         assert_eq!(last.unit_flows.get("fiber").and_then(|f| f.get("granted")), Some(&240));
         assert!(taken > 2, "only {taken} snapshots alongside the writes");
