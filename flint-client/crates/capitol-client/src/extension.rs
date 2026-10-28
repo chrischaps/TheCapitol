@@ -4850,8 +4850,8 @@ mod pad_tests {
             i.process_gamepad_button_down(PAD, button);
             assert!(i.is_action_just_pressed(action), "{button} is {action}");
         }
-        // The triggers zoom as far as they're pulled. Tested here, since an
-        // input script can only press one fully (#513)
+        // The triggers zoom as far as they're pulled. A capture shows it too,
+        // with an input script's `pull RightTrigger2 0.5` (#513)
         let mut i = input();
         i.process_gamepad_button_changed(PAD, "RightTrigger2", 0.6);
         assert!((i.action_value("zoom_in") - 0.6).abs() < 1e-6);
