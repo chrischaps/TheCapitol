@@ -39,6 +39,7 @@
 //! scale, and the report counts in game hours.
 
 pub mod activity;
+pub mod grade;
 pub mod guild;
 pub mod lot;
 pub mod patron;

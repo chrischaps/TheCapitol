@@ -49,7 +49,10 @@ use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
 use uuid::Uuid;
 
+use capitol_protocol::rules::stacking::Pick;
+
 use super::activity::{self, Activity};
+use super::grade;
 use super::lot;
 use super::plan::{Goal, Holdings, Step, Upward, FLOAT};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
@@ -1702,30 +1705,60 @@ impl SimBot {
     }
 
     fn trade_at_the_hall(&mut self, trade: &Trade) -> Result<(), BotError> {
+        let mut stands = matches!(trade, Trade::Sell { stands: true, .. });
         let order = match trade {
             Trade::Sell { item, quantity, price, .. } => {
+                // Its work keeps the best of what it uses for its own crafts
+                let keeps_best = self.job().uses().contains(&item.as_str()) || self.wants().contains(&item.as_str());
+                let holdings = self.holdings();
+                let state = self.bot.state();
                 // The biggest stack; of tools, which don't stack, the
                 // freshest, so it keeps its most worn to use up. The book
                 // shows a tool's wear (#547), so it's priced by the share of
                 // its uses left, as at a stall
-                let (item_id, held, price) = self
-                    .bot
-                    .state()
+                let stack = state
                     .inventory()
                     .and_then(|inv| {
                         inv.items()
                             .filter(|i| &i.item_type == item)
                             .max_by_key(|i| (i.quantity, i.durability.unwrap_or(0)))
                     })
-                    .map(|i| (i.item_id, i.quantity, people::worn_price(*price, i)))
+                    .cloned()
                     .ok_or_else(|| BotError::Failed(format!("no {item} to sell")))?;
+                let (price, quantity, qualities) = if is_tool(item) {
+                    (people::worn_price(*price, &stack), (*quantity).min(stack.quantity), None)
+                } else {
+                    // A good sells by grade (#429): one grade's units, named,
+                    // at that grade's price
+                    let market = state.market();
+                    let book = market.book(item);
+                    let at = grade::sale_quality(book, market.trades(item).next().map(|t| t.quality));
+                    let asking = market.open_orders().iter().any(|o| o.side == OrderSide::Sell && &o.item_type == item);
+                    let most = (*quantity).min(stack.quantity);
+                    let lot = super::sell_at(item);
+                    let Some(sale) = grade::plan_sale(&stack.units, most, lot, *price, at, book, keeps_best, asking) else {
+                        // Its ask is up, and no bid takes anything else at its price
+                        return Ok(());
+                    };
+                    // The listing fee is paid as it's placed (#294)
+                    let mut n = sale.units.count() as i32;
+                    while n > 0 && holdings.fees.listing_fee(sale.price * n as i64) > holdings.strands {
+                        n -= 1;
+                    }
+                    let pick = if keeps_best { Pick::Lowest } else { Pick::Best };
+                    let Some(units) = sale.units.pick(n, pick) else {
+                        return Ok(());
+                    };
+                    stands |= sale.stands;
+                    (sale.price, n, Some(units))
+                };
                 PlaceOrder {
                     side: OrderSide::Sell,
                     item_type: item.clone(),
                     price,
-                    quantity: (*quantity).min(held),
-                    item_id: Some(item_id),
-                    qualities: None,
+                    quantity,
+                    item_id: Some(stack.item_id),
+                    qualities,
                     min_grade: None,
                     grade_rule: None,
                     min_durability: None,
@@ -1748,8 +1781,9 @@ impl SimBot {
         };
         let placed = self.bot.place_order(order)?;
         let id = placed.id;
-        // An ask to open the book stands, till it fills or goes stale (#501)
-        if matches!(trade, Trade::Sell { stands: true, .. }) {
+        // An ask to open the book stands, till it fills or goes stale (#501),
+        // and so does a grade nobody bids its price for (#429)
+        if stands {
             self.mind.placed(id);
             return Ok(());
         }

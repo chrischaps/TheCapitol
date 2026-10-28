@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::super::plan::Holdings;
 use super::super::report::{AskFate, Entry};
-use super::super::{bid_menu, is_tool, stall_menu, worth_unbooked, Trade, STALL_DAYS};
+use super::super::{bid_menu, grade, is_tool, stall_menu, surplus, worth_unbooked, Trade, STALL_DAYS};
 use super::{Action, SimBot};
 use crate::bazaar;
 use crate::bot::BotError;
@@ -350,6 +350,25 @@ impl SimBot {
     /// Leaves a bid for `quantity` of `item` at `price` on the book, to
     /// stand until it fills or goes stale. The bot must be at the hall.
     pub(super) fn bid(&mut self, item: &str, quantity: i32, price: i64) -> Result<(), BotError> {
+        // For the main ingredient of what it makes, a grade by its thrift, at
+        // the grade's price, carried from the worth its price came from (#429)
+        let jobs = surplus::near(&self.calling, self.job());
+        let state = self.bot.state();
+        let wanted = (!is_tool(item))
+            .then(|| grade::bid_grade(state.catalog(), item, &jobs, self.mind.temperament.thrift))
+            .flatten();
+        let (price, quantity) = match wanted.and_then(grade::grade_mid) {
+            Some(mid) => {
+                let market = state.market();
+                let at = grade::worth_quality(market.book(item), market.trades(item).next().map(|t| t.quality));
+                let price = grade::carried(price, at, mid);
+                (price, quantity.min(super::super::affordable(&self.holdings(), price)))
+            }
+            None => (price, quantity),
+        };
+        if quantity < 1 {
+            return Ok(());
+        }
         let order = self.bot.place_order(PlaceOrder {
             side: OrderSide::Buy,
             item_type: item.to_string(),
@@ -357,7 +376,7 @@ impl SimBot {
             quantity,
             item_id: None,
             qualities: None,
-            min_grade: None,
+            min_grade: wanted.map(String::from),
             grade_rule: None,
             // A tool: at least half its uses (#547)
             min_durability: super::super::fewest_uses(self.bot.state().catalog(), item),
