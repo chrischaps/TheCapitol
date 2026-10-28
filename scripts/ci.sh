@@ -52,6 +52,15 @@ usage() { sed -n '6,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
+# The db step runs at most 12 tests at once, or one a core where there are
+# fewer (#571); $CI_DB_THREADS changes it. Every #[sqlx::test] pool borrows
+# from one master pool of 20 connections in sqlx's harness, and a test's setup
+# waits 30 s for one of them; sqlx lets us set neither. On all 24 threads of a
+# busy machine the tests held the 20 so long that 1 to 9 setups a run timed
+# out (PoolTimedOut). 12 at once kept every setup under that load.
+cores=$(nproc 2>/dev/null || echo 12)
+DB_THREADS=${CI_DB_THREADS:-$(( cores < 12 ? cores : 12 ))}
+
 # Ignored tests that are tools, not tests: one prints migration rows, one
 # renders suburb plans, one draws the wilds (water_plan), one reports the wild
 # nodes (wild_node_report), one writes the Gazette's fixture
@@ -127,7 +136,7 @@ step() {
             for t in "${DB_SKIP[@]}"; do skips+=(--skip "$t"); done
             cargo test -p capitol-backend --no-run
             db_lock "$DATABASE_URL"
-            cargo test -p capitol-backend -- --ignored "${skips[@]}"
+            cargo test -p capitol-backend -- --ignored --test-threads "$DB_THREADS" "${skips[@]}"
             rm -rf "$DB_LOCK"; DB_LOCK=; trap - EXIT ;;
         flint-check)
             # Per crate, never --workspace: the engine's flint-android needs
