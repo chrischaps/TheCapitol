@@ -182,6 +182,10 @@ impl SimBot {
         // How full its shop is, if it keeps one: a full one takes no more (#544)
         let shelf = self.bot.state().bazaar().my_shop().map(|s| s.listings.len());
         let menu = stall_menu(holdings, &item, held, worth, shelf)?;
+        // With none, only if there's one free to rent (#551)
+        if shelf.is_none() && !self.stall_to_rent() {
+            return None;
+        }
         match self.decide(Question::Sell { item: item.clone() }, menu, 1, holdings)? {
             (d, Choice::Stock { item, .. }) => Some(Trade::Stock {
                 item,

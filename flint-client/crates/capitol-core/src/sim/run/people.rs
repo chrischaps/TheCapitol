@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use capitol_protocol::rest::{PlaceOrder, SlotItem};
+use capitol_protocol::rest::{BazaarDirectory, PlaceOrder, SlotItem};
 use capitol_protocol::rules::bazaar::{MAX_LISTINGS, MAX_SHOP_NAME, RENT_DAY_SECS};
 use capitol_protocol::rules::lately::Lately;
 use capitol_protocol::rules::market::OrderSide;
@@ -28,6 +28,10 @@ use crate::net::{RestError, RestRequest, RestResponse};
 /// A standing bid is taken down and thought over again after this many
 /// game seconds, at the citizen's next visit to the hall.
 const BID_LIFE: f64 = 3600.0;
+/// Game hours a citizen with no stall waits, once it found every stall at
+/// the bazaar taken, before it reads the directory for a free one again
+/// (#551).
+const STALLS_AGAIN: f64 = 1.0;
 /// How far from its spot a lingering citizen looks for a citizen to ask
 /// (#295): about fifteen metres, across the hall's steps.
 const ASK_REACH: f64 = 150.0;
@@ -254,6 +258,10 @@ impl SimBot {
         // How full its shop is, if it keeps one: a full one takes no more (#544)
         let shelf = self.bot.state().bazaar().my_shop().map(|s| s.listings.len());
         let menu = stall_menu(holdings, item, spare, self.worth(item), shelf)?;
+        // With none, only if there's one free to rent (#551)
+        if shelf.is_none() && !self.stall_to_rent() {
+            return None;
+        }
         let question = Question::Sell { item: item.into() };
         match self.decide(question, menu, 1, holdings)? {
             (d, Choice::Stock { item, .. }) => Some(Trade::Stock {
@@ -345,6 +353,24 @@ impl SimBot {
         Ok(())
     }
 
+    /// Whether a citizen with no stall could rent one: the bazaar's
+    /// directory shows one free. Once it finds every stall taken it doesn't
+    /// read again for [`STALLS_AGAIN`], so it isn't asked to stock a stall
+    /// it can't have, round after round (#551). If the directory can't be
+    /// read, it tries, and [`keep_stall`](Self::keep_stall) says why not.
+    pub(super) fn stall_to_rent(&mut self) -> bool {
+        let now = self.now();
+        if !looks_again(self.stalls_full, now) {
+            return false;
+        }
+        let Ok(directory) = self.bot.bazaar() else {
+            return true;
+        };
+        let free = free_stall(&directory).is_some();
+        self.stalls_full = (!free).then_some(now);
+        free
+    }
+
     /// Stocks the citizen's stall with `quantity` of `item` at `price`,
     /// renting the first free stall for [`STALL_DAYS`] if it keeps none,
     /// and paying for more days when its rent has less than one to run.
@@ -353,12 +379,11 @@ impl SimBot {
         match self.bot.state().bazaar().my_shop().cloned() {
             None => {
                 let directory = self.bot.bazaar()?;
-                let free = directory
-                    .stalls
-                    .iter()
-                    .find(|s| s.shop.is_none())
-                    .map(|s| s.stall_id.clone())
-                    .ok_or_else(|| BotError::Failed("every stall at the bazaar is taken".into()))?;
+                let Some(free) = free_stall(&directory).map(str::to_string) else {
+                    // Taken since it looked: it waits before it asks again
+                    self.stalls_full = Some(self.now());
+                    return Err(BotError::Failed("every stall at the bazaar is taken".into()));
+                };
                 let name = shop_name(self.bot.name(), item);
                 self.bot.rent_stall(&free, STALL_DAYS, Some(&name))?;
             }
@@ -416,6 +441,18 @@ pub(super) fn worn_price(price: i64, stack: &SlotItem) -> i64 {
     }
 }
 
+/// The first stall the directory shows free to rent, if any.
+fn free_stall(directory: &BazaarDirectory) -> Option<&str> {
+    directory.stalls.iter().find(|s| s.shop.is_none()).map(|s| s.stall_id.as_str())
+}
+
+/// Whether a citizen that last found every stall taken at `full` (game
+/// hours, or never) looks for a free one again at `now`: after
+/// [`STALLS_AGAIN`] (#551).
+fn looks_again(full: Option<f64>, now: f64) -> bool {
+    full.is_none_or(|at| now - at >= STALLS_AGAIN)
+}
+
 /// A citizen's shop: "Percy Sawyer's logs", shortened to fit.
 fn shop_name(name: &str, item: &str) -> String {
     let goods = match item {
@@ -457,5 +494,33 @@ mod tests {
         assert_eq!(worn_price(8, &stack(None, None)), 8, "not a tool");
         let long = shop_name("Bartholomew Fitzwilliam-Cartwright", "plank");
         assert_eq!(long.chars().count(), MAX_SHOP_NAME);
+    }
+
+    /// #551: with every stall taken there's no stall to rent, and a citizen
+    /// that found so waits a game hour before it reads the directory again.
+    #[test]
+    fn a_full_bazaar_has_no_stall_to_rent_until_it_looks_again() {
+        let sign = || capitol_protocol::rest::ShopSign {
+            name: "Ida Smith's ore".into(),
+            owner_id: Uuid::nil(),
+            owner_name: "Ida Smith".into(),
+            owner_citizen: true,
+            item_types: vec!["iron_ore".into()],
+        };
+        let stall = |id: &str, taken: bool| capitol_protocol::rest::BazaarStall {
+            stall_id: id.into(),
+            shop: taken.then(sign),
+        };
+        let full = BazaarDirectory {
+            stalls: vec![stall("bazaar_stall_0", true), stall("bazaar_stall_1", true)],
+        };
+        assert_eq!(free_stall(&full), None);
+        let one = BazaarDirectory {
+            stalls: vec![stall("bazaar_stall_0", true), stall("bazaar_stall_1", false)],
+        };
+        assert_eq!(free_stall(&one), Some("bazaar_stall_1"));
+        assert!(looks_again(None, 0.0), "it looks the first time");
+        assert!(!looks_again(Some(2.0), 2.5), "not within the hour");
+        assert!(looks_again(Some(2.0), 3.0), "and again after it");
     }
 }

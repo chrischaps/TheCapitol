@@ -485,6 +485,10 @@ struct SimBot {
     /// When it last read the bazaar's signs for a tool, in the run's game
     /// hours (K2.1).
     tools_looked: Option<f64>,
+    /// When it last found every stall at the bazaar taken, with none of its
+    /// own, in the run's game hours (#551): it isn't asked to stock until
+    /// it looks again.
+    stalls_full: Option<f64>,
     /// Tools its standing bids bought since it last collected its market
     /// box (K2.1): they wait there, not in its pack.
     boxed_tools: std::collections::HashSet<String>,
@@ -563,6 +567,7 @@ impl SimBot {
             repacked: None,
             last_detour: None,
             tools_looked: None,
+            stalls_full: None,
             boxed_tools: Default::default(),
             refused_repairs: HashMap::new(),
         }
