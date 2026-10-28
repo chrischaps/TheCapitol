@@ -295,6 +295,11 @@ pub struct CapitolExtension {
     dev_sample: bool,
     /// The frame's instant, paced like dt (#406): what the session samples at.
     frame: capitol_core::frame_time::FrameInstant,
+    /// Offline, the samples' clock: when the client started, and the game
+    /// seconds since. A sample's timed card (a chapter's close) runs on it,
+    /// so it's where `--screenshot-at` says however far the wall clock runs
+    /// ahead while loading (#485).
+    sample_clock: (Instant, f64),
     /// The admin's world layer on F6 (D5.3).
     layer: crate::debug_layers::Layer,
     /// The player's settings, and the file they're kept in (P8.4).
@@ -421,6 +426,7 @@ impl CapitolExtension {
             dev: ui::dev_overlay::DevOverlay::default(),
             dev_sample: false,
             frame: Default::default(),
+            sample_clock: (Instant::now(), 0.0),
             layer: Default::default(),
             settings: SettingsFile::load(crate::settings::Settings::PATH),
             settings_panel: ui::settings::SettingsPanel::default(),
@@ -550,6 +556,12 @@ impl CapitolExtension {
         let held = self.shared.focus.lock().ok().and_then(|f| f.as_ref().map(|f| (f.kind, f.id.clone())));
         let held = held.and_then(|(kind, id)| Kind::named(kind).map(|k| (k, id)));
         focus::focus_holding(&candidates, (x, y), view, held.as_ref().map(|(k, id)| (*k, id.as_str())))
+    }
+
+    /// The samples' clock now (#485): game time, as an `Instant`.
+    fn sample_now(&self) -> Instant {
+        let (start, game) = self.sample_clock;
+        start + std::time::Duration::from_secs_f64(game.max(0.0))
     }
 
     /// Offline, the samples' nodes, stations and people, so a capture can
@@ -1751,6 +1763,7 @@ impl PlayerExtension for CapitolExtension {
         } else {
             self.frame.advance(wall, ctx.clock.delta_time)
         };
+        self.sample_clock.1 = ctx.clock.total_time;
         self.dev.record(ctx.clock.delta_time, ctx.world.entity_count());
         if ctx.input.is_action_just_pressed("dev_overlay") {
             self.dev.toggle();
@@ -3429,6 +3442,7 @@ impl PlayerExtension for CapitolExtension {
             };
             let _ = self.plot_panel.show(ctx, &view, None);
         }
+        let sample_now = self.sample_now();
         if let Some((log, chat, me, state, hints)) = &mut self.chat_sample {
             let phase = capitol_core::craft::Phase::Idle;
             let view = ui::crafting::View { state, phase: &phase, refused: None };
@@ -3442,7 +3456,7 @@ impl PlayerExtension for CapitolExtension {
             }
             self.inventory.show(ctx, &mut self.icons, state.catalog(), state.inventory(), None, 0.0);
             let panels: Vec<_> = [self.inventory.rect, self.crafting.rect, self.chat.rect].into_iter().flatten().collect();
-            hints.show(ctx, Instant::now(), &panels, None);
+            hints.show(ctx, sample_now, &panels, None);
         }
         if self.hints_sample {
             if let Some(hidden) = self.hints.hidden() {
@@ -3477,7 +3491,7 @@ impl PlayerExtension for CapitolExtension {
             }
             self.hints.set_direct(self.control_mode() == ControlMode::Direct);
             self.hints.set_pad(self.pad_held);
-            self.hints.show(ctx, Instant::now(), &[], self.lead);
+            self.hints.show(ctx, self.sample_now(), &[], self.lead);
         }
         if let Some(reader) = &mut self.gazette_sample {
             self.gazette.reading(reader);
