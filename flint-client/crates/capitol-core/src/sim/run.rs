@@ -1753,7 +1753,7 @@ impl SimBot {
                         super::sell_at(item),
                         *price,
                         market.book(item),
-                        market.trades(item).next().map(|t| t.quality),
+                        grade::typical_quality(market.trades(item)),
                         keeps_best,
                         market.open_orders().iter().any(|o| o.side == OrderSide::Sell && &o.item_type == item),
                         free,

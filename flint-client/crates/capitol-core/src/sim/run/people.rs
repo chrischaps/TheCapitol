@@ -360,7 +360,7 @@ impl SimBot {
         let (price, quantity) = match wanted.and_then(grade::grade_mid) {
             Some(mid) => {
                 let market = state.market();
-                let at = grade::worth_quality(market.book(item), market.trades(item).next().map(|t| t.quality));
+                let at = grade::worth_quality(market.book(item), grade::typical_quality(market.trades(item)));
                 let price = grade::carried(price, at, mid);
                 (price, quantity.min(super::super::affordable(&self.holdings(), price)))
             }

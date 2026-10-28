@@ -29,7 +29,7 @@
 //! of thrift, not a choice (#579). A stall still stocks the lowest units at
 //! one price (#578).
 
-use capitol_protocol::rest::DepthLevel;
+use capitol_protocol::rest::{DepthLevel, MarketTrade};
 use capitol_protocol::rules::market::{grade_floor, OrderSide};
 use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::{Pick, Units};
@@ -74,10 +74,31 @@ pub fn bid_grade_of(book: Option<&Book>) -> Option<&str> {
     book?.side(OrderSide::Buy).next().map(|l| l.grade.as_str())
 }
 
-/// The quality a bid's worth is for: the last trade's, the worth being its
-/// price, else the best bid's grade, or Q50 for a target price.
-pub fn worth_quality(book: Option<&Book>, last: Option<i32>) -> i32 {
-    last.or_else(|| bid_grade_of(book).and_then(grade_mid)).unwrap_or(50)
+/// The quality a bid's worth is for: the typical trade's ([`typical_last`]
+/// carries the last to it), else the best bid's grade, or Q50 for a target
+/// price.
+pub fn worth_quality(book: Option<&Book>, typical: Option<i32>) -> i32 {
+    typical.or_else(|| bid_grade_of(book).and_then(grade_mid)).unwrap_or(50)
+}
+
+/// The quality the latest `trades` were, by the unit: what a price for any
+/// grade buys.
+pub fn typical_quality<'a>(trades: impl IntoIterator<Item = &'a MarketTrade>) -> Option<i32> {
+    let (units, total) = trades
+        .into_iter()
+        .fold((0i64, 0i64), |(n, q), t| (n + i64::from(t.quantity), q + i64::from(t.quantity) * i64::from(t.quality)));
+    (units > 0).then(|| (total / units) as i32)
+}
+
+/// The last of `trades` (newest first), its price carried from its own
+/// quality to the [typical](typical_quality) one. A B lot sold at its
+/// premium doesn't make every price for any grade a B's: one at 39 for Q80,
+/// among trades of Q40, reads as 27. What the mind's quotes and a market
+/// maker take for the last trade of a good.
+pub fn typical_last(trades: &[&MarketTrade]) -> Option<i64> {
+    let last = trades.first()?;
+    let typical = typical_quality(trades.iter().copied())?;
+    Some(carried(last.price, last.quality, typical))
 }
 
 fn levels(book: Option<&Book>, side: OrderSide) -> impl Iterator<Item = &DepthLevel> {
@@ -139,8 +160,8 @@ pub struct Plan {
 }
 
 /// What a citizen does at the hall with `held`, the mind having chosen to
-/// sell up to `quantity` at `price` on the item's book. `last` is the last
-/// trade's quality.
+/// sell up to `quantity` at `price` on the item's book. `typical` is the
+/// quality its trades typically are ([`typical_quality`]).
 ///
 /// - **The sale**, up to `quantity`: of a grade someone bids for, the best
 ///   such grade (the lowest, if it `keeps_best`), at the best bid that
@@ -153,7 +174,7 @@ pub struct Plan {
 ///   that grade. With no bid at all, a citizen that keeps its best stands its
 ///   lowest (#501's ask to open the book). The premium is carried from the
 ///   quality `price` is for: the grade the best bid asks, or for a bid for
-///   any grade the mean of the units it gets, or with no bid `last`, else
+///   any grade the mean of the units it gets, or with no bid `typical`, else
 ///   Q50.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_sale(
@@ -162,7 +183,7 @@ pub fn plan_sale(
     lot: i32,
     price: i64,
     book: Option<&Book>,
-    last: Option<i32>,
+    typical: Option<i32>,
     keeps_best: bool,
     asking: bool,
     free: bool,
@@ -192,7 +213,7 @@ pub fn plan_sale(
     let at = match bid_grade_of(book) {
         Some("F") => cheap.as_ref().and_then(Units::mean).unwrap_or(17),
         Some(g) => grade_mid(g).unwrap_or(50),
-        None => last.unwrap_or(50),
+        None => typical.unwrap_or(50),
     };
     let pick = if keeps_best { Pick::Lowest } else { Pick::Best };
     let of_grade = |g: &str, most: i32| {
@@ -384,8 +405,40 @@ mod tests {
         assert_eq!(bid_grade(&catalog, "iron_ore", &[Role::Crafter(Craft::Planks)], 0.1), None, "not what it makes");
     }
 
+    fn trade(quality: i32, price: i64, quantity: i32) -> MarketTrade {
+        MarketTrade {
+            id: uuid::Uuid::nil(),
+            buy_order_id: uuid::Uuid::nil(),
+            sell_order_id: uuid::Uuid::nil(),
+            item_type: "iron_ore".into(),
+            grade: quality_grade(quality).into(),
+            quality,
+            min_quality: quality,
+            price,
+            quantity,
+            at: chrono::DateTime::UNIX_EPOCH,
+        }
+    }
+
     #[test]
-    fn the_worth_a_bid_is_carried_from_is_the_last_trades() {
+    fn a_premium_sale_reads_at_the_quality_trades_typically_are() {
+        // Seen in a soak (#429): one B lot at its premium, and every bid for
+        // any grade after it bid a B's price
+        let b = trade(80, 39, 5);
+        let others = [trade(40, 20, 10), trade(38, 19, 15)];
+        let newest_first: Vec<&MarketTrade> = std::iter::once(&b).chain(others.iter()).collect();
+        let typical = typical_quality(newest_first.iter().copied()).unwrap();
+        assert_eq!(typical, 45, "by the unit: (400 + 570 + 400) / 30");
+        assert_eq!(typical_last(&newest_first), Some(carried(39, 80, 45)));
+        assert!(typical_last(&newest_first).unwrap() < 39);
+        assert_eq!(typical_last(&[]), None);
+        // Trades all of a kind read as they sold
+        let plain = [trade(40, 20, 10)];
+        assert_eq!(typical_last(&plain.iter().collect::<Vec<_>>()), Some(20));
+    }
+
+    #[test]
+    fn the_worth_a_bid_is_carried_from_is_the_typical_trades() {
         let b = book(vec![level(OrderSide::Buy, 10, "F", 40)]);
         assert_eq!(worth_quality(Some(&b), Some(70)), 70);
         assert_eq!(worth_quality(Some(&b), None), 17);

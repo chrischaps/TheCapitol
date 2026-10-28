@@ -5,7 +5,10 @@
 //!
 //! - **The reference** is the item's last trade or, before it has traded, its
 //!   target price, D5's labour value, from the catalog (`target_price` in
-//!   `items.toml`, D2.3). It follows the trades, but only within
+//!   `items.toml`, D2.3). A good's trade is read at the quality its trades
+//!   typically are (`sim::grade::typical_last`, #429), so a lot sold at a
+//!   grade's premium doesn't move its quotes for any grade. It follows the
+//!   trades, but only within
 //!   [`DRIFT`]× of where it started, so a run of one-sided fills can't walk it
 //!   off.
 //! - **Quotes** ([`quotes`]): `depth` levels a side. The first is half the
@@ -39,6 +42,7 @@ use uuid::Uuid;
 
 use crate::bot::{Bot, BotError};
 use crate::market::MarketEvent;
+use crate::sim::{grade, is_tool};
 use crate::state::StateEvent;
 
 /// How far the reference may follow the trades from where it started, as a
@@ -392,7 +396,16 @@ impl Maker {
                 match *event {
                     MarketEvent::Traded(trade) => {
                         if let Some(r) = self.references.get_mut(&trade.item_type) {
-                            r.follow(trade.price);
+                            // A good's trade at the quality its trades
+                            // typically are (#429): a grade's premium isn't
+                            // the price for any grade
+                            let price = if is_tool(&trade.item_type) {
+                                trade.price
+                            } else {
+                                let trades: Vec<_> = bot.state().market().trades(&trade.item_type).collect();
+                                grade::typical_last(&trades).unwrap_or(trade.price)
+                            };
+                            r.follow(price);
                             dirty.insert(trade.item_type);
                         }
                     }

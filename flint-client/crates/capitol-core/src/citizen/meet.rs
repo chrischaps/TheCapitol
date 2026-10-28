@@ -59,7 +59,7 @@ use super::decide::{Choice, Held, Lot, Mind, Place, Question, Quote, Situation, 
 use super::phrases::Occasion;
 use crate::bot::{Bot, BotError, TRADE_THINK};
 use crate::sim::plan::Holdings;
-use crate::sim::{watched, LOT, SELL_AT};
+use crate::sim::{grade, is_tool, watched, LOT, SELL_AT};
 use crate::state::{Container, GameState, Offer, OpenTrade, StateEvent, Trade, TradeEvent};
 
 /// How long a window may stand with nothing offered before it's closed.
@@ -79,16 +79,19 @@ const EARSHOT: f64 = 15.0;
 
 /// The books a citizen watches, as it sees them: best bid and ask, and the
 /// last trade, of each of the hall's goods and the tools ([`watched`],
-/// Callings K2.1).
+/// Callings K2.1). A good's last trade is read at the quality its trades
+/// typically are ([`grade::typical_last`], #429), so a lot sold at a grade's
+/// premium doesn't raise its worth for any grade; a tool's is as it sold.
 pub fn quotes(state: &GameState) -> Vec<Quote> {
     watched()
         .map(|item| {
             let book = state.market().book(item);
+            let trades: Vec<_> = state.market().trades(item).collect();
             Quote {
                 item: item.to_string(),
                 bid: book.and_then(|b| b.best_bid()),
                 ask: book.and_then(|b| b.best_ask()),
-                last: state.market().trades(item).next().map(|t| t.price),
+                last: if is_tool(item) { trades.first().map(|t| t.price) } else { grade::typical_last(&trades) },
             }
         })
         .collect()
