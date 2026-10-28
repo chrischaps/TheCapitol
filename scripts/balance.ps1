@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   A balance run (D6.3): the same town lived under two presets of tunables,
-  and what changed.
+  and what changed. Or one town under one preset, for a soak.
 
 .DESCRIPTION
   Each preset gets a new town: a database, server, roster and admin of its
@@ -13,7 +13,11 @@
   citizens' Strands by trade, the Gini, the faucets and sinks by type, and
   prices against their targets.
 
-    scripts\balance.ps1 A.toml B.toml [-Hours 2] [-Citizens 20] [-Merchants 2] [-Scale 10]
+    scripts\balance.ps1 A.toml [B.toml] [-Hours 2] [-Citizens 20] [-Merchants 2] [-Scale 10]
+                         [-Roster R.toml | -Roster RA.toml,RB.toml]
+
+  With one preset there's one town, a, and no comparison: a soak of
+  -Citizens under that preset, its report and balance in a\.
 
   -Merchants is how many more are born to trade, trading favourites
   (Callings K2.2). Anyone leaning to trading makes a market once it has
@@ -35,14 +39,34 @@
 
   scripts\presets\ has two to start from. An empty file is every default.
 
+  A preset holds the server's knobs. The town's own, the roster's tables
+  ([callings] mix, [trading] line, [hiring] line, [patrons] line, [town]
+  layers and voice), go in -Roster: TOML that starts each town's roster
+  before its citizens are minted, so the mix deals their callings and the
+  lines are theirs. One file is for every town; two are a's and b's, to
+  hold two rosters up against each other under the same preset:
+
+    [trading]
+    line = 3000
+    [callings]
+    mix = { specialist = 0.4, leaner = 0.4, all-rounder = 0.2 }
+
   The runs live in flint-client\balance\<when>\ (git-ignored): a and b,
   each with its roster, its server's log, its soak's output (soak.log) and
   its report, books and balance, and the comparison beside them as
-  balance.md. Two hours of the day's clock is ten real minutes, plus the
+  balance.md. run.log there is this script's own lines, in UTF-8 however
+  it was started. Two runs started in the same second get <when> and
+  <when>-2: the folder is taken whole or not at all (#554). Two hours of the day's clock is ten real minutes, plus the
   servers' first start.
 
   The towns have databases, ports and Redis dbs of their own, so they
-  never touch the usual world or the town, and can run beside them. The
+  never touch the usual world or the town, and can run beside them. Two
+  balance runs at once each need their own BALANCE_PORT, BALANCE_DB and
+  BALANCE_REDIS, two apart. A long run is best started detached, so
+  nothing reaps it with the shell that started it:
+
+    Start-Process powershell -WindowStyle Hidden -ArgumentList '-File scripts\balance.ps1 a.toml -Hours 24'
+ The
   servers are the backend's soak build, optimised but with the debug
   assertions that let SIM_TICK_SCALE run, and run with RATE_LIMITS=off,
   since citizens at ten times the pace go over every limit.
@@ -60,21 +84,23 @@
     BALANCE_LOG_MB each citizen's decision log, in MB, to town.decisions/
                    beside its roster (default 0: none)
 
-  Exits 1 if either run's books drifted.
+  Exits 1 if a run's books drifted.
 
 .EXAMPLE
   powershell -File scripts\balance.ps1 scripts\presets\tax-2pct.toml scripts\presets\tax-20pct.toml
   powershell -File scripts\balance.ps1 a.toml b.toml -Hours 0.5 -Citizens 8 -Merchants 1
+  powershell -File scripts\balance.ps1 scripts\presets\tax-2pct.toml -Citizens 200 -Roster line-3000.toml
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
     [string]$A,
-    [Parameter(Position = 1, Mandatory = $true)]
+    [Parameter(Position = 1)]
     [string]$B,
     [double]$Hours = 2,
     [int]$Citizens = 20,
     [int]$Merchants = 2,
-    [int]$Scale = 10
+    [int]$Scale = 10,
+    [string[]]$Roster = @()
 )
 
 # Invoke-WebRequest's progress bar slows every health check in 5.1.
@@ -84,7 +110,10 @@ $root = Split-Path -Parent $PSScriptRoot
 $basePort = if ($env:BALANCE_PORT) { [int]$env:BALANCE_PORT } else { 3400 }
 $dbPrefix = if ($env:BALANCE_DB) { $env:BALANCE_DB } else { "capitol_balance" }
 $baseRedis = if ($env:BALANCE_REDIS) { [int]$env:BALANCE_REDIS } else { 2 }
-$runs = Join-Path $root ("flint-client\balance\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+$runs = $null
+# PowerShell's names aren't cased: town-common's $roster is the param's too
+# and under powershell -File, a,b comes as one string
+$rosterFiles = @($Roster | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $backendExe = Join-Path $root "target\balance\capitol-backend.exe"
 $townExe = Join-Path $root "flint-client\target\balance\capitol-town.exe"
 $townExeA = if ($env:BALANCE_TOWN_A) { (Resolve-Path -LiteralPath $env:BALANCE_TOWN_A).Path } else { $townExe }
@@ -107,6 +136,28 @@ function Use-Town([hashtable]$town) {
     $script:adminEnv = Join-Path $script:dir "admin.env"
 }
 
+# Takes a new folder for this run, flint-client\balance\<when>, or <when>-2
+# and on if another run took that one in the same second. The folder is
+# ours once we've made its run.log: creating a file is all or nothing, so
+# of two runs only one can (#554).
+function New-RunFolder {
+    $parent = Join-Path $root "flint-client\balance"
+    $when = Get-Date -Format "yyyyMMdd-HHmmss"
+    for ($n = 1; $n -le 50; $n++) {
+        $name = if ($n -eq 1) { $when } else { "$when-$n" }
+        $folder = Join-Path $parent $name
+        New-Item -ItemType Directory -Force $folder | Out-Null
+        try {
+            $mark = [IO.File]::Open((Join-Path $folder "run.log"), [IO.FileMode]::CreateNew)
+            $mark.Close()
+            return $folder
+        } catch [IO.IOException] {
+            continue
+        }
+    }
+    Die "couldn't take a folder in $parent for this run"
+}
+
 # Makes a new town for one preset: its database, server, admin and citizens.
 function New-BalanceTown([hashtable]$town) {
     Use-Town $town
@@ -118,6 +169,12 @@ function New-BalanceTown([hashtable]$town) {
     Start-Backend
     $town.Backend = $script:backend
     $town.Admin = Read-Admin
+    if ($town.Roster) {
+        # Before the mint, so the mix deals their callings and each citizen takes the lines
+        $tables = [IO.File]::ReadAllText($town.Roster)
+        [IO.File]::WriteAllText($roster, $tables.TrimEnd() + "`n")
+        Say "the roster starts from $(Split-Path -Leaf $town.Roster)"
+    }
     Say "minting $Citizens of the sim's mix and $Merchants trading favourites"
     New-Citizens $town.Admin "--count" $Citizens $Merchants | Out-Host
 }
@@ -144,21 +201,33 @@ function Get-Health([hashtable]$town) {
     if ($line) { return ($line -replace '^.*?UTC\s+\S+\s+', '') } else { return "starting" }
 }
 
-foreach ($preset in @($A, $B)) {
-    if (-not (Test-Path -LiteralPath $preset)) { Die "no preset at $preset" }
+$presets = @(@($A, $B) | Where-Object { $_ })
+foreach ($file in $presets + $rosterFiles) {
+    if (-not (Test-Path -LiteralPath $file)) { Die "no file at $file" }
 }
-$towns = @(
-    @{ Name = "a"; Preset = (Resolve-Path -LiteralPath $A).Path; Port = $basePort; Db = "${dbPrefix}_a"; Redis = $baseRedis; Exe = $townExeA },
-    @{ Name = "b"; Preset = (Resolve-Path -LiteralPath $B).Path; Port = $basePort + 1; Db = "${dbPrefix}_b"; Redis = $baseRedis + 1; Exe = $townExe }
-)
+if ($rosterFiles.Count -gt $presets.Count) { Die "-Roster gives $($rosterFiles.Count) rosters for $($presets.Count) town(s)" }
+$towns = @(for ($i = 0; $i -lt $presets.Count; $i++) {
+    $name = "ab"[$i]
+    $rosterOf = if ($rosterFiles.Count -eq 0) { $null } elseif ($rosterFiles.Count -eq 1) { $rosterFiles[0] } else { $rosterFiles[$i] }
+    @{
+        Name = "$name"; Preset = (Resolve-Path -LiteralPath $presets[$i]).Path
+        Port = $basePort + $i; Db = "${dbPrefix}_$name"; Redis = $baseRedis + $i
+        Exe = if ($i -eq 0) { $townExeA } else { $townExe }
+        Roster = if ($rosterOf) { (Resolve-Path -LiteralPath $rosterOf).Path } else { $null }
+    }
+})
 if (-not (Test-Path -LiteralPath (Join-Path $root "backend\.env"))) {
     Die "backend/.env is missing: copy backend/.env.example (the servers read its JWT_SECRET)"
 }
 foreach ($town in $towns) {
-    Use-Town $town
+    # Not Use-Town: the run has no folder yet
+    $server = "http://127.0.0.1:$($town.Port)"
     if (Test-Healthy) { Die "something already answers on $server`: another balance run? Stop it, or set BALANCE_PORT" }
 }
 Assert-Postgres
+$runs = New-RunFolder
+$sayLog = Join-Path $runs "run.log"
+Say "this run's folder is $runs"
 Build-Copy $root capitol-backend capitol-backend (Join-Path $root "target\balance") soak
 Build-Copy (Join-Path $root "flint-client") capitol-core capitol-town (Join-Path $root "flint-client\target\balance")
 
@@ -167,9 +236,13 @@ Build-Copy (Join-Path $root "flint-client") capitol-core capitol-town (Join-Path
 $drifted = $false
 try {
     foreach ($town in $towns) { New-BalanceTown $town }
-    Say "both soaks start now, so they live the same hours: $Hours of the day's clock at ${Scale}x"
+    if ($towns.Count -gt 1) {
+        Say "both soaks start now, so they live the same hours: $Hours of the day's clock at ${Scale}x"
+    } else {
+        Say "the soak starts now: $Hours of the day's clock at ${Scale}x"
+    }
     foreach ($town in $towns) { Start-Soak $town }
-    Say "their output is in $(Join-Path $runs 'a\soak.log') and b's"
+    Say "the output is in $(Join-Path $runs 'a\soak.log')$(if ($towns.Count -gt 1) { " and b's" })"
     $next = (Get-Date).AddSeconds(60)
     while (@($towns | Where-Object { -not $_.Soak.HasExited }).Count -gt 0) {
         if ((Get-Date) -ge $next) {
@@ -190,15 +263,19 @@ try {
     foreach ($town in $towns) { Stop-Town $town.Backend 0 }
 }
 
-$balances = foreach ($town in $towns) {
+$balances = @(foreach ($town in $towns) {
     $found = Get-ChildItem -LiteralPath (Join-Path $runs $town.Name) -Filter "*.balance.json" | Sort-Object LastWriteTime | Select-Object -Last 1
     if ($null -eq $found) { Die "town $($town.Name) wrote no balance: see its soak.log, soak.err and backend.log in $runs" }
     $found.FullName
+})
+if ($balances.Count -gt 1) {
+    $comparison = Join-Path $runs "balance.md"
+    & $townExe compare $balances[0] $balances[1] --out $comparison | Out-Null
+    if ($LASTEXITCODE -ne 0) { $drifted = $true }
+    Say "the comparison is in $comparison"
+} else {
+    Say "one town, so no comparison: its balance is $($balances[0])"
 }
-$comparison = Join-Path $runs "balance.md"
-& $townExe compare $balances[0] $balances[1] --out $comparison | Out-Null
-if ($LASTEXITCODE -ne 0) { $drifted = $true }
-Say "the comparison is in $comparison"
 if ($drifted) {
     Say "a run's books drifted: see its soak's report in $runs"
     exit 1

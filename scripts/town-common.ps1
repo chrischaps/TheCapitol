@@ -7,15 +7,29 @@
 #   $backendExe $townExe              where the copies of the binaries go
 #   $sayAs                            the word each line starts with
 #   $backendEnv                       (optional) more variables for the server
+#   $sayLog                           (optional) a file each line goes to too,
+#                                     in UTF-8, however the script was started
 
 $postgres = "capitol-postgres"
 
 function Die([string]$message) {
     [Console]::Error.WriteLine("$sayAs`: $message")
+    Write-SayLog "$sayAs`: $message"
     exit 1
 }
 
-function Say([string]$message) { Write-Host "$sayAs`: $message" }
+function Say([string]$message) {
+    Write-Host "$sayAs`: $message"
+    Write-SayLog "$sayAs`: $message"
+}
+
+# Started with *> under PowerShell 5.1, a script's output is UTF-16, which
+# grep and tail don't read (#554). $sayLog, when set, is a copy in UTF-8.
+function Write-SayLog([string]$line) {
+    if ($sayLog) {
+        [IO.File]::AppendAllText($sayLog, "$(Get-Date -Format 'HH:mm:ss') $line`n")
+    }
+}
 
 # Runs a native command for its exit code alone. PowerShell 5.1 turns a
 # redirected stderr line into an error record, so the preference is eased
