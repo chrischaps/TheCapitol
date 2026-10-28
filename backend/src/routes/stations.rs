@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use capitol_protocol::rest::{
-    ConfigureAutomation, NearbyStationsResponse, RepairStationResponse, StationAutomation, PlaceStationRequest, PlaceStationResponse, StationContainerResponse,
+    ConfigureAutomation, MyStationsResponse, NearbyStationsResponse, RepairStationResponse, StationAutomation, PlaceStationRequest, PlaceStationResponse, StationContainerResponse,
     SuccessResponse,
 };
 
@@ -24,6 +24,7 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/nearby", get(get_nearby_stations))
+        .route("/mine", get(get_my_stations))
         .route("/place", post(place_station))
         .route("/{id}", delete(remove_station))
         .route("/{id}/container", get(get_station_container))
@@ -61,16 +62,6 @@ pub async fn get_nearby_stations(
 
     let (_player_id, player_x, player_y) = player;
 
-    // Get station types for metadata
-    let station_types: Vec<StationType> = sqlx::query_as(&format!("SELECT {STATION_TYPE_COLUMNS} FROM station_types"))
-    .fetch_all(&state.db)
-    .await?;
-
-    let type_map: HashMap<String, StationType> = station_types
-        .into_iter()
-        .map(|st| (st.id.clone(), st))
-        .collect();
-
     // Get all stations within a generous range (500 units for visibility)
     let stations: Vec<Station> = sqlx::query_as(&format!(
         "SELECT {STATION_COLUMNS}
@@ -82,6 +73,63 @@ pub async fn get_nearby_stations(
     .bind(player_y)
     .fetch_all(&state.db)
     .await?;
+
+    Ok(Json(NearbyStationsResponse { stations: station_infos(&state, &stations).await? }))
+}
+
+/// Every station you own, wherever it stands (#500), nearest you first: a
+/// citizen's far benches, which `/stations/nearby` no longer shows it, so it
+/// can go back for them.
+#[utoipa::path(
+    get,
+    path = "/stations/mine",
+    responses(
+        (status = 200, description = "Your stations, nearest first", body = MyStationsResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
+pub async fn get_my_stations(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<MyStationsResponse>, AppError> {
+    let (player_id, saved_x, saved_y): (Uuid, f64, f64) =
+        sqlx::query_as("SELECT id, position_x, position_y FROM players WHERE account_id = $1 LIMIT 1")
+            .bind(auth_user.account_id)
+            .fetch_one(&state.db)
+            .await?;
+    let at = live_position(&state.game, player_id).await.unwrap_or((saved_x, saved_y));
+    let stations = owned_stations(&state.db, player_id, at).await?;
+    Ok(Json(MyStationsResponse { stations: station_infos(&state, &stations).await? }))
+}
+
+/// `player_id`'s stations, nearest `at` first.
+async fn owned_stations(db: &sqlx::PgPool, player_id: Uuid, (x, y): (f64, f64)) -> Result<Vec<Station>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "SELECT {STATION_COLUMNS}
+         FROM stations
+         WHERE owner_id = $1
+         ORDER BY (position_x - $2) ^ 2 + (position_y - $3) ^ 2, id"
+    ))
+    .bind(player_id)
+    .bind(x)
+    .bind(y)
+    .fetch_all(db)
+    .await
+}
+
+/// `stations` as a client sees them: with their type's name and reach, their
+/// box, tool, job and what they've made lately.
+async fn station_infos(state: &AppState, stations: &[Station]) -> Result<Vec<StationInfo>, AppError> {
+    // Get station types for metadata
+    let station_types: Vec<StationType> = sqlx::query_as(&format!("SELECT {STATION_TYPE_COLUMNS} FROM station_types"))
+    .fetch_all(&state.db)
+    .await?;
+
+    let type_map: HashMap<String, StationType> = station_types
+        .into_iter()
+        .map(|st| (st.id.clone(), st))
+        .collect();
 
     // Get containers for these stations
     let station_ids: Vec<Uuid> = stations.iter().map(|s| s.id).collect();
@@ -128,7 +176,7 @@ pub async fn get_nearby_stations(
         })
         .collect();
 
-    Ok(Json(NearbyStationsResponse { stations: station_infos }))
+    Ok(station_infos)
 }
 
 /// Place a new station: on a plot you own, or, for a workbench, on dry ground no plot covers (#187)
@@ -445,5 +493,46 @@ fn automation_refusal(e: AutomationError) -> AppError {
         AutomationError::Access(AccessError::Database(db)) => AppError::Database(db),
         AutomationError::NotYourStation => AppError::Forbidden(e.message()),
         _ => AppError::BadRequest(e.message()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::PgPool;
+
+    /// A workbench of `owner`'s at (`x`, `y`)
+    async fn bench(db: &PgPool, owner: Uuid, x: f64, y: f64) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, kit_quality)
+             VALUES ($1, 'workbench', $2, $3, $4, 50)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(x)
+        .bind(y)
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// `/stations/mine` lists every station of yours however far off, nearest
+    /// first, and none of anyone else's (#500).
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn your_stations_are_yours_however_far(db: PgPool) {
+        use crate::engine::market::tests::player;
+        let ada = player(&db, "ada", 0).await.id;
+        let bea = player(&db, "bea", 0).await.id;
+        let far = bench(&db, ada, 8300.0, 13800.0).await;
+        let near = bench(&db, ada, 9600.0, 8740.0).await;
+        let middling = bench(&db, ada, 9000.0, 9000.0).await;
+        bench(&db, bea, 9601.0, 8741.0).await;
+
+        let mine: Vec<Uuid> = owned_stations(&db, ada, (9610.0, 8742.0)).await.unwrap().iter().map(|s| s.id).collect();
+        assert_eq!(mine, [near, middling, far]);
+        assert!(owned_stations(&db, Uuid::new_v4(), (0.0, 0.0)).await.unwrap().is_empty());
     }
 }

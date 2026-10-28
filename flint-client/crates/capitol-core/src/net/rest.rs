@@ -118,6 +118,8 @@ pub enum RestRequest {
 
     /// `GET /stations/nearby`
     NearbyStations,
+    /// `GET /stations/mine`: ours, wherever they stand (#500)
+    MyStations,
     /// `POST /stations/place`
     PlaceStation(PlaceStationRequest),
     /// `DELETE /stations/{id}`
@@ -334,6 +336,9 @@ pub enum RestResponse {
     Recipes(RecipesResponse),
     Catalog(Box<CatalogResponse>),
     NearbyStations(NearbyStationsResponse),
+    /// Ours wherever they stand (#500): not mirrored, since the store
+    /// holds what's near.
+    MyStations(MyStationsResponse),
     PlaceStation(PlaceStationResponse),
     StationContainer(StationContainerResponse),
     Deposit(DepositResponse),
@@ -547,6 +552,7 @@ impl RestRequest {
             | Recipes
             | Catalog
             | NearbyStations
+            | MyStations
             | StationContainer { .. }
             | ListPlots(_)
             | ClaimedPlots
@@ -625,6 +631,7 @@ impl RestRequest {
             Recipes => "/recipes".into(),
             Catalog => "/catalog".into(),
             NearbyStations => "/stations/nearby".into(),
+            MyStations => "/stations/mine".into(),
             PlaceStation(_) => "/stations/place".into(),
             RemoveStation { station_id } => format!("/stations/{station_id}"),
             StationContainer { station_id } => format!("/stations/{station_id}/container"),
@@ -802,6 +809,7 @@ impl RestRequest {
             Q::Recipes => A::Recipes(de(body)?),
             Q::Catalog => A::Catalog(Box::new(de(body)?)),
             Q::NearbyStations => A::NearbyStations(de(body)?),
+            Q::MyStations => A::MyStations(de(body)?),
             Q::PlaceStation(_) => A::PlaceStation(de(body)?),
             Q::StationContainer { .. } => A::StationContainer(de(body)?),
             Q::Deposit(_) => A::Deposit(de(body)?),
@@ -1033,6 +1041,7 @@ mod tests {
             ),
             (RestRequest::Recipes, "GET", "/recipes".into()),
             (RestRequest::Catalog, "GET", "/catalog".into()),
+            (RestRequest::MyStations, "GET", "/stations/mine".into()),
             (RestRequest::PlayerMe, "GET", "/player/me".into()),
             (RestRequest::PlayerCard { player_id: id }, "GET", format!("/players/{id}/card")),
             (RestRequest::Letters(Default::default()), "GET", "/letters".into()),

@@ -1401,6 +1401,15 @@ impl Bot {
         }
     }
 
+    /// Our stations, wherever they stand, nearest first (#500): those the
+    /// store's nearby view has lost sight of too.
+    pub fn my_stations(&mut self) -> Result<Vec<StationInfo>, BotError> {
+        match self.call("listing our stations", RestRequest::MyStations)? {
+            RestResponse::MyStations(mine) => Ok(mine.stations),
+            other => Err(unexpected("listing our stations", &other)),
+        }
+    }
+
     /// Takes our station `station_id` down, over REST.
     pub fn remove_station(&mut self, station_id: Uuid) -> Result<(), BotError> {
         match self.call("removing a station", RestRequest::RemoveStation { station_id })? {

@@ -133,7 +133,7 @@ impl SimBot {
         }
         // A box a hire left, once nobody works there
         let busy = |station: Uuid, open: &[WageOffer]| open.iter().any(|o| wage_place(&o.work) == station);
-        self.hiring.collect.retain(|s| self.stations.values().any(|o| o.id == *s));
+        self.hiring.collect.retain(|s| self.stations.contains_key(s));
         if let Some(&station) = self.hiring.collect.iter().find(|s| !busy(**s, &self.hiring.open)) {
             return Some(HireAct::Collect { station });
         }
@@ -146,7 +146,7 @@ impl SimBot {
         }
         let catalog = self.bot.state().catalog().clone();
         let job = self.job();
-        let stations: Vec<(String, Uuid)> = self.stations.iter().map(|(kind, s)| (kind.clone(), s.id)).collect();
+        let stations: Vec<(String, Uuid)> = self.stations.values().map(|s| (s.station_type.clone(), s.id)).collect();
         // What its stint neither needs nor makes: a fiber stint banks its
         // fiber
         let spare: HashMap<String, i32> = holdings
@@ -266,7 +266,7 @@ impl SimBot {
     /// Brings home what's in station `station`'s box, a hire over.
     fn collect_box(&mut self, station: Uuid) -> Result<(), BotError> {
         self.hiring.collect.retain(|s| *s != station);
-        let Some(s) = self.stations.values().find(|s| s.id == station).cloned() else {
+        let Some(s) = self.stations.get(&station).cloned() else {
             return Ok(());
         };
         self.bot.walk_to(s.x, s.y + 10.0)?;

@@ -112,6 +112,10 @@ const STOP_CHECK: Duration = Duration::from_secs(1);
 /// off its lot, to take it down (#488). Further off, it's left for a day
 /// that ends nearer.
 const PACK_UP_REACH: f64 = 200.0;
+/// How many of its stations off its lot and further than [`PACK_UP_REACH`]
+/// a citizen with a lot goes back for of an evening (#500): one, so a pile
+/// by the spawn clears over a few days and no evening is all walking.
+const FETCH_A_DAY: usize = 1;
 
 /// How a sim is run.
 #[derive(Debug, Clone)]
@@ -283,6 +287,13 @@ pub(crate) fn live(
     // Its goods to trade in, from its calling (Callings K2.2): trading is a
     // leaning anyone may take up once it has its float
     citizen.merchant = Some(merchant::Merchant::new(&citizen.calling, seed, trade_line));
+    // Its stations wherever they stand, not just those near it (#500)
+    if let Err(e) = citizen.learn_own() {
+        if e.is_final() {
+            return Err(e);
+        }
+        town.health(|h| h.failed(format!("listing its stations: {e}")));
+    }
     let ended = citizen.work(None, Some(town));
     // A shift it's on ends with its session, paid for what it made, rather
     // than holding the work from others until the server sees it gone
@@ -426,8 +437,12 @@ struct SimBot {
     entries: Vec<Entry>,
     /// Every node seen this run. The store only holds what's in range.
     atlas: HashMap<Uuid, Seen>,
-    /// Stations the bot owns, by type.
-    stations: HashMap<String, StationInfo>,
+    /// Stations the bot owns, by id (#500): a second of a type, and one far
+    /// off that `/stations/nearby` has lost, count too. Its working one of a
+    /// type is [`Self::own`].
+    stations: HashMap<Uuid, StationInfo>,
+    /// The day it last went back for a far station of its own (#500).
+    fetched_day: Option<i64>,
     deed_cost: i64,
     rng: u64,
     /// Whether there are makers to trade with
@@ -532,7 +547,7 @@ impl SimBot {
             .stations()
             .values()
             .filter(|s| Some(s.owner_id) == me)
-            .map(|s| (s.station_type.clone(), s.clone()))
+            .map(|s| (s.id, s.clone()))
             .collect();
         SimBot {
             bot,
@@ -544,6 +559,7 @@ impl SimBot {
             entries: Vec::new(),
             atlas: HashMap::new(),
             stations,
+            fetched_day: None,
             deed_cost: DEFAULT_DEED,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (n + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9),
             trading,
@@ -1019,8 +1035,9 @@ impl SimBot {
                 Err(e) => town.health(|h| h.failed(format!("buying a home: {e}"))),
             }
         }
-        // Its benches off its lot come home in its pack (#488)
-        match self.pack_up() {
+        // Its benches off its lot come home in its pack (#488), those it
+        // had lost sight of too (#500): the near ones, and a far one
+        match self.learn_own().and_then(|()| self.pack_up()).and_then(|_| self.fetch_far()) {
             Ok(_) => {}
             Err(e) if e.is_final() => return Err(e),
             Err(e) => town.health(|h| h.failed(format!("packing up: {e}"))),
@@ -1432,7 +1449,7 @@ impl SimBot {
                 }
             }
         }
-        h.stations.extend(self.stations.keys().cloned());
+        h.stations.extend(self.stations.values().map(|s| s.station_type.clone()));
         // What fits on the lot, not just its capacity: a narrow suburban lot
         // runs out of ground first (#305). One that would take the rest of
         // its chain packed again is ([`Self::repack`], #405). Its floors
@@ -1449,7 +1466,8 @@ impl SimBot {
         // Its own under 25: the work at one mends it first (#478), but not
         // one whose repair was refused lately
         let now_hours = self.now();
-        for (kind, s) in &self.stations {
+        for s in self.working() {
+            let kind = &s.station_type;
             let condition = state.station(s.id).map_or(s.condition, |s| s.condition);
             let refused = self.refused_repairs.get(kind).is_some_and(|&at| now_hours - at < REPAIR_RETRY_HOURS);
             if condition < capitol_protocol::rules::weather::NEEDS_REPAIR && !refused {
@@ -1463,7 +1481,7 @@ impl SimBot {
         // workbench may take, so it stays home (#499), and a dabble's
         // station outside its calling (D6)
         let one_job = self.persona.is_none();
-        let (lot_for, spare) = lot_kept(&self.calling, one_job, |kind| self.stations.contains_key(kind), h.plot_room);
+        let (lot_for, spare) = lot_kept(&self.calling, one_job, |kind| self.owns(kind), h.plot_room);
         h.lot_for = lot_for;
         h.plot_spare = spare;
         h.owed = self.owed();
@@ -1522,7 +1540,7 @@ impl SimBot {
     /// How many of its calling's stations for a lot it has yet to place
     /// ([`still_wanted`]).
     fn still_wanted(&self) -> i32 {
-        still_wanted(&self.calling, |kind| self.stations.contains_key(kind))
+        still_wanted(&self.calling, |kind| self.owns(kind))
     }
 
     /// Takes down its own stations on its lot, so the planner puts them back
@@ -1546,15 +1564,15 @@ impl SimBot {
         // What the store last heard of each, for a job set since it was placed
         let ours: Vec<(String, StationInfo)> = self
             .stations
-            .iter()
-            .map(|(kind, s)| (kind.clone(), state.station(s.id).cloned().unwrap_or_else(|| s.clone())))
+            .values()
+            .map(|s| (s.station_type.clone(), state.station(s.id).cloned().unwrap_or_else(|| s.clone())))
             .collect();
         let (moving, staying): (Vec<_>, Vec<_>) =
             ours.into_iter().partition(|(_, s)| idle(s) && s.floor == 0 && plot.contains(s.x, s.y));
         if moving.is_empty() {
             return Ok(0);
         }
-        let mine = |id: Uuid| self.stations.values().any(|s| s.id == id);
+        let mine = |id: Uuid| self.stations.contains_key(&id);
         let fixed: Vec<(f64, f64)> = state
             .stations()
             .values()
@@ -1569,11 +1587,11 @@ impl SimBot {
         self.repacked = Some(plot.id);
         let (began, day) = (self.now(), self.day());
         let mut down = 0;
-        for (kind, s) in moving {
+        for (_, s) in moving {
             self.bot.walk_to(s.x, s.y + 10.0)?;
             match self.bot.remove_station(s.id) {
                 Ok(()) => {
-                    self.stations.remove(&kind);
+                    self.stations.remove(&s.id);
                     down += 1;
                 }
                 // The pack has no room for the kit and what's in its box:
@@ -1603,7 +1621,7 @@ impl SimBot {
             Step::Craft { recipe, station } => {
                 let at = match station {
                     Some(kind) => {
-                        let s = self.stations.get(kind).cloned().ok_or_else(|| {
+                        let s = self.own(kind).cloned().ok_or_else(|| {
                             BotError::Failed(format!("no {kind} of ours is known"))
                         })?;
                         self.bot.walk_to(s.x, s.y + 10.0)?;
@@ -1926,7 +1944,7 @@ impl SimBot {
             let fire = |kind: &str| catalog.station_type(kind).is_some_and(|t| t.ground_only);
             let keep = super::stint::lot_for(&self.calling)
                 .into_iter()
-                .filter(|&kind| kind != station && fire(kind) && !self.stations.contains_key(kind))
+                .filter(|&kind| kind != station && fire(kind) && !self.owns(kind))
                 .count();
             let open = plot.open_floors(self.server_now());
             let mut spots = lot::spots_for(&plot, &self.stations_placed(), open, fire(station), keep);
@@ -1954,7 +1972,7 @@ impl SimBot {
             }
             match self.bot.place_station_on(station, kit_id, x, y, floor) {
                 Ok(placed) => {
-                    self.stations.insert(station.to_string(), placed);
+                    self.stations.insert(placed.id, placed);
                     return Ok(());
                 }
                 Err(e @ BotError::Rest { .. }) => {
@@ -1997,7 +2015,7 @@ impl SimBot {
 
     /// Repairs its own `kind` of station, at it (#478).
     fn repair(&mut self, kind: &str) -> Result<(), BotError> {
-        let s = self.stations.get(kind).cloned().ok_or_else(|| BotError::Failed(format!("no {kind} of ours is known")))?;
+        let s = self.own(kind).cloned().ok_or_else(|| BotError::Failed(format!("no {kind} of ours is known")))?;
         self.bot.walk_to(s.x, s.y + 10.0)?;
         let condition = match self.bot.repair_station(s.id) {
             Ok(condition) => condition,
@@ -2008,7 +2026,7 @@ impl SimBot {
             Err(e) => return Err(e),
         };
         self.refused_repairs.remove(kind);
-        if let Some(ours) = self.stations.get_mut(kind) {
+        if let Some(ours) = self.stations.get_mut(&s.id) {
             ours.condition = condition;
         }
         Ok(())
@@ -2026,11 +2044,11 @@ impl SimBot {
         let catalog = state.catalog().clone();
         let holdings = self.holdings();
         let mut due: Vec<(String, i32)> = self
-            .stations
-            .iter()
-            .map(|(kind, s)| (kind, state.station(s.id).unwrap_or(s)))
-            .filter(|(_, s)| s.condition < MEND_BELOW && plot.contains(s.x, s.y))
-            .map(|(kind, s)| (kind.clone(), s.condition))
+            .working()
+            .into_iter()
+            .map(|s| state.station(s.id).cloned().unwrap_or(s))
+            .filter(|s| s.condition < MEND_BELOW && plot.contains(s.x, s.y))
+            .map(|s| (s.station_type, s.condition))
             .collect();
         // The most worn first, while the goods last
         due.sort_by_key(|&(_, condition)| condition);
@@ -2077,19 +2095,14 @@ impl SimBot {
     pub(super) fn pack_up(&mut self) -> Result<usize, BotError> {
         let state = self.bot.state();
         let plots = state.plots();
-        // What the store last heard of each, for a job set since it was placed
-        let known: Vec<(String, StationInfo)> = self
-            .stations
-            .iter()
-            .map(|(kind, s)| (kind.clone(), state.station(s.id).cloned().unwrap_or_else(|| s.clone())))
-            .collect();
+        let known = self.known_own();
         let leaving = leaving(known, self.bot.position(), |x, y| plots.iter().any(|p| p.contains(x, y)));
         let mut down = 0;
-        for (kind, s) in leaving {
+        for (_, s) in leaving {
             self.bot.walk_to(s.x, s.y + 10.0)?;
             match self.bot.remove_station(s.id) {
                 Ok(()) => {
-                    self.stations.remove(&kind);
+                    self.stations.remove(&s.id);
                     down += 1;
                 }
                 // The pack has no room for the kit and what's in its box:
@@ -2099,6 +2112,96 @@ impl SimBot {
             }
         }
         Ok(down)
+    }
+
+    /// Goes back for one of its stations off its lot beyond
+    /// [`PACK_UP_REACH`] and takes it down (#500), once a day, nearest
+    /// first: a bench from Arrival by the spawn, left there before it had a
+    /// lot or before #499, that crowded new citizens out of Arrival's bench
+    /// step. Only once it has a lot, where the planner puts the kit back
+    /// down. How many came down.
+    fn fetch_far(&mut self) -> Result<usize, BotError> {
+        let day = self.day();
+        let state = self.bot.state();
+        let plots = state.plots();
+        if plots.is_empty() || self.fetched_day == Some(day) {
+            return Ok(0);
+        }
+        let known = self.known_own();
+        let far = strays(known, self.bot.position(), |x, y| plots.iter().any(|p| p.contains(x, y)));
+        self.fetched_day = Some(day);
+        let began = self.now();
+        let mut down = 0;
+        for (_, s) in far.into_iter().take(FETCH_A_DAY) {
+            self.bot.walk_to(s.x, s.y + 10.0)?;
+            match self.bot.remove_station(s.id) {
+                Ok(()) => {
+                    self.stations.remove(&s.id);
+                    down += 1;
+                }
+                // Its pack has no room, or it's gone: for another day, or
+                // the next list of its own
+                Err(BotError::Rest { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // In the report's steps, so a soak shows the pile going
+        if down > 0 {
+            self.entries.push(Entry::Spent {
+                label: format!("fetch a far station ({down} down)"),
+                hours: self.now() - began,
+                ok: true,
+                activity: Activity::Building,
+                setup: true,
+                day,
+            });
+        }
+        Ok(down)
+    }
+
+    /// Learns its own stations wherever they stand, from the server (#500):
+    /// one the store has lost sight of (after a restart, or a second of a
+    /// type, far off) is known again, and one gone (taken down another way)
+    /// is forgotten.
+    pub(super) fn learn_own(&mut self) -> Result<(), BotError> {
+        let mine = self.bot.my_stations()?;
+        self.stations = mine.into_iter().map(|s| (s.id, s)).collect();
+        Ok(())
+    }
+
+    /// Its own stations by type, each as the store last heard of it if it
+    /// has, for a job set since it was placed.
+    fn known_own(&self) -> Vec<(String, StationInfo)> {
+        let state = self.bot.state();
+        self.stations
+            .values()
+            .map(|s| (s.station_type.clone(), state.station(s.id).cloned().unwrap_or_else(|| s.clone())))
+            .collect()
+    }
+
+    /// Whether it owns a `kind` of station, anywhere.
+    fn owns(&self, kind: &str) -> bool {
+        self.stations.values().any(|s| s.station_type == kind)
+    }
+
+    /// Its working `kind` of station (#500): of two, the one on its lot,
+    /// else the nearer.
+    fn own(&self, kind: &str) -> Option<&StationInfo> {
+        let plots = self.bot.state().plots();
+        let (x, y) = self.bot.position();
+        let rank = |s: &StationInfo| (!plots.iter().any(|p| p.contains(s.x, s.y)), (s.x - x).hypot(s.y - y));
+        self.stations.values().filter(|s| s.station_type == kind).min_by(|a, b| {
+            let (ra, rb) = (rank(a), rank(b));
+            ra.0.cmp(&rb.0).then(ra.1.total_cmp(&rb.1)).then(a.id.cmp(&b.id))
+        })
+    }
+
+    /// Its working station of each type it owns ([`Self::own`]).
+    fn working(&self) -> Vec<StationInfo> {
+        let mut kinds: Vec<&str> = self.stations.values().map(|s| s.station_type.as_str()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        kinds.into_iter().filter_map(|kind| self.own(kind).cloned()).collect()
     }
 
     /// Buys the nearest unclaimed plot it can afford with its [`FLOAT`] left
@@ -2220,9 +2323,9 @@ impl SimBot {
 
 /// Which of `stations` (each by type) a citizen at `at` takes down as it
 /// packs up (#488): those not on a lot of its own (`own_lot`) and within
-/// [`PACK_UP_REACH`], nearest first. Only those it knows of: one it's lost
-/// sight of stays up, since it can't list its own (#500). One at work stays where its job is; a
-/// job set but stopped holds nothing there, and came down with it (#499).
+/// [`PACK_UP_REACH`], nearest first. Further off, it goes back for one a
+/// day ([`strays`], #500). One at work stays where its job is; a job set
+/// but stopped holds nothing there, and came down with it (#499).
 fn leaving(
     stations: Vec<(String, StationInfo)>,
     (x, y): (f64, f64),
@@ -2235,6 +2338,23 @@ fn leaving(
         .collect();
     leaving.sort_by(|a, b| away(&a.1).total_cmp(&away(&b.1)));
     leaving
+}
+
+/// Which of `stations` (each by type) off a lot of its own (`own_lot`) and
+/// beyond [`PACK_UP_REACH`] of `at` a citizen goes back for (#500), nearest
+/// first: those [`leaving`] leaves. One at work stays.
+fn strays(
+    stations: Vec<(String, StationInfo)>,
+    (x, y): (f64, f64),
+    own_lot: impl Fn(f64, f64) -> bool,
+) -> Vec<(String, StationInfo)> {
+    let away = |s: &StationInfo| (s.x - x).hypot(s.y - y);
+    let mut far: Vec<_> = stations
+        .into_iter()
+        .filter(|(_, s)| idle(s) && !own_lot(s.x, s.y) && away(s) > PACK_UP_REACH)
+        .collect();
+    far.sort_by(|a, b| away(&a.1).total_cmp(&away(&b.1)));
+    far
 }
 
 /// Whether a station may come down: no job on it, or one stopped (#499).
@@ -2424,6 +2544,35 @@ mod tests {
         let leaving = leaving(stations, (0.0, 0.0), |_, y| y > 50.0);
         let kinds: Vec<&str> = leaving.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(kinds, ["kiln", "sawbench", "workbench"]);
+    }
+
+    /// Going back for its far stations (#500) takes what packing up leaves
+    /// off its lot, nearest first: not its lot's, nor one at work.
+    #[test]
+    fn going_back_takes_the_far_ones_off_its_lot() {
+        use capitol_protocol::rest::{AutomationMode, AutomationState, StationAutomation};
+        let mut working = station("anvil", 900.0, 0.0);
+        working.1.automation = Some(StationAutomation {
+            recipe_id: "nails".into(),
+            mode: AutomationMode::Forever,
+            state: AutomationState::Running,
+            done: 0,
+        });
+        let stations = vec![
+            station("workbench", 5000.0, 0.0),
+            station("workbench", 120.0, 0.0),
+            station("kiln", 300.0, 0.0),
+            station("loom", 400.0, 400.0),
+            working,
+        ];
+        // Its lot is everything north of y = 50
+        let far = strays(stations.clone(), (0.0, 0.0), |_, y| y > 50.0);
+        let at: Vec<(&str, f64)> = far.iter().map(|(k, s)| (k.as_str(), s.x)).collect();
+        assert_eq!(at, [("kiln", 300.0), ("workbench", 5000.0)]);
+        // Packing up and going back never both take one
+        let near = leaving(stations, (0.0, 0.0), |_, y| y > 50.0);
+        assert!(near.iter().all(|(_, n)| far.iter().all(|(_, f)| f.id != n.id)));
+        assert_eq!(near.len(), 1);
     }
 
     /// Holdings on a lot of `room` that owns `stations`, as a round sees

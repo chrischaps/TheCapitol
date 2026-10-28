@@ -1553,6 +1553,7 @@ impl GameState {
             | R::Collected(_)
             | R::Gazette(_)
             | R::Card(_)
+            | R::MyStations(_)
             | R::Mutes(_)
             | R::Mailbox(_)
             | R::MyGuild(_)

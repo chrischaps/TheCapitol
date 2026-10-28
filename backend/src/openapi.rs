@@ -9,7 +9,7 @@ use capitol_protocol::rest::{
     CurrencyResponse, DeedPrice, DeedPricesResponse, ZoneFacts, ZoneFactsResponse, ZoneGrowth, DepositRequest, DepositResponse,
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, RefreshRequest, MoveItemRequest, MoveItemResponse,
-    MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
+    MoveRequest, MyStationsResponse, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
     PayTaxRequest, PayTaxResponse, BuildFloorResponse, FloorBill, PlaceStationResponse, PlayerCard, OwnStanding, SendLetter, Correspondent, Letter, LetterBox, Mailbox, LettersUnread, PlayerMeResponse, MutesResponse, MutedPlayer, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse,
     StationContainerResponse, StationInfo, StationTool, StationAutomation, Produced, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, GrantRequest, GrantItem, GrantResponse, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
@@ -175,6 +175,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::recipes::list_recipes,
         // Stations
         crate::routes::stations::get_nearby_stations,
+        crate::routes::stations::get_my_stations,
         crate::routes::stations::place_station,
         crate::routes::stations::remove_station,
         crate::routes::stations::get_station_container,
@@ -338,6 +339,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         RecipeOutputInfo,
         // Stations
         NearbyStationsResponse,
+        MyStationsResponse,
         StationInfo,
         StationAutomation,
         Produced,

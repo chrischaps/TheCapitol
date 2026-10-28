@@ -4,6 +4,8 @@
 //! content. The Flint client's offline fallback is the same file
 //! (`capitol-core/src/catalog_fallback.json`), and a test there keeps them equal.
 //! `fixtures/rest/stations_nearby.json` is `GET /stations/nearby`, a station running (E4.2).
+//! `fixtures/rest/stations_mine.json` is `GET /stations/mine` (#500): a bench
+//! and a kiln on its lot, and a bench far down the road in.
 //! `fixtures/rest/split_stack.json` is `POST /items/{id}/split` taking named qualities (E1.8).
 //! `fixtures/rest/place_order.json` is a sell order naming its units (E3.1).
 //! `fixtures/rest/market_depth.json`, `market_history.json` and
@@ -91,7 +93,7 @@ use capitol_protocol::rest::{
     BazaarDirectory, BazaarShop,
     AutomationMode, AutomationState, CatalogResponse, GazetteResponse, LeaderboardKind, LeaderboardsResponse,
     MarketDepthResponse, MarketHistoryResponse,
-    MarketListingsResponse, MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
+    MarketListingsResponse, MarketSummaryResponse, MyStationsResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
 use capitol_protocol::metrics::{Feed, Sample, TownReport, ROLE_ALL_ROUNDER, ROLE_PERSON};
@@ -126,6 +128,17 @@ fn nearby_stations_round_trip_with_their_quality() {
     assert_eq!((automation.mode, &automation.state), (AutomationMode::Count(20), &AutomationState::Running));
     assert!(!automation.is_finished());
     assert_eq!(serde_json::to_string(&nearby).unwrap(), json);
+}
+
+/// Your stations wherever they stand (#500), the far one too.
+#[test]
+fn my_stations_round_trip_far_ones_and_all() {
+    let json = fixture("stations_mine.json");
+    let mine: MyStationsResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(mine.stations.len(), 3);
+    assert!(mine.stations.iter().all(|s| s.owner_id == mine.stations[0].owner_id));
+    assert_eq!(mine.stations.iter().filter(|s| s.station_type == "workbench").count(), 2);
+    assert_eq!(serde_json::to_string(&mine).unwrap(), json);
 }
 
 #[test]

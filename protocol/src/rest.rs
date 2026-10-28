@@ -1590,6 +1590,16 @@ pub struct NearbyStationsResponse {
     pub stations: Vec<StationInfo>,
 }
 
+/// `GET /stations/mine`: every station the caller owns, wherever it stands
+/// (#500), nearest first. A citizen learns its far benches from it, the ones
+/// `/stations/nearby` no longer shows it, so it can go back for them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MyStationsResponse {
+    /// Your stations, nearest you first
+    pub stations: Vec<StationInfo>,
+}
+
 /// Client-facing station info
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
