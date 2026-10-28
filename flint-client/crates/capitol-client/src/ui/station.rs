@@ -226,6 +226,7 @@ impl StationPanel {
             state.open_station_info()?.quality,
             craft::tool_in(state, recipe, true),
             whose,
+            state.catalog(),
         ))
     }
 

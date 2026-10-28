@@ -100,6 +100,7 @@ impl CraftingPanel {
             state.crafting_input()?,
             state.crafting_output(),
             craft::tool_in(state, recipe, false),
+            state.catalog(),
         ))
     }
 

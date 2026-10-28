@@ -42,7 +42,8 @@
 //!   how far an A-grade station or tool would raise the range's floor.
 //! - **Output with nowhere to go.** The server puts the output in the
 //!   output box: onto the first stack of its type, whatever its grade
-//!   (every unit keeps its quality, E1.8), else into a free slot, and if
+//!   (every unit keeps its quality, E1.8), if it stacks (a kit or a tool
+//!   never does, #568), else into a free slot, and if
 //!   there's neither it refuses the craft. [`Check::blocked`] names what's in
 //!   the way, and the craft isn't sent.
 //! - **A finished craft settles in two refetches.** The tick writes the
@@ -439,13 +440,15 @@ impl Check<'_> {
 
 /// Weighs a hand `recipe` against the input box, and the output box if
 /// it's known, with `tool` ([`tool_for`]) for a recipe that takes one.
+/// `catalog` says which outputs stack (#568).
 pub fn check<'a>(
     recipe: &'a RecipeInfo,
     input: &Container,
     output: Option<&Container>,
     tool: Option<ToolPick>,
+    catalog: &Catalog,
 ) -> Check<'a> {
-    check_at(recipe, input, output, quality::NO_STATION, tool, Whose::Any)
+    check_at(recipe, input, output, quality::NO_STATION, tool, Whose::Any, catalog)
 }
 
 /// Whose stacks a craft may take, and which its output may join (#498). A
@@ -502,6 +505,7 @@ pub fn check_at<'a>(
     station: i32,
     tool: Option<ToolPick>,
     whose: Whose,
+    catalog: &Catalog,
 ) -> Check<'a> {
     let mut needs = Vec::with_capacity(recipe.inputs.len());
     let mut inputs = Vec::new();
@@ -544,7 +548,7 @@ pub fn check_at<'a>(
         taken,
         range,
         // At a station the box is both, and what the craft empties is room
-        blocked: output.and_then(|o| blocked(recipe, o, if o.id == input.id { &emptied } else { &[] }, whose)),
+        blocked: output.and_then(|o| blocked(recipe, o, if o.id == input.id { &emptied } else { &[] }, whose, catalog)),
         station,
         tool,
     }
@@ -552,15 +556,25 @@ pub fn check_at<'a>(
 
 /// What in `output` would leave one of the recipe's outputs nowhere to go:
 /// a stack of its type `whose` may join takes it, whatever the grade
-/// (E1.8); anything else needs a free slot. The stacks in `emptied` are
-/// gone by then (the server takes the inputs first), so their slots are
-/// free. A stack of its type that isn't yours is what's named in the way.
-fn blocked(recipe: &RecipeInfo, output: &Container, emptied: &[Uuid], whose: Whose) -> Option<Blocked> {
+/// (E1.8), if it stacks; anything else needs a free slot. A kit or a tool
+/// doesn't stack, so it always takes a slot of its own, as the server's
+/// `place_made` puts it (#568); a type `catalog` doesn't know stacks, as
+/// there. The stacks in `emptied` are gone by then (the server takes the
+/// inputs first), so their slots are free. A stack of its type that isn't
+/// yours, or a kit or tool of its type, is what's named in the way.
+fn blocked(
+    recipe: &RecipeInfo,
+    output: &Container,
+    emptied: &[Uuid],
+    whose: Whose,
+    catalog: &Catalog,
+) -> Option<Blocked> {
     let mut free = output.slot_count() - output.used_slots() + emptied.len();
     let staying: Vec<&SlotItem> = output.items().filter(|i| !emptied.contains(&i.item_id)).collect();
     for out in &recipe.outputs {
+        let stacks = catalog.item_type(&out.item_type).is_none_or(|t| t.stackable);
         let of_type = || staying.iter().filter(|i| i.item_type == out.item_type);
-        if of_type().any(|i| whose.joins(i)) {
+        if stacks && of_type().any(|i| whose.joins(i)) {
             continue;
         }
         if free == 0 {
@@ -803,6 +817,24 @@ mod tests {
     const IN: Uuid = Uuid::from_u128(101);
     const OUT: Uuid = Uuid::from_u128(102);
 
+    /// [`super::check`] against the seed's catalog (#568): fiber and rope
+    /// stack, a chest kit and a stone axe don't.
+    fn check<'a>(r: &'a RecipeInfo, i: &Container, o: Option<&Container>, t: Option<ToolPick>) -> Check<'a> {
+        super::check(r, i, o, t, &Catalog::fallback())
+    }
+
+    /// [`super::check_at`] against the seed's catalog.
+    fn check_at<'a>(
+        r: &'a RecipeInfo,
+        i: &Container,
+        o: Option<&Container>,
+        station: i32,
+        t: Option<ToolPick>,
+        whose: Whose,
+    ) -> Check<'a> {
+        super::check_at(r, i, o, station, t, whose, &Catalog::fallback())
+    }
+
     /// A hand recipe, its inputs weighted evenly, give or take 3.
     fn recipe(id: &str, inputs: &[(&str, i32)], output: &str) -> RecipeInfo {
         RecipeInfo {
@@ -1032,6 +1064,44 @@ mod tests {
         );
         // Not loaded yet: nothing to say.
         assert_eq!(check(&r[0], &inp, None, None).blocked, None);
+    }
+
+    /// A kit or a tool never stacks (#568): the server puts each in a slot
+    /// of its own, so one of its type in a full box is no room for another,
+    /// and it's what's named in the way. Rope still joins its stack.
+    #[test]
+    fn a_kit_or_a_tool_takes_a_slot_of_its_own() {
+        let chest = recipe("craft_chest", &[("fiber", 8)], "chest_kit");
+        let axe = recipe("craft_axe", &[("fiber", 8)], "stone_axe");
+        let inp = input(&[item(1, 0, "fiber", 50, 9)]);
+        let out = |items: &[SlotItem]| boxed(OUT, "crafting_output", 1, items);
+        for (r, kind) in [(&chest, "chest_kit"), (&axe, "stone_axe")] {
+            let c = check(r, &inp, Some(&out(&[item(9, 0, kind, 70, 1)])), None);
+            assert!(c.satisfied() && !c.ready(), "{kind}");
+            assert_eq!(c.blocked.map(|b| b.item_id), Some(Uuid::from_u128(9)), "{kind}");
+            // An empty slot takes it
+            assert!(check(r, &inp, Some(&out(&[])), None).ready(), "{kind}");
+        }
+        let rope = recipe("rope_basic", &[("fiber", 2)], "rope");
+        assert!(check(&rope, &inp, Some(&out(&[item(9, 0, "rope", 70, 1)])), None).ready());
+        // A type the catalog doesn't know stacks, as the server takes it
+        let odd = recipe("craft_odd", &[("fiber", 2)], "odd_thing");
+        assert!(check(&odd, &inp, Some(&out(&[item(9, 0, "odd_thing", 70, 1)])), None).ready());
+
+        // At a station: a box full but for your own chest kit has no room
+        // for the next one, though the same box takes your rope
+        let me = Uuid::from_u128(500);
+        let bench = boxed(
+            Uuid::from_u128(40),
+            "station_inventory",
+            2,
+            &[item(1, 0, "fiber", 50, 9).with_owner(Some(me)), item(2, 1, "chest_kit", 70, 1).with_owner(Some(me))],
+        );
+        let c = check_at(&chest, &bench, Some(&bench), 50, None, Whose::Mine(me));
+        assert_eq!(c.blocked.map(|b| b.item_id), Some(Uuid::from_u128(2)));
+        let mut bench = bench;
+        bench.slots[1] = Some(item(2, 1, "rope", 70, 1).with_owner(Some(me)));
+        assert!(check_at(&rope, &bench, Some(&bench), 50, None, Whose::Mine(me)).ready());
     }
 
     /// At a station the box is the input and the output (#489): a full box

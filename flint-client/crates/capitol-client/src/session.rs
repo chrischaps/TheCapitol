@@ -1196,7 +1196,7 @@ impl Session {
         // The output stays in the station's box (#489), joining only a
         // stack of yours, or on a shift the employer's (#498)
         let whose = craft::Whose::at(self.state.me(), self.wages.employer_at(station_id));
-        let check = craft::check_at(recipe, bench, Some(bench), open.quality, tool, whose);
+        let check = craft::check_at(recipe, bench, Some(bench), open.quality, tool, whose, self.state.catalog());
         if let Some(message) = self.crafting.start_at(&check, station_id, &self.state, now) {
             tracing::info!(
                 "craft: {} at {station_id} from {} stacks",
@@ -1338,7 +1338,7 @@ impl Session {
             return;
         };
         let tool = craft::tool_in(&self.state, recipe, false);
-        let check = craft::check(recipe, input, self.state.crafting_output(), tool);
+        let check = craft::check(recipe, input, self.state.crafting_output(), tool, self.state.catalog());
         if let Some(message) = self.crafting.start(&check, &self.state, now) {
             tracing::info!(
                 "craft: {} from {} stacks",
@@ -4328,7 +4328,7 @@ mod tests {
         let check = |s: &Session, id: &str| {
             let st = s.state();
             let r = st.recipe(id).unwrap().clone();
-            let c = craft::check(&r, st.crafting_input().unwrap(), st.crafting_output(), None);
+            let c = craft::check(&r, st.crafting_input().unwrap(), st.crafting_output(), None, st.catalog());
             (c.satisfied(), c.blocked.is_some())
         };
         let idle = |s: &Session| *s.crafting().phase() == Phase::Idle && !s.state().is_crafting();
@@ -5477,7 +5477,7 @@ mod tests {
         let ready = |s: &Session| {
             let st = s.state();
             let r = st.recipe("tool_handle").unwrap();
-            station_box(s).is_some_and(|b| craft::check(r, &b, Some(&b), None).ready())
+            station_box(s).is_some_and(|b| craft::check(r, &b, Some(&b), None, st.catalog()).ready())
         };
         wait(&mut session, "sticks and rope on the workbench", &ready);
 
