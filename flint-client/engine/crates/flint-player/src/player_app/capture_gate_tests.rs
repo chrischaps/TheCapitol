@@ -167,6 +167,30 @@ fn pad_axes_read_zero_while_a_field_has_focus() {
     assert!(app.input.action_value("walk") > 0.7);
 }
 
+/// Run one egui frame on the app's context with a button focused.
+fn focus_a_button(app: &PlayerApp) {
+    let _ = app.egui_ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.button("Buy").request_focus();
+        });
+    });
+}
+
+#[test]
+fn a_focused_button_leaves_the_pads_to_the_game() {
+    // egui counts any focus as wanting the keyboard; the gate counts only
+    // a text field (ADR 0110's amendment), so a pad ring's focused button
+    // between frames holds nothing.
+    let mut app = headless_app("0 axis LeftStickY 0.8
+");
+    app.add_extension(Box::new(Bare));
+    focus_a_button(&app);
+    assert!(app.egui_ctx.wants_keyboard_input());
+    assert!(!app.text_has_focus());
+    app.tick();
+    assert!(app.input.action_value("walk") > 0.7);
+}
+
 #[test]
 fn pad_axes_read_zero_while_the_window_is_unfocused() {
     let mut app = headless_app("");
@@ -180,6 +204,56 @@ fn pad_axes_read_zero_while_the_window_is_unfocused() {
     assert!(!app.window_focused);
     app.window_focus_changed(true);
     assert!(app.window_focused);
+}
+
+#[test]
+fn a_capture_hears_its_script_alone() {
+    let device_id = DeviceId::dummy();
+    let wheel = WindowEvent::MouseWheel {
+        device_id,
+        delta: winit::event::MouseScrollDelta::LineDelta(0.0, 3.0),
+        phase: winit::event::TouchPhase::Moved,
+    };
+    let click = WindowEvent::MouseInput {
+        device_id,
+        state: ElementState::Pressed,
+        button: MouseButton::Left,
+    };
+    let moved = WindowEvent::CursorMoved {
+        device_id,
+        position: winit::dpi::PhysicalPosition::new(10.0, 20.0),
+    };
+    let resized = WindowEvent::Resized(winit::dpi::PhysicalSize::new(800, 600));
+    // An input script, a screenshot or an exit time makes a capture
+    let mut app = headless_app("1.0 wheel 2
+");
+    assert!(app.capture.is_capture());
+    for real in [&wheel, &click, &moved] {
+        assert!(app.capture_drops(real), "{real:?}");
+    }
+    assert!(!app.capture_drops(&resized), "lifecycle events still arrive");
+    assert!(!app.capture_drops(&WindowEvent::Focused(true)));
+    app.capture.input_script = None;
+    app.capture.exit_after = Some(4.0);
+    assert!(app.capture_drops(&wheel));
+    app.capture.exit_after = None;
+    app.capture.path = Some("shot.png".into());
+    assert!(app.capture_drops(&wheel));
+    // A run that's no capture hears the real mouse
+    app.capture.path = None;
+    assert!(!app.capture.is_capture());
+    assert!(!app.capture_drops(&wheel));
+}
+
+#[test]
+fn a_captures_script_still_reaches_the_game() {
+    // The script's keys take the path a real keyboard's does, past the
+    // capture's gate: the frame they play on, the game sees them.
+    let mut app = headless_app("0 down KeyW
+");
+    app.add_extension(Box::new(Bare));
+    app.tick();
+    assert!(app.input.is_key_down(winit::keyboard::KeyCode::KeyW));
 }
 
 #[test]

@@ -77,6 +77,11 @@ makes it the tool for verifying `on_draw_ui` output:
 flint-player scenes/race.scene.toml --schemas engine/schemas --schemas schemas   --width 1280 --height 720   --screenshot renders/hud.png --screenshot-at 6 --exit-after 6.5
 ```
 
+With `--screenshot`, `--exit-after` or `--input-script`, the run is a capture
+and ignores the real keyboard, mouse and pads, so a stray scroll over its
+window can't change the shot. Only the input script drives it (see
+[input gates](../concepts/input-gates.md#during-a-capture)).
+
 | Flag | Description |
 |------|-------------|
 | `--width <px>` / `--height <px>` | Initial window size in physical pixels (default `1280`x`720`; ignored with `--fullscreen`) |
@@ -94,9 +99,10 @@ An input script plays its events at set game times. `#` starts a comment:
 0.0   down    KeyW               # hold a key (names as in input configs)
 2.5   up      KeyW
 3.0   tap     KeyF 0.4           # down now, up 0.4 s later (default 0.06)
-3.0   axis    LeftStickX -0.35   # stick / trigger value on the script pad
+3.0   axis    LeftStickX -0.35   # stick value on the script pad
 4.0   press   South              # gamepad button down
 4.2   release South
+4.5   pull    RightTrigger2 0.6  # a trigger pulled part-way (0 lets go)
 5.0   wheel   1                  # one wheel line up this frame
 5.5   wheel   -0.5 2             # half a line down, two lines right
 6.0   mouse   640 360            # pointer to (640, 360) in window pixels
@@ -111,6 +117,12 @@ An input script plays its events at set game times. `#` starts a comment:
 10.0  look    40 -10             # raw mouse motion, for mouse-look
 10.5  look    300 0 1.5          # spread over 1.5 s
 ```
+
+`pull` sets an analog button's travel, as a real pad's trigger sends it: a
+`gamepad_button` binding to `RightTrigger2` reads 0.6, not the 0 or 1 that
+`press` gives. It sets the value alone, so add a `press` and `release` too
+when a script wants the button's press edge. `axis RightTrigger2` writes an
+axis of that name, which a button binding never reads.
 
 The mouse buttons are `MouseLeft`, `MouseRight`, `MouseMiddle`, `MouseBack`
 and `MouseForward`. Pointer positions are physical window pixels, the same
