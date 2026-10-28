@@ -24,15 +24,27 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-road-in.md` - The Road In: the tutorial grows into a walk from the spawn up the south road to the hall, with hands-on practice in every system and a stop in each home zone. It ends at a Deeds Office by the hall with **a deed of the player's choice** as the reward, judged on the server, with citizens walking it too (umbrella #437; issues labelled `tutorial`, #438 to #452)
 - `the-capitol-callings.md` - Callings: citizens with a favourite, not a single job. Each citizen is to get a calling (a favourite activity and how strongly it keeps to it, or none for an all-rounder; 40% specialists, 40% leaners, 20% all-rounders), work in stints chosen as a person chooses their evening, take up the game's other activities and the odd detour, and later find its niche. Since K1.2 (#531) a citizen works in stints: its job of the moment is its stint's, and the rest of K1 to K5 is planned. Two reports go with it, `docs/citizens/roles-today.md` and `docs/citizens/roles-proposed.md` (plan #526; issues labelled `callings`, #527 to #543)
 
-## Current Focus: The Commons
+## Current Focus: Callings
 
-The city is lived in, but nobody says anything: every trade is a window of numbers, and what one person wants of another can't be said, promised, kept or broken. Active work is **the Commons**, the city's social half. The question it answers is whether the economy can become a society. It's also the economy's own fix: a commission is demand you can see, and it pays the walk (#294, #336). The plan is `the-capitol-commons.md`. The work queue is the GitHub issues labelled `commons` (#378 to #401, plus #311), created in dependency order. The phase labels run `cm:S0-groundwork` to `cm:S4-guilds`. In order:
-- talk: local speech over heads, a Capitol channel and letters (S1);
-- commissions on the hall's board with escrow and claims, and piece-rate wages (S2);
-- standing in words and weekly leaderboards (S3);
-- guilds with a treasury, dues and a hall (S4).
+A citizen used to be one job for life, so a fiber gatherer wanted nothing, spent nothing, and the town's Strands pooled in its pockets (#403). Active work is **Callings**: citizens with a favourite, not a single job. The question it answers is whether the town's people can be read as people, and with it whether the money moves once everyone has wants. The plan is `the-capitol-callings.md` (plan #526). The work queue is the GitHub issues labelled `callings` (#527 to #543), with phase labels `cg:K0-groundwork` to `cg:K5-niche`.
+- **Built (K0 to K3):**
+  - a calling in every persona (40% specialists, 40% leaners, 20% all-rounders);
+  - stints and detours;
+  - surplus and needs across jobs;
+  - a tools market;
+  - trading as a leaning;
+  - patrons who post commissions for their homes;
+  - citizens who hire;
+  - "lately busy with" on every card.
+- **Next:**
+  - K4.1 (#542): a soak against #403, and tuning. This is the test of whether callings fixed the pooling.
+  - K5.1 (#543): leanings drift into a niche. It needs Chris's decision.
 
-Citizens are in all of it, marked honestly. The first slice is S0.1, S0.2 and S0.3, which have no dependencies and can run side by side, then talk (S1), which unblocks #311 (a Claude layer for what citizens say).
+**Plots v2's buildings** (V3, `the-capitol-plots-v2.md`) run alongside: floors, condition and repair are built, and their follow-ups are open under `plots-v2` (#548, #549).
+
+### The Commons (built)
+
+**The Commons** is the city's social half: local talk and a Capitol channel, letters, commissions on the hall's board with escrow and claims, piece-rate wages, standing in words, weekly leaderboards, and guilds with a treasury, dues and a hall, with citizens in all of it. The plan is `the-capitol-commons.md`, and the issues are labelled `commons` (#378 to #401, plus #311), with phase labels `cm:S0-groundwork` to `cm:S4-guilds`. All of S0 to S4 is built. What's open under `commons` is follow-ups.
 
 ### The Observatory (built)
 
