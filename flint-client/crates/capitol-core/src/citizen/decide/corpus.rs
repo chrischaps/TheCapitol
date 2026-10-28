@@ -124,7 +124,7 @@ fn round(r: u32) -> Vec<Situation> {
                 if let Some(menu) = sell_menu(&h, item, n, last.map(|l| l - 1), last.map(|l| l + 2)) {
                     out.push(s(Question::Sell { item: item.into() }, menu, 1));
                 }
-                if let Some(menu) = stall_menu(&h, item, n, last, false) {
+                if let Some(menu) = stall_menu(&h, item, n, last, None) {
                     out.push(s(Question::Sell { item: item.into() }, menu, 1));
                 }
             }

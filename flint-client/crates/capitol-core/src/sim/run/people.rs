@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::{PlaceOrder, SlotItem};
-use capitol_protocol::rules::bazaar::{RENT_DAY_SECS, MAX_SHOP_NAME};
+use capitol_protocol::rules::bazaar::{MAX_LISTINGS, MAX_SHOP_NAME, RENT_DAY_SECS};
 use capitol_protocol::rules::lately::Lately;
 use capitol_protocol::rules::market::OrderSide;
 use uuid::Uuid;
@@ -251,8 +251,9 @@ impl SimBot {
         if !self.people {
             return None;
         }
-        let keeps = self.bot.state().bazaar().my_shop().is_some();
-        let menu = stall_menu(holdings, item, spare, self.worth(item), keeps)?;
+        // How full its shop is, if it keeps one: a full one takes no more (#544)
+        let shelf = self.bot.state().bazaar().my_shop().map(|s| s.listings.len());
+        let menu = stall_menu(holdings, item, spare, self.worth(item), shelf)?;
         let question = Question::Sell { item: item.into() };
         match self.decide(question, menu, 1, holdings)? {
             (d, Choice::Stock { item, .. }) => Some(Trade::Stock {
@@ -386,6 +387,11 @@ impl SimBot {
                 break;
             }
             let listings = self.bot.state().bazaar().my_shop().map_or(0, |s| s.listings.len());
+            // A stack to a listing: once the shelf fills, the rest stays in
+            // the pack, unless nothing went up at all (#544)
+            if listings >= MAX_LISTINGS && left < quantity {
+                break;
+            }
             let n = left.min(stack.quantity);
             let price = worn_price(price, &stack);
             let listing = bazaar::stock(&stack, n, price, listings).map_err(|e| BotError::Failed(e.message()))?;

@@ -918,13 +918,21 @@ pub fn sell_menu(holdings: &Holdings, item: &str, spare: i32, bid: Option<i64>, 
 
 /// The menu for stocking a stall with `spare` of `item` (C1.5, Callings
 /// K1.4), if there's a question to ask: it has half of [`STALL_AT`] or more
-/// spare, or a tool (K2.1, [`stall_at`]), can put a worth to it, and keeps a stall (`keeps`) or can pay
-/// [`STALL_DAYS`] of rent for one, with what it [`keeps`](kept) back. Stock
-/// (a price round its worth, up to all it has spare), or keep it.
-pub fn stall_menu(holdings: &Holdings, item: &str, spare: i32, worth: Option<i64>, keeps: bool) -> Option<Vec<Choice>> {
+/// spare, or a tool (K2.1, [`stall_at`]), can put a worth to it, and keeps a
+/// stall with room on its shelf, or can pay [`STALL_DAYS`] of rent for one,
+/// with what it [`keeps`](kept) back. `shelf` is how many listings the shop
+/// it keeps holds, or `None` if it keeps none: a shop with
+/// [`MAX_LISTINGS`](capitol_protocol::rules::bazaar::MAX_LISTINGS) already
+/// takes no more, so there's no question (#544). Stock (a price round its
+/// worth, up to all it has spare), or keep it.
+pub fn stall_menu(holdings: &Holdings, item: &str, spare: i32, worth: Option<i64>, shelf: Option<usize>) -> Option<Vec<Choice>> {
     let worth = worth?.max(1);
     let rent = holdings.fees.rent(STALL_DAYS);
-    if spare < (stall_at(item) / 2).max(1) || (!keeps && holdings.strands - kept(holdings) < rent) {
+    let room = match shelf {
+        Some(listings) => listings < capitol_protocol::rules::bazaar::MAX_LISTINGS,
+        None => holdings.strands - kept(holdings) >= rent,
+    };
+    if spare < (stall_at(item) / 2).max(1) || !room {
         return None;
     }
     Some(vec![
@@ -1402,16 +1410,22 @@ mod tests {
             ..Holdings::default()
         };
         h.items.insert("log".into(), STALL_AT);
-        assert!(stall_menu(&h, "log", STALL_AT, Some(10), false).is_some());
+        assert!(stall_menu(&h, "log", STALL_AT, Some(10), None).is_some());
         // Not enough for the rent with a deed kept back, unless it keeps one
         h.strands = 280;
-        assert_eq!(stall_menu(&h, "log", STALL_AT, Some(10), false), None);
-        assert!(stall_menu(&h, "log", STALL_AT, Some(10), true).is_some());
+        assert_eq!(stall_menu(&h, "log", STALL_AT, Some(10), None), None);
+        assert!(stall_menu(&h, "log", STALL_AT, Some(10), Some(0)).is_some());
         // Too few spare, or no worth to price them by
-        assert_eq!(stall_menu(&h, "log", STALL_AT / 2 - 1, Some(10), true), None);
-        assert_eq!(stall_menu(&h, "log", STALL_AT, None, true), None);
+        assert_eq!(stall_menu(&h, "log", STALL_AT / 2 - 1, Some(10), Some(0)), None);
+        assert_eq!(stall_menu(&h, "log", STALL_AT, None, Some(0)), None);
         // Up to what it has spare
-        assert!(matches!(&stall_menu(&h, "log", 25, Some(10), true).unwrap()[0], Choice::Stock { quantity, .. } if quantity.max == 25));
+        assert!(matches!(&stall_menu(&h, "log", 25, Some(10), Some(0)).unwrap()[0], Choice::Stock { quantity, .. } if quantity.max == 25));
+        // A full shop takes no more, however much it has spare or could pay
+        // for (#544); one listing short, it asks
+        let full = capitol_protocol::rules::bazaar::MAX_LISTINGS;
+        h.strands = 10_000;
+        assert_eq!(stall_menu(&h, "log", STALL_AT, Some(10), Some(full)), None);
+        assert!(stall_menu(&h, "log", STALL_AT, Some(10), Some(full - 1)).is_some());
     }
 
     /// C1.1's choice of step: bank at [`BANK_FIBER_AT`], else the first goal's.
@@ -1795,7 +1809,7 @@ mod tests {
         // doesn't wear in the pack
         let menu = sell_menu(&h, "stone_axe", 1, Some(48), None).unwrap();
         assert_eq!(rules_pick(Question::Sell { item: "stone_axe".into() }, menu, &h, Some(48), None), sold("stone_axe", 1, 48));
-        let stall = stall_menu(&h, "stone_axe", 1, Some(50), true).unwrap();
+        let stall = stall_menu(&h, "stone_axe", 1, Some(50), Some(0)).unwrap();
         let patient = Temperament {
             patience: 1.0,
             ..Temperament::default()
@@ -1818,7 +1832,7 @@ mod tests {
         let d = Cascade::rules().ask(&s, std::time::Instant::now()).decision.unwrap();
         assert_eq!(d.pick, 0, "even the patient stock a spare tool");
         assert_eq!(d.price, Some(60), "its target and a little more");
-        assert_eq!(stall_menu(&h, "log", 1, Some(50), true), None);
+        assert_eq!(stall_menu(&h, "log", 1, Some(50), Some(0)), None);
         // A wood gatherer whose axe broke buys one at the ask
         let mut broke = Holdings {
             strands: 500,
