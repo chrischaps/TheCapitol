@@ -691,6 +691,8 @@ impl TerrainConfig {
         // And every lane's: its ends onto the arterial or the main road it
         // stops at (RD5). Only the farm gates stay loose.
         street_plan::weld_junctions(&mut roads, super::rural::is_lane);
+        // And the urban grid's: its ring streets cross the arterials (#436).
+        street_plan::weld_junctions(&mut roads, super::urban::is_grid_street);
 
         (roads, plan)
     }
@@ -1141,7 +1143,13 @@ mod tests {
         // released by startup's sync, and the rural ring's planned nodes are
         // re-planned (`20270106_001_packing_rows.sql` and its post-content
         // nodes).
-        assert_eq!(TerrainConfig::default_world().version(), "7c5330637253da07");
+        //
+        // #436 welded the urban grid into the arterials: each of the eight
+        // gains a vertex on its own line where each of the six ring streets
+        // crosses it, and the rings' vertices there settle by 2e-12. No lot,
+        // park, water or node moved (7 farms by 4e-12, under the hash's
+        // quantum), so there's no migration.
+        assert_eq!(TerrainConfig::default_world().version(), "c21dd99ad3b7a2d5");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -2081,5 +2089,53 @@ mod tests {
             last = y;
         }
     }
-}
 
+    /// Lots follow a road's shape, not how many points draw it (#436): an
+    /// arterial with extra vertices on its straight line, as the urban grid's
+    /// weld gives it, lays the same suburban lots and farms.
+    #[test]
+    fn a_collinear_vertex_on_an_arterial_moves_no_lot() {
+        let params = WorldGenParams::default();
+        let bare = TerrainConfig::bare(&params);
+        let center = (bare.center_x, bare.center_y);
+        let (roads, _) = bare.generate_roads_and_rural_plan(&params);
+        let mut split = roads.clone();
+        let mut added = 0;
+        for road in split.iter_mut().filter(|r| r.id.strip_prefix("arterial_").is_some_and(|n| n.parse::<u32>().is_ok())) {
+            let mut points = Vec::with_capacity(road.points.len() * 3);
+            for w in road.points.windows(2) {
+                points.push(w[0]);
+                for t in [0.29, 0.61] {
+                    points.push((w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t));
+                    added += 1;
+                }
+            }
+            points.push(*road.points.last().unwrap());
+            road.points = points;
+        }
+        assert!(added > 0);
+        let lay = |roads: Vec<RoadSegment>| {
+            let t = TerrainConfig { roads, ..bare.clone() };
+            let mut lots = t.generate_suburban_plots_internal(&params.suburban_params());
+            let sectors = super::super::rural::sectors_of(&params, center, &t.roads);
+            lots.extend(super::super::rural::farms::lay(&params, center, &t.roads, &sectors, None));
+            lots
+        };
+        let (before, after) = (lay(roads), lay(split));
+        let by_id: HashMap<&str, &TerrainPlot> = after.iter().map(|l| (l.id.as_str(), l)).collect();
+        let mut moved = Vec::new();
+        for lot in &before {
+            match by_id.get(lot.id.as_str()) {
+                None => moved.push(format!("{} dropped", lot.id)),
+                Some(other) => {
+                    let off = lot.corners.iter().zip(&other.corners).map(|(a, b)| (a.0 - b.0).stable_hypot(a.1 - b.1)).fold(0.0, f64::max);
+                    if off > 1e-6 {
+                        moved.push(format!("{} moved {off:.3}", lot.id));
+                    }
+                }
+            }
+        }
+        moved.extend(after.iter().filter(|l| !before.iter().any(|b| b.id == l.id)).map(|l| format!("{} new", l.id)));
+        assert!(moved.is_empty(), "{} of {} lots changed: {:?}", moved.len(), before.len(), &moved[..moved.len().min(40)]);
+    }
+}

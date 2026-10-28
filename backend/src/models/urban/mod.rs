@@ -36,9 +36,8 @@
 //! The grid has no seed: it's the same in every world. Its streets meet at
 //! shared vertices (`street_plan::audit`), by construction. Where a ring
 //! street crosses an arterial it has a vertex on the arterial's centre line,
-//! but the arterial isn't welded to it: the farms and suburban lots laid
-//! along an arterial follow its vertices, and a weld moved 137 of them
-//! (#436).
+//! and the weld puts the same point into the arterial (#436). The lots laid
+//! along an arterial follow its shape, not its vertices, so none moved.
 
 #[cfg(test)]
 pub(crate) mod metrics;
@@ -115,7 +114,6 @@ impl Default for UrbanParams {
 }
 
 /// Whether `road` is one of the grid's streets.
-#[cfg(test)]
 pub fn is_grid_street(road: &RoadSegment) -> bool {
     road.id.starts_with("urb_")
 }

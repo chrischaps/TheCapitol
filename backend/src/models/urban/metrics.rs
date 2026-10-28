@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::models::lot_clearance::finish_lots;
 use crate::models::station_room;
 use crate::models::street_plan;
-use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
+use crate::models::terrain::{TerrainConfig, WorldGenParams};
 
 type P = (f64, f64);
 
@@ -81,6 +81,10 @@ pub fn measure_grid(params: &WorldGenParams) -> (TerrainConfig, Metrics) {
     let grid = super::grid(params, center, &roads);
     roads.extend(grid.roads());
     roads.extend(crate::models::suburb::plan(&params.suburban_params(), center).roads);
+    // Welded as the world's are, so the grid meets the arterials at shared
+    // vertices (#436).
+    street_plan::weld_junctions(&mut roads, |r| r.road_type == RoadType::Suburban);
+    street_plan::weld_junctions(&mut roads, super::is_grid_street);
     terrain.terrain_plots = finish_lots(grid.lots(&params.urban), &roads, &terrain.water_rings, center);
     terrain.roads = roads;
     let m = numbers(params, &terrain);
@@ -105,27 +109,16 @@ fn numbers(params: &WorldGenParams, terrain: &TerrainConfig) -> Metrics {
     let fives = lots.iter().filter(|l| station_room::takes(&l.corners, 5)).count();
     let inner = params.guild_outer_radius + params.canal_outer_width / 2.0;
     let band = PI * (params.urban_outer_radius.powi(2) - inner.powi(2));
-    // The grid's streets among themselves, and each crossing of a ring
-    // street and an arterial at a vertex of the ring's on its centre line.
-    let grid: Vec<RoadSegment> = terrain.roads.iter().filter(|r| super::is_grid_street(r)).cloned().collect();
-    let audit = street_plan::audit(&grid, |_| true);
-    let arterials: Vec<&RoadSegment> =
-        terrain.roads.iter().filter(|r| r.road_type == RoadType::Arterial && r.id.starts_with("arterial_")).collect();
-    let off_vertex = grid
+    // The grid's streets among themselves and with the arterials they
+    // cross: every junction a vertex both share, since the arterials are
+    // welded to the grid (#436).
+    let roads: Vec<RoadSegment> = terrain
+        .roads
         .iter()
-        .filter(|r| r.id.starts_with("urb_ring_"))
-        .flat_map(|ring| arterials.iter().map(move |a| (ring, a)))
-        .filter(|(ring, a)| {
-            let (p, q) = (a.points[0], a.points[a.points.len() - 1]);
-            let on = |v: &P| point_to_segment_distance(v.0, v.1, p.0, p.1, q.0, q.1) < 1e-6;
-            let crosses = ring.points.windows(2).any(|w| {
-                let side = |v: P| (q.0 - p.0) * (v.1 - p.1) - (q.1 - p.1) * (v.0 - p.0);
-                side(w[0]) * side(w[1]) < 0.0
-                    && point_to_segment_distance(w[0].0, w[0].1, p.0, p.1, q.0, q.1) < 50.0
-            });
-            crosses && !ring.points.iter().any(on)
-        })
-        .count();
+        .filter(|r| super::is_grid_street(r) || (r.road_type == RoadType::Arterial && r.id.starts_with("arterial_")))
+        .cloned()
+        .collect();
+    let audit = street_plan::audit(&roads, super::is_grid_street);
     Metrics {
         lots: lots.len(),
         outer_street: layout.streets.last().copied().unwrap_or(f64::NAN),
@@ -153,8 +146,7 @@ fn numbers(params: &WorldGenParams, terrain: &TerrainConfig) -> Metrics {
             + audit.sharp_turns.len()
             + audit.self_crossings.len()
             + audit.unjoined_crossings.len()
-            + audit.loose_ends.len()
-            + off_vertex,
+            + audit.loose_ends.len(),
         streets: terrain.roads.iter().filter(|r| super::is_grid_street(r)).count(),
     }
 }
