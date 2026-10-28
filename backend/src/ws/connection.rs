@@ -186,16 +186,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     // Handle messages and events
-    // The interest cell this socket's player was in at the last `positions`, and
-    // whether the last one sent was empty, so one out of the world isn't sent
-    // an empty list ten times a second (C0.4)
-    let mut my_cell: Option<crate::engine::interest::Cell> = None;
-    let mut sent_nobody = false;
-    // The last `positions`, with `my_cell`: only the gathering and crafting of
-    // the players in sight in it reach this socket (#275)
-    let mut seen: Option<std::sync::Arc<crate::engine::interest::Positions>> = None;
-    // Whether everyone in the world was in sight in it, so nothing needs filtering
-    let mut sees_everyone = false;
 
     loop {
         tokio::select! {
@@ -257,29 +247,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
 
-            // Handle game events: still inline here, so untested (#566)
+            // Handle game events (#566: `Socket::heard`)
             heard = event_rx.recv() => {
-                if !socket.subscribed_position {
-                    continue;
-                }
                 let event = match heard {
-                    Ok(event) => Ok(event),
-                    // Too far behind: the missed events are gone, so skip ahead
-                    // and start this socket over from what's true now (C0.3)
+                    Ok(event) => event,
+                    // Too far behind: the missed events are gone (C0.3)
+                    Err(RecvError::Lagged(_)) if !socket.subscribed_position => continue,
                     Err(RecvError::Lagged(missed)) => {
                         tracing::warn!("Player {player_id}'s connection {connection_id} fell {missed} events behind; resyncing it");
                         counted.resynced();
-                        crate::engine::load::Receiver::Sockets.lagged(missed);
-                        // The next `positions` tells it again what everyone in sight is doing
-                        seen = None;
-                        sees_everyone = false;
-                        // A `mutes_changed` may be among what it missed
-                        socket.muted = read_mutes(&state, player_id, socket.muted).await;
-                        // And a `guild_changed`
-                        socket.my_guild = read_guild(&state, player_id, socket.my_guild).await;
-                        let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &socket.market_items).await;
                         let mut sent = Ok(());
-                        for msg in messages {
+                        for msg in socket.resynced(&state, missed).await {
                             sent = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                             if sent.is_err() {
                                 break;
@@ -291,408 +269,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                         continue;
                     }
-                    Err(RecvError::Closed) => Err(()),
-                };
-
-                match event {
-                    // Only the players near this socket's (C0.4), each cell serialised once
-                    // for every socket that sees it. A watcher sees round the avatar.
-                    Ok(GameEvent::PlayerPositions(positions)) => {
-                        let was_cell = std::mem::replace(&mut my_cell, positions.cell_of(player_id));
-                        let arrived: Vec<Uuid> = positions
-                            .come_into_sight(my_cell, seen.as_deref().map(|before| (before, was_cell)))
-                            .into_iter()
-                            .filter(|id| *id != player_id)
-                            .collect();
-                        sees_everyone = positions.sees_everyone(my_cell);
-                        seen = Some(std::sync::Arc::clone(&positions));
-                        if my_cell.is_none() && std::mem::replace(&mut sent_nobody, true) {
-                            continue;
-                        }
-                        sent_nobody = my_cell.is_none();
-                        if sender.send(Message::Text(positions.message(my_cell).into())).await.is_err() {
-                            counted.ends(SocketEnd::SendFailed);
-                            break;
-                        }
-                        // Someone come into sight part way through a gather or a craft (#275)
-                        let mut sent = Ok(());
-                        for msg in arrived.into_iter().flat_map(|id| positions.catch_up(id)) {
-                            sent = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                            if sent.is_err() {
-                                break;
-                            }
-                        }
-                        if sent.is_err() {
-                            counted.ends(SocketEnd::SendFailed);
-                            break;
-                        }
-                    }
-                    // Joining far off isn't news; the positions bring them when they're near
-                    Ok(GameEvent::PlayerJoined(player)) => {
-                        let cell = crate::engine::interest::cell_at(player.x, player.y);
-                        if player.id == player_id || my_cell.is_none_or(|mine| crate::engine::interest::near(mine, cell)) {
-                            let msg = ServerMessage::PlayerJoined { player };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // Talk (S1.1): local by the cell and then the distance, Capitol to all
-                    Ok(GameEvent::Said { seq, line }) => {
-                        let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > socket.heard_capitol;
-                        if fresh && crate::engine::talk::hears(&line, player_id, socket.holds_avatar, seen.as_deref(), my_cell, &socket.muted, socket.my_guild) {
-                            socket.heard_capitol = socket.heard_capitol.max(seq);
-                            let _ = sender.send(Message::Text(serde_json::to_string(&line.message()).unwrap().into())).await;
-                        }
-                    }
-                    // They muted or unmuted someone, here or on another device (S1.4)
-                    Ok(GameEvent::MutesChanged { player_id: who }) => {
-                        if who == player_id {
-                            socket.muted = read_mutes(&state, player_id, socket.muted).await;
-                        }
-                    }
-                    // Their guild changed, or they joined or left one (S4.1)
-                    Ok(GameEvent::Tutorial { player_id: to, message }) => {
-                        if to == player_id {
-                            let _ = sender.send(Message::Text(serde_json::to_string(&message).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::GuildChanged { guild_id, players }) => {
-                        if players.contains(&player_id) {
-                            // In, out or still in: whose talk it hears (S4.4)
-                            socket.my_guild = read_guild(&state, player_id, socket.my_guild).await;
-                            let msg = ServerMessage::GuildChanged { guild_id };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // Leaving goes to everyone, near or far: it ends their trades
-                    Ok(GameEvent::PlayerLeft { player_id: left_id }) => {
-                        let msg = ServerMessage::PlayerLeft { player_id: left_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // M2: Extraction events, from the players in sight (#275)
-                    Ok(GameEvent::ExtractionStarted { player_id: pid, node_id, duration_ticks }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::ExtractionStarted { player_id: pid, node_id, duration_ticks };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::ExtractionProgress { player_id: pid, progress, duration }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::ExtractionProgress { player_id: pid, progress, duration };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::ExtractionCancelled { player_id: pid }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::ExtractionCancelled { player_id: pid };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::ExtractionFailed { player_id: pid, reason }) => {
-                        if pid == player_id {
-                            let msg = ServerMessage::ExtractionFailed { player_id: pid, reason };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::NodeDepleted { node_id }) => {
-                        let msg = ServerMessage::NodeDepleted { node_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::NodeRegenerated { node_id }) => {
-                        let msg = ServerMessage::NodeRegenerated { node_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // M3: Crafting events, from the players in sight (#275)
-                    Ok(GameEvent::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::CraftingProgress { player_id: pid, operation_id, progress, duration }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::CraftingProgress { player_id: pid, operation_id, progress, duration };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::CraftingCancelled { player_id: pid, operation_id }) => {
-                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
-                            let msg = ServerMessage::CraftingCancelled { player_id: pid, operation_id };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::CraftingFailed { player_id: pid, reason }) => {
-                        if pid == player_id {
-                            let msg = ServerMessage::CraftingFailed { player_id: pid, reason };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // M3.5: Inventory events
-                    Ok(GameEvent::InventoryUpdated { player_id: pid, container_id, slots: _ }) => {
-                        let msg = ServerMessage::InventoryUpdated { player_id: pid, container_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // M4: Station events
-                    Ok(GameEvent::StationRemoved { station_id }) => {
-                        let msg = ServerMessage::StationRemoved { station_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::StationCondition { station_id, condition }) => {
-                        let msg = ServerMessage::StationCondition { station_id, condition };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::StationToolChanged { station_id, tool }) => {
-                        let msg = ServerMessage::StationToolChanged { station_id, tool };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::StationAutomationChanged { station_id, automation }) => {
-                        let msg = ServerMessage::StationAutomationChanged { station_id, automation };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // E4.3: a station working on its own, to its owner
-                    Ok(GameEvent::AutomationProduced { owner_id, station_id, produced, done }) => {
-                        if owner_id == player_id {
-                            let msg = ServerMessage::AutomationProduced { station_id, produced, done };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::AutomationPaused { owner_id, station_id, station_type, reason, notice_id }) => {
-                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
-                            let msg = ServerMessage::AutomationPaused { station_id, station_type, reason };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::StationDisplaced { owner_id, station_id, station_type, terrain_id, notice_id }) => {
-                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
-                            let msg = ServerMessage::StationDisplaced { station_id, station_type, terrain_id };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(
-                        GameEvent::BazaarNotice { player_id: to, notice_id, message }
-                        | GameEvent::Notice { player_id: to, notice_id, message },
-                    ) => {
-                        if to == player_id && take_notice(&state.db, Some(notice_id)).await {
-                            let _ = sender.send(Message::Text(serde_json::to_string(&message).unwrap().into())).await;
-                        }
-                    }
-                    // M5: Trading events
-                    Ok(GameEvent::TradeRequested { from_player, from_player_name, from_citizen, to_player }) => {
-                        // Only send to the target player
-                        if to_player == player_id {
-                            let msg = ServerMessage::TradeRequested { from_player, from_player_name, from_citizen };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::TradeRequestDeclined { by_player, initiator }) => {
-                        // Send to initiator
-                        if initiator == player_id {
-                            let msg = ServerMessage::TradeRequestDeclined { by_player };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::TradeRequestExpired { initiator, target }) => {
-                        // To both: the asker stops waiting, the one asked loses the prompt
-                        if player_id == initiator || player_id == target {
-                            let msg = ServerMessage::TradeRequestExpired { from_player: initiator, to_player: target };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::TradeStarted { trade_id, player_a, player_b }) => {
-                        // Send to both players
-                        if player_id == player_a || player_id == player_b {
-                            let partner_id = if player_id == player_a { player_b } else { player_a };
-                            // Get partner name from game state
-                            let (partner_name, partner_citizen) = {
-                                let game = state.game.read().await;
-                                game.players.get(&partner_id).map(|p| (p.name.clone(), p.citizen)).unwrap_or_default()
-                            };
-                            let msg = ServerMessage::TradeStarted { trade_id, partner_id, partner_name, partner_citizen };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::TradeOfferUpdated { trade_id, player_id: offering_player, items, strands }) => {
-                        let ours = {
-                            let game = state.game.read().await;
-                            game.trade_manager.active_trades.get(&trade_id)
-                                .is_some_and(|t| player_id == t.player_a || player_id == t.player_b)
-                        };
-                        if ours {
-                            let msg = ServerMessage::TradeOfferUpdated {
-                                trade_id,
-                                player_id: offering_player,
-                                items,
-                                strands,
-                            };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::TradeAccepted { trade_id, player_id: accepting_player }) => {
-                        // Get trade participants
-                        let participants = {
-                            let game = state.game.read().await;
-                            game.trade_manager.active_trades.get(&trade_id)
-                                .map(|t| (t.player_a, t.player_b))
-                        };
-
-                        if let Some((player_a, player_b)) = participants {
-                            if player_id == player_a || player_id == player_b {
-                                let msg = ServerMessage::TradeAccepted { trade_id, player_id: accepting_player };
-                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                            }
-                        }
-                    }
-                    Ok(GameEvent::TradeExecuted { trade_id }) => {
-                        let msg = ServerMessage::TradeExecuted { trade_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::TradeCancelled { trade_id, reason }) => {
-                        let msg = ServerMessage::TradeCancelled { trade_id, reason };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::TradeFailed { player_id: pid, command, reason }) => {
-                        if pid == player_id {
-                            let msg = ServerMessage::Error { message: reason, command: command.into() };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // M5: Currency events
-                    Ok(GameEvent::CurrencyChanged { player_id: pid, new_balance }) => {
-                        if pid == player_id {
-                            let msg = ServerMessage::CurrencyChanged { new_balance };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::ToolBroke { player_id: pid, item_id, item_type, item_name }) => {
-                        if pid == player_id {
-                            let msg = ServerMessage::ToolBroke { item_id, item_type, item_name };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // M7: Zone events
-                    Ok(GameEvent::ZoneChanged { player_id: pid, from_zone, to_zone, zone_name }) => {
-                        // Only send to the player who changed zones
-                        if pid == player_id {
-                            let msg = ServerMessage::ZoneChanged { player_id: pid, from_zone, to_zone, zone_name };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // Terrain events
-                    Ok(GameEvent::MovementBlocked { player_id: pid, reason, water_id, stopped_x, stopped_y }) => {
-                        // Only send to the player who was blocked
-                        if pid == player_id {
-                            let msg = ServerMessage::MovementBlocked { player_id: pid, reason, water_id, stopped_x, stopped_y };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::TerrainUpdated) => {
-                        // Broadcast to all connected clients
-                        let msg = ServerMessage::TerrainUpdated;
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // B13: Plot ownership, to everyone
-                    Ok(GameEvent::PlotClaimed { terrain_id, owner_id, claimed_at, guild }) => {
-                        let msg = ServerMessage::PlotClaimed { terrain_id, owner_id, claimed_at, guild };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::PlotReleased { terrain_id }) => {
-                        let msg = ServerMessage::PlotReleased { terrain_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::PlotFloorBuilt { terrain_id, owner_id, floors, floor_ready_at }) => {
-                        let msg = ServerMessage::PlotFloorBuilt { terrain_id, owner_id, floors, floor_ready_at };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // #131: Property tax, to the plot's owner only, if they take its notice (#138).
-                    // A watcher sends it without taking it, leaving it for the holder.
-                    Ok(GameEvent::TaxDelinquent { owner_id, terrain_id, tax_owed, forecloses_at, notice_id }) => {
-                        if owner_id == player_id && (!holds(&state, player_id, connection_id).await || take_notice(&state.db, notice_id).await) {
-                            let msg = ServerMessage::TaxDelinquent { terrain_id, tax_owed, forecloses_at };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, impounded, lost, notice_id }) => {
-                        if owner_id == player_id && (!holds(&state, player_id, connection_id).await || take_notice(&state.db, notice_id).await) {
-                            let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund, impounded, lost };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::SubscriptionLapsed { player_id: whose, until, notice_id }) => {
-                        if whose == player_id && take_notice(&state.db, notice_id).await {
-                            let msg = ServerMessage::SubscriptionLapsed { until };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // E3.2: fills and expiries, to the order's owner
-                    Ok(GameEvent::OrderFilled { player_id: whose, order, trade }) => {
-                        if whose == player_id {
-                            let msg = ServerMessage::OrderFilled { order, trade };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::OrderClosed { player_id: whose, order }) => {
-                        if whose == player_id {
-                            let msg = ServerMessage::OrderCancelled { order };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // E3.3: placing, and the items' market channels
-                    Ok(GameEvent::OrderPlaced { player_id: whose, order }) => {
-                        if whose == player_id {
-                            let msg = ServerMessage::OrderPlaced { order };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::MarketDepth { item_type, seq, levels }) => {
-                        if socket.market_items.contains(&item_type) {
-                            let msg = ServerMessage::MarketDepth { item_type, seq, full: false, levels };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    Ok(GameEvent::MarketTrade { trade }) => {
-                        if socket.market_items.contains(&trade.item_type) {
-                            let msg = ServerMessage::MarketTrade { trade };
-                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                        }
-                    }
-                    // E3.9: the Gazette, to everyone
-                    Ok(GameEvent::GazettePublished { day, number, headline }) => {
-                        let msg = ServerMessage::GazettePublished { day, number, headline };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // D6.1: a fee moved, to everyone, so previews follow
-                    Ok(GameEvent::FeesChanged { fees }) => {
-                        let msg = ServerMessage::FeesChanged { fees };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // Commons S2.1: the hall's board, to everyone
-                    Ok(GameEvent::Board { change, commission }) => {
-                        let msg = change.message(commission);
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    // Commons S2.6: the board's Work page to everyone, a
-                    // worker's pay to them alone
-                    Ok(GameEvent::Wages { to, message }) => {
-                        if to.is_none_or(|to| to == player_id) {
-                            let _ = sender.send(Message::Text(serde_json::to_string(&message).unwrap().into())).await;
-                        }
-                    }
-                    Err(()) => {
-                        // Channel closed
+                    Err(RecvError::Closed) => {
                         counted.ends(SocketEnd::ServerStopping);
                         break;
                     }
+                };
+                // A `positions` that can't be sent ends the socket; any other
+                // send's failure shows on the next read
+                let must_send = matches!(event, GameEvent::PlayerPositions(_));
+                let mut sent = Ok(());
+                for out in socket.heard(&state, event).await {
+                    let text = match out {
+                        Outgoing::Message(msg) => serde_json::to_string(&msg).unwrap(),
+                        Outgoing::Text(text) => text,
+                    };
+                    sent = sender.send(Message::Text(text.into())).await;
+                    if sent.is_err() && must_send {
+                        break;
+                    }
+                }
+                if sent.is_err() && must_send {
+                    counted.ends(SocketEnd::SendFailed);
+                    break;
                 }
             }
         }
@@ -711,9 +309,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 }
 
+/// What a socket sends: a message, or a `positions` already serialised once
+/// for every socket in its cell (C0.4)
+/// (It lives a moment, so a message is kept whole rather than boxed.)
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+enum Outgoing {
+    Message(ServerMessage),
+    Text(String),
+}
+
 /// What one socket knows of its player between messages (#463): who it is,
-/// and what it has asked to hear. The socket's loop keeps it, and `handle`
-/// reads and changes it, so a test can drive it without a socket.
+/// what it has asked to hear, and what's in sight. The socket's loop keeps
+/// it, and `handle` and `heard` read and change it, so a test can drive it
+/// without a socket.
 pub(crate) struct Socket {
     player_id: Uuid,
     account_id: Uuid,
@@ -740,6 +349,16 @@ pub(crate) struct Socket {
     /// The guild this socket's player is in (S4.4), whose talk it hears: read
     /// on subscribe, and again whenever their guild changes
     my_guild: Option<Uuid>,
+    /// The interest cell this socket's player was in at the last `positions`,
+    /// and whether the last one sent was empty, so one out of the world isn't
+    /// sent an empty list ten times a second (C0.4)
+    my_cell: Option<crate::engine::interest::Cell>,
+    sent_nobody: bool,
+    /// The last `positions`, with `my_cell`: only the gathering and crafting of
+    /// the players in sight in it reach this socket (#275)
+    seen: Option<std::sync::Arc<crate::engine::interest::Positions>>,
+    /// Whether everyone in the world was in sight in it, so nothing needs filtering
+    sees_everyone: bool,
 }
 
 impl Socket {
@@ -759,6 +378,10 @@ impl Socket {
             heard_capitol: 0,
             muted: Default::default(),
             my_guild: None,
+            my_cell: None,
+            sent_nobody: false,
+            seen: None,
+            sees_everyone: false,
         }
     }
 
@@ -1453,6 +1076,413 @@ impl Socket {
             _ => {}
         }
         out
+    }
+
+    /// One of the game's events, as this socket hears it (#566): only once
+    /// it has subscribed to `position`, and only what's for its player, in
+    /// sight of them, or on a channel it watches. What it sends is returned,
+    /// in order.
+    async fn heard(&mut self, state: &AppState, event: GameEvent) -> Vec<Outgoing> {
+        let (player_id, connection_id) = (self.player_id, self.connection_id);
+        let mut out = Vec::new();
+        if !self.subscribed_position {
+            return out;
+        }
+        match event {
+            // Only the players near this socket's (C0.4), each cell serialised once
+            // for every socket that sees it. A watcher sees round the avatar.
+            GameEvent::PlayerPositions(positions) => {
+                let was_cell = std::mem::replace(&mut self.my_cell, positions.cell_of(player_id));
+                let arrived: Vec<Uuid> = positions
+                    .come_into_sight(self.my_cell, self.seen.as_deref().map(|before| (before, was_cell)))
+                    .into_iter()
+                    .filter(|id| *id != player_id)
+                    .collect();
+                self.sees_everyone = positions.sees_everyone(self.my_cell);
+                self.seen = Some(std::sync::Arc::clone(&positions));
+                if self.my_cell.is_none() && std::mem::replace(&mut self.sent_nobody, true) {
+                    return out;
+                }
+                self.sent_nobody = self.my_cell.is_none();
+                out.push(Outgoing::Text(positions.message(self.my_cell)));
+                // Someone come into sight part way through a gather or a craft (#275)
+                out.extend(arrived.into_iter().flat_map(|id| positions.catch_up(id)).map(Outgoing::Message));
+            }
+            // Joining far off isn't news; the positions bring them when they're near
+            GameEvent::PlayerJoined(player) => {
+                let cell = crate::engine::interest::cell_at(player.x, player.y);
+                if player.id == player_id || self.my_cell.is_none_or(|mine| crate::engine::interest::near(mine, cell)) {
+                    let msg = ServerMessage::PlayerJoined { player };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // Talk (S1.1): local by the cell and then the distance, Capitol to all
+            GameEvent::Said { seq, line } => {
+                let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > self.heard_capitol;
+                if fresh && crate::engine::talk::hears(&line, player_id, self.holds_avatar, self.seen.as_deref(), self.my_cell, &self.muted, self.my_guild) {
+                    self.heard_capitol = self.heard_capitol.max(seq);
+                    out.push(Outgoing::Message(line.message()));
+                }
+            }
+            // They muted or unmuted someone, here or on another device (S1.4)
+            GameEvent::MutesChanged { player_id: who } => {
+                if who == player_id {
+                    self.muted = read_mutes(state, player_id, std::mem::take(&mut self.muted)).await;
+                }
+            }
+            // Their guild changed, or they joined or left one (S4.1)
+            GameEvent::Tutorial { player_id: to, message } => {
+                if to == player_id {
+                    out.push(Outgoing::Message(message));
+                }
+            }
+            GameEvent::GuildChanged { guild_id, players } => {
+                if players.contains(&player_id) {
+                    // In, out or still in: whose talk it hears (S4.4)
+                    self.my_guild = read_guild(state, player_id, self.my_guild).await;
+                    let msg = ServerMessage::GuildChanged { guild_id };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // Leaving goes to everyone, near or far: it ends their trades
+            GameEvent::PlayerLeft { player_id: left_id } => {
+                let msg = ServerMessage::PlayerLeft { player_id: left_id };
+                out.push(Outgoing::Message(msg));
+            }
+            // M2: Extraction events, from the players in sight (#275)
+            GameEvent::ExtractionStarted { player_id: pid, node_id, duration_ticks } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::ExtractionStarted { player_id: pid, node_id, duration_ticks };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::ExtractionProgress { player_id: pid, progress, duration } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::ExtractionProgress { player_id: pid, progress, duration };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::ExtractionCancelled { player_id: pid } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::ExtractionCancelled { player_id: pid };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::ExtractionFailed { player_id: pid, reason } => {
+                if pid == player_id {
+                    let msg = ServerMessage::ExtractionFailed { player_id: pid, reason };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::NodeDepleted { node_id } => {
+                let msg = ServerMessage::NodeDepleted { node_id };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::NodeRegenerated { node_id } => {
+                let msg = ServerMessage::NodeRegenerated { node_id };
+                out.push(Outgoing::Message(msg));
+            }
+            // M3: Crafting events, from the players in sight (#275)
+            GameEvent::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::CraftingProgress { player_id: pid, operation_id, progress, duration } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::CraftingProgress { player_id: pid, operation_id, progress, duration };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::CraftingCancelled { player_id: pid, operation_id } => {
+                if pid == player_id || self.sees_everyone || self.seen.as_ref().is_some_and(|p| p.sees(self.my_cell, pid)) {
+                    let msg = ServerMessage::CraftingCancelled { player_id: pid, operation_id };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::CraftingFailed { player_id: pid, reason } => {
+                if pid == player_id {
+                    let msg = ServerMessage::CraftingFailed { player_id: pid, reason };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // M3.5: Inventory events
+            GameEvent::InventoryUpdated { player_id: pid, container_id, slots: _ } => {
+                let msg = ServerMessage::InventoryUpdated { player_id: pid, container_id };
+                out.push(Outgoing::Message(msg));
+            }
+            // M4: Station events
+            GameEvent::StationRemoved { station_id } => {
+                let msg = ServerMessage::StationRemoved { station_id };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::StationCondition { station_id, condition } => {
+                let msg = ServerMessage::StationCondition { station_id, condition };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::StationToolChanged { station_id, tool } => {
+                let msg = ServerMessage::StationToolChanged { station_id, tool };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::StationAutomationChanged { station_id, automation } => {
+                let msg = ServerMessage::StationAutomationChanged { station_id, automation };
+                out.push(Outgoing::Message(msg));
+            }
+            // E4.3: a station working on its own, to its owner
+            GameEvent::AutomationProduced { owner_id, station_id, produced, done } => {
+                if owner_id == player_id {
+                    let msg = ServerMessage::AutomationProduced { station_id, produced, done };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::AutomationPaused { owner_id, station_id, station_type, reason, notice_id } => {
+                if owner_id == player_id && take_notice(&state.db, notice_id).await {
+                    let msg = ServerMessage::AutomationPaused { station_id, station_type, reason };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::StationDisplaced { owner_id, station_id, station_type, terrain_id, notice_id } => {
+                if owner_id == player_id && take_notice(&state.db, notice_id).await {
+                    let msg = ServerMessage::StationDisplaced { station_id, station_type, terrain_id };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::BazaarNotice { player_id: to, notice_id, message }
+                | GameEvent::Notice { player_id: to, notice_id, message } => {
+                if to == player_id && take_notice(&state.db, Some(notice_id)).await {
+                    out.push(Outgoing::Message(message));
+                }
+            }
+            // M5: Trading events
+            GameEvent::TradeRequested { from_player, from_player_name, from_citizen, to_player } => {
+                // Only send to the target player
+                if to_player == player_id {
+                    let msg = ServerMessage::TradeRequested { from_player, from_player_name, from_citizen };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::TradeRequestDeclined { by_player, initiator } => {
+                // Send to initiator
+                if initiator == player_id {
+                    let msg = ServerMessage::TradeRequestDeclined { by_player };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::TradeRequestExpired { initiator, target } => {
+                // To both: the asker stops waiting, the one asked loses the prompt
+                if player_id == initiator || player_id == target {
+                    let msg = ServerMessage::TradeRequestExpired { from_player: initiator, to_player: target };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::TradeStarted { trade_id, player_a, player_b } => {
+                // Send to both players
+                if player_id == player_a || player_id == player_b {
+                    let partner_id = if player_id == player_a { player_b } else { player_a };
+                    // Get partner name from game state
+                    let (partner_name, partner_citizen) = {
+                        let game = state.game.read().await;
+                        game.players.get(&partner_id).map(|p| (p.name.clone(), p.citizen)).unwrap_or_default()
+                    };
+                    let msg = ServerMessage::TradeStarted { trade_id, partner_id, partner_name, partner_citizen };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::TradeOfferUpdated { trade_id, player_id: offering_player, items, strands } => {
+                let ours = {
+                    let game = state.game.read().await;
+                    game.trade_manager.active_trades.get(&trade_id)
+                        .is_some_and(|t| player_id == t.player_a || player_id == t.player_b)
+                };
+                if ours {
+                    let msg = ServerMessage::TradeOfferUpdated {
+                        trade_id,
+                        player_id: offering_player,
+                        items,
+                        strands,
+                    };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::TradeAccepted { trade_id, player_id: accepting_player } => {
+                // Get trade participants
+                let participants = {
+                    let game = state.game.read().await;
+                    game.trade_manager.active_trades.get(&trade_id)
+                        .map(|t| (t.player_a, t.player_b))
+                };
+
+                if let Some((player_a, player_b)) = participants {
+                    if player_id == player_a || player_id == player_b {
+                        let msg = ServerMessage::TradeAccepted { trade_id, player_id: accepting_player };
+                        out.push(Outgoing::Message(msg));
+                    }
+                }
+            }
+            GameEvent::TradeExecuted { trade_id } => {
+                let msg = ServerMessage::TradeExecuted { trade_id };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::TradeCancelled { trade_id, reason } => {
+                let msg = ServerMessage::TradeCancelled { trade_id, reason };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::TradeFailed { player_id: pid, command, reason } => {
+                if pid == player_id {
+                    let msg = ServerMessage::Error { message: reason, command: command.into() };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // M5: Currency events
+            GameEvent::CurrencyChanged { player_id: pid, new_balance } => {
+                if pid == player_id {
+                    let msg = ServerMessage::CurrencyChanged { new_balance };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::ToolBroke { player_id: pid, item_id, item_type, item_name } => {
+                if pid == player_id {
+                    let msg = ServerMessage::ToolBroke { item_id, item_type, item_name };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // M7: Zone events
+            GameEvent::ZoneChanged { player_id: pid, from_zone, to_zone, zone_name } => {
+                // Only send to the player who changed zones
+                if pid == player_id {
+                    let msg = ServerMessage::ZoneChanged { player_id: pid, from_zone, to_zone, zone_name };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // Terrain events
+            GameEvent::MovementBlocked { player_id: pid, reason, water_id, stopped_x, stopped_y } => {
+                // Only send to the player who was blocked
+                if pid == player_id {
+                    let msg = ServerMessage::MovementBlocked { player_id: pid, reason, water_id, stopped_x, stopped_y };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::TerrainUpdated => {
+                // Broadcast to all connected clients
+                let msg = ServerMessage::TerrainUpdated;
+                out.push(Outgoing::Message(msg));
+            }
+            // B13: Plot ownership, to everyone
+            GameEvent::PlotClaimed { terrain_id, owner_id, claimed_at, guild } => {
+                let msg = ServerMessage::PlotClaimed { terrain_id, owner_id, claimed_at, guild };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::PlotReleased { terrain_id } => {
+                let msg = ServerMessage::PlotReleased { terrain_id };
+                out.push(Outgoing::Message(msg));
+            }
+            GameEvent::PlotFloorBuilt { terrain_id, owner_id, floors, floor_ready_at } => {
+                let msg = ServerMessage::PlotFloorBuilt { terrain_id, owner_id, floors, floor_ready_at };
+                out.push(Outgoing::Message(msg));
+            }
+            // #131: Property tax, to the plot's owner only, if they take its notice (#138).
+            // A watcher sends it without taking it, leaving it for the holder.
+            GameEvent::TaxDelinquent { owner_id, terrain_id, tax_owed, forecloses_at, notice_id } => {
+                if owner_id == player_id && (!holds(state, player_id, connection_id).await || take_notice(&state.db, notice_id).await) {
+                    let msg = ServerMessage::TaxDelinquent { terrain_id, tax_owed, forecloses_at };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, impounded, lost, notice_id } => {
+                if owner_id == player_id && (!holds(state, player_id, connection_id).await || take_notice(&state.db, notice_id).await) {
+                    let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund, impounded, lost };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::SubscriptionLapsed { player_id: whose, until, notice_id } => {
+                if whose == player_id && take_notice(&state.db, notice_id).await {
+                    let msg = ServerMessage::SubscriptionLapsed { until };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // E3.2: fills and expiries, to the order's owner
+            GameEvent::OrderFilled { player_id: whose, order, trade } => {
+                if whose == player_id {
+                    let msg = ServerMessage::OrderFilled { order, trade };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::OrderClosed { player_id: whose, order } => {
+                if whose == player_id {
+                    let msg = ServerMessage::OrderCancelled { order };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // E3.3: placing, and the items' market channels
+            GameEvent::OrderPlaced { player_id: whose, order } => {
+                if whose == player_id {
+                    let msg = ServerMessage::OrderPlaced { order };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::MarketDepth { item_type, seq, levels } => {
+                if self.market_items.contains(&item_type) {
+                    let msg = ServerMessage::MarketDepth { item_type, seq, full: false, levels };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            GameEvent::MarketTrade { trade } => {
+                if self.market_items.contains(&trade.item_type) {
+                    let msg = ServerMessage::MarketTrade { trade };
+                    out.push(Outgoing::Message(msg));
+                }
+            }
+            // E3.9: the Gazette, to everyone
+            GameEvent::GazettePublished { day, number, headline } => {
+                let msg = ServerMessage::GazettePublished { day, number, headline };
+                out.push(Outgoing::Message(msg));
+            }
+            // D6.1: a fee moved, to everyone, so previews follow
+            GameEvent::FeesChanged { fees } => {
+                let msg = ServerMessage::FeesChanged { fees };
+                out.push(Outgoing::Message(msg));
+            }
+            // Commons S2.1: the hall's board, to everyone
+            GameEvent::Board { change, commission } => {
+                let msg = change.message(commission);
+                out.push(Outgoing::Message(msg));
+            }
+            // Commons S2.6: the board's Work page to everyone, a
+            // worker's pay to them alone
+            GameEvent::Wages { to, message } => {
+                if to.is_none_or(|to| to == player_id) {
+                    out.push(Outgoing::Message(message));
+                }
+            }
+        }
+        out
+    }
+
+    /// The events this socket missed are gone (C0.3): skip ahead and start it
+    /// over from what's true now. The next `positions` tells it again what
+    /// everyone in sight is doing.
+    async fn resynced(&mut self, state: &AppState, missed: u64) -> Vec<ServerMessage> {
+        crate::engine::load::Receiver::Sockets.lagged(missed);
+        self.seen = None;
+        self.sees_everyone = false;
+        // A `mutes_changed` may be among what it missed
+        self.muted = read_mutes(state, self.player_id, std::mem::take(&mut self.muted)).await;
+        // And a `guild_changed`
+        self.my_guild = read_guild(state, self.player_id, self.my_guild).await;
+        resync(&state.db, &state.game, &state.market, self.player_id, self.connection_id, missed, &self.market_items).await
     }
 }
 
@@ -2598,6 +2628,36 @@ mod tests {
         async fn queued(&self) -> Vec<crate::engine::Command> {
             std::mem::take(&mut self.state.game.write().await.command_queue)
         }
+
+        /// What this socket sends on hearing `event` (#566), read back as the
+        /// client would, `positions` too
+        async fn hears(&mut self, event: GameEvent) -> Vec<ServerMessage> {
+            self.socket
+                .heard(&self.state, event)
+                .await
+                .into_iter()
+                .map(|out| match out {
+                    Outgoing::Message(msg) => msg,
+                    Outgoing::Text(text) => serde_json::from_str(&text).unwrap(),
+                })
+                .collect()
+        }
+
+        /// `player` in the world at (`x`, `y`), playing on some other socket
+        async fn put(&self, player: Uuid, (x, y): (f64, f64)) {
+            let account: Uuid = sqlx::query_scalar("SELECT account_id FROM players WHERE id = $1")
+                .bind(player)
+                .fetch_one(&self.state.db)
+                .await
+                .unwrap();
+            let row = load_player(&self.state.db, account).await.unwrap();
+            self.state.game.write().await.add_player(PlayerState { x, y, ..row });
+        }
+
+        /// The `positions` the tick would send now
+        async fn positions(&self) -> GameEvent {
+            GameEvent::PlayerPositions(std::sync::Arc::new(self.state.game.read().await.positions()))
+        }
     }
 
     /// A local line goes out to the world, and counts for the road in's
@@ -2727,5 +2787,101 @@ mod tests {
         let back = socket.send(ClientMessage::Steer { heading: 0, throttle: 255, at: None }).await;
         assert_eq!(back, vec![ServerMessage::Error { message: presence::NOT_HOLDING.into(), command: "steer".into() }]);
         assert!(socket.queued().await.is_empty());
+    }
+
+    /// A line said at (`x`, `y`) by `from`: a Capitol one numbered 1, as the
+    /// first since the socket's backlog (a socket skips one it has heard)
+    fn line(from: Uuid, channel: capitol_protocol::ws::Channel, (x, y): (f64, f64)) -> GameEvent {
+        let line = crate::engine::talk::Line { from, name: "Someone".into(), citizen: false, channel, text: "Hello".into(), x, y, guild: None };
+        let seq = u64::from(channel == capitol_protocol::ws::Channel::Capitol);
+        GameEvent::Said { seq, line }
+    }
+
+    /// A socket hears none of the game until it subscribes to `position`;
+    /// then what's for everyone, what's for its player and not another's,
+    /// and an item's market only once it watches it (#566)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn a_socket_hears_what_its_subscribed_to_and_its_own(db: sqlx::PgPool) {
+        crate::content::sync(&db, &crate::content::load().unwrap()).await.unwrap();
+        let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
+        let bob = crate::engine::plot_sync::tests::player(&db, "Bob", 0).await;
+        let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
+        let paid = |player_id| GameEvent::CurrencyChanged { player_id, new_balance: 5 };
+
+        assert_eq!(socket.hears(GameEvent::TerrainUpdated).await, vec![]);
+        assert_eq!(socket.hears(paid(ada)).await, vec![], "not until it subscribes");
+
+        socket.send(ClientMessage::Subscribe { channel: "position".into() }).await;
+        assert_eq!(socket.hears(GameEvent::TerrainUpdated).await, vec![ServerMessage::TerrainUpdated]);
+        assert_eq!(socket.hears(paid(ada)).await, vec![ServerMessage::CurrencyChanged { new_balance: 5 }]);
+        assert_eq!(socket.hears(paid(bob)).await, vec![], "Bob's balance is his own");
+        let asked = |to_player| GameEvent::TradeRequested { from_player: bob, from_player_name: "Bob".into(), from_citizen: false, to_player };
+        assert_eq!(
+            socket.hears(asked(ada)).await,
+            vec![ServerMessage::TradeRequested { from_player: bob, from_player_name: "Bob".into(), from_citizen: false }]
+        );
+        assert_eq!(socket.hears(asked(bob)).await, vec![]);
+
+        // The plank market, unwatched and then watched
+        let depth = || GameEvent::MarketDepth { item_type: "plank".into(), seq: 7, levels: vec![] };
+        assert_eq!(socket.hears(depth()).await, vec![]);
+        let back = socket.send(ClientMessage::SubscribeMarket { item_type: "plank".into() }).await;
+        assert!(matches!(back.as_slice(), [ServerMessage::MarketDepth { full: true, .. }]), "{back:?}");
+        assert_eq!(
+            socket.hears(depth()).await,
+            vec![ServerMessage::MarketDepth { item_type: "plank".into(), seq: 7, full: false, levels: vec![] }]
+        );
+        socket.send(ClientMessage::UnsubscribeMarket { item_type: None }).await;
+        assert_eq!(socket.hears(depth()).await, vec![]);
+    }
+
+    /// A socket hears who's in sight of its player: their `positions`, their
+    /// gathering, their local talk, but not someone's across the city, nor
+    /// anyone it has muted. A Capitol line reaches it from anywhere (#566)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn a_socket_hears_who_is_in_sight(db: sqlx::PgPool) {
+        use capitol_protocol::ws::Channel;
+        let (here, near, far) = ((8300.0, 8300.0), (8310.0, 8300.0), (11300.0, 8300.0));
+        let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
+        let bob = crate::engine::plot_sync::tests::player(&db, "Bob", 0).await;
+        let cal = crate::engine::plot_sync::tests::player(&db, "Cal", 0).await;
+        sqlx::query("UPDATE players SET position_x = $1, position_y = $2 WHERE id = $3")
+            .bind(here.0)
+            .bind(here.1)
+            .bind(ada)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
+        socket.put(bob, near).await;
+        socket.put(cal, far).await;
+        socket.send(ClientMessage::Subscribe { channel: "position".into() }).await;
+
+        let positions = socket.positions().await;
+        let back = socket.hears(positions).await;
+        let [ServerMessage::Positions { players }] = back.as_slice() else { panic!("positions answered {back:?}") };
+        let mut seen: Vec<Uuid> = players.iter().map(|p| p.id).collect();
+        seen.sort();
+        let mut expected = vec![ada, bob];
+        expected.sort();
+        assert_eq!(seen, expected, "Cal is across the city");
+
+        let gathers = |player_id| GameEvent::ExtractionStarted { player_id, node_id: Uuid::nil(), duration_ticks: 10 };
+        assert_eq!(socket.hears(gathers(bob)).await.len(), 1);
+        assert_eq!(socket.hears(gathers(cal)).await, vec![]);
+
+        assert_eq!(socket.hears(line(bob, Channel::Local, near)).await.len(), 1);
+        assert_eq!(socket.hears(line(cal, Channel::Local, far)).await, vec![]);
+        assert_eq!(socket.hears(line(cal, Channel::Capitol, far)).await.len(), 1);
+
+        // Ada mutes Bob, on any device: this socket reads its mutes again
+        let events = socket.state.game.read().await.event_sender.clone();
+        crate::mutes::set(&db, &events, ada, bob, true).await.unwrap();
+        assert!(socket.heard().iter().any(|e| matches!(e, GameEvent::MutesChanged { player_id } if *player_id == ada)));
+        assert_eq!(socket.hears(GameEvent::MutesChanged { player_id: ada }).await, vec![]);
+        assert_eq!(socket.hears(line(bob, Channel::Local, near)).await, vec![], "muted");
+        assert_eq!(socket.hears(gathers(bob)).await.len(), 1, "muting is for talk");
     }
 }
