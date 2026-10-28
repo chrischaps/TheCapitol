@@ -297,7 +297,7 @@ Citizens read a neighbour's trade from their surname today (`persona::trade_of`)
 
 | WP | What | Size | Depends |
 |---|---|---|---|
-| K4.1 #542 | K0.1's soak again, on callings, at 20 and 200; tune; §10's measures; closes #403 | M | K0–K3 |
+| K4.1 #542 | K0.1's soak again, on callings, at 20 and 200; tune; §10's measures; closes #403. *Measured (2026-10-28), open on [#555](https://github.com/chrischaps/TheCapitol/issues/555):* the money moves (circulation 2% → 157 to 179% of the faucet, Gini 0.79 → 0.52 to 0.59, fiber-favouring share 97% → 31 to 33%), but four targets miss: the fiber share (just over 30%), the faucet (down by half), specialists' favourite share (about 50%) and "lately" (70 to 75%). The results are in §10. **Tuning tried:** `[trading] line` 1200 → 600 (half `TRADE_LINE`, K2.2) gave a fiber share of 32% / 22% against 31% / 33% untouched, which is within the towns' noise of about 10 points, with the faucet lower again. Nothing was changed: the targets pull against each other, so #555 asks Chris which hold. #403 stays open until then. | M | K0–K3 |
 
 ### K5: Finding a niche (`cg:K5-niche`)
 
@@ -362,3 +362,37 @@ K4.1 runs K0.1's soak again on callings: 20 citizens at 10× for 14 to 17 game h
 | The swarm | `capitol-bot --sim 20 --hours 2` within noise of its baseline |
 
 Each work package has its own unit tests and a short town run (in its issue). The baseline (K0.1) and the results (K4.1) are recorded here.
+
+### The results (K4.1, #542)
+
+Run on 2026-10-28 on master at 6d2ec94d, which has #544 (a full shop isn't stocked), #547 (a tool's wear on the hall's book) and #549 (urban lots and builders' homes). It's K0.1's recipe: `scripts/balance.ps1` as two towns at once, both on every default. Each had 20 of the sim's mix and no merchants, fresh, `--always-on`, at 10×, for 14 hours of the day's clock (game 04:41 to 18:43), with 8 MB decision logs. One town of 200 ran beside them over the same hours, with no logs. A pair from before #549 (game 04:43 to 18:45) and a tuning pair (`[trading] line = 600`, game 06:23 to 20:25) ran too. The files are in [`docs/citizens/k4.1/`](docs/citizens/k4.1/balance.md). The baseline's failed steps are counted without #544's 1,210 and 1,005 refusals. Every run's books held, with drift 0 and units conserved.
+
+| Measure | Target | Baseline A / B | Callings A / B | 200 | Met? |
+|---|---|---:|---:|---:|---|
+| Fiber-favouring citizens' share of the Strands | < 30% | 97% / 97% | 31% / 33% (29% / 31% with escrow) | 41% (30% with escrow) | just over |
+| Gini at the end | below the baseline's | 0.79 / 0.80 | 0.52 / 0.59 | 0.62 (0.44 with escrow) | yes |
+| Spent on goods, commissions, wages and rent, of the faucet | ≥ 50% | 2% / 2% | 179% / 157% | 61% | yes |
+| Faucet a citizen-hour | ±25% of the baseline | 147.8 / 146.7 | 71.6 / 79.7 | 12.3 | no: down by half |
+| Favourite's share: specialists | 60–80% | 92–99% (one job) | median about 50%, 2 of 9 in band | median 47%, 7 of 81 | no |
+| Favourite's share: leaners | 35–55% | | median 36% / 33%, 6 and 3 of 9 in band | median 31%, 31 of 82 | partly |
+| All-rounders' biggest job | ≤ 35% | | 17–25% | 34 of 37 | yes |
+| Fewest activities in a day | 3; all-rounders 5 | 2 | 6 / 8; all-rounders 10 | 4; all-rounders 5 | yes |
+| Citizens who took a detour | ≥ 70% | 0 | 85% / 80% | 88% | yes |
+| Setup, of the work | ≤ baseline + 10 points | 1% | 1.4% / 1.5% | 1.4% | yes |
+| Steps that failed | ≤ the baseline's | 3,840 / 1,809 | 843 / 978 | 65,373 (#551) | yes at 20 |
+| Times stuck | ≤ the baseline's | 2,343 / 2,354 | 211 / 214 | 1,140 | yes |
+| Markets | tools trade, a hire a day per 20, non-crafters post | none | 8 and 20 tools; 12 and 14 wage offers; fiber and wood citizens post | 4 wage offers, no posts | yes at 20 |
+| "Lately busy with" is the most time | ≥ 80% | | 70% / 75% (80% / 85% among the card's three) | 50% | no |
+| Replay, ledger | 100%, drift 0 | | 100%, 0 | (no logs), 0 | yes |
+| The swarm, 20 for 2 hours | within noise | | gathering within noise; plank bots stuck on the kiln 197 times | | no (#552) |
+
+What it says:
+- **The money moves.** Everyone gathers, makes and trades a little. Fiber-favouring citizens bank fiber and spend it on logs, ore, kits and wages, so the Strands spread from 4 holders to the whole town. The ingot makers end richest after the fiber-favouring. Tool crafters and builders end about where they began.
+- **Fiber-favouring citizens still hold about 30%.** They're 15% of the town and own its only faucet. At 200, half the citizens' Strands sat in open bids (17,998 of 36,608), which the balance leaves out (#553). Counted in, the share is 30%.
+- **The faucet halved.** Fiber is 13% of the work, against 26%, since everyone does everything. At 200 the grass runs out ("spent", 16,362 times) and the faucet is 12 a citizen-hour.
+- **Specialists sit near 50%, by design.** A rich citizen's calling leans to trading (K2.2's `RICH_RISE`), and market hours with goods to sell are work. A rich fiber specialist's fiber target is 0.68 × 0.7, about 48%. Of the seven making jobs alone, specialists reach 47 to 83%.
+- **Prices fall.** Logs traded at 3.0 and 5.3 against a target of 8, ore at about 6 against 20, planks at 1.1 to 1.3 against 5, and bricks at 2.7 against 8. Everyone's surplus goes to market.
+- **At 200** the stalls all go, and 30,000 steps fail stocking with none free (#551). Nobody posted a commission, and there were 4 wage offers.
+- **Asks between citizens** (K3.2): 39 and 72 asks in the two towns (most `buy_from`), with 22 and 17 trades, 17 and 55 ended, and none declined. A further 78 and 86 times, a citizen chose to rest instead.
+- **Before #549** the pair gave a fiber share of 40% / 32% and a Gini of 0.49 / 0.37. Urban plank makers were walled off from their sawbench then.
+
