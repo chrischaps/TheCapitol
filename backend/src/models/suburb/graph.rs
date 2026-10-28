@@ -241,7 +241,7 @@ mod tests {
     use super::*;
 
     fn road(id: &str, road_type: RoadType, points: Vec<P>) -> RoadSegment {
-        RoadSegment { id: id.into(), road_type, points, width: 16.0 }
+        RoadSegment { id: id.into(), road_type, points, width: 16.0, name: None }
     }
 
     fn node_at(g: &Graph, p: P) -> usize {

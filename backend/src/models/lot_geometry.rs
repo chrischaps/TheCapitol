@@ -782,6 +782,7 @@ mod tests {
             road_type: RoadType::Trail,
             points: vec![(-1000.0, 0.0), (1000.0, 0.0)],
             width: 10.0,
+            name: None,
         }]
     }
 

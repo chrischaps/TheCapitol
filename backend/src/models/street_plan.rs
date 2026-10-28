@@ -521,6 +521,7 @@ mod tests {
             road_type: capitol_protocol::terrain::RoadType::Suburban,
             points,
             width: 10.0,
+            name: None,
         };
         let mut roads = vec![
             road("main", vec![(0.0, 0.0), (100.0, 0.0)]),
@@ -545,6 +546,7 @@ mod tests {
             road_type: capitol_protocol::terrain::RoadType::Suburban,
             points,
             width: 10.0,
+            name: None,
         };
         // Main has a vertex at x = 50 and another 3 before it, inside SNAP.
         // The nearest segment to t's end is the short one, with the point

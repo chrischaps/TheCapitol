@@ -161,7 +161,7 @@ pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[
 
     let grid = Grid::new(land, water, roads, lots, &starts);
     let mut trails: Vec<RoadSegment> = Vec::new();
-    let road = |id: String, points: Vec<P>| RoadSegment { id, road_type: RoadType::Trail, points, width };
+    let road = |id: String, points: Vec<P>| RoadSegment { id, road_type: RoadType::Trail, points, width, name: None };
 
     // 1. Up the valleys.
     let mut valleys: Vec<Option<usize>> = Vec::new();
@@ -353,7 +353,7 @@ fn spurs(grid: &Grid, water: &Hydrology, network: &[RoadSegment], bearings: &[f6
         } else {
             format!("wild_spur_{}", out.len() - climbs)
         };
-        out.push(RoadSegment { id, road_type: RoadType::Trail, points, width });
+        out.push(RoadSegment { id, road_type: RoadType::Trail, points, width, name: None });
     }
     out
 }

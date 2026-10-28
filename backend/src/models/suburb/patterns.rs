@@ -486,7 +486,7 @@ fn pull_in_long_stems(cx: &Ctx, layout: &mut Parallels, longest: f64) {
 }
 
 pub(super) fn road(id: String, points: Vec<P>, width: f64) -> RoadSegment {
-    RoadSegment { id, road_type: RoadType::Suburban, points, width }
+    RoadSegment { id, road_type: RoadType::Suburban, points, width, name: None }
 }
 
 /// The roads of a chosen pattern (a) layout.

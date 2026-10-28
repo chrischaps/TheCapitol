@@ -9,6 +9,7 @@ pub mod lot_geometry;
 pub mod player;
 pub mod plot;
 pub mod recipe;
+pub mod road_names;
 pub mod resource;
 pub mod station_room;
 pub mod rural;

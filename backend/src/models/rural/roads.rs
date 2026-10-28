@@ -174,6 +174,7 @@ pub fn lay(sector: &Sector, ring: &Ring, mains: &[(f64, f64)], rng: &mut SplitMi
             road_type: RoadType::Trail,
             points,
             width: ring.lane_width,
+            name: None,
         })
         .collect();
     out

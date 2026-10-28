@@ -410,7 +410,7 @@ mod tests {
     }
 
     fn road(points: Vec<(f64, f64)>, width: f64) -> RoadSegment {
-        RoadSegment { id: "r".into(), road_type: RoadType::Arterial, points, width }
+        RoadSegment { id: "r".into(), road_type: RoadType::Arterial, points, width, name: None }
     }
 
     // Far from the centre, so no ring is near.

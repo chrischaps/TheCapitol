@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn only_the_rings_own_lanes_are_rural_roads() {
-        let road = |id: &str, road_type| RoadSegment { id: id.into(), road_type, points: vec![], width: 6.0 };
+        let road = |id: &str, road_type| RoadSegment { id: id.into(), road_type, points: vec![], width: 6.0, name: None };
         assert!(!is_rural_road(&road("trail_3", RoadType::Trail)), "the old trails are gone (#291)");
         assert!(is_rural_road(&road("lane_2_0", RoadType::Trail)));
         assert!(!is_rural_road(&road("wild_0_1", RoadType::Trail)));

@@ -238,7 +238,7 @@ impl Grid {
         }
         for k in 0..self.streets.len() {
             let points = self.ring_street(k);
-            roads.push(RoadSegment { id: format!("urb_ring_{k}"), road_type: RoadType::Grid, points, width: self.street_width });
+            roads.push(RoadSegment { id: format!("urb_ring_{k}"), road_type: RoadType::Grid, points, width: self.street_width, name: None });
         }
         // Each spoke runs across the rings of blocks whose set has its
         // bearing: the inner set's out to ring street `outer_from`, the
@@ -262,7 +262,7 @@ impl Grid {
         for (id, a, from, to) in spokes {
             if to > from {
                 let points = self.streets[from..=to].iter().map(|&r| self.polar(r, a)).collect();
-                roads.push(RoadSegment { id, road_type: RoadType::Grid, points, width: self.street_width });
+                roads.push(RoadSegment { id, road_type: RoadType::Grid, points, width: self.street_width, name: None });
             }
         }
         roads

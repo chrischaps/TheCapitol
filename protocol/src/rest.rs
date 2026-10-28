@@ -3525,6 +3525,10 @@ pub struct FreeLot {
     /// Its middle, server units
     pub x: f64,
     pub y: f64,
+    /// Its address: "7 Larch Close", or on a ring street with its
+    /// crossing, "112 Mercer Street by Tannergate" (#483)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     /// Its area in square units
     pub area: f64,
     /// The stations it fits at `STATION_MIN_SPACING`, capped by its

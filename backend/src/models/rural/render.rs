@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn the_rural_plan_view_draws_a_small_ring() {
-        let road = |id: &str, road_type, points: Vec<P>, width| RoadSegment { id: id.into(), road_type, points, width };
+        let road = |id: &str, road_type, points: Vec<P>, width| RoadSegment { id: id.into(), road_type, points, width, name: None };
         let roads = vec![
             road("arterial_0", RoadType::Arterial, vec![(3000.0, 0.0), (3800.0, 0.0)], 60.0),
             road("lane_0_0", RoadType::Trail, vec![(3000.0, 300.0), (3780.0, 330.0)], 8.0),

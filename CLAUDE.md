@@ -228,6 +228,7 @@ models/          - Database types and game state structs
   bazaar.rs      - The bazaar quarter: its stalls, lane, alley and square (E3.12)
   hydrology.rs   - The wilds' rivers, streams, lakes and fords, from the height field (W3)
   lot_geometry.rs - Lot geometry the suburb and the farms share: road index, rays, regions, water, overlap pass (R2)
+  road_names.rs  - What people call the roads, from the seed, in each zone's manner, and every lot's address ("3 Sheepwash Lane") (#483)
   plot.rs        - Plot ownership, permissions, property tax
   suburb/        - The suburb's neighbourhoods, streets, lots and parks (suburb v2)
   urban/         - The urban grid (#421): a canal bank and quay, five rings of back-to-back blocks out to r2160 (three before Plots v2, #455, #459), 24 bearings and 32 past r1800, about 1016 `urb_*` lots of about 8.6k, every one taking 4 stations; `backend/tools/urban-plan.ps1` draws it

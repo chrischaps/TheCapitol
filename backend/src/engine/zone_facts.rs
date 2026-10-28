@@ -55,6 +55,8 @@ struct Lot {
     capacity: i32,
     /// Its middle's straight walk to the hall, in seconds
     walk: f64,
+    /// Its address: "7 Larch Close" (#483)
+    address: Option<String>,
 }
 
 /// Every home lot of one world, packed.
@@ -70,7 +72,7 @@ static ROOMS: Mutex<Option<Arc<Rooms>>> = Mutex::new(None);
 /// The home lots of the world being played, packed: from the cache when the
 /// terrain hasn't changed since, otherwise packed now, off the async threads.
 pub async fn rooms(state: &AppState) -> Result<Arc<Rooms>, sqlx::Error> {
-    let (version, plots, hall) = {
+    let (version, plots, hall, addresses) = {
         let game = state.game.read().await;
         let version = game.terrain_version.clone();
         if let Some(rooms) = ROOMS.lock().unwrap().as_ref().filter(|r| r.version == version) {
@@ -88,16 +90,16 @@ pub async fn rooms(state: &AppState) -> Result<Arc<Rooms>, sqlx::Error> {
             .iter()
             .find(|l| l.kind == LandmarkKind::ExchangeHall)
             .map_or((terrain.center_x, terrain.center_y), |l| l.door);
-        (version, plots, hall)
+        (version, plots, hall, terrain.addresses())
     };
-    let rooms = tokio::task::spawn_blocking(move || Arc::new(pack(version, &plots, hall)))
+    let rooms = tokio::task::spawn_blocking(move || Arc::new(pack(version, &plots, hall, &addresses)))
         .await
         .expect("packing the lots panicked");
     *ROOMS.lock().unwrap() = Some(rooms.clone());
     Ok(rooms)
 }
 
-fn pack(version: String, plots: &[TerrainPlot], hall: (f64, f64)) -> Rooms {
+fn pack(version: String, plots: &[TerrainPlot], hall: (f64, f64), addresses: &HashMap<String, String>) -> Rooms {
     let lots = plots
         .iter()
         .filter_map(|p| {
@@ -106,7 +108,8 @@ fn pack(version: String, plots: &[TerrainPlot], hall: (f64, f64)) -> Rooms {
             let capacity = fits;
             let (mx, my) = middle(&p.corners);
             let walk = (mx - hall.0).stable_hypot(my - hall.1) / PLAYER_SPEED;
-            Some(Lot { id: p.id.clone(), zone, corners: p.corners, area: p.area, fits, capacity, walk })
+            let address = addresses.get(&p.id).cloned();
+            Some(Lot { id: p.id.clone(), zone, corners: p.corners, area: p.area, fits, capacity, walk, address })
         })
         .collect();
     Rooms { version, lots }
@@ -244,6 +247,7 @@ fn listed(rooms: &Rooms, zone: Zone, free: &HashMap<String, uuid::Uuid>) -> Vec<
                 fits: l.fits,
                 capacity: l.capacity,
                 walk_secs: l.walk,
+                address: l.address.clone(),
             })
         })
         .collect();
@@ -358,6 +362,7 @@ mod tests {
             fits: 4,
             capacity: 16,
             walk,
+            address: Some(format!("3 {id} Lane")),
         };
         let rooms = Rooms {
             version: "v".into(),
@@ -378,6 +383,7 @@ mod tests {
         assert_eq!(ids, ["near", "far"]);
         assert_eq!(listed[0].plot_id, uuid::Uuid::from_u128(2));
         assert_eq!((listed[0].x, listed[0].y, listed[0].fits, listed[0].walk_secs), (5.0, 5.0, 4, 70.0));
+        assert_eq!(listed[0].address.as_deref(), Some("3 near Lane"));
     }
 
     /// On the default world every free lot is listed, and a claimed one isn't

@@ -396,8 +396,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // E3.9: the Gazette, an edition at each in-game midnight
     let gazette_events = game_state.read().await.event_sender.clone();
     let gazette_db = app_state.db.clone();
+    let gazette_game = game_state.clone();
     tokio::spawn(async move {
-        engine::gazette::run_gazette_loop(gazette_db, gazette_events).await;
+        engine::gazette::run_gazette_loop(gazette_db, gazette_events, gazette_game).await;
     });
 
     // E3.10: the bazaar's stalls close when their rent runs out

@@ -700,6 +700,7 @@ mod tests {
             road_type: RoadType::Trail,
             points: vec![(900.0, 1500.0), (1100.0, 1500.0)],
             width: 12.0,
+            name: None,
         };
         Ground::new(&flat(), &[river], &[stream], &[lake], &[ford], &[road])
     }

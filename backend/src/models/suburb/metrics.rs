@@ -901,6 +901,7 @@ mod tests {
             road_type: RoadType::Suburban,
             points: vec![(x0 - 30.0, y), (x0 + 90.0, y), (x0 + 210.0, y)],
             width: 16.0,
+            name: None,
         };
         (vec![street("a", -8.0), street("b", 2.0 * d + 8.0)], lots)
     }

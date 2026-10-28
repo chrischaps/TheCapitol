@@ -322,9 +322,18 @@ impl DeedsOffice {
         if shown {
             painter.rect_filled(rect.shrink2(egui::vec2(0.0, 2.0)), 4.0, theme::GOLD_WASH);
         }
-        let place = deeds::whereabouts(zone, lot.x, lot.y);
-        let place = format!("{}{}", place[..1].to_uppercase(), &place[1..]);
-        painter.text(rect.min + egui::vec2(12.0, 8.0), Align2::LEFT_TOP, place, theme::strong(size::BODY), TEXT);
+        // Its address, short of the buttons: a ring street's crossing goes
+        // when there isn't room for it ("A yard at 112 Mercer Street")
+        let room = width - 300.0 - 12.0;
+        let place = |address: Option<&str>| {
+            let place = deeds::whereabouts(zone, address, lot.x, lot.y);
+            painter.layout_no_wrap(format!("{}{}", place[..1].to_uppercase(), &place[1..]), theme::strong(size::BODY), TEXT)
+        };
+        let mut galley = place(lot.address.as_deref());
+        if galley.size().x > room {
+            galley = place(lot.address.as_deref().map(|a| a.split(" by ").next().unwrap_or(a)));
+        }
+        painter.galley(rect.min + egui::vec2(12.0, 8.0), galley, TEXT);
         let detail = format!(
             "{} stations  ·  {} sq  ·  {} to the hall",
             lot.fits,
@@ -482,7 +491,9 @@ fn slip(ui: &mut egui::Ui, view: &View, taxes: Vec<(Zone, i64)>) {
 }
 
 /// A sample register for `--deeds-sample`: the default world's farms near
-/// the road in, as `/bureaucracy/free-lots?zone=rural` lists them.
+/// the road in, as `/bureaucracy/free-lots?zone=rural` lists them. The
+/// streets are the default world's nearest the hall (#483), the numbers
+/// made up.
 pub fn sample_lots(zone: Zone) -> FreeLotsResponse {
     use capitol_core::protocol::rules::{CENTER_X, CENTER_Y};
     let (r, fits, area, walk0) = match zone {
@@ -490,15 +501,27 @@ pub fn sample_lots(zone: Zone) -> FreeLotsResponse {
         Zone::Suburban => (2900.0, 7, 18_600.0, 42.0),
         _ => (4300.0, 14, 35_000.0, 72.0),
     };
+    let streets: &[&str] = match zone {
+        Zone::Urban => &["Canal Quay by Coopergate", "Canal Quay by Pilgrims' Road", "Canal Quay by Shearergate", "Spurrier Street by Wrightgate"],
+        Zone::Suburban => &["Lupin Close", "Ivy Court", "Elderberry Road", "Redstart End", "Goldfinch Drive"],
+        _ => &["Pilgrims' Road", "Quarry Road", "Dimmock Line", "Flax Road", "Scarth Line", "Hollow Lane"],
+    };
     let lots = (0..40)
         .map(|k| {
             let a = 1.2 + k as f64 * 0.157;
             let (x, y) = (CENTER_X + r * a.cos(), CENTER_Y + r * a.sin());
+            let n = k as usize;
+            let (number, street) = (2 * (n / streets.len()) + 1 + n % 2, streets[n % streets.len()]);
+            let address = match street.split_once(" by ") {
+                Some((street, by)) => format!("{number} {street} by {by}"),
+                None => format!("{number} {street}"),
+            };
             FreeLot {
                 plot_id: Uuid::from_u128(4480 + k as u128),
                 terrain_id: format!("sample_{}_{k}", zone.as_str()),
                 x,
                 y,
+                address: Some(address),
                 area: area + 1_300.0 * ((k * 7) % 5) as f64,
                 fits: fits + (k * 3) % 4 - 1,
                 capacity: if zone == Zone::Urban { 16 } else { 25 },

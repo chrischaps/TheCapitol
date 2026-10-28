@@ -923,7 +923,7 @@ mod tests {
 
     #[test]
     fn the_plan_view_draws_a_small_plan() {
-        let road = |id: &str, road_type, points: Vec<P>, width| RoadSegment { id: id.into(), road_type, points, width };
+        let road = |id: &str, road_type, points: Vec<P>, width| RoadSegment { id: id.into(), road_type, points, width, name: None };
         let roads = vec![
             road("arterial_0", RoadType::Arterial, vec![(URBAN_OUTER_RADIUS, 0.0), (SUBURBAN_OUTER_RADIUS, 0.0)], 60.0),
             road("culdesac_1", RoadType::Suburban, vec![(2000.0, 0.0), (2000.0, 100.0)], 16.0),

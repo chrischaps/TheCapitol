@@ -685,6 +685,7 @@ mod tests {
                 road_type: RoadType::Arterial,
                 points: vec![(800.0, 1000.0), (1200.0, 1000.0)],
                 width: 20.0,
+                name: None,
             }],
             terrain_plots: vec![TerrainPlot {
                 id: "farm".into(),

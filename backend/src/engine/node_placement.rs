@@ -335,6 +335,7 @@ mod tests {
             road_type: RoadType::Suburban,
             points: vec![(at.0 - 500.0, at.1), (at.0 + 500.0, at.1)],
             width,
+            name: None,
         }
     }
 

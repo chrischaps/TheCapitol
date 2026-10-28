@@ -82,12 +82,14 @@ pub fn quarter(center: (f64, f64), params: &WorldGenParams) -> Quarter {
         road_type: RoadType::Grid,
         points: vec![lane_at(0.0, along), lane_at(lane_end, along)],
         width: LANE_WIDTH,
+        name: None,
     };
     let alley = RoadSegment {
         id: "bazaar_alley".into(),
         road_type: RoadType::Grid,
         points: vec![polar(ring_r, ALLEY_BEARING), polar(SQUARE_OUT, ALLEY_BEARING)],
         width: ALLEY_WIDTH,
+        name: None,
     };
 
     // Everything a stall keeps off: the streets it faces, the avenue and the

@@ -234,6 +234,11 @@ pub struct RoadSegment {
     pub points: Vec<(f64, f64)>,
     /// Road width
     pub width: f64,
+    /// What people call it: "Miller's Lane", "Larch Close", "Cooper
+    /// Street". Drawn from the world's seed once the world is laid (#483).
+    /// `None` for a road nobody names, such as a wild spur.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Type of road
@@ -397,6 +402,26 @@ pub fn quad_contains(corners: &[(f64, f64); 4], x: f64, y: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A road's name is on the wire when it has one, and a road without
+    /// one, or a terrain from before names (#483), reads as `None`
+    #[test]
+    fn a_roads_name_round_trips_and_is_left_off_when_it_has_none() {
+        let lane = RoadSegment {
+            id: "lane_2_0".into(),
+            road_type: RoadType::Trail,
+            points: vec![(0.0, 0.0), (10.0, 0.0)],
+            width: 8.0,
+            name: Some("Sheepwash Lane".into()),
+        };
+        let json = serde_json::to_string(&lane).unwrap();
+        assert!(json.ends_with(r#""width":8.0,"name":"Sheepwash Lane"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RoadSegment>(&json).unwrap(), lane);
+        let spur = RoadSegment { name: None, ..lane };
+        let json = serde_json::to_string(&spur).unwrap();
+        assert!(!json.contains("name"), "{json}");
+        assert_eq!(serde_json::from_str::<RoadSegment>(&json).unwrap(), spur);
+    }
 
     #[test]
     fn bridge_contains_angle_wraps() {

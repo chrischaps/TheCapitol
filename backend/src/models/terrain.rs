@@ -442,6 +442,12 @@ impl TerrainConfig {
         Self::from_params(&WorldGenParams::default())
     }
 
+    /// Where each lot is, by its street's name: lot id to "Larch Close", or
+    /// "Mercer Street by Tannergate" on a ring street (#483)
+    pub fn addresses(&self) -> std::collections::HashMap<String, String> {
+        super::road_names::addresses(&self.roads, &self.terrain_plots)
+    }
+
     /// The lot that `(x, y)` stands on, if any. Lots don't overlap, so there's at most one.
     pub fn lot_at(&self, x: f64, y: f64) -> Option<&TerrainPlot> {
         self.terrain_plots.iter().find(|lot| {
@@ -608,6 +614,9 @@ impl TerrainConfig {
         let bazaar = super::bazaar::quarter((config.center_x, config.center_y), params);
         config.landmarks.extend(bazaar.landmarks);
         config.roads.extend(bazaar.roads);
+        // And now the world's laid, what people call its roads (#483)
+        let sectors = super::rural::sectors_of(params, (config.center_x, config.center_y), &config.roads);
+        super::road_names::name_roads(&mut config.roads, params.seed, &sectors, params.rural.mains.len());
 
         config
     }
@@ -722,6 +731,7 @@ impl TerrainConfig {
             road_type: RoadType::Arterial,
             points,
             width,
+            name: None,
         }
     }
 
@@ -754,6 +764,7 @@ impl TerrainConfig {
                     road_type: RoadType::Arterial,
                     points: vec![(start_x, start_y), (end_x, end_y)],
                     width: params.arterial_width,
+                    name: None,
                 });
 
                 let is_cardinal = angle_deg == 0.0 || angle_deg == 90.0 || angle_deg == 180.0 || angle_deg == 270.0;
@@ -769,6 +780,7 @@ impl TerrainConfig {
                             road_type: RoadType::Arterial,
                             points: vec![(guild_x, guild_y), (trade_x, trade_y)],
                             width: params.arterial_width,
+                            name: None,
                         });
                     }
                 }
@@ -788,6 +800,7 @@ impl TerrainConfig {
                 road_type: RoadType::Arterial,
                 points: vec![(trade_x, trade_y), (capitol_x, capitol_y)],
                 width: params.arterial_width,
+                name: None,
             });
         }
 
@@ -1149,7 +1162,11 @@ mod tests {
         // crosses it, and the rings' vertices there settle by 2e-12. No lot,
         // park, water or node moved (7 farms by 4e-12, under the hash's
         // quantum), so there's no migration.
-        assert_eq!(TerrainConfig::default_world().version(), "c21dd99ad3b7a2d5");
+        //
+        // #483 named the roads (`road_names`): every road but the wild spurs
+        // has a `name`, which the hash covers. No road, lot, park, water or
+        // node moved, and no id changed.
+        assert_eq!(TerrainConfig::default_world().version(), "415fdfde7a60fb1d");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

@@ -101,6 +101,7 @@ pub fn spurs(params: &WorldGenParams, center: P, roads: &[RoadSegment], sectors:
                 road_type: RoadType::Trail,
                 points: spur,
                 width: params.rural.lane_width,
+                name: None,
             };
             world_roads.push(road.clone());
             out.push(road);

@@ -238,6 +238,7 @@ pub(super) fn one_canal() -> TerrainResponse {
             road_type: RoadType::Arterial,
             points: vec![(6800.0, 7600.0), (6800.0, 8000.0)],
             width: 20.0,
+            name: None,
         }],
         terrain_plots: vec![],
         parks: vec![],

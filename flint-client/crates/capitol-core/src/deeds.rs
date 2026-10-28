@@ -13,8 +13,8 @@
 //! - **Free lots** come from `/bureaucracy/free-lots`, one zone at a time,
 //!   and sort by the walk to the hall or by room ([`Sort`]).
 //!
-//! Roads have no names yet, so a lot is placed by its bearing from the
-//! tower ([`whereabouts`], #483).
+//! A lot is placed by its address, "a farm at 3 Sheepwash Lane", which the
+//! server reads off the roads' names ([`whereabouts`], #483).
 
 use capitol_protocol::rest::{FreeLot, PlotInfo};
 use capitol_protocol::rules::{self, Zone};
@@ -110,9 +110,13 @@ pub fn bearing(x: f64, y: f64) -> &'static str {
 }
 
 /// Where a lot in `zone` at the server point (x, y) is, as the Gazette says
-/// it: "a farm out to the south-west", "a house on a street to the east", "a
-/// yard north of the tower". Roads have no names yet (#483).
-pub fn whereabouts(zone: Zone, x: f64, y: f64) -> String {
+/// it: by its `address`, "a farm at 3 Sheepwash Lane", "a yard at 112 Mercer
+/// Street by Tannergate" (#483). A server too old to send one places it by
+/// its bearing from the tower: "a farm out to the south-west".
+pub fn whereabouts(zone: Zone, address: Option<&str>, x: f64, y: f64) -> String {
+    if let Some(address) = address {
+        return format!("a {} at {address}", home_noun(zone));
+    }
     let b = bearing(x, y);
     match zone {
         Zone::Rural => format!("a farm out to the {b}"),
@@ -230,6 +234,7 @@ mod tests {
             terrain_id: id.into(),
             x: 0.0,
             y: 0.0,
+            address: None,
             area: 35_000.0,
             fits,
             capacity: 25,
@@ -251,9 +256,14 @@ mod tests {
         assert_eq!(bearing(cx, cy + 3000.0), "south", "y points south");
         assert_eq!(bearing(cx - 2000.0, cy + 2000.0), "south-west");
         assert_eq!(bearing(cx + 2000.0, cy - 100.0), "east");
-        assert_eq!(whereabouts(Zone::Rural, cx - 3000.0, cy + 3000.0), "a farm out to the south-west");
-        assert_eq!(whereabouts(Zone::Urban, cx, cy - 1500.0), "a yard north of the tower");
-        assert_eq!(whereabouts(Zone::Suburban, cx + 2500.0, cy), "a house on a street to the east");
+        assert_eq!(whereabouts(Zone::Rural, None, cx - 3000.0, cy + 3000.0), "a farm out to the south-west");
+        assert_eq!(whereabouts(Zone::Urban, None, cx, cy - 1500.0), "a yard north of the tower");
+        assert_eq!(whereabouts(Zone::Suburban, None, cx + 2500.0, cy), "a house on a street to the east");
+        assert_eq!(whereabouts(Zone::Rural, Some("3 Sheepwash Lane"), cx, cy), "a farm at 3 Sheepwash Lane");
+        assert_eq!(
+            whereabouts(Zone::Urban, Some("112 Mercer Street by Tannergate"), cx, cy),
+            "a yard at 112 Mercer Street by Tannergate"
+        );
         assert_eq!(home_noun(Zone::Suburban), "house");
     }
 

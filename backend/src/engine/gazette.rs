@@ -53,10 +53,12 @@ use capitol_protocol::annotation::AnnotationKind;
 use capitol_protocol::rules::{self, Zone};
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
-use tokio::sync::broadcast;
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use super::events::GameEvent;
+use super::tick::GameState;
 
 /// How many movers and producers an edition lists
 const MOVERS: usize = 5;
@@ -325,10 +327,14 @@ pub struct Settler {
     /// The plot's middle, server units
     pub x: f64,
     pub y: f64,
+    /// Its address: "7 Larch Close", "112 Mercer Street by Tannergate"
+    /// (#483). `None` for a plot off the terrain's lots.
+    pub address: Option<String>,
 }
 
-/// Read day `day`'s records.
-pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
+/// Read day `day`'s records. `addresses` places the plots settled by their
+/// streets: lot id to address (`TerrainConfig::addresses`).
+pub async fn gather(db: &PgPool, day: i64, addresses: &HashMap<String, String>) -> Result<DayRecords, sqlx::Error> {
     let at = |ms: i64| DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or_default();
     let (start, end) = (at(rules::day_start_ms(day)), at(rules::day_start_ms(day + 1)));
     let before = at(rules::day_start_ms(day - 1));
@@ -458,8 +464,8 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     .fetch_all(db)
     .await?;
 
-    let settlers: Vec<(String, bool, bool, String, f32, f32)> = sqlx::query_as(
-        "SELECT p.name, p.gazette_named, COALESCE(a.kind = 'citizen', FALSE), d.zone_id, pl.world_x, pl.world_y
+    let settlers: Vec<(String, bool, bool, String, f32, f32, Option<String>)> = sqlx::query_as(
+        "SELECT p.name, p.gazette_named, COALESCE(a.kind = 'citizen', FALSE), d.zone_id, pl.world_x, pl.world_y, pl.terrain_id
          FROM deed_events d
          JOIN players p ON p.id = d.player_id
          LEFT JOIN accounts a ON a.id = p.account_id
@@ -482,8 +488,8 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     .fetch_all(db)
     .await?;
 
-    let floors: Vec<(String, bool, bool, String, f32, f32, Option<i32>)> = sqlx::query_as(
-        "SELECT p.name, p.gazette_named, COALESCE(a.kind = 'citizen', FALSE), d.zone_id, pl.world_x, pl.world_y, d.floor
+    let floors: Vec<(String, bool, bool, String, f32, f32, Option<String>, Option<i32>)> = sqlx::query_as(
+        "SELECT p.name, p.gazette_named, COALESCE(a.kind = 'citizen', FALSE), d.zone_id, pl.world_x, pl.world_y, pl.terrain_id, d.floor
          FROM deed_events d
          JOIN players p ON p.id = d.player_id
          LEFT JOIN accounts a ON a.id = p.account_id
@@ -535,19 +541,21 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
         claimed_by_people,
         settlers: settlers
             .into_iter()
-            .map(|(name, named, citizen, zone, x, y)| Settler {
+            .map(|(name, named, citizen, zone, x, y, lot)| Settler {
                 name: named.then_some(name),
                 citizen,
                 zone,
                 x: x as f64,
                 y: y as f64,
+                address: lot.and_then(|lot| addresses.get(&lot).cloned()),
             })
             .collect(),
         halls,
         floors: floors
             .into_iter()
-            .map(|(name, named, citizen, zone, x, y, floor)| {
-                (Settler { name: named.then_some(name), citizen, zone, x: x as f64, y: y as f64 }, floor.unwrap_or(1))
+            .map(|(name, named, citizen, zone, x, y, lot, floor)| {
+                let address = lot.and_then(|lot| addresses.get(&lot).cloned());
+                (Settler { name: named.then_some(name), citizen, zone, x: x as f64, y: y as f64, address }, floor.unwrap_or(1))
             })
             .collect(),
         work: work
@@ -1438,10 +1446,8 @@ fn sold_share(s: &GazetteShares, both: bool) -> String {
 /// How many settlers the land column names before it counts the rest
 const SETTLERS_NAMED: usize = 4;
 
-/// Who settled with the road in's deed (#448): " Settled: Ada, a farm out
-/// to the south-west; Citizen Bo, a yard north-east of the tower." Roads
-/// have no names yet, so a home is placed by its bearing from the tower
-/// ([#483](https://github.com/chrischaps/TheCapitol/issues/483)).
+/// Who settled with the road in's deed (#448): " Settled: Ada, a farm at
+/// 3 Sheepwash Lane; Citizen Bo, a yard at 112 Mercer Street by Tannergate."
 fn settled(settlers: &[Settler]) -> String {
     if settlers.is_empty() {
         return String::new();
@@ -1494,9 +1500,19 @@ fn halls_taken(guilds: &[String]) -> String {
     }
 }
 
-/// "a farm out to the south-west", "a house on a street to the north",
-/// "a yard north-east of the tower"
+/// "a farm at 3 Sheepwash Lane", "a house at 7 Larch Close", "a yard at
+/// 112 Mercer Street by Tannergate" (#483). A plot whose street isn't known
+/// is placed by its bearing from the tower: "a farm out to the south-west".
 fn home_of(s: &Settler) -> String {
+    if let Some(address) = &s.address {
+        let noun = match Zone::from_str(&s.zone) {
+            Some(Zone::Rural) => "farm",
+            Some(Zone::Suburban) => "house",
+            Some(Zone::Urban) => "yard",
+            _ => "lot",
+        };
+        return format!("a {noun} at {address}");
+    }
     let bearing = compass(s.x - rules::CENTER_X, s.y - rules::CENTER_Y);
     match Zone::from_str(&s.zone) {
         Some(Zone::Rural) => format!("a farm out to the {bearing}"),
@@ -1600,7 +1616,8 @@ fn capitalise(s: &str) -> String {
 
 /// Compose and keep day `day`'s edition. `Some` if it's new; `None` if the day
 /// already had one (another start, or a race), which is left as it was.
-pub async fn publish(db: &PgPool, day: i64) -> Result<Option<Gazette>, sqlx::Error> {
+/// `addresses` are the world's, lot id to street (`TerrainConfig::addresses`).
+pub async fn publish(db: &PgPool, day: i64, addresses: &HashMap<String, String>) -> Result<Option<Gazette>, sqlx::Error> {
     // A week's last edition names the week's leaders (S3.2), so its boards
     // come first. They're kept whether or not the edition is new.
     if rules::ends_week(day) && super::leaderboards::compute(db, rules::week_of(day)).await? {
@@ -1613,7 +1630,7 @@ pub async fn publish(db: &PgPool, day: i64) -> Result<Option<Gazette>, sqlx::Err
     if exists {
         return Ok(None);
     }
-    let edition = compose(&gather(db, day).await?);
+    let edition = compose(&gather(db, day, addresses).await?);
     let json = serde_json::to_value(&edition).expect("an edition serialises");
     let inserted = sqlx::query("INSERT INTO gazette_editions (day, edition) VALUES ($1, $2) ON CONFLICT (day) DO NOTHING")
         .bind(day)
@@ -1643,7 +1660,9 @@ pub async fn edition(db: &PgPool, day: Option<i64>) -> Result<Option<Gazette>, s
 
 /// Publish each day's edition at the midnight that ends it, for as long as the
 /// server runs. On start it catches up the day just ended, if it has none.
-pub async fn run_gazette_loop(db: PgPool, events: broadcast::Sender<GameEvent>) {
+/// The settlers' streets are read off `game`'s terrain as each edition goes
+/// to press.
+pub async fn run_gazette_loop(db: PgPool, events: broadcast::Sender<GameEvent>, game: Arc<RwLock<GameState>>) {
     loop {
         let now = Utc::now().timestamp_millis();
         let today = rules::day_number(now);
@@ -1652,7 +1671,8 @@ pub async fn run_gazette_loop(db: PgPool, events: broadcast::Sender<GameEvent>) 
         if let Err(e) = super::leaderboards::compute(&db, rules::week_of(today) - 1).await {
             tracing::error!("Leaderboards for week {} failed: {e}", rules::week_of(today) - 1);
         }
-        match publish(&db, today - 1).await {
+        let addresses = game.read().await.terrain.addresses();
+        match publish(&db, today - 1, &addresses).await {
             Ok(Some(edition)) => {
                 tracing::info!("The Gazette, No. {}: {}", edition.number, edition.headline);
                 let _ = events.send(GameEvent::GazettePublished {
@@ -1899,6 +1919,7 @@ mod tests {
             zone: zone.into(),
             x,
             y,
+            address: None,
         };
         let records = DayRecords {
             day: DAY,
@@ -1923,6 +1944,40 @@ mod tests {
         let crowd = DayRecords { settlers: vec![records.settlers[0].clone(); 6], ..records.clone() };
         assert!(compose(&crowd).deeds_story.ends_with("; and two more."), "{}", compose(&crowd).deeds_story);
         assert!(!compose(&DayRecords { day: DAY, ..Default::default() }).deeds_story.contains("Settled"));
+    }
+
+    /// A settler's home is placed by its address, where it has one (#483)
+    #[test]
+    fn settlers_are_placed_by_their_addresses() {
+        let settler = |name: &str, citizen, zone: &str, address: &str| Settler {
+            name: Some(name.into()),
+            citizen,
+            zone: zone.into(),
+            x: rules::CENTER_X,
+            y: rules::CENTER_Y,
+            address: Some(address.into()),
+        };
+        let records = DayRecords {
+            day: DAY,
+            deeds: vec![("rural".into(), 1, 0), ("urban".into(), 1, 0), ("suburban".into(), 1, 0)],
+            claimed_by_people: 2,
+            settlers: vec![
+                settler("Ada", false, "rural", "3 Sheepwash Lane"),
+                settler("Bo", true, "urban", "112 Mercer Street by Tannergate"),
+                settler("Cy", false, "suburban", "7 Larch Close"),
+            ],
+            floors: vec![(settler("Di", false, "rural", "12 Hallett Line"), 2)],
+            ..Default::default()
+        };
+        let story = compose(&records).deeds_story;
+        assert!(
+            story.contains(
+                " Settled, with the deed the road in earns: Ada, a farm at 3 Sheepwash Lane; \
+                 Citizen Bo, a yard at 112 Mercer Street by Tannergate; Cy, a house at 7 Larch Close."
+            ),
+            "{story}"
+        );
+        assert!(story.ends_with(" Going up: Di, a second floor on a farm at 12 Hallett Line."), "{story}");
     }
 
     /// A guild's hall makes the land column (S4.3), by the guild's name
@@ -1962,6 +2017,7 @@ mod tests {
             zone: zone.into(),
             x,
             y,
+            address: None,
         };
         let records = DayRecords {
             day: DAY,
@@ -2367,7 +2423,7 @@ mod tests {
                     .unwrap();
             }
 
-            let g = publish(&db, day).await.unwrap().expect("a new edition");
+            let g = publish(&db, day, &HashMap::new()).await.unwrap().expect("a new edition");
             assert_eq!(g.prices.len(), 2);
             let fiber = g.prices.iter().find(|p| p.item_type == "fiber").unwrap();
             assert_eq!((fiber.mean, fiber.volume, fiber.previous), (3, 100, Some(2)));
@@ -2385,7 +2441,7 @@ mod tests {
                 assert!(!text.is_empty() && !text.contains('{'), "{text}");
             }
 
-            assert_eq!(publish(&db, day).await.unwrap(), None);
+            assert_eq!(publish(&db, day, &HashMap::new()).await.unwrap(), None);
             // One marker for the console (D0.4), and none for the edition it already had
             let marks = crate::engine::annotations::since(&db, 0, 10).await.unwrap();
             assert_eq!(marks.len(), 1);
@@ -2429,7 +2485,7 @@ mod tests {
                     .unwrap();
             }
 
-            let g = publish(&db, day).await.unwrap().expect("a new edition");
+            let g = publish(&db, day, &HashMap::new()).await.unwrap().expect("a new edition");
             let sale = g.best_sale.as_ref().unwrap();
             assert_eq!((sale.seller.as_deref(), sale.seller_citizen, sale.own_work), (Some("Cog"), true, true));
             assert!(g.best_sale_story.ends_with("made and sold by Citizen Cog."), "{}", g.best_sale_story);
@@ -2482,7 +2538,7 @@ mod tests {
             let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bazaar_sales").fetch_one(&db).await.unwrap();
             assert_eq!(recorded, 3);
 
-            let g = publish(&db, day).await.unwrap().expect("a new edition");
+            let g = publish(&db, day, &HashMap::new()).await.unwrap().expect("a new edition");
             let st = g.stalls.as_ref().expect("the stalls sold");
             assert_eq!((st.sales, st.units, st.strands, st.goods), (3, 9, 38, 2));
             let shops: Vec<(Option<&str>, Option<&str>, i64, i64, &str)> =
@@ -2544,7 +2600,7 @@ mod tests {
             let begging = commissions::post(&db, ada.id, &ask("rope", 7, 9, 1), at(12) - Duration::days(1)).await.unwrap();
             assert_eq!(commissions::expire_due(&db, begging.due_at).await.unwrap().len(), 1);
 
-            let g = publish(&db, day).await.unwrap().expect("a new edition");
+            let g = publish(&db, day, &HashMap::new()).await.unwrap().expect("a new edition");
             let w = g.wanted.as_ref().expect("the board had a day");
             assert_eq!((w.posted, w.filled, w.expired, w.deliveries, w.paid, w.kept, w.lapsed), (2, 1, 1, 2, 80, 1, 1));
             let wanted: Vec<(&str, i64, i64)> = w.wanted.iter().map(|a| (a.item_type.as_str(), a.units, a.value)).collect();
@@ -2589,11 +2645,11 @@ mod tests {
             let at = DateTime::<Utc>::from_timestamp_millis(rules::day_start_ms(last - 3) + 3_600_000).unwrap();
             trade(&db, (ada.id, bo.id), "fiber", 50, 2, 100, at).await;
 
-            let before = publish(&db, last - 1).await.unwrap().expect("an edition");
+            let before = publish(&db, last - 1, &HashMap::new()).await.unwrap().expect("an edition");
             assert_eq!(before.week_names, None);
             assert_eq!(crate::engine::leaderboards::latest(&db).await.unwrap(), None);
 
-            let g = publish(&db, last).await.unwrap().expect("the week's last edition");
+            let g = publish(&db, last, &HashMap::new()).await.unwrap().expect("the week's last edition");
             let names = g.week_names.expect("the week's names");
             assert_eq!(names.week, week);
             let wealth = &names.boards[0];

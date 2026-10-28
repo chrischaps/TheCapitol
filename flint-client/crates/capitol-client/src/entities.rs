@@ -963,6 +963,7 @@ mod tests {
             road_type: RoadType::Grid,
             points: ends.iter().map(|&[x, y]| (x, y)).collect(),
             width: 24.0,
+            name: None,
         };
         let street = Street::at(std::slice::from_ref(&lane), [-16.0, 30.1]).expect("on the lane");
         assert!((street.centre[1] - 29.75).abs() < 1e-3, "brought onto the centreline");
