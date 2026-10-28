@@ -164,7 +164,7 @@ impl PadNav {
             }
         }
         if let Some(spot) = at {
-            // Held for this pass only: `end` gives it back (#516)
+            // Kept between frames, but for a field (`end`)
             ctx.memory_mut(|m| m.request_focus(spot.id));
             self.lent = Some(spot.id);
             if self.last != Some(spot.id) {
@@ -186,10 +186,10 @@ impl PadNav {
         }
     }
 
-    /// At the end of `ui`: draws the ring round the widget in focus, and
-    /// gives egui's focus back. Flint takes any focus between frames for
-    /// typing, and would hold the pads and keep the game's keys (#516), so
-    /// the ring keeps its own (`last`) and lends it to egui a pass at a time.
+    /// At the end of `ui`: draws the ring round the widget in focus. Flint
+    /// takes only a focused text field for typing (#516), so a button, tab
+    /// or slot keeps egui's focus between frames. A field the ring sits on
+    /// gives it back: as typing, it would hold the pad that moves the ring.
     /// A text field that took the focus itself (the chat's, opened) keeps
     /// it: that is typing.
     pub fn end(&mut self, ctx: &Context) {
@@ -202,6 +202,8 @@ impl PadNav {
         if self.lent == Some(id) || !typing {
             // A press can move the focus on: the ring follows it
             self.last = Some(id);
+        }
+        if self.lent == Some(id) && typing {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }
         let Some(response) = ctx.read_response(id) else { return };
@@ -538,7 +540,7 @@ mod tests {
         frame(&mut nav, Asked::default(), &mut clicked);
         frame(&mut nav, Asked::default(), &mut clicked);
         assert!(nav.last.is_some(), "the ring is on the first button");
-        assert_eq!(ctx.memory(|m| m.focused()), None, "and egui holds no focus between frames (#516)");
+        assert_eq!(ctx.memory(|m| m.focused()), nav.last, "and egui keeps its focus between frames (#516)");
         frame(&mut nav, Asked { dir: Some(Dir::Down), ..Default::default() }, &mut clicked);
         frame(&mut nav, Asked { press: true, ..Default::default() }, &mut clicked);
         assert_eq!(clicked, vec![1], "A pressed the second button");
