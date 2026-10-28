@@ -723,6 +723,10 @@ pub(crate) mod tests {
         assert_eq!((order.escrow_strands, order.fee), (240, 3));
         assert_eq!((order.min_grade.as_deref(), order.grade_rule), (Some("B"), Some(GradeRule::Average)));
         assert_eq!(balance(&db, bea.id).await, 1000 - 243);
+        // The ledger counts the bid's escrow as hers (#553)
+        let books = crate::engine::ledger::books(&db).await.unwrap();
+        let hers = books.accounts.iter().find(|a| a.player_id == bea.id).unwrap();
+        assert_eq!((hers.escrow.bids, hers.holding()), (240, 1000 - 3));
 
         let done = cancel(&db, bea.id, order.id).await.unwrap();
         assert_eq!((done.refunded, done.order.escrow_strands, done.market_box), (240, 0, None));

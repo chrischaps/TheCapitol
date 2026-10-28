@@ -9,7 +9,10 @@
 //!   before it reads the books, and writes a [`Balance`] beside its report:
 //!   the knobs it ran under, the citizens' Strands by trade, the Gini, the
 //!   faucets and sinks by type, prices against their targets, and whether
-//!   the books balanced.
+//!   the books balanced. Since #553 each trade's Strands in escrow too
+//!   (bids, commissions and wage offers), so the fiber share and the Gini
+//!   read both with it and without, and each citizen's calling and time for
+//!   §10's measures ([`measures`](super::measures)).
 //! - [`compare`] holds two of them up against each other, for
 //!   `capitol-town compare` and `scripts/balance.ps1`.
 //!
@@ -23,6 +26,7 @@ use capitol_protocol::metrics::{gini, top_tenth_share};
 use capitol_protocol::tunables::{Knob, TunableError, TunablesResponse, TunablesUpdate, Unit};
 use serde::{Deserialize, Serialize};
 
+use super::measures::{self, CitizenCalling};
 use super::report::TownReport;
 use crate::sim::report::ActivityTime;
 use crate::sim::ROLES;
@@ -136,6 +140,10 @@ pub struct Balance {
     pub gini_start: Option<f64>,
     pub gini_end: Option<f64>,
     pub top_tenth_end: Option<f64>,
+    /// The Gini at the end with each citizen's escrow counted as its own
+    /// (#553). `None` in a file from before.
+    #[serde(default)]
+    pub gini_end_with_escrow: Option<f64>,
     /// Strands by transaction type over the run, as the ledger files them:
     /// faucets positive, sinks negative
     pub flows: BTreeMap<String, i64>,
@@ -162,6 +170,10 @@ pub struct Balance {
     pub commissions_paid: Option<i64>,
     #[serde(default)]
     pub wages_paid: Option<i64>,
+    /// Each citizen's calling and time, for §10's measures (#553). Empty in
+    /// a file from before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callings: Vec<CitizenCalling>,
 }
 
 /// A trade's Strands, all its citizens together.
@@ -175,6 +187,12 @@ pub struct TradeMoney {
     pub citizens: usize,
     pub start: i64,
     pub end: i64,
+    /// Its citizens' Strands in escrow at each end, outside `start` and
+    /// `end` (#553). `None` in a file from before.
+    #[serde(default)]
+    pub escrow_start: Option<i64>,
+    #[serde(default)]
+    pub escrow_end: Option<i64>,
     /// What its citizens' time went on (Callings K0.1). A file from before
     /// has none, and neither do the counts after it.
     #[serde(default)]
@@ -229,6 +247,7 @@ impl Balance {
         let books = soak.reconciliation();
         let citizens = |l: &Ledger| l.accounts.iter().filter(|a| a.citizen).map(|a| a.strands).collect::<Vec<_>>();
         let (start, end) = (citizens(&soak.start), citizens(&soak.end));
+        let holding: Vec<i64> = soak.end.accounts.iter().filter(|a| a.citizen).map(|a| a.holding()).collect();
         let prices = report
             .sim
             .items
@@ -259,6 +278,8 @@ impl Balance {
                     citizens: t.citizens,
                     start: t.strands_start,
                     end: t.strands_end,
+                    escrow_start: Some(t.escrow_start),
+                    escrow_end: Some(t.escrow_end),
                     time: t.time.clone(),
                     failed_steps: t.failed_steps,
                     stuck: t.stuck,
@@ -267,6 +288,7 @@ impl Balance {
             gini_start: gini(&start),
             gini_end: gini(&end),
             top_tenth_end: top_tenth_share(&end),
+            gini_end_with_escrow: gini(&holding),
             flows: books.strands.flows.clone(),
             faucets: books.strands.faucets,
             sinks: books.strands.sinks,
@@ -279,6 +301,7 @@ impl Balance {
             unit_drift: books.units.drift.clone(),
             commissions_paid: Some(report.sim.court.paid),
             wages_paid: Some(report.sim.wages.earned),
+            callings: if report.citizens.iter().any(|c| c.calling.is_some()) { report.callings() } else { Vec::new() },
         })
     }
 
@@ -359,6 +382,23 @@ impl Balance {
         (end > 0).then(|| fiber as f64 / end as f64)
     }
 
+    /// The citizens' Strands in escrow at the end, all together: `None` in
+    /// a file from before it was kept (#553)
+    pub fn escrow_end(&self) -> Option<i64> {
+        self.trades.iter().map(|t| t.escrow_end).sum()
+    }
+
+    /// [`fiber_share`](Self::fiber_share) with each trade's escrow counted
+    /// as its own (#553): at 200 citizens K4.1 found half the Strands in
+    /// open bids, which the share without it leaves out.
+    pub fn fiber_share_with_escrow(&self) -> Option<f64> {
+        self.escrow_end()?;
+        let holding = |t: &TradeMoney| t.end + t.escrow_end.unwrap_or(0);
+        let all: i64 = self.trades.iter().map(holding).sum();
+        let fiber: i64 = self.trades.iter().filter(|t| t.role.contains("fiber")).map(holding).sum();
+        (all > 0).then(|| fiber as f64 / all as f64)
+    }
+
     /// Every trade's time together, and whether there is any: a run from
     /// before K0.1 has none.
     fn time(&self) -> Option<ActivityTime> {
@@ -434,6 +474,7 @@ pub fn compare(a: &Balance, b: &Balance) -> String {
     prices_md(&mut md, a, b);
     time_md(&mut md, a, b);
     steps_md(&mut md, a, b);
+    measures::callings_md(&mut md, &[("A", &a.callings), ("B", &b.callings)]);
     md
 }
 
@@ -475,6 +516,12 @@ fn money_md(md: &mut String, a: &Balance, b: &Balance) {
     let _ = writeln!(md, "| **Spent a game hour** | {} | {} |", per_hour(ca.total(), a), per_hour(cb.total(), b));
     let _ = writeln!(md, "| Spent, of the faucets | {} | {} |", of_faucet(&ca, a), of_faucet(&cb, b));
     let _ = writeln!(md, "| Fiber trades' share of the Strands at the end | {} | {} |", pct(a.fiber_share()), pct(b.fiber_share()));
+    let _ = writeln!(
+        md,
+        "| … counting their escrow | {} | {} |",
+        pct(a.fiber_share_with_escrow()),
+        pct(b.fiber_share_with_escrow())
+    );
     md.push('\n');
 }
 
@@ -598,14 +645,23 @@ fn books_md(md: &mut String, a: &Balance, b: &Balance) {
 fn trades_md(md: &mut String, a: &Balance, b: &Balance) {
     let _ = writeln!(md, "## Strands by trade\n");
     let ((a0, a1), (b0, b1)) = (a.strands(), b.strands());
+    let escrow = |run: &Balance| {
+        run.escrow_end()
+            .map_or(String::new(), |e| format!(", with {e} more in escrow at the end"))
+    };
     let _ = writeln!(
         md,
-        "The citizens' Strands went from {a0} to {a1} in A ({:+}) and from {b0} to {b1} in B ({:+}).\n",
+        "The citizens' Strands went from {a0} to {a1} in A ({:+}{}) and from {b0} to {b1} in B ({:+}{}). Escrow is what a trade's citizens have put up in open bids, commissions and wage offers: still theirs, but outside their balances.\n",
         a1 - a0,
-        b1 - b0
+        escrow(a),
+        b1 - b0,
+        escrow(b)
     );
-    let _ = writeln!(md, "| Trade | Citizens | A: start → end | A: change each | B: start → end | B: change each |");
-    let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|");
+    let _ = writeln!(
+        md,
+        "| Trade | Citizens | A: start → end | A: change each | A: in escrow at the end | B: start → end | B: change each | B: in escrow at the end |"
+    );
+    let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---:|");
     let roles: BTreeSet<&String> = a.trades.iter().chain(&b.trades).map(|t| &t.role).collect();
     for role in roles {
         let (ta, tb) = (a.trades.iter().find(|t| &t.role == role), b.trades.iter().find(|t| &t.role == role));
@@ -617,11 +673,12 @@ fn trades_md(md: &mut String, a: &Balance, b: &Balance) {
             Some(t) => (
                 format!("{} → {}", t.start, t.end),
                 format!("{:+.0}", (t.end - t.start) as f64 / t.citizens.max(1) as f64),
+                t.escrow_end.map_or("—".to_string(), |e| e.to_string()),
             ),
-            None => ("—".into(), "—".into()),
+            None => ("—".into(), "—".into(), "—".into()),
         };
-        let ((a_range, a_each), (b_range, b_each)) = (cells(ta), cells(tb));
-        let _ = writeln!(md, "| {role} | {citizens} | {a_range} | {a_each} | {b_range} | {b_each} |");
+        let ((a_range, a_each, a_held), (b_range, b_each, b_held)) = (cells(ta), cells(tb));
+        let _ = writeln!(md, "| {role} | {citizens} | {a_range} | {a_each} | {a_held} | {b_range} | {b_each} | {b_held} |");
     }
     md.push('\n');
 }
@@ -640,6 +697,12 @@ fn spread_md(md: &mut String, a: &Balance, b: &Balance) {
     let _ = writeln!(md, "|---|---:|---:|");
     let _ = writeln!(md, "| Gini at the start | {} | {} |", g(a.gini_start), g(b.gini_start));
     let _ = writeln!(md, "| Gini at the end | {} | {} |", g(a.gini_end), g(b.gini_end));
+    let _ = writeln!(
+        md,
+        "| Gini at the end, counting escrow | {} | {} |",
+        g(a.gini_end_with_escrow),
+        g(b.gini_end_with_escrow)
+    );
     let _ = writeln!(md, "| The richest tenth's share at the end | {} | {} |", share(a.top_tenth_end), share(b.top_tenth_end));
     md.push('\n');
 }
@@ -841,6 +904,7 @@ mod tests {
             gini_start: Some(0.0),
             gini_end: Some(0.41),
             top_tenth_end: Some(0.3),
+            gini_end_with_escrow: None,
             flows,
             faucets: 900,
             sinks,
@@ -856,6 +920,7 @@ mod tests {
             unit_drift: vec![],
             commissions_paid: None,
             wages_paid: None,
+            callings: Vec::new(),
         }
     }
 
@@ -865,6 +930,8 @@ mod tests {
             citizens,
             start,
             end,
+            escrow_start: None,
+            escrow_end: None,
             time: ActivityTime::default(),
             failed_steps: 0,
             stuck: 0,
@@ -938,7 +1005,7 @@ mod tests {
         assert!(md.contains("B's sinks took 522 Strands, 9 more than A's 513; property tax took 10 in B and 1 in A."), "{md}");
         assert!(md.contains("| `property_tax` | sink | -1 | -10 | -9 |"), "{md}");
         assert!(!md.contains("market_escrow"), "escrow isn't a sink: {md}");
-        assert!(md.contains("| gatherer-fiber | 4 | 400 → 1200 | +200 | 400 → 1200 | +200 |"), "{md}");
+        assert!(md.contains("| gatherer-fiber | 4 | 400 → 1200 | +200 | — | 400 → 1200 | +200 | — |"), "{md}");
         assert!(md.contains("| plank | 12 | 40 | 15.0 | +25% |"), "{md}");
         assert!(!md.contains("| ingot |"), "an item that never traded has no price: {md}");
         assert!(md.contains("Gini of the citizens' Strands ended at 0.41 in A and 0.41 in B"), "{md}");

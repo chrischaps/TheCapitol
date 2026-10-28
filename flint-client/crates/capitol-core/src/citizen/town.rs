@@ -49,12 +49,14 @@ use std::time::{Duration, Instant};
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    CitizenReport, DecisionBrief, RoadInReport, StintReport, TownFailure, TownReport, TOWN_FAILURES,
+    CallingReport, CitizenReport, DecisionBrief, RoadInReport, StintReport, TownFailure, TownReport, TOWN_FAILURES,
 };
 use capitol_protocol::rest::{ClockResponse, CreateCitizenRequest, LoginRequest, SetClockRequest};
+use capitol_protocol::rules::lately::Lately;
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use serde::Deserialize;
+use uuid::Uuid;
 
 use super::decide::log::{self, Log};
 use super::decide::pulse::{Pulse, SharedPulse};
@@ -706,6 +708,21 @@ impl Admin {
         }
     }
 
+    /// What each of `players`' cards says they've lately been busy with
+    /// (Callings K3.1), `GET /players/{id}/card`, as anyone reading it would
+    /// see: for the soak's §10 measures (#553). `None` for a quiet card, and
+    /// for one that couldn't be read.
+    pub fn cards(&self, config: &NetConfig, players: &[Uuid]) -> Result<Vec<Option<Lately>>, String> {
+        let token = self.sign_in(config)?;
+        Ok(players
+            .iter()
+            .map(|id| match net::call_once(config, Some(&token), &RestRequest::PlayerCard { player_id: *id }) {
+                Ok(RestResponse::Card(card)) => card.lately,
+                Ok(_) | Err(_) => None,
+            })
+            .collect())
+    }
+
     /// Every live knob, `GET /admin/tunables` (D6.1)
     pub fn tunables(&self, config: &NetConfig) -> Result<TunablesResponse, String> {
         self.tunables_call(config, &RestRequest::Tunables, "reading the tunables")
@@ -1199,6 +1216,19 @@ impl Town {
                     error: None,
                 };
                 (run, book.rulings)
+            })
+            .collect()
+    }
+
+    /// Each citizen's calling, by name, as the console's roster says it
+    /// (Callings K3.3): for the soak's §10 measures (#553), which a run
+    /// doesn't carry.
+    pub fn callings(&self) -> BTreeMap<String, CallingReport> {
+        self.health
+            .iter()
+            .filter_map(|health| {
+                let h = health.lock().unwrap_or_else(|e| e.into_inner());
+                Some((h.name.clone(), h.calling.as_ref()?.report()))
             })
             .collect()
     }

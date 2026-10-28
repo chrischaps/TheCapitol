@@ -906,6 +906,7 @@ mod tests {
             citizen,
             strands,
             flows: flows.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            escrow: Default::default(),
         }
     }
 

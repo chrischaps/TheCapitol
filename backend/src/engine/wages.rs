@@ -1173,6 +1173,10 @@ mod tests {
         assert_eq!(audit_of(&db, ada.id).await, vec![("court_escrow".into(), -40), ("court_fee".into(), -6)]);
         assert!(matches!(&news.board[..], [ServerMessage::WageOffered { .. }]));
         assert_eq!(news.balances, vec![(ada.id, 954)]);
+        // The ledger counts the offer's escrow as hers (#553)
+        let books = crate::engine::ledger::books(&db).await.unwrap();
+        let hers = books.accounts.iter().find(|a| a.player_id == ada.id).unwrap();
+        assert_eq!((hers.escrow.wages, hers.escrow.bids, hers.holding()), (40, 0, 994));
 
         // Grass on her lot, placed at the lot's middle
         let (field, _) = offer(&db, ada.id, &grass_on(plot, 2, 5), now).await.unwrap();

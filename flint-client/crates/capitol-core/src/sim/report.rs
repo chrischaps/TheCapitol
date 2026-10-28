@@ -70,6 +70,10 @@ pub enum Entry {
         strands: i64,
         at: f64,
     },
+    /// It had a citizen near it to ask to trade (Callings K3.2), and what
+    /// came of it: let them be, or asked and the trade went through, was
+    /// declined, ended or failed (#553).
+    Asking { fate: AskFate },
     /// A commission went up on the hall's board (Commons S2.5): `quantity`
     /// of `item` at `price` each, all of it escrowed, and the court's `fee`
     /// on top.
@@ -130,6 +134,21 @@ pub enum Entry {
     LeftGuild { guild: String, why: String },
     /// Its share of `guild`'s treasury as the guild closed.
     GuildShare { guild: String, strands: i64 },
+}
+
+/// What came of a citizen's having someone near it to ask (Callings K3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskFate {
+    /// It let them be
+    LetBe,
+    /// It asked, and they traded
+    Traded,
+    /// It asked, and they declined
+    Declined,
+    /// It asked, and the trade ended otherwise
+    Ended,
+    /// It asked, and the asking failed on the way
+    Failed,
 }
 
 /// One bot's run, as the report needs it.
@@ -699,7 +718,7 @@ impl Report {
                     Entry::Fee { strands } => fees += strands,
                     // The swarm trades only at the hall; a town's report
                     // counts trades in person
-                    Entry::Dealt { .. } => {}
+                    Entry::Dealt { .. } | Entry::Asking { .. } => {}
                     // The board's, counted by the court
                     Entry::Posted { .. }
                     | Entry::Promised { .. }

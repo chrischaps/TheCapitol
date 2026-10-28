@@ -596,6 +596,7 @@ mod tests {
                 citizen: false,
                 strands,
                 flows: flows.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+                escrow: Default::default(),
             }],
             escrow_strands: 0,
             units: BTreeMap::from([("stone".to_string(), stone)]),

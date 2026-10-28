@@ -139,6 +139,46 @@ pub struct AccountBooks {
     pub strands: i64,
     /// The sum of its `currency_transactions` amounts, by type, ever
     pub flows: BTreeMap<String, i64>,
+    /// Its Strands in escrow, outside [`strands`](Self::strands) (#553): a
+    /// part of [`Ledger::escrow_strands`]. A ledger from before reads with
+    /// none.
+    #[serde(default, skip_serializing_if = "AccountEscrow::is_empty")]
+    pub escrow: AccountEscrow,
+}
+
+impl AccountBooks {
+    /// Its Strands with those it has in escrow: what it holds, all told.
+    pub fn holding(&self) -> i64 {
+        self.strands + self.escrow.total()
+    }
+}
+
+/// An account's Strands in escrow (#553), by what holds them. They're still
+/// its own, put up for something not yet come: a bid's for its fill, a
+/// commission's and a wage offer's for the work. The guilds' treasuries are
+/// no one account's, so they aren't here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct AccountEscrow {
+    /// Its open buy orders on the Exchange (E3.1)
+    #[serde(default, skip_serializing_if = "crate::rules::is_zero")]
+    pub bids: i64,
+    /// What's unspent of its open commissions (S2.1)
+    #[serde(default, skip_serializing_if = "crate::rules::is_zero")]
+    pub commissions: i64,
+    /// What's unspent of its wage offers (S2.6)
+    #[serde(default, skip_serializing_if = "crate::rules::is_zero")]
+    pub wages: i64,
+}
+
+impl AccountEscrow {
+    pub fn total(&self) -> i64 {
+        self.bids + self.commissions + self.wages
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == AccountEscrow::default()
+    }
 }
 
 /// How hard the server is working, as running totals since it started:
@@ -746,6 +786,7 @@ mod tests {
             citizen: true,
             strands,
             flows: flows.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            escrow: Default::default(),
         }
     }
 

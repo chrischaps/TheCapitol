@@ -22,6 +22,8 @@
 //!   balanced and how hard it worked (C1.7).
 //! - [`balance`]: a soak under a preset of tunables, and two of them held up
 //!   against each other (D6.3).
+//! - [`measures`]: §10's callings measures, for a soak's report and a
+//!   balance run's comparison (#553).
 
 pub mod balance;
 pub mod calling;
@@ -29,6 +31,7 @@ pub mod decide;
 pub mod detour;
 pub mod habit;
 pub mod idle;
+pub mod measures;
 pub mod meet;
 pub mod persona;
 pub mod phrases;

@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use capitol_protocol::ledger::{AccountBooks, Crafts, Ledger, UnitFlow};
+use capitol_protocol::ledger::{AccountBooks, AccountEscrow, Crafts, Ledger, UnitFlow};
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use uuid::Uuid;
@@ -250,6 +250,7 @@ pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
     .fetch_all(&mut *tx)
     .await?;
     let escrow_strands = held_strands(&mut tx).await?;
+    let mut escrow = escrow_by_player(&mut tx).await?;
     let held_flows = super::guilds::held_flows(&mut tx).await?;
     let grants = super::deed_grants::books(&mut tx).await?;
     tx.commit().await?;
@@ -266,6 +267,7 @@ pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
             citizen,
             strands,
             flows: flows.remove(&player_id).unwrap_or_default(),
+            escrow: escrow.remove(&player_id).unwrap_or_default(),
         })
         .collect();
 
@@ -299,6 +301,34 @@ pub(crate) async fn held_strands(conn: &mut sqlx::PgConnection) -> Result<i64, s
         .fetch_one(&mut *conn)
         .await?;
     Ok(market + court_held(conn).await? + super::guilds::held(conn).await?)
+}
+
+/// Each player's Strands in escrow (#553), by what holds them: the part of
+/// [`held_strands`] that's someone's own, so a balance run can count it with
+/// their Strands. Every holding but the guilds' treasuries.
+async fn escrow_by_player(conn: &mut sqlx::PgConnection) -> Result<BTreeMap<Uuid, AccountEscrow>, sqlx::Error> {
+    let rows: Vec<(Uuid, String, i64)> = sqlx::query_as(
+        "SELECT player_id, 'bids', SUM(escrow_strands)::BIGINT FROM market_orders
+             WHERE escrow_strands > 0 GROUP BY player_id
+         UNION ALL
+         SELECT poster_id, 'commissions', SUM(escrow_strands)::BIGINT FROM commissions
+             WHERE escrow_strands > 0 GROUP BY poster_id
+         UNION ALL
+         SELECT employer_id, 'wages', SUM(escrow_strands)::BIGINT FROM wage_offers
+             WHERE escrow_strands > 0 GROUP BY employer_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut by: BTreeMap<Uuid, AccountEscrow> = BTreeMap::new();
+    for (player_id, holding, strands) in rows {
+        let escrow = by.entry(player_id).or_default();
+        match holding.as_str() {
+            "bids" => escrow.bids = strands,
+            "commissions" => escrow.commissions = strands,
+            _ => escrow.wages = strands,
+        }
+    }
+    Ok(by)
 }
 
 /// Strands the Contract Court holds: what's unspent of open commissions'

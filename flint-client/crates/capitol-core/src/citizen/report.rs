@@ -9,6 +9,10 @@
 //!   the share of its work on each activity, setup's share, and how many
 //!   jobs and activities a day. The day by day is
 //!   [`activity_csv`](TownReport::activity_csv).
+//! - **Callings** (§10 of the callings plan, #553): each style's
+//!   favourite's share against its band, the fewest activities a day,
+//!   detours, asks between citizens and the cards' "lately busy with"
+//!   ([`measures`](super::measures)).
 //! - **How questions were settled**: how often each layer of the cascade
 //!   answered (D4).
 //! - **Conservation**, in a soak: the world's Strands and units at each end,
@@ -25,9 +29,11 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use capitol_protocol::ledger::{reconcile, Ledger, LoadWindow, Reconciliation};
+use capitol_protocol::ledger::{reconcile, AccountBooks, Ledger, LoadWindow, Reconciliation};
+use capitol_protocol::metrics::CallingReport;
 
-use crate::sim::report::{days, ActivityTime, BotRun, DayTime, Entry, Report};
+use super::measures::{self, Asks, CitizenCalling};
+use crate::sim::report::{days, ActivityTime, AskFate, BotRun, DayTime, Entry, Report};
 use crate::sim::Activity;
 
 /// What a soak read from the server: the ledger at each end, and the ledger
@@ -113,6 +119,10 @@ pub struct CitizenLine {
     pub role: String,
     pub strands_start: i64,
     pub strands_end: i64,
+    /// Its Strands in escrow at each end, by the soak's books (#553): bids,
+    /// commissions and wage offers. 0 without a soak.
+    pub escrow_start: i64,
+    pub escrow_end: i64,
     /// Units gathered and crafted
     pub made: i64,
     /// What it made most of, and how many
@@ -130,6 +140,14 @@ pub struct CitizenLine {
     /// What its time went on (K0.1), over the run and a day at a time
     pub time: ActivityTime,
     pub days: BTreeMap<i64, DayTime>,
+    /// Its calling, as the town knows it (Callings K3.3): `None` until
+    /// [`TownReport::with_callings`]
+    pub calling: Option<CallingReport>,
+    /// What came of the citizens near it it had to ask (K3.2)
+    pub asks: Asks,
+    /// The jobs its card's "lately busy with" names at the end, most first
+    /// ([`measures::card_jobs`]); `None` until [`TownReport::with_cards`]
+    pub lately: Option<Vec<String>>,
 }
 
 impl CitizenLine {
@@ -141,6 +159,8 @@ impl CitizenLine {
             role: run.role.clone(),
             strands_start: run.strands_start,
             strands_end: run.strands_end,
+            escrow_start: 0,
+            escrow_end: 0,
             made: 0,
             most: None,
             sold: 0,
@@ -153,6 +173,9 @@ impl CitizenLine {
             why_stuck: None,
             time: ActivityTime::of(&run.entries),
             days: days(&run.entries),
+            calling: None,
+            asks: Asks::default(),
+            lately: None,
         };
         for entry in &run.entries {
             match entry {
@@ -171,6 +194,15 @@ impl CitizenLine {
                 Entry::Claimed { .. } => line.deeds += 1,
                 Entry::Spent { ok: false, .. } => line.failed_steps += 1,
                 Entry::Stuck { reason } => *stuck.entry(reason).or_insert(0) += 1,
+                Entry::Asking { fate } => {
+                    *match fate {
+                        AskFate::LetBe => &mut line.asks.let_be,
+                        AskFate::Traded => &mut line.asks.traded,
+                        AskFate::Declined => &mut line.asks.declined,
+                        AskFate::Ended => &mut line.asks.ended,
+                        AskFate::Failed => &mut line.asks.failed,
+                    } += 1
+                }
                 _ => {}
             }
         }
@@ -186,6 +218,23 @@ impl CitizenLine {
             .map(|(reason, _)| reason.to_string());
         line
     }
+
+    /// Its line for §10's callings measures
+    pub fn calling_line(&self) -> CitizenCalling {
+        CitizenCalling {
+            name: self.name.clone(),
+            style: self.calling.as_ref().map(|c| c.style.clone()),
+            favourite: self.calling.as_ref().and_then(|c| c.favourite.clone()),
+            time: self.time.clone(),
+            detour_days: self
+                .days
+                .values()
+                .filter(|d| d.work() > 0.0 && d.hours.get(&Activity::Detour).is_some_and(|h| *h > 0.0))
+                .count(),
+            lately: self.lately.clone(),
+            asks: self.asks,
+        }
+    }
 }
 
 /// One trade's line: its citizens taken together.
@@ -195,6 +244,9 @@ pub struct TradeLine {
     pub citizens: usize,
     pub strands_start: i64,
     pub strands_end: i64,
+    /// Its citizens' Strands in escrow at each end (#553)
+    pub escrow_start: i64,
+    pub escrow_end: i64,
     pub made: i64,
     pub sold: i64,
     pub sold_for: i64,
@@ -269,9 +321,12 @@ impl TownReport {
             }
             let mut line = CitizenLine::from_run(run);
             if let Some(soak) = &soak {
-                let strands = |l: &Ledger| l.accounts.iter().find(|a| a.name == run.name).map(|a| a.strands);
-                line.strands_start = strands(&soak.start).unwrap_or(line.strands_start);
-                line.strands_end = strands(&soak.end).unwrap_or(line.strands_end);
+                let books = |l: &Ledger| l.accounts.iter().find(|a| a.name == run.name).cloned();
+                let (start, end) = (books(&soak.start), books(&soak.end));
+                line.strands_start = start.as_ref().map_or(line.strands_start, |a| a.strands);
+                line.strands_end = end.as_ref().map_or(line.strands_end, |a| a.strands);
+                let escrow = |a: Option<AccountBooks>| a.map_or(0, |a| a.escrow.total());
+                (line.escrow_start, line.escrow_end) = (escrow(start), escrow(end));
             }
             citizens.push(line);
         }
@@ -282,6 +337,8 @@ impl TownReport {
                 citizens: 0,
                 strands_start: 0,
                 strands_end: 0,
+                escrow_start: 0,
+                escrow_end: 0,
                 made: 0,
                 sold: 0,
                 sold_for: 0,
@@ -295,6 +352,8 @@ impl TownReport {
             t.citizens += 1;
             t.strands_start += c.strands_start;
             t.strands_end += c.strands_end;
+            t.escrow_start += c.escrow_start;
+            t.escrow_end += c.escrow_end;
             t.made += c.made;
             t.sold += c.sold;
             t.sold_for += c.sold_for;
@@ -321,6 +380,30 @@ impl TownReport {
             day_hours: wall_secs / capitol_protocol::rules::DAY_LENGTH_SECS as f64 * 24.0,
             in_person: InPerson::count(runs),
         }
+    }
+
+    /// Each citizen's calling, by name (Callings K3.3), for §10's measures:
+    /// the town's, which its run doesn't carry.
+    pub fn with_callings(mut self, callings: &BTreeMap<String, CallingReport>) -> TownReport {
+        for c in &mut self.citizens {
+            c.calling = callings.get(&c.name).cloned();
+        }
+        self
+    }
+
+    /// Each citizen's card's "lately busy with" at the end, by name, as the
+    /// jobs it names ([`measures::card_jobs`]): empty for a quiet card. One
+    /// not given wasn't read.
+    pub fn with_cards(mut self, cards: &BTreeMap<String, Vec<String>>) -> TownReport {
+        for c in &mut self.citizens {
+            c.lately = cards.get(&c.name).cloned();
+        }
+        self
+    }
+
+    /// Every citizen's line for §10's callings measures
+    pub fn callings(&self) -> Vec<CitizenCalling> {
+        self.citizens.iter().map(CitizenLine::calling_line).collect()
     }
 
     /// Whether a soak's books balanced. A report with no soak has nothing
@@ -357,6 +440,9 @@ impl TownReport {
         );
         self.citizens_md(&mut md);
         self.time_md(&mut md);
+        if self.citizens.iter().any(|c| c.calling.is_some()) {
+            measures::callings_md(&mut md, &[("The town", &self.callings())]);
+        }
         self.rulings_md(&mut md);
         md.push('\n');
         md.push_str(&self.sim.sections());
@@ -791,6 +877,7 @@ mod tests {
                 citizen: true,
                 strands: percy,
                 flows: BTreeMap::from([("exchange_deposit".to_string(), percy - 100)]),
+                escrow: Default::default(),
             }],
             escrow_strands: 0,
             units: BTreeMap::from([("log".to_string(), logs)]),
@@ -888,6 +975,88 @@ mod tests {
         assert_eq!(run.gini_end, None, "one citizen has no spread");
         assert!(run.conserved());
         assert!(Balance::of(&TownReport::build(&runs(), 120.0, 10.0, None), "x", BTreeMap::new(), &targets).is_none());
+    }
+
+    /// #553: a citizen's escrow is counted with its Strands, both ways, and
+    /// its calling, its asks, its detours and its card go to §10's measures
+    #[test]
+    fn a_soaks_balance_counts_escrow_and_keeps_each_calling() {
+        use crate::citizen::balance::{compare, Balance};
+        use capitol_protocol::ledger::AccountEscrow;
+        let start = ledger(0, 100, 0, 0, 0);
+        let mut end = ledger(120_000, 160, 12_000, 20, 20);
+        end.accounts[0].escrow = AccountEscrow { bids: 30, commissions: 0, wages: 10 };
+        let mut ada = end.accounts[0].clone();
+        (ada.player_id, ada.name, ada.strands, ada.escrow) = (Uuid::from_u128(2), "Ada Wright".into(), 90, AccountEscrow::default());
+        end.accounts.push(ada);
+        let spent = |activity: Activity, hours: f64, day: i64| Entry::Spent {
+            label: "a step".into(),
+            hours,
+            ok: true,
+            activity,
+            setup: false,
+            day,
+        };
+        let mut runs = runs();
+        runs[0].0.entries.extend([
+            spent(Activity::Wood, 7.0, 1),
+            spent(Activity::Detour, 1.0, 1),
+            spent(Activity::Planks, 2.0, 2),
+            Entry::Asking { fate: AskFate::LetBe },
+            Entry::Asking { fate: AskFate::Traded },
+            Entry::Asking { fate: AskFate::Ended },
+        ]);
+        let soak = Soak {
+            start: start.clone(),
+            end: end.clone(),
+            samples: vec![start, end],
+        };
+        let callings = BTreeMap::from([(
+            "Percy Sawyer".to_string(),
+            CallingReport {
+                style: "specialist".into(),
+                favourite: Some("gatherer-wood".into()),
+                ..CallingReport::default()
+            },
+        )]);
+        let cards = BTreeMap::from([("Percy Sawyer".to_string(), vec!["wood".to_string()])]);
+        let report = TownReport::build(&runs, 120.0, 10.0, Some(soak)).with_callings(&callings).with_cards(&cards);
+        let percy = &report.citizens[0];
+        assert_eq!((percy.strands_end, percy.escrow_start, percy.escrow_end), (160, 0, 40));
+        assert_eq!((percy.asks.let_be, percy.asks.asked(), percy.asks.traded), (1, 2, 1));
+        assert!(report.to_markdown().contains("## Callings (§10)"));
+
+        let run = Balance::of(&report, "x", BTreeMap::new(), &BTreeMap::new()).unwrap();
+        let wood = run.trades.iter().find(|t| t.role == "gatherer-wood").unwrap();
+        assert_eq!((wood.end, wood.escrow_end), (160, Some(40)));
+        assert_eq!(run.escrow_end(), Some(40));
+        // Without escrow, 160 of 250; with it, 200 of 290. Neither trade says fiber
+        assert_eq!(run.fiber_share_with_escrow(), Some(0.0));
+        let (without, with) = (run.gini_end.unwrap(), run.gini_end_with_escrow.unwrap());
+        assert!(with > without, "Percy, the richer, holds the escrow: {without} {with}");
+        let line = &run.callings[0];
+        assert_eq!((line.style.as_deref(), line.detour_days, line.of_work()), (Some("specialist"), 1, Some(0.7)));
+        assert_eq!(line.lately_matches(), Some((true, true)));
+        assert_eq!(run.callings[1].style, None, "Ada's calling wasn't given");
+        // Round trips, and a file from before #553 reads without any of it
+        let json = serde_json::to_string(&run).unwrap();
+        assert_eq!(serde_json::from_str::<Balance>(&json).unwrap(), run);
+        let mut old = serde_json::to_value(&run).unwrap();
+        let fields = old.as_object_mut().unwrap();
+        fields.remove("callings");
+        fields.remove("gini_end_with_escrow");
+        for trade in fields["trades"].as_array_mut().unwrap() {
+            let trade = trade.as_object_mut().unwrap();
+            trade.remove("escrow_start");
+            trade.remove("escrow_end");
+        }
+        let old: Balance = serde_json::from_value(old).unwrap();
+        assert_eq!((old.escrow_end(), old.fiber_share_with_escrow(), old.callings.len()), (None, None, 0));
+        let md = compare(&old, &run);
+        assert!(md.contains("| … counting their escrow | — | 0% |"), "{md}");
+        assert!(md.contains("A is from before callings were kept"), "{md}");
+        assert!(md.contains("| gatherer-wood | 1 | 100 → 160 | +60 | — | 100 → 160 | +60 | 40 |"), "{md}");
+        assert!(md.contains("with 40 more in escrow at the end"), "{md}");
     }
 
     /// A soak killed before its end still has the readings it wrote down

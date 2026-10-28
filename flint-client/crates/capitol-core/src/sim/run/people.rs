@@ -14,7 +14,7 @@ use capitol_protocol::rules::market::OrderSide;
 use uuid::Uuid;
 
 use super::super::plan::Holdings;
-use super::super::report::Entry;
+use super::super::report::{AskFate, Entry};
 use super::super::{bid_menu, is_tool, stall_menu, worth_unbooked, Trade, STALL_DAYS};
 use super::{Action, SimBot};
 use crate::bazaar;
@@ -110,6 +110,7 @@ impl SimBot {
             ),
             _ => {
                 self.settle(mark, None, &Ok(()));
+                self.entries.push(Entry::Asking { fate: AskFate::LetBe });
                 return Ok(false);
             }
         };
@@ -124,6 +125,13 @@ impl SimBot {
         }
         let me = self.answering();
         let met = self.step_up_to(them).and_then(|()| meet::ask(&mut self.bot, &mut self.mind, &me, them, &asking));
+        let fate = match &met {
+            Ok(Met::Traded { .. }) => AskFate::Traded,
+            Ok(Met::Declined { .. }) => AskFate::Declined,
+            Ok(Met::Ended { .. }) => AskFate::Ended,
+            Err(_) => AskFate::Failed,
+        };
+        self.entries.push(Entry::Asking { fate });
         self.after_trade(mark, town, met, true, true)?;
         Ok(true)
     }

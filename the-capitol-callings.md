@@ -362,3 +362,10 @@ K4.1 runs K0.1's soak again on callings: 20 citizens at 10× for 14 to 17 game h
 | The swarm | `capitol-bot --sim 20 --hours 2` within noise of its baseline |
 
 Each work package has its own unit tests and a short town run (in its issue). The baseline (K0.1) and the results (K4.1) are recorded here.
+
+**Reading them off `balance.md`** (#553). K4.1 computed most of these by hand, from the roster, the activity CSV, the decision logs and the database. Since #553 a soak's report and `capitol-town compare` say them (`citizen::measures`, the "Callings (§10)" section), and a balance's JSON keeps each citizen's line for later comparisons:
+- **Escrow.** `/admin/ledger` gives each account its Strands in escrow (`AccountBooks::escrow`: bids, commissions and wage offers; the guilds' treasuries are no one's), so the Strands by trade, the fiber share and the Gini are reported both without escrow, as before, and with it.
+- **The favourite's share** by style (from `CitizenReport.calling`, K3.3), the median and how many are in band: of the work (§10's measure), of the eight jobs and of the seven making jobs (#555). An all-rounder is held to its biggest job.
+- **The fewest activities a day** (every day it worked, the first and last among them, so a short run reads low), **detours** (citizens who took one, and days worked with one), and **asks** (`Entry::Asking`: let be, then traded, declined, ended or failed).
+- **"Lately busy with"**: the soak reads each citizen's card with the end's books, as the jobs it names (`measures::card_jobs`: an input such as clay says nothing), and holds its first against the making job the citizen gave most time to, over the whole run. A card names only what's made, so trading is left out of it; K4.1's 70 to 75% counted against every activity.
+- **Not here:** setup's share and the failed and stuck steps were already in `compare` (K0.1); circulation, the faucet and the markets are in its money moving.

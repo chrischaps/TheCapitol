@@ -320,7 +320,14 @@ fn the_ledger_round_trips_with_its_phases() {
     // The phases cover the whole tick
     let phases: f64 = load.phases.values().map(|p| p.secs).sum();
     assert!((phases - load.tick_secs).abs() < 1e-9, "{phases} of {}", load.tick_secs);
+    // Each account's escrow, by what holds it (#553): here the whole of it
+    let percy = &ledger.accounts[0];
+    assert_eq!((percy.escrow.bids, percy.escrow.wages, percy.escrow.total()), (20, 0, ledger.escrow_strands));
+    assert_eq!(percy.holding(), 140 + 36);
     assert_eq!(serde_json::to_string(&ledger).unwrap(), json);
+    // A ledger from before reads with none
+    let before: Ledger = serde_json::from_str(&json.replace(r#","escrow":{"bids":20,"commissions":16}"#, "")).unwrap();
+    assert!(before.accounts[0].escrow.is_empty());
 }
 
 #[test]

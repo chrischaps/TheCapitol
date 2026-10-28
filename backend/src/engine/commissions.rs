@@ -1356,6 +1356,9 @@ mod tests {
         let mid = books(&db).await.unwrap();
         // 60 still wanted on one, 100 on the other
         assert_eq!(mid.escrow_strands, 160);
+        // All of it Ada's, as hers (#553)
+        let escrow_of = |name: &str| mid.accounts.iter().find(|a| a.name == name).unwrap().escrow;
+        assert_eq!((escrow_of("ada").commissions, escrow_of("ada").total(), escrow_of("bo").total()), (160, 160, 0));
         let books_mid = reconcile(&start, &mid);
         assert!(books_mid.strands.holds(), "{:#?}", books_mid.strands);
         assert!(books_mid.units.holds(), "{:#?}", books_mid.units);

@@ -35,10 +35,12 @@ use capitol_core::citizen::decide::{corpus, log};
 use capitol_core::citizen::decide::replay::Replayer;
 use capitol_core::citizen::decide::{self, Cascade};
 use capitol_core::citizen::habit::{self, Habit, Kind};
+use capitol_core::citizen::measures;
 use capitol_core::citizen::report::{Soak, TownReport};
 use capitol_core::citizen::schedule;
 use capitol_core::citizen::voice;
 use capitol_core::citizen::town::{self, Admin, Hours, Logs, Reporter, Roster, Town};
+use capitol_core::catalog::Catalog;
 use capitol_core::net::{self, NetConfig, RestRequest, RestResponse};
 use capitol_core::protocol::ledger::Ledger;
 use capitol_core::protocol::metrics::{self, TOWN_REPORT_MS};
@@ -852,7 +854,13 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
     let end = admin.ledger(&config)?;
     keep(&ledgers, &end)?;
     samples.push(end.clone());
-    let report = TownReport::build(&town.runs(), wall.as_secs_f64(), scale, Some(Soak { start, end, samples }));
+    // The cards' "lately busy with" are read with the end's books, before
+    // the run's database goes (§10, #553)
+    let catalog = catalog(&config);
+    let cards = cards(&admin, &config, &end, &catalog);
+    let report = TownReport::build(&town.runs(), wall.as_secs_f64(), scale, Some(Soak { start, end, samples }))
+        .with_callings(&town.callings())
+        .with_cards(&cards);
     std::fs::write(&md, report.to_markdown()).map_err(|e| format!("writing {}: {e}", md.display()))?;
     if let Some(csv) = report.load_csv() {
         let path = md.with_extension("csv");
@@ -880,7 +888,7 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
     let label = preset.as_ref().map_or("the server's knobs".to_string(), |(path, _)| {
         path.file_name().map_or(path.display().to_string(), |n| n.to_string_lossy().into_owned())
     });
-    if let Some(mut run) = Balance::of(&report, &label, knobs, &targets(&config)) {
+    if let Some(mut run) = Balance::of(&report, &label, knobs, &targets(&catalog)) {
         run.day_offset_ms = day_offset(&server);
         let path = md.with_extension("balance.json");
         let json = capitol_core::serde_json::to_string_pretty(&run).map_err(|e| format!("writing the balance: {e}"))?;
@@ -891,14 +899,42 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
     Ok(report.conserved())
 }
 
-/// Each item's target price from the catalog (D2.3); none if it can't be read
-fn targets(config: &NetConfig) -> std::collections::BTreeMap<String, i64> {
+/// The server's catalog, or `None` if it can't be read
+fn catalog(config: &NetConfig) -> Option<Catalog> {
     match net::call_once(config, None, &RestRequest::Catalog) {
-        Ok(RestResponse::Catalog(catalog)) => {
-            catalog.item_types.iter().filter_map(|t| Some((t.id.clone(), t.target_price?))).collect()
-        }
+        Ok(RestResponse::Catalog(catalog)) => Some(Catalog::new(*catalog)),
         Ok(_) | Err(_) => {
-            eprintln!("capitol-town: couldn't read the catalog, so prices are held up against the sim's D5 values");
+            eprintln!(
+                "capitol-town: couldn't read the catalog, so prices are held up against the sim's D5 values, and the cards are read by the built-in one"
+            );
+            None
+        }
+    }
+}
+
+/// Each item's target price from the catalog (D2.3); none without one
+fn targets(catalog: &Option<Catalog>) -> std::collections::BTreeMap<String, i64> {
+    catalog.as_ref().map_or_else(Default::default, |catalog| {
+        catalog.item_types().iter().filter_map(|t| Some((t.id.clone(), t.target_price?))).collect()
+    })
+}
+
+/// What each citizen's card says it's lately been busy with, by name, as
+/// the jobs it names (§10, #553): an empty list for a quiet card. A card
+/// that couldn't be read is left out, and the report says it went unread.
+fn cards(admin: &Admin, config: &NetConfig, books: &Ledger, catalog: &Option<Catalog>) -> std::collections::BTreeMap<String, Vec<String>> {
+    let citizens: Vec<_> = books.accounts.iter().filter(|a| a.citizen).collect();
+    let ids: Vec<_> = citizens.iter().map(|a| a.player_id).collect();
+    let fallback = Catalog::fallback();
+    let catalog = catalog.as_ref().unwrap_or(&fallback);
+    match admin.cards(config, &ids) {
+        Ok(cards) => citizens
+            .iter()
+            .zip(cards)
+            .map(|(a, card)| (a.name.clone(), card.map_or_else(Vec::new, |c| measures::card_jobs(&c, catalog))))
+            .collect(),
+        Err(e) => {
+            eprintln!("capitol-town: couldn't read the citizens' cards ({e}), so \"lately busy with\" goes unmeasured");
             Default::default()
         }
     }
