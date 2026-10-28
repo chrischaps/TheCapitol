@@ -469,9 +469,9 @@ pub fn question(q: &Question) -> String {
                 Why::Pull => "since there's work on offer that pays, or Strands enough to trade with",
             };
             let mut out = format!("Choose what to work at for the next while, {why}.");
-            let done: f32 = lately.values().filter(|&&v| v > 0.0).sum();
+            let done: f64 = lately.values().filter(|&&v| v > 0.0).sum();
             if done > 0.0 {
-                let mut shares: Vec<(&String, f32)> = lately
+                let mut shares: Vec<(&String, f64)> = lately
                     .iter()
                     .filter(|(_, &v)| v > 0.0)
                     .map(|(job, &v)| (job, v / done))

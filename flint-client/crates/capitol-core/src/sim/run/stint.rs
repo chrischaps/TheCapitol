@@ -250,7 +250,7 @@ impl SimBot {
                 let question = Question::Stint {
                     why,
                     doing: doing.map(|d| d.slug().to_string()),
-                    run: self.stints.on.map_or(0.0, |s| s.run(now)) as f32,
+                    run: self.stints.on.map_or(0.0, |s| s.run(now)),
                     lately: self.stints.lately.question(),
                     line: self.trade_line(),
                 };

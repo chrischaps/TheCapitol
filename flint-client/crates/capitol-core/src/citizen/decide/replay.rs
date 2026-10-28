@@ -724,10 +724,8 @@ mod tests {
         let mut n = 0;
         for record in log::read(&path).unwrap() {
             let Record::Decision { situation, ruling, .. } = record.unwrap() else { continue };
-            // What the stint's score reads (an f64 like the hours of `when`
-            // may come back a hair off, which nothing here reads: #545)
-            let logged = &stints[n];
-            assert_eq!((&situation.who, &situation.question, &situation.menu), (&logged.who, &logged.question, &logged.menu));
+            // The whole of it, every f64 to the bit (#545)
+            assert_eq!(*situation, stints[n], "#{n}");
             let Some(Turn {
                 asked: Asked::Settled { confidence, choice } | Asked::Unsure { confidence, choice },
                 ..

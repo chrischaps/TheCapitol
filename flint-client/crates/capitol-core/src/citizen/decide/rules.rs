@@ -368,11 +368,11 @@ fn stint(s: &Situation, job: &str, setup: u32, pays: i64) -> f64 {
         (Some(calling), Some(role)) => stints::target(&calling, role, s.holdings.strands, *line),
         _ => 0.0,
     };
-    let done: f64 = lately.values().map(|&v| v.max(0.0) as f64).sum();
-    let recent = if done > 0.0 { lately.get(job).map_or(0.0, |&v| v.max(0.0) as f64) / done } else { 0.0 };
+    let done: f64 = lately.values().map(|&v| v.max(0.0)).sum();
+    let recent = if done > 0.0 { lately.get(job).map_or(0.0, |&v| v.max(0.0)) / done } else { 0.0 };
     let chase = CHASE * (target - recent).max(0.0) * setup_cost(setup);
     let pull = if pays > 0 { PULL * pays as f64 / (pays as f64 + PULL_HALF) } else { 0.0 };
-    let at_it = doing.as_deref() == Some(job) && f64::from(*run) < least_stint(&s.who.temperament);
+    let at_it = doing.as_deref() == Some(job) && *run < least_stint(&s.who.temperament);
     STINT + LEAN * target + chase + pull + if at_it { MOMENTUM } else { 0.0 }
 }
 
@@ -401,7 +401,7 @@ fn detour(s: &Situation, entry: usize, kind: DetourKind) -> f64 {
                     _ => None,
                 })
                 .fold(STINT, f64::max);
-            let held = doing.is_some() && f64::from(*run) < least_stint(&s.who.temperament);
+            let held = doing.is_some() && *run < least_stint(&s.who.temperament);
             let chance = DETOUR * wander * if held { DETOUR_HELD } else { 1.0 };
             if unit(s, DETOUR_SALT) < chance {
                 best + DETOUR_OVER + DETOUR_TASTE * taste.clamp(0.0, 1.0)
@@ -1442,7 +1442,7 @@ mod tests {
 
     /// The stint question for `calling`, at `doing` for `run` game hours,
     /// with `lately` done, over `menu`.
-    fn stint(calling: Option<Calling>, doing: Option<Role>, run: f32, lately: &BTreeMap<String, f32>, menu: Vec<Choice>) -> Situation {
+    fn stint(calling: Option<Calling>, doing: Option<Role>, run: f64, lately: &BTreeMap<String, f64>, menu: Vec<Choice>) -> Situation {
         let q = Question::Stint {
             why: super::super::Why::Done,
             doing: doing.map(|d| d.slug().into()),
@@ -1458,13 +1458,13 @@ mod tests {
 
     /// What `calling` works at over `stints` stints, every job ready: each
     /// job's share of them.
-    fn lived(calling: &Calling, stints: usize) -> BTreeMap<String, f32> {
+    fn lived(calling: &Calling, stints: usize) -> BTreeMap<String, f64> {
         lived_with(calling, stints, 0, 0)
     }
 
     /// [`lived`], with `strands` in hand against a trading `line` (K2.2).
-    fn lived_with(calling: &Calling, stints: usize, strands: i64, line: i64) -> BTreeMap<String, f32> {
-        let mut lately: BTreeMap<String, f32> = BTreeMap::new();
+    fn lived_with(calling: &Calling, stints: usize, strands: i64, line: i64) -> BTreeMap<String, f64> {
+        let mut lately: BTreeMap<String, f64> = BTreeMap::new();
         let menu: Vec<Choice> = ROLES.iter().map(|&job| take(job, 0, 0)).collect();
         for _ in 0..stints {
             let mut s = stint(Some(calling.clone()), None, 0.0, &lately, menu.clone());
@@ -1475,7 +1475,7 @@ mod tests {
             let Choice::Take { job, .. } = s.choice(&decide(&s).0) else { panic!() };
             *lately.entry(job.clone()).or_default() += 1.0;
         }
-        lately.values_mut().for_each(|v| *v /= stints as f32);
+        lately.values_mut().for_each(|v| *v /= stints as f64);
         lately
     }
 
@@ -1486,12 +1486,12 @@ mod tests {
                 let c = calling(role, style, 31 * k as u64 + 7);
                 let shares = lived(&c, 400);
                 for job in ROLES {
-                    let (got, want) = (shares.get(job.slug()).copied().unwrap_or(0.0), c.share(job));
+                    let (got, want) = (shares.get(job.slug()).copied().unwrap_or(0.0), f64::from(c.share(job)));
                     assert!((got - want).abs() < 0.02, "{style} {}: {job} {got} against {want}", role.slug());
                 }
                 // So a specialist keeps to its favourite, and an all-rounder
                 // spreads itself
-                let top = shares.values().fold(0.0f32, |a, &b| a.max(b));
+                let top = shares.values().fold(0.0f64, |a, &b| a.max(b));
                 match style {
                     Style::Specialist => assert!((0.6..=0.8).contains(&shares[role.slug()]), "{shares:?}"),
                     Style::Leaner => assert!((0.35..=0.55).contains(&shares[role.slug()]), "{shares:?}"),
@@ -1529,7 +1529,7 @@ mod tests {
             // Under the line, its calling's shares; well over it, trading's
             // raised, and the stints come out near it
             let poor = lived_with(&c, 400, line - 1, line);
-            let got = |shares: &BTreeMap<String, f32>| f64::from(shares.get(Role::Merchant.slug()).copied().unwrap_or(0.0));
+            let got = |shares: &BTreeMap<String, f64>| shares.get(Role::Merchant.slug()).copied().unwrap_or(0.0);
             assert!((got(&poor) - trading).abs() < 0.02, "{style}: {} against {trading}", got(&poor));
             let well = lived_with(&c, 400, line * 4, line);
             assert!((got(&well) - rich).abs() < 0.02, "{style}: {} against {rich}", got(&well));
@@ -1579,17 +1579,17 @@ mod tests {
         // At the builder's work a short while, it stays, though wood is short
         let menu = || vec![take(Role::Builder, 0, 0), take(wood, 0, 0)];
         let t = Temperament::default();
-        let s = stint(Some(c.clone()), Some(Role::Builder), least_stint(&t) as f32 - 0.1, &lately, menu());
+        let s = stint(Some(c.clone()), Some(Role::Builder), least_stint(&t) - 0.1, &lately, menu());
         assert_eq!(s.carry_on, Some(0));
         assert_eq!(decide(&s).0.pick, 0, "momentum");
         // Past its stint's least length, it goes where its share is short
-        let s = stint(Some(c.clone()), Some(Role::Builder), least_stint(&t) as f32 + 0.1, &lately, menu());
+        let s = stint(Some(c.clone()), Some(Role::Builder), least_stint(&t) + 0.1, &lately, menu());
         assert_eq!(decide(&s).0.pick, 1);
         // A patient citizen's stints run longer
         let (hasty, patient) = (stint_hours(&with(|t| t.patience = 0.0)), stint_hours(&with(|t| t.patience = 1.0)));
         assert!(hasty < stint_hours(&t) && stint_hours(&t) < patient, "{hasty} {patient}");
         // A pull draws it to a job it has done its share of already
-        let even: BTreeMap<String, f32> = [(wood, 0.1), (ore, 0.1), (planks, 0.1), (Role::Builder, 0.6)]
+        let even: BTreeMap<String, f64> = [(wood, 0.1), (ore, 0.1), (planks, 0.1), (Role::Builder, 0.6)]
             .into_iter()
             .map(|(job, share)| (job.slug().to_string(), share))
             .collect();
@@ -1622,7 +1622,7 @@ mod tests {
 
     /// Of `n` stint ends a game quarter hour apart, how many the rules turn
     /// into a detour, for `who` wandering `wander`, at `doing` for `run`.
-    fn detours_in(n: usize, wander: f32, doing: Option<Role>, run: f32) -> usize {
+    fn detours_in(n: usize, wander: f32, doing: Option<Role>, run: f64) -> usize {
         let c = Calling {
             wander,
             ..calling(Role::Builder, Style::Leaner, 5)
@@ -1649,7 +1649,7 @@ mod tests {
         }
         // While the job it's at has its momentum, a quarter as often
         let t = Temperament::default();
-        let held = detours_in(n, 0.8, Some(Role::Builder), least_stint(&t) as f32 - 0.1) as f64 / n as f64;
+        let held = detours_in(n, 0.8, Some(Role::Builder), least_stint(&t) - 0.1) as f64 / n as f64;
         assert!((held - DETOUR * DETOUR_HELD * 0.8).abs() < 0.05, "{held}");
         // With no calling (a swarm bot, a log from before callings), never
         let mut menu = vec![take(Role::Builder, 0, 0), detour(DetourKind::See)];
@@ -1745,7 +1745,7 @@ mod tests {
                 if open {
                     menu.extend(DetourKind::ALL.map(detour));
                 }
-                let run = if doing.is_some() { stint_hours(&t) as f32 } else { 0.0 };
+                let run = if doing.is_some() { stint_hours(&t) } else { 0.0 };
                 let mut s = stint(Some(persona.calling.clone()), doing, run, &lately.question(), menu);
                 s.who.name = format!("Citizen {i}");
                 s.who.temperament = t;

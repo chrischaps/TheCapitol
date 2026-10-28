@@ -10,7 +10,8 @@ authors.workspace = true
 capitol-protocol.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1.0"
+# float_roundtrip: an f64 in a decision log reads back to the bit (#545)
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 thiserror = "2.0"
 # capitol-town's roster, town.toml (C1.1)
 toml = { workspace = true }

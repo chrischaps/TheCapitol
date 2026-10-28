@@ -289,10 +289,10 @@ pub enum Question {
     /// What to work at for the next while (Callings K1.1, D4): which job to
     /// take up for a stint, one [`Choice::Take`] each. Asked `why`. `doing`
     /// is the job it's at ([`Role::slug`]), `None` before its first stint;
-    /// `run` the game hours it's been at it (an `f32`, which goes through
-    /// JSON and back to the bit, as an `f64` may not: #545); `lately` each job's
-    /// share of its recent work time, by slug, which the rules chase its
-    /// calling's shares with. The menu's *carry on* is the job it's at, so a slow
+    /// `run` the game hours it's been at it; `lately` each job's share of its
+    /// recent work time, by slug, which the rules chase its calling's shares
+    /// with. Both go through a log and back to the bit (`float_roundtrip`,
+    /// #545). The menu's *carry on* is the job it's at, so a slow
     /// layer never makes a citizen switch. `line` is its line for trading
     /// (Callings K2.2, [`stint::trade_line`](crate::sim::stint::trade_line)):
     /// with more Strands in hand than that, trading's share of its calling
@@ -303,9 +303,9 @@ pub enum Question {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         doing: Option<String>,
         #[serde(default)]
-        run: f32,
+        run: f64,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        lately: BTreeMap<String, f32>,
+        lately: BTreeMap<String, f64>,
         #[serde(default, skip_serializing_if = "no_line")]
         line: i64,
     },

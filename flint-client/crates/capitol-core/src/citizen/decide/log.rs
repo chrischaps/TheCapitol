@@ -464,6 +464,60 @@ mod tests {
     }
 
     #[test]
+    fn an_awkward_f64_survives_the_log_exactly() {
+        // Without serde_json's float_roundtrip, 1.11 came back 1.1099999999999999 (#545)
+        let mut awkward = vec![
+            1.11,
+            -0.0,
+            0.1 + 0.2,
+            f64::MIN_POSITIVE,
+            f64::MIN_POSITIVE / 3.0,
+            f64::from_bits(1),
+            f64::MAX,
+            f64::MIN,
+            f64::EPSILON,
+            1.0 - f64::EPSILON / 2.0,
+            1.7976931348623155e308,
+            2.2250738585072009e-308,
+            9007199254740993.0,
+            0.30000000000000004,
+            123456.78901234567,
+            -9.8765432109876543e-200,
+        ];
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let v = f64::from_bits(x);
+            if v.is_finite() {
+                awkward.push(v);
+            }
+        }
+        for v in awkward {
+            let back: f64 = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+            assert_eq!(back.to_bits(), v.to_bits(), "{v:e}");
+        }
+        // And within a situation, as the town logs it
+        let mut s = situation();
+        s.when.hours = 1.11;
+        s.at.x = f64::from_bits(1);
+        s.at.y = -0.0;
+        let back: Situation = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!((back.when.hours.to_bits(), back.at.x.to_bits(), back.at.y.to_bits()), (1.11f64.to_bits(), 1, (-0.0f64).to_bits()));
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_stint_logged_as_f32s_still_reads() {
+        // Before #545 a stint's run and lately were f32s; their shortest
+        // forms read as the nearest f64s
+        let line = r#"{"kind":"stint","why":"done","doing":"builder","run":1.2345679,"lately":{"builder":0.33333334}}"#;
+        let Question::Stint { run, lately, .. } = serde_json::from_str(line).unwrap() else { panic!() };
+        assert_eq!((run, lately["builder"]), (1.2345679, 0.33333334));
+    }
+
+    #[test]
     fn a_log_rotates_and_each_file_starts_with_its_run() {
         let dir = temp("rotate");
         let path = file_for(&dir, "Percy Sawyer");

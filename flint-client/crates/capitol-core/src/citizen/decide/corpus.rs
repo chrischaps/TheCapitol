@@ -276,22 +276,22 @@ fn stint(
         })
         .collect();
     let favourite = calling.favourite.unwrap_or(role);
-    let (why, doing, run, lately): (Why, Option<Role>, f32, BTreeMap<String, f32>) = match n % 4 {
+    let (why, doing, run, lately): (Why, Option<Role>, f64, BTreeMap<String, f64>) = match n % 4 {
         0 => (Why::Start, None, 0.0, BTreeMap::new()),
-        1 => (Why::Done, Some(role), 1.0 + (n % 3) as f32, BTreeMap::from([(role.slug().to_string(), 1.0)])),
+        1 => (Why::Done, Some(role), 1.0 + (n % 3) as f64, BTreeMap::from([(role.slug().to_string(), 1.0)])),
         2 => {
-            let at = jobs.iter().map(|&job| (job.slug().to_string(), calling.share(job))).collect();
+            let at = jobs.iter().map(|&job| (job.slug().to_string(), f64::from(calling.share(job)))).collect();
             (Why::Done, Some(favourite), 2.0, at)
         }
         _ => {
             let short = jobs
                 .iter()
                 .map(|&job| {
-                    let share = calling.share(job);
+                    let share = f64::from(calling.share(job));
                     (job.slug().to_string(), if job == favourite { share * 0.5 } else { share * 1.3 })
                 })
                 .collect();
-            (Why::Pull, Some(favourite), 0.2 * (n % 4) as f32, short)
+            (Why::Pull, Some(favourite), 0.2 * (n % 4) as f64, short)
         }
     };
     let mut menu = menu;

@@ -142,10 +142,10 @@ impl Lately {
         }
     }
 
-    /// As the stint question carries it: hours by slug, as `f32`s
-    /// (`Question::Stint::lately`, #545).
-    pub fn question(&self) -> BTreeMap<String, f32> {
-        self.0.iter().map(|(job, h)| (job.clone(), *h as f32)).collect()
+    /// As the stint question carries it: hours by slug
+    /// (`Question::Stint::lately`).
+    pub fn question(&self) -> BTreeMap<String, f64> {
+        self.0.clone()
     }
 }
 
@@ -275,7 +275,7 @@ mod tests {
         lately.add(FIBER, 0.0);
         assert_eq!(lately.of(FIBER), 0.0);
         assert_eq!(Lately::default().share(WOOD), 0.0);
-        assert_eq!(lately.question()["gatherer-wood"], lately.of(WOOD) as f32);
+        assert_eq!(lately.question()["gatherer-wood"], lately.of(WOOD));
     }
 
     #[test]
