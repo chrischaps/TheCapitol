@@ -1,4 +1,4 @@
-# A river running off the world's rim to its pond
+# A river running out of lake_10 and off the world's rim to its pond (#481)
 #  t      px      py      pz      tx    ty    tz
-  0.0  -371.9   33.9  -438.5  -449.8   3.9 -463.0
-  8.0  -385.0   30.0  -445.0  -449.8   3.9 -463.0
+  0.0  -512.0   39.9  -559.4  -589.9   9.9  -583.9
+  8.0  -525.1   36.0  -565.9  -589.9   9.9  -583.9

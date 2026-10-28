@@ -1,4 +1,4 @@
-# A ford through the old growth, the tower on the horizon
+# A ford through the old growth, the tower on the horizon behind it (ford_56; re-framed for the 16600 world, #481)
 #  t      px      py      pz      tx    ty    tz
-  0.0   300.0   11.0   455.0   287.6   6.4  448.2
-  8.0   296.0   10.0   450.0   287.6   6.4  448.2
+  0.0   355.9    5.3   545.1   348.2   0.7   533.4
+  8.0   353.4    4.3   541.4   348.2   0.7   533.4

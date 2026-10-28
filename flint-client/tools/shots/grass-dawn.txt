@@ -1,4 +1,4 @@
-# Eye height in the long grass at dawn, the tower on the horizon (the first teaser's opening)
+# Eye height in the long grass at dawn, the tower on the horizon (the first teaser's opening; out in the farms since #481)
 #  t      px      py      pz      tx    ty    tz
-  0.0   -59.0    1.6   340.0     0.0   3.0    0.0
-  7.0   -58.0    2.1   327.0     0.0   3.5    0.0
+  0.0   -73.5    1.6   423.8     0.0   3.0     0.0
+  7.0   -72.6    2.0   414.5     0.0   3.5     0.0

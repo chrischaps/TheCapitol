@@ -1,4 +1,4 @@
-# Morning sun down a valley the river crosses a ridge by
+# Morning sun down a valley the river crosses a ridge by (ford_14's river, #481)
 #  t      px      py      pz      tx    ty    tz
-  0.0   547.8   36.1  -174.9   641.0   6.1  -79.8
-  8.0   540.0   32.0  -160.0   641.0   6.0  -70.0
+  0.0   581.4   36.0  -198.8   674.6   6.0  -103.7
+  8.0   573.6   32.0  -193.7   674.6   6.0   -93.7
