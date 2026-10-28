@@ -214,8 +214,9 @@ impl StationPanel {
     }
 
     /// The recipe weighed against the station's box, which takes its inputs
-    /// and its output (#489), at the station's quality.
-    pub fn check<'a>(&self, state: &'a GameState) -> Option<Check<'a>> {
+    /// and its output (#489), at the station's quality, using and joining
+    /// only `whose` stacks (#498).
+    pub fn check<'a>(&self, state: &'a GameState, whose: craft::Whose) -> Option<Check<'a>> {
         let recipe = self.recipe(state)?;
         let bench = state.station_container()?;
         Some(craft::check_at(
@@ -224,6 +225,7 @@ impl StationPanel {
             Some(bench),
             state.open_station_info()?.quality,
             craft::tool_in(state, recipe, true),
+            whose,
         ))
     }
 
@@ -509,7 +511,9 @@ impl StationPanel {
         }
         ui.add_space(6.0);
 
-        let check = self.check(state);
+        // Yours in the box, or on a shift the employer's (#498)
+        let whose = craft::Whose::at(state.me(), shift.map(|(o, _)| o.employer_id));
+        let check = self.check(state, whose);
         if let Some(info) = state.open_station_info() {
             station_quality(ui, info.quality, check.as_ref());
             ui.add_space(4.0);
@@ -550,12 +554,12 @@ impl StationPanel {
             ui.add_enabled_ui(idle, |ui| {
                 let fill = match (&check, state.inventory(), state.station_container()) {
                     (Some(c), Some(inv), Some(bench)) if !c.satisfied() => {
-                        craft::fill(c.recipe, inv, bench)
+                        craft::fill(c.recipe, inv, bench, whose)
                     }
                     _ => Vec::new(),
                 };
                 let clear = match (state.station_container(), state.inventory()) {
-                    (Some(bench), Some(inv)) => craft::empty_into(bench, inv),
+                    (Some(bench), Some(inv)) => craft::empty_into(bench, inv, whose),
                     _ => Vec::new(),
                 };
                 ui.add_space(((ui.available_width() - 150.0) / 2.0).max(0.0));
@@ -568,7 +572,7 @@ impl StationPanel {
                 }
                 if ui
                     .add_enabled(!clear.is_empty(), egui::Button::new(theme::text("Clear")))
-                    .on_hover_text("Put everything in the station's box back in your inventory")
+                    .on_hover_text("Put everything of yours in the station's box back in your inventory")
                     .clicked()
                 {
                     action = Some(Action::Moves(clear));
@@ -779,7 +783,7 @@ fn station_box(
     ui.label(theme::label(if storage { "Storage" } else { "Station box" }));
     match state.station_container() {
         Some(c) => {
-            if let Some(m) = SlotGrid::new(c).enabled(idle).show(ui, icons) {
+            if let Some(m) = SlotGrid::new(c).enabled(idle).yours(state.me()).show(ui, icons) {
                 action = Some(Action::Move(m));
             }
         }

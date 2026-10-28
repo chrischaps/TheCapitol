@@ -312,23 +312,7 @@ pub async fn get_station_container(
     .fetch_one(&state.db)
     .await?;
 
-    // Item types, for names and tools' durability
-    let item_types: Vec<ItemType> = sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types"))
-        .fetch_all(&state.db)
-        .await?;
-    let item_types: HashMap<String, ItemType> =
-        item_types.into_iter().map(|it| (it.id.clone(), it)).collect();
-
-    // Get items in container
-    let items: Vec<Item> = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE container_id = $1"))
-        .bind(container.id)
-        .fetch_all(&state.db)
-        .await?;
-
-    let slots: Vec<SlotItem> = items
-        .into_iter()
-        .filter_map(|item| item.to_slot_item(item_types.get(&item.item_type)))
-        .collect();
+    let slots = box_slots(&state.db, container.id).await?;
 
     Ok(Json(StationContainerResponse {
         id: container.id,
@@ -337,6 +321,28 @@ pub async fn get_station_container(
         layout_columns: container_type.layout_columns,
         slots,
     }))
+}
+
+/// What's in a station's box, each stack with whose it is: the box holds
+/// other people's things too (#80), and a craft there takes and joins only
+/// the crafter's (#489, #498).
+async fn box_slots(db: &sqlx::PgPool, container_id: Uuid) -> Result<Vec<SlotItem>, sqlx::Error> {
+    // Item types, for names and tools' durability
+    let item_types: Vec<ItemType> = sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types"))
+        .fetch_all(db)
+        .await?;
+    let item_types: HashMap<String, ItemType> =
+        item_types.into_iter().map(|it| (it.id.clone(), it)).collect();
+
+    let items: Vec<Item> = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE container_id = $1"))
+        .bind(container_id)
+        .fetch_all(db)
+        .await?;
+
+    Ok(items
+        .into_iter()
+        .filter_map(|item| Some(item.to_slot_item(item_types.get(&item.item_type))?.with_owner(item.owner_id)))
+        .collect())
 }
 
 /// Set what your station makes on its own (E4.2): a recipe at this station's
@@ -534,5 +540,48 @@ mod tests {
         let mine: Vec<Uuid> = owned_stations(&db, ada, (9610.0, 8742.0)).await.unwrap().iter().map(|s| s.id).collect();
         assert_eq!(mine, [near, middling, far]);
         assert!(owned_stations(&db, Uuid::new_v4(), (0.0, 0.0)).await.unwrap().is_empty());
+    }
+
+    /// A station's box says whose each stack in it is (#498), so a guest's
+    /// client can tell the owner's rope from its own.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_station_box_says_whose_each_stack_is(db: PgPool) {
+        use crate::engine::market::tests::player;
+        let (ada, bea) = (player(&db, "ada", 0).await.id, player(&db, "bea", 0).await.id);
+        let station = bench(&db, ada, 0.0, 0.0).await;
+        let the_box = Uuid::new_v4();
+        sqlx::query("INSERT INTO containers (id, container_type, station_id) VALUES ($1, 'station_inventory', $2)")
+            .bind(the_box)
+            .bind(station)
+            .execute(&db)
+            .await
+            .unwrap();
+        let stack = |owner: Uuid, slot: i32, item_type: &'static str| {
+            let db = db.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+                     VALUES ($1, $2, 60, 3, $3, $4, $5)",
+                )
+                .bind(id)
+                .bind(item_type)
+                .bind(owner)
+                .bind(the_box)
+                .bind(slot)
+                .execute(&db)
+                .await
+                .unwrap();
+                id
+            }
+        };
+        let rope = stack(ada, 0, "rope").await;
+        let fiber = stack(bea, 1, "fiber").await;
+
+        let mut slots = box_slots(&db, the_box).await.unwrap();
+        slots.sort_by_key(|s| s.slot_index);
+        let whose: Vec<(Uuid, Option<Uuid>)> = slots.iter().map(|s| (s.item_id, s.owner_id)).collect();
+        assert_eq!(whose, [(rope, Some(ada)), (fiber, Some(bea))]);
     }
 }

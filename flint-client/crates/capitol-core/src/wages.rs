@@ -401,6 +401,14 @@ impl Wages {
         Some((self.offer(shift.offer_id)?, shift))
     }
 
+    /// Whose work you'd be doing crafting at `station`: the employer's, if
+    /// your shift is there (#498).
+    pub fn employer_at(&self, station: Uuid) -> Option<Uuid> {
+        self.working()
+            .filter(|(o, _)| matches!(&o.work, Work::Craft { station_id, .. } if *station_id == station))
+            .map(|(o, _)| o.employer_id)
+    }
+
     /// What your shift has earned: each unit is paid the rate as it's made.
     pub fn earned(&self) -> Option<i64> {
         let (offer, shift) = self.working()?;

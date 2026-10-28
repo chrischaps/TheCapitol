@@ -762,6 +762,7 @@ mod tests {
             durability: None,
             max_durability: None,
             maker: None,
+            owner_id: None,
         }
     }
 

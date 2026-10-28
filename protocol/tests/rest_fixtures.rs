@@ -7,6 +7,8 @@
 //! `fixtures/rest/stations_mine.json` is `GET /stations/mine` (#500): a bench
 //! and a kiln on its lot, and a bench far down the road in.
 //! `fixtures/rest/split_stack.json` is `POST /items/{id}/split` taking named qualities (E1.8).
+//! `fixtures/rest/station_container.json` is `GET /stations/{id}/container` (#498):
+//! the owner's rope and axe, and a guest's fiber, each stack saying whose it is.
 //! `fixtures/rest/place_order.json` is a sell order naming its units (E3.1).
 //! `fixtures/rest/market_depth.json`, `market_history.json` and
 //! `market_summary.json` are `GET /market/orders`, `/market/history` and
@@ -94,6 +96,7 @@ use capitol_protocol::rest::{
     AutomationMode, AutomationState, CatalogResponse, GazetteResponse, LeaderboardKind, LeaderboardsResponse,
     MarketDepthResponse, MarketHistoryResponse,
     MarketListingsResponse, MarketSummaryResponse, MyStationsResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
+    StationContainerResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
 use capitol_protocol::metrics::{Feed, Sample, TownReport, ROLE_ALL_ROUNDER, ROLE_PERSON};
@@ -139,6 +142,22 @@ fn my_stations_round_trip_far_ones_and_all() {
     assert!(mine.stations.iter().all(|s| s.owner_id == mine.stations[0].owner_id));
     assert_eq!(mine.stations.iter().filter(|s| s.station_type == "workbench").count(), 2);
     assert_eq!(serde_json::to_string(&mine).unwrap(), json);
+}
+
+/// A station's box says whose each stack is (#498): the owner's and a guest's
+/// side by side, as a craft there needs to know.
+#[test]
+fn a_station_box_round_trips_with_whose_each_stack_is() {
+    let json = fixture("station_container.json");
+    let bench: StationContainerResponse = serde_json::from_str(&json).unwrap();
+    let owner = bench.slots[0].owner_id.expect("the box says whose");
+    let guest = bench.slots[1].owner_id.expect("the box says whose");
+    assert_ne!(owner, guest);
+    assert_eq!(bench.slots[2].owner_id, Some(owner));
+    assert_eq!(serde_json::to_string(&bench).unwrap(), json);
+    // Anywhere else it's absent, and a stack without it reads as before
+    let split: SplitStackResponse = serde_json::from_str(&fixture("split_stack.json")).unwrap();
+    assert_eq!(split.item.owner_id, None);
 }
 
 #[test]

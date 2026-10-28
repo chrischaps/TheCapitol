@@ -9,10 +9,12 @@
 //! in place of the hand ones. [`Crafting::start_at`] sends
 //! `craft_at_station`. The output stays at the station, in its box, as
 //! yours (#489), so the box is the output box too, and [`check_at`] counts
-//! the slots the craft's own inputs would empty as room for it. It joins
-//! only a stack of its type you own there, and the box can't say whose a
-//! stack is, so a guest whose box is full but for the owner's rope sees
-//! it pass here and the server refuse it.
+//! the slots the craft's own inputs would empty as room for it. The box
+//! holds other people's things too, and says whose each stack is (#498), so
+//! [`Whose`] keeps the craft to the server's rule: it takes only your
+//! stacks and joins only one of yours (on a wage shift, it takes anything
+//! there and joins the employer's). Fill counts only yours, and Clear
+//! leaves the rest in the box.
 //!
 //! - **The recipe.** A recipe picked by hand wins. Otherwise [`detect`]
 //!   finds one the inputs satisfy: an exact match first, then the one that
@@ -79,6 +81,15 @@ pub fn count(container: &Container, item_type: &str) -> i32 {
     container
         .items()
         .filter(|i| i.item_type == item_type)
+        .map(|i| i.quantity)
+        .sum()
+}
+
+/// As [`count`], of the stacks a craft may take ([`Whose::takes`]).
+pub fn count_of(container: &Container, item_type: &str, whose: Whose) -> i32 {
+    container
+        .items()
+        .filter(|i| i.item_type == item_type && whose.takes(i))
         .map(|i| i.quantity)
         .sum()
 }
@@ -434,17 +445,63 @@ pub fn check<'a>(
     output: Option<&Container>,
     tool: Option<ToolPick>,
 ) -> Check<'a> {
-    check_at(recipe, input, output, quality::NO_STATION, tool)
+    check_at(recipe, input, output, quality::NO_STATION, tool, Whose::Any)
+}
+
+/// Whose stacks a craft may take, and which its output may join (#498). A
+/// station's box holds other people's things too (#80) and says whose each
+/// stack is (`SlotItem::owner_id`); your own boxes don't, and needn't. A
+/// stack that doesn't say is taken as yours, as it was before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whose {
+    /// Your own boxes: every stack is yours.
+    Any,
+    /// At a station, as `me`: the craft takes your stacks and joins one of
+    /// yours, as the server's does (#489).
+    Mine(Uuid),
+    /// On a wage shift (Commons D7): the craft takes anything in the box,
+    /// and its output is the employer's, so it joins only theirs.
+    Shift { employer: Uuid },
+}
+
+impl Whose {
+    /// At the open station: on `employer`'s shift if you're on one, else
+    /// yours. `Any` when who you are isn't known yet.
+    pub fn at(me: Option<Uuid>, employer: Option<Uuid>) -> Self {
+        match (employer, me) {
+            (Some(employer), _) => Whose::Shift { employer },
+            (None, Some(me)) => Whose::Mine(me),
+            (None, None) => Whose::Any,
+        }
+    }
+
+    /// A craft may take `item`.
+    pub fn takes(self, item: &SlotItem) -> bool {
+        match self {
+            Whose::Mine(me) => item.owner_id.is_none_or(|o| o == me),
+            Whose::Any | Whose::Shift { .. } => true,
+        }
+    }
+
+    /// A craft's output may join `item`, a stack of its type.
+    pub fn joins(self, item: &SlotItem) -> bool {
+        match self {
+            Whose::Any => true,
+            Whose::Mine(who) | Whose::Shift { employer: who } => item.owner_id.is_none_or(|o| o == who),
+        }
+    }
 }
 
 /// As [`check`], at a station of quality `station`: its share of the output
-/// counts that quality, as the server's does.
+/// counts that quality, as the server's does. `whose` says which stacks in
+/// the box the craft may take and join ([`Whose`]).
 pub fn check_at<'a>(
     recipe: &'a RecipeInfo,
     input: &Container,
     output: Option<&Container>,
     station: i32,
     tool: Option<ToolPick>,
+    whose: Whose,
 ) -> Check<'a> {
     let mut needs = Vec::with_capacity(recipe.inputs.len());
     let mut inputs = Vec::new();
@@ -454,7 +511,7 @@ pub fn check_at<'a>(
     let mut emptied = Vec::new();
     for need in &recipe.inputs {
         let mut left = need.quantity;
-        for item in input.items().filter(|i| i.item_type == need.item_type) {
+        for item in input.items().filter(|i| i.item_type == need.item_type && whose.takes(i)) {
             if left <= 0 {
                 break;
             }
@@ -471,7 +528,7 @@ pub fn check_at<'a>(
         needs.push(Need {
             item_type: need.item_type.clone(),
             item_name: need.item_name.clone(),
-            have: count(input, &need.item_type),
+            have: count_of(input, &need.item_type, whose),
             required: need.quantity,
         });
     }
@@ -487,25 +544,27 @@ pub fn check_at<'a>(
         taken,
         range,
         // At a station the box is both, and what the craft empties is room
-        blocked: output.and_then(|o| blocked(recipe, o, if o.id == input.id { &emptied } else { &[] })),
+        blocked: output.and_then(|o| blocked(recipe, o, if o.id == input.id { &emptied } else { &[] }, whose)),
         station,
         tool,
     }
 }
 
 /// What in `output` would leave one of the recipe's outputs nowhere to go:
-/// a stack of its type takes it, whatever the grade (E1.8); anything else
-/// needs a free slot. The stacks in `emptied` are gone by then (the server
-/// takes the inputs first), so their slots are free.
-fn blocked(recipe: &RecipeInfo, output: &Container, emptied: &[Uuid]) -> Option<Blocked> {
+/// a stack of its type `whose` may join takes it, whatever the grade
+/// (E1.8); anything else needs a free slot. The stacks in `emptied` are
+/// gone by then (the server takes the inputs first), so their slots are
+/// free. A stack of its type that isn't yours is what's named in the way.
+fn blocked(recipe: &RecipeInfo, output: &Container, emptied: &[Uuid], whose: Whose) -> Option<Blocked> {
     let mut free = output.slot_count() - output.used_slots() + emptied.len();
     let staying: Vec<&SlotItem> = output.items().filter(|i| !emptied.contains(&i.item_id)).collect();
     for out in &recipe.outputs {
-        if staying.iter().any(|i| i.item_type == out.item_type) {
+        let of_type = || staying.iter().filter(|i| i.item_type == out.item_type);
+        if of_type().any(|i| whose.joins(i)) {
             continue;
         }
         if free == 0 {
-            let first = staying.first()?;
+            let first = of_type().next().or(staying.first())?;
             return Some(Blocked {
                 item_id: first.item_id,
                 item_name: first.item_name.clone(),
@@ -521,12 +580,13 @@ pub type Shift = (Uuid, Uuid, i32);
 
 /// The moves that bring a recipe's inputs from `from` (the inventory) into
 /// `input`, whole stacks into empty slots, until each need is met or the
-/// slots run out. What's already in `input` counts.
-pub fn fill(recipe: &RecipeInfo, from: &Container, input: &Container) -> Vec<Shift> {
+/// slots run out. What's already in `input` counts, if the craft may take
+/// it (`whose`: at a station, someone else's fiber isn't yours to use).
+pub fn fill(recipe: &RecipeInfo, from: &Container, input: &Container, whose: Whose) -> Vec<Shift> {
     let mut empty = (0..input.slot_count()).filter(|&s| input.slot(s).is_none());
     let mut shifts = Vec::new();
     'needs: for need in &recipe.inputs {
-        let mut left = need.quantity - count(input, &need.item_type);
+        let mut left = need.quantity - count_of(input, &need.item_type, whose);
         // Best first: the craft uses the stacks in slot order.
         let mut stacks: Vec<_> = from
             .items()
@@ -550,11 +610,12 @@ pub fn fill(recipe: &RecipeInfo, from: &Container, input: &Container) -> Vec<Shi
 /// The moves that put everything in `from` back into `to`: onto a stack of
 /// the same type where there is one, whatever its grade (every unit keeps
 /// its quality, E1.8), else into an empty slot. Each target is used once, so
-/// moves sent together can't race for a slot.
-pub fn empty_into(from: &Container, to: &Container) -> Vec<Shift> {
+/// moves sent together can't race for a slot. Only what `whose` may take
+/// moves: at a station, someone else's things stay in its box (#498).
+pub fn empty_into(from: &Container, to: &Container, whose: Whose) -> Vec<Shift> {
     let mut taken = vec![false; to.slot_count()];
     let mut shifts = Vec::new();
-    for item in from.items() {
+    for item in from.items().filter(|i| whose.takes(i)) {
         let onto = (0..to.slot_count())
             .find(|&s| {
                 !taken[s]
@@ -985,10 +1046,10 @@ mod tests {
         };
         // Two fiber, both used: their slot takes the rope
         let used_up = bench(2);
-        assert!(check_at(&r[0], &used_up, Some(&used_up), 50, None).ready());
+        assert!(check_at(&r[0], &used_up, Some(&used_up), 50, None, Whose::Any).ready());
         // Three: one stays, and there's no room
         let left = bench(3);
-        let c = check_at(&r[0], &left, Some(&left), 50, None);
+        let c = check_at(&r[0], &left, Some(&left), 50, None, Whose::Any);
         assert_eq!(c.blocked.map(|b| b.item_id), Some(Uuid::from_u128(1)));
     }
 
@@ -1085,23 +1146,23 @@ mod tests {
         );
         // Rope: the 90s alone are enough.
         assert_eq!(
-            fill(&r[0], &inv, &input(&[])),
+            fill(&r[0], &inv, &input(&[]), Whose::Any),
             [(Uuid::from_u128(3), IN, 0)]
         );
         // A workbench: 3 + 9; the slot already taken is skipped.
         assert_eq!(
-            fill(&r[1], &inv, &input(&[item(7, 0, "rope", 50, 1)])),
+            fill(&r[1], &inv, &input(&[item(7, 0, "rope", 50, 1)]), Whose::Any),
             [(Uuid::from_u128(3), IN, 1), (Uuid::from_u128(4), IN, 2)]
         );
         // What's in the inputs already counts.
-        assert!(fill(&r[0], &inv, &input(&[item(7, 2, "fiber", 50, 2)])).is_empty());
+        assert!(fill(&r[0], &inv, &input(&[item(7, 2, "fiber", 50, 2)]), Whose::Any).is_empty());
         // Out of slots: as far as it goes.
         let full = input(&[
             item(7, 0, "rope", 50, 1),
             item(8, 1, "rope", 50, 1),
             item(9, 2, "rope", 50, 1),
         ]);
-        assert_eq!(fill(&r[1], &inv, &full), [(Uuid::from_u128(3), IN, 3)]);
+        assert_eq!(fill(&r[1], &inv, &full, Whose::Any), [(Uuid::from_u128(3), IN, 3)]);
     }
 
     #[test]
@@ -1119,7 +1180,7 @@ mod tests {
             item(8, 3, "chest_kit", 70, 1),
         ]);
         assert_eq!(
-            empty_into(&inp, &inv),
+            empty_into(&inp, &inv, Whose::Any),
             [
                 (Uuid::from_u128(5), INV, 0), // onto the fiber, a D as it is
                 (Uuid::from_u128(6), INV, 1), // that one's taken: an empty slot
@@ -1134,7 +1195,95 @@ mod tests {
         let mixed = item(1, 0, "fiber", 40, 4).with_units(Units::from_pairs([(10, 1), (50, 3)]));
         let inv = boxed(INV, "player_inventory", 4, &[mixed]);
         let inp = input(&[item(5, 0, "fiber", 95, 3)]);
-        assert_eq!(empty_into(&inp, &inv), [(Uuid::from_u128(5), INV, 0)]);
+        assert_eq!(empty_into(&inp, &inv, Whose::Any), [(Uuid::from_u128(5), INV, 0)]);
+    }
+
+    /// A station's box holds other people's things too, and says whose
+    /// (#498): a guest's rope joins only the guest's own rope, so the
+    /// owner's stack is no room for it, and is what's named in the way
+    #[test]
+    fn a_guests_craft_has_no_room_on_the_owners_stack() {
+        let r = recipes();
+        let (owner, guest) = (Uuid::from_u128(500), Uuid::from_u128(501));
+        let bench = |rope_owner: Uuid| {
+            let items = [
+                item(1, 0, "fiber", 50, 3).with_owner(Some(guest)),
+                item(2, 1, "rope", 70, 4).with_owner(Some(rope_owner)),
+                item(3, 2, "chest_kit", 70, 1).with_owner(Some(owner)),
+                item(4, 3, "chest_kit", 70, 1).with_owner(Some(owner)),
+            ];
+            boxed(Uuid::from_u128(40), "station_inventory", 4, &items)
+        };
+        // Full but for the owner's rope: the server would refuse, so it's held back
+        let full = bench(owner);
+        let c = check_at(&r[0], &full, Some(&full), 50, None, Whose::Mine(guest));
+        assert!(c.satisfied() && !c.ready());
+        assert_eq!(c.blocked.map(|b| b.item_id), Some(Uuid::from_u128(2)));
+        // The owner's own craft joins it, as it did before
+        let theirs = bench(guest);
+        assert!(check_at(&r[0], &theirs, Some(&theirs), 50, None, Whose::Mine(guest)).ready());
+        // A box that doesn't say whose is taken as yours, as before
+        assert!(check_at(&r[0], &full, Some(&full), 50, None, Whose::Any).ready());
+    }
+
+    /// The craft takes only your stacks at a station (#498): the server
+    /// refuses another's as an input. On a wage shift it takes anything in
+    /// the box, and the output joins the employer's.
+    #[test]
+    fn a_station_craft_takes_only_yours_and_a_shift_the_employers() {
+        let r = recipes();
+        let (owner, guest) = (Uuid::from_u128(500), Uuid::from_u128(501));
+        let items = [
+            item(1, 0, "fiber", 90, 2).with_owner(Some(owner)),
+            item(2, 1, "fiber", 50, 1).with_owner(Some(guest)),
+            item(3, 2, "rope", 70, 1).with_owner(Some(owner)),
+        ];
+        let bench = boxed(Uuid::from_u128(40), "station_inventory", 3, &items);
+        // The guest has 1 of the 2, and the owner's best fiber isn't theirs
+        let c = check_at(&r[0], &bench, Some(&bench), 50, None, Whose::Mine(guest));
+        assert_eq!((c.needs[0].have, c.inputs.clone()), (1, vec![Uuid::from_u128(2)]));
+        assert!(!c.satisfied());
+        // The owner's craft takes the owner's, and joins the owner's rope
+        let c = check_at(&r[0], &bench, Some(&bench), 50, None, Whose::Mine(owner));
+        assert!(c.ready());
+        assert_eq!(c.inputs, vec![Uuid::from_u128(1)]);
+        // On the owner's shift the guest takes the best there, whoever's, and
+        // the rope joins the owner's
+        let shift = Whose::at(Some(guest), Some(owner));
+        assert_eq!(shift, Whose::Shift { employer: owner });
+        let c = check_at(&r[0], &bench, Some(&bench), 50, None, shift);
+        assert!(c.ready());
+        assert_eq!(c.inputs, vec![Uuid::from_u128(1)]);
+        // Whoever you are, unknown: as before
+        assert_eq!(Whose::at(None, None), Whose::Any);
+    }
+
+    /// Fill counts only what you may use, and Clear moves only yours (#498)
+    #[test]
+    fn fill_and_clear_at_a_station_keep_to_yours() {
+        let r = recipes();
+        let (owner, guest) = (Uuid::from_u128(500), Uuid::from_u128(501));
+        let inv = boxed(INV, "player_inventory", 4, &[item(9, 0, "fiber", 60, 2)]);
+        let bench = boxed(
+            Uuid::from_u128(40),
+            "station_inventory",
+            4,
+            &[
+                item(1, 0, "fiber", 90, 2).with_owner(Some(owner)),
+                item(2, 1, "rope", 70, 1).with_owner(Some(guest)),
+            ],
+        );
+        // The owner's fiber is no use to the guest: Fill brings theirs
+        assert_eq!(
+            fill(&r[0], &inv, &bench, Whose::Mine(guest)),
+            [(Uuid::from_u128(9), Uuid::from_u128(40), 2)]
+        );
+        assert!(fill(&r[0], &inv, &bench, Whose::Mine(owner)).is_empty());
+        // Clear takes the guest's rope and leaves the owner's fiber
+        assert_eq!(
+            empty_into(&bench, &inv, Whose::Mine(guest)),
+            [(Uuid::from_u128(2), INV, 1)]
+        );
     }
 
     /// The craft takes the best units of each stack first, as the server
@@ -1269,14 +1418,14 @@ mod tests {
         fill(&mut state, 5);
         let mut crafting = Crafting::default();
         let bench = state.station_container().unwrap();
-        let c = check_at(&forge, bench, Some(bench), 90, None);
+        let c = check_at(&forge, bench, Some(bench), 90, None, Whose::Any);
         assert!(c.ready());
         // 0.56 × 70 + 0.24 × 50 + 0.2 × 90 (an A-grade bench) = 69.2.
         assert_eq!(c.range, Some((66, 72)));
         let points: f64 = c.breakdown().iter().map(quality::Term::points).sum();
         assert!((points - 69.2).abs() < 1e-9);
         // The same box at a D-grade bench comes out 10 points lower.
-        let d = check_at(&forge, state.station_container().unwrap(), None, 40, None);
+        let d = check_at(&forge, state.station_container().unwrap(), None, 40, None, Whose::Any);
         assert_eq!(d.range, Some((56, 62)));
         assert_eq!(
             crafting.start_at(&c, BENCH, &state, t0),

@@ -872,6 +872,7 @@ pub fn sample(which: &str, catalog: &Catalog) -> (Board, Option<Container>, Uuid
         durability: None,
         max_durability: None,
         maker: None,
+        owner_id: None,
     };
     let mut slots: Vec<Option<SlotItem>> = vec![
         Some(stack(0, "iron_ore", Units::from_pairs([(48, 4), (61, 6), (78, 3)]))),

@@ -253,7 +253,7 @@ impl Sample {
         let recipe = sample_recipe();
         let catalog = capitol_core::catalog::Catalog::fallback();
         let tool = craft::tool_for(&catalog, &recipe, Some(&self.containers[0]), None);
-        let check = craft::check_at(&recipe, &self.containers[1], None, SAMPLE_STATION, tool);
+        let check = craft::check_at(&recipe, &self.containers[1], None, SAMPLE_STATION, tool, craft::Whose::Any);
         if let Some(range) = check.range {
             super::crafting::preview(ui, &check, range);
         }

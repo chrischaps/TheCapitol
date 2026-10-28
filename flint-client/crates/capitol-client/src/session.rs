@@ -1193,8 +1193,10 @@ impl Session {
         };
         let station_id = open.id;
         let tool = craft::tool_in(&self.state, recipe, true);
-        // The output stays in the station's box (#489)
-        let check = craft::check_at(recipe, bench, Some(bench), open.quality, tool);
+        // The output stays in the station's box (#489), joining only a
+        // stack of yours, or on a shift the employer's (#498)
+        let whose = craft::Whose::at(self.state.me(), self.wages.employer_at(station_id));
+        let check = craft::check_at(recipe, bench, Some(bench), open.quality, tool, whose);
         if let Some(message) = self.crafting.start_at(&check, station_id, &self.state, now) {
             tracing::info!(
                 "craft: {} at {station_id} from {} stacks",
@@ -4314,13 +4316,13 @@ mod tests {
         // Everything in a box back into the inventory.
         let drain = |session: &mut Session, kind: &str| {
             let shifts =
-                craft::empty_into(&boxed(session, kind), session.state().inventory().unwrap());
+                craft::empty_into(&boxed(session, kind), session.state().inventory().unwrap(), craft::Whose::Any);
             session.move_items(&shifts);
         };
         let fill = |session: &mut Session, id: &str| {
             let r = session.state().recipe(id).unwrap().clone();
             let st = session.state();
-            let shifts = craft::fill(&r, st.inventory().unwrap(), st.crafting_input().unwrap());
+            let shifts = craft::fill(&r, st.inventory().unwrap(), st.crafting_input().unwrap(), craft::Whose::Any);
             session.move_items(&shifts);
         };
         let check = |s: &Session, id: &str| {
@@ -5445,6 +5447,7 @@ mod tests {
             let shifts = craft::empty_into(
                 &station_box(session).unwrap(),
                 session.state().inventory().unwrap(),
+                craft::Whose::at(session.state().me(), None),
             );
             session.move_items(&shifts);
         };
@@ -5468,6 +5471,7 @@ mod tests {
             &handle,
             session.state().inventory().unwrap(),
             &station_box(&session).unwrap(),
+            craft::Whose::at(session.state().me(), None),
         );
         session.move_items(&shifts);
         let ready = |s: &Session| {

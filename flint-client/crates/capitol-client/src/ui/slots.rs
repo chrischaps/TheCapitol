@@ -231,6 +231,8 @@ pub struct SlotGrid<'a> {
     enabled: bool,
     /// Set by [`SlotGrid::placing`]: the catalog that says what's a kit.
     placing: Option<&'a Catalog>,
+    /// Set by [`SlotGrid::yours`]: who you are, in a box of several people's.
+    me: Option<Uuid>,
 }
 
 impl<'a> SlotGrid<'a> {
@@ -239,7 +241,16 @@ impl<'a> SlotGrid<'a> {
             container,
             enabled: true,
             placing: None,
+            me: None,
         }
+    }
+
+    /// A box of several people's things, a station's (#498): a stack that
+    /// says it's someone else's says so in its tooltip, and that a craft
+    /// here won't use it.
+    pub fn yours(mut self, me: Option<Uuid>) -> Self {
+        self.me = me;
+        self
     }
 
     /// A right click on a kit asks to place its station (the inventory's
@@ -281,7 +292,7 @@ impl<'a> SlotGrid<'a> {
                             item: item.as_ref(),
                             enabled: self.enabled,
                         };
-                        let (moved, right) = slot.show_inner(ui, icons, self.placing);
+                        let (moved, right) = slot.show_inner(ui, icons, self.placing, self.me);
                         clicks.moved = clicks.moved.take().or(moved);
                         if let Some(catalog) = self.placing.filter(|_| right) {
                             clicks.place = item.clone().filter(|i| is_kit(catalog, i));
@@ -411,16 +422,18 @@ pub struct Slot<'a> {
 
 impl Slot<'_> {
     pub fn show(self, ui: &mut Ui, icons: &mut ItemIcons) -> Option<Move> {
-        self.show_inner(ui, icons, None).0
+        self.show_inner(ui, icons, None, None).0
     }
 
     /// The drop onto this slot, and whether it was right-clicked. `placing`
-    /// adds the kit's hint to the tooltip.
+    /// adds the kit's hint to the tooltip, and `me` whether it's someone
+    /// else's.
     fn show_inner(
         self,
         ui: &mut Ui,
         icons: &mut ItemIcons,
         placing: Option<&Catalog>,
+        me: Option<Uuid>,
     ) -> (Option<Move>, bool) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(SLOT_SIZE, SLOT_SIZE), Sense::hover());
         let id = Id::new(("capitol_slot", self.container_id, self.index));
@@ -501,6 +514,7 @@ impl Slot<'_> {
                 // The ring's slot says what's in it, as a hover does
                 response.show_tooltip_ui(|ui| {
                     tooltip(ui, item);
+                    theirs_line(ui, item, me);
                     if draggable {
                         let more = if item.quantity > 1 { ", {X} half of it" } else { "" };
                         super::shortcuts::keys_row(ui, &format!("{{A}} picks it up{more}"));
@@ -514,6 +528,7 @@ impl Slot<'_> {
                 };
                 response.on_hover_ui(|ui| {
                     tooltip(ui, item);
+                    theirs_line(ui, item, me);
                     if placing.is_some_and(|c| is_kit(c, item)) {
                         ui.label(theme::dim("Right-click to place"));
                     }
@@ -1055,6 +1070,19 @@ fn makeup_bar(ui: &mut Ui, units: &Units) {
     painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, theme::PIP_EDGE));
 }
 
+/// A stack in a station's box that isn't yours says so (#498): a craft
+/// here won't take it or add to it, and Clear leaves it.
+fn theirs_line(ui: &mut Ui, item: &SlotItem, me: Option<Uuid>) {
+    if theirs(item, me) {
+        ui.label(theme::dim("Someone else's: a craft here won't use it"));
+    }
+}
+
+/// `item` says whose it is, and it isn't `me`'s.
+fn theirs(item: &SlotItem, me: Option<Uuid>) -> bool {
+    matches!((item.owner_id, me), (Some(owner), Some(me)) if owner != me)
+}
+
 /// What hovering a full slot says: the name, the mean quality and its
 /// grade, how many, for a stack of more than one quality its makeup, and
 /// who made it, if one maker made it all.
@@ -1293,6 +1321,18 @@ mod tests {
 
     fn item(slot: i32, item_type: &str, quantity: i32) -> SlotItem {
         SlotItem::new(id(), item_type.into(), item_type.into(), 80, quantity, slot)
+    }
+
+    /// In a station's box a stack that says it's someone else's says so;
+    /// yours, or one that doesn't say, or a grid that doesn't know you, don't (#498)
+    #[test]
+    fn only_someone_elses_stack_says_so() {
+        let (me, them) = (id(), id());
+        let rope = item(0, "rope", 4);
+        assert!(theirs(&rope.clone().with_owner(Some(them)), Some(me)));
+        assert!(!theirs(&rope.clone().with_owner(Some(me)), Some(me)));
+        assert!(!theirs(&rope, Some(me)));
+        assert!(!theirs(&rope.with_owner(Some(them)), None));
     }
 
     /// An inventory (6 × 2) holding fiber in slot 0 and rope in slot 3, and

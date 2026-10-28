@@ -1259,6 +1259,12 @@ pub struct SlotItem {
     /// their byline is on. Absent for a stack with no mark or mixed marks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maker: Option<Maker>,
+    /// Whose it is, in a station's box (#498), which holds other people's
+    /// things too (#80): a craft there takes only the crafter's stacks and
+    /// joins only one of theirs (#489), and Clear moves only yours. Absent
+    /// everywhere else, where every stack is the box's owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<Uuid>,
 }
 
 /// A stack's maker, as its tooltip names them (#242). Set only when every
@@ -1296,6 +1302,7 @@ impl SlotItem {
             durability: None,
             max_durability: None,
             maker: None,
+            owner_id: None,
         }
     }
 
@@ -1316,6 +1323,12 @@ impl SlotItem {
     /// This slot item made by `maker`, if every unit has the one.
     pub fn with_maker(mut self, maker: Option<Maker>) -> Self {
         self.maker = maker;
+        self
+    }
+
+    /// This slot item as `owner_id`'s, as a station's box says (#498).
+    pub fn with_owner(mut self, owner_id: Option<Uuid>) -> Self {
+        self.owner_id = owner_id;
         self
     }
 
@@ -1807,7 +1820,7 @@ pub struct StationContainerResponse {
     pub slot_count: i32,
     /// UI layout columns
     pub layout_columns: i32,
-    /// Items in slots
+    /// Items in slots, each with whose it is (`owner_id`, #498)
     pub slots: Vec<SlotItem>,
 }
 

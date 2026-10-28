@@ -231,12 +231,12 @@ impl CraftingPanel {
             ui.add_enabled_ui(open, |ui| {
                 let fill = match (&check, state.inventory(), state.crafting_input()) {
                     (Some(c), Some(inv), Some(inp)) if !c.satisfied() => {
-                        craft::fill(c.recipe, inv, inp)
+                        craft::fill(c.recipe, inv, inp, craft::Whose::Any)
                     }
                     _ => Vec::new(),
                 };
                 let clear = match (state.crafting_input(), state.inventory()) {
-                    (Some(inp), Some(inv)) => craft::empty_into(inp, inv),
+                    (Some(inp), Some(inv)) => craft::empty_into(inp, inv, craft::Whose::Any),
                     _ => Vec::new(),
                 };
                 ui.add_space(((ui.available_width() - 150.0) / 2.0).max(0.0));
