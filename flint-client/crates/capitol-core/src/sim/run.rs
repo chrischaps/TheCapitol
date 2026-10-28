@@ -1138,21 +1138,29 @@ impl SimBot {
             return self.choose_market(holdings, errand);
         }
         // What a claim of its own wants isn't spare (S2.5): one question at
-        // the hall, for the first good someone bids for, then one about a
-        // stall, for the most it has spare of what's enough for one (a
+        // the hall, for the first good someone bids for or nobody trades
+        // yet (an ask to open its book at its worth, #501), then one about
+        // a stall, for the most it has spare of what's enough for one (a
         // good's STALL_AT, or tools, K2.1)
         let spare = self.spare(holdings, errand.goal.as_ref());
         let sale = spare.iter().find_map(|&(item, n)| {
             let (bid, ask) = self.best(item);
-            Some((item, super::sell_menu(holdings, item, n, bid, ask)?))
+            let menu = match (bid, ask) {
+                (None, None) if self.people => super::open_menu(holdings, item, n, self.worth(item)),
+                _ => super::sell_menu(holdings, item, n, bid, ask),
+            };
+            Some((item, menu?))
         });
         if let Some((item, menu)) = sale {
             let question = Question::Sell { item: item.into() };
+            // Nobody trades it yet: the ask is to stand (#501)
+            let stands = self.best(item) == (None, None);
             if let Some((d, Choice::Sell { item, .. })) = self.decide(question, menu, 1, holdings) {
                 return Some(Trade::Sell {
                     item,
                     quantity: d.quantity?,
                     price: d.price?,
+                    stands,
                 });
             }
         }
@@ -1695,7 +1703,7 @@ impl SimBot {
 
     fn trade_at_the_hall(&mut self, trade: &Trade) -> Result<(), BotError> {
         let order = match trade {
-            Trade::Sell { item, quantity, price } => {
+            Trade::Sell { item, quantity, price, .. } => {
                 // The biggest stack; of tools, which don't stack, the
                 // freshest, so it keeps its most worn to use up. The book
                 // shows a tool's wear (#547), so it's priced by the share of
@@ -1740,6 +1748,11 @@ impl SimBot {
         };
         let placed = self.bot.place_order(order)?;
         let id = placed.id;
+        // An ask to open the book stands, till it fills or goes stale (#501)
+        if matches!(trade, Trade::Sell { stands: true, .. }) {
+            self.mind.placed(id);
+            return Ok(());
+        }
         let closed = |s: &crate::state::GameState| s.market().order(id).is_some_and(|o| o.status != OrderStatus::Open);
         if self.bot.until("a fill", FILL_WAIT, |s, _| closed(s)).is_err() {
             match self.bot.cancel_order(id) {

@@ -204,7 +204,10 @@ pub struct Wanted<'a> {
 /// A trade a bot makes instead of the planner's step, as its mind decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trade {
-    Sell { item: String, quantity: i32, price: i64 },
+    /// An ask at the hall. Into a bid, it waits a moment for the fill and
+    /// takes down what's left; one that `stands` opens an empty book (#501)
+    /// and is left there until it fills or stands a game hour.
+    Sell { item: String, quantity: i32, price: i64, stands: bool },
     Buy { item: String, quantity: i32, price: i64 },
     /// A standing bid, left at the hall (C1.5).
     Bid { item: String, quantity: i32, price: i64 },
@@ -917,6 +920,39 @@ pub fn sell_menu(holdings: &Holdings, item: &str, spare: i32, bid: Option<i64>, 
     })
 }
 
+/// The menu for opening the hall's book on `item` (#501), if there's a
+/// question to ask: nobody bids for it and nobody asks, it can put a worth
+/// to it (its books', else its target, [`worth_unbooked`]), it has half of
+/// [`sell_at`] or more spare, and it can pay the listing fee on some. Leave
+/// an ask standing (from the worth to twice it, for up to one lot of
+/// [`sell_at`]), or keep. A fresh town's book held nothing to buy for
+/// hours: a sell only went into a bid, and what a bid didn't take was taken
+/// down. One lot is enough for something to buy, and leaves the rest for a
+/// stall. The ask stands ([`Trade::Sell`]'s `stands`), so it isn't posted
+/// again while it's on the book.
+pub fn open_menu(holdings: &Holdings, item: &str, spare: i32, worth: Option<i64>) -> Option<Vec<Choice>> {
+    let lot = sell_at(item);
+    if spare < (lot / 2).max(1) {
+        return None;
+    }
+    let worth = worth?.max(1);
+    let price = Span::new(worth, worth * 2);
+    let mut most = spare.min(lot);
+    while most > 0 && holdings.fees.listing_fee(price.max * most as i64) > holdings.strands {
+        most -= 1;
+    }
+    (most > 0).then(|| {
+        vec![
+            Choice::Sell {
+                item: item.to_string(),
+                price,
+                quantity: Span::new(1, most),
+            },
+            Choice::Keep,
+        ]
+    })
+}
+
 /// The menu for stocking a stall with `spare` of `item` (C1.5, Callings
 /// K1.4), if there's a question to ask: it has half of [`STALL_AT`] or more
 /// spare, or a tool (K2.1, [`stall_at`]), can put a worth to it, and keeps a
@@ -1355,6 +1391,40 @@ mod tests {
         // No more than it has spare, and nothing under half a SELL_AT of it
         assert!(matches!(&sell_menu(&h, "log", 12, Some(7), None).unwrap()[0], Choice::Sell { quantity, .. } if quantity.max == 12));
         assert_eq!(sell_menu(&h, "log", SELL_AT / 2 - 1, Some(7), None), None);
+    }
+
+    #[test]
+    fn an_empty_book_gets_an_ask_at_its_worth() {
+        // A fresh town (#501): nobody bids or asks for planks, so a sell
+        // menu has no question, but the plank's target gives a worth to
+        // open the book at: one lot standing, priced from the worth up
+        let catalog = Catalog::fallback();
+        let mut h = Holdings { strands: FLOOR, ..Holdings::default() };
+        h.items.insert("plank".into(), SELL_AT * 3);
+        assert_eq!(sell_menu(&h, "plank", SELL_AT * 3, None, None), None);
+        let worth = worth_unbooked(&catalog, "plank");
+        let menu = open_menu(&h, "plank", SELL_AT * 3, worth).unwrap();
+        let w = worth.unwrap();
+        assert_eq!(
+            menu,
+            vec![
+                Choice::Sell {
+                    item: "plank".into(),
+                    price: Span::new(w, w * 2),
+                    quantity: Span::new(1, SELL_AT),
+                },
+                Choice::Keep,
+            ]
+        );
+        // Too few spare, nothing to price it by, or nothing for the fee
+        assert_eq!(open_menu(&h, "plank", SELL_AT / 2 - 1, worth), None);
+        assert_eq!(open_menu(&h, "plank", SELL_AT, None), None);
+        h.strands = 0;
+        assert_eq!(open_menu(&h, "plank", SELL_AT, worth), None);
+        // A tool opens its book with one
+        h.strands = FLOOR;
+        let menu = open_menu(&h, "stone_axe", 1, worth_unbooked(&catalog, "stone_axe")).unwrap();
+        assert!(matches!(&menu[0], Choice::Sell { quantity, .. } if quantity.max == 1));
     }
 
     #[test]

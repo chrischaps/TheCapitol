@@ -825,6 +825,27 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_on_an_empty_book_stands_at_its_worth() {
+        // #501: no bid and no ask, so the menu's least is the worth, and a
+        // middling seller leaves its lot there, a taker of risks too
+        for risk in [0.5, 1.0] {
+            let menu = vec![
+                Choice::Sell {
+                    item: "plank".into(),
+                    price: Span::new(5, 10),
+                    quantity: Span::new(1, SELL_AT),
+                },
+                Choice::Keep,
+            ];
+            let t = with(|t| t.risk = risk);
+            let mut s = situation(Question::Sell { item: "plank".into() }, menu, t);
+            s.holdings.items.insert("plank".into(), SELL_AT * 3);
+            let d = decide(&s).0;
+            assert_eq!(d, Decision { pick: 0, price: Some(5), quantity: Some(SELL_AT) }, "risk {risk}");
+        }
+    }
+
+    #[test]
     fn a_middling_seller_sells_all_at_the_bid_from_sell_at() {
         let t = Temperament::default();
         let (d, _) = decide(&sell(SELL_AT, 7, Some(9), None, t));

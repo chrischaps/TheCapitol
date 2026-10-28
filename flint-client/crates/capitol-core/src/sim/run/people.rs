@@ -291,8 +291,8 @@ impl SimBot {
         }
     }
 
-    /// At the hall: takes down standing bids that have stood a game hour,
-    /// and asks again about a bid for each thing it wants (the job at
+    /// At the hall: takes down standing bids, and asks that opened a book
+    /// (#501), that have stood a game hour, and asks again about a bid for each thing it wants (the job at
     /// hand's inputs, then its nearest jobs', Callings K1.4), so whoever
     /// makes it has someone to sell to.
     pub(super) fn post_demand(&mut self) -> Result<(), BotError> {
@@ -304,9 +304,12 @@ impl SimBot {
             .market()
             .open_orders()
             .iter()
-            .filter(|o| o.side == OrderSide::Buy && now - o.created_at > life)
+            .filter(|o| now - o.created_at > life)
             .map(|o| o.id)
             .collect();
+        // A merchant's quotes come down at its spell's end, so a sell an
+        // hour old is an ask that opened a book. Its units go to the box
+        let any = !stale.is_empty();
         for id in stale {
             match self.bot.cancel_order(id) {
                 Ok(_) => {}
@@ -314,6 +317,9 @@ impl SimBot {
                 Err(BotError::Rest { source, .. }) if source.status().is_some_and(|s| s < 500) => {}
                 Err(e) => return Err(e),
             }
+        }
+        if any {
+            self.bot.collect_market_box()?;
         }
         for item in self.wants() {
             let holdings = self.holdings();
