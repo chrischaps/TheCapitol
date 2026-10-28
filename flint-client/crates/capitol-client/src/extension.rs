@@ -4382,6 +4382,7 @@ fn owned_lots(
 /// scripts what they need to draw round it (`cap_placing`), and fire
 /// `placement_note` at them, with a `title` and `body`, when a click is
 /// refused or the server says no.
+#[allow(clippy::too_many_arguments)]
 fn placing(
     ctx: &mut ExtensionCtx,
     session: &mut Session,
