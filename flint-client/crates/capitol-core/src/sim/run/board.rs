@@ -59,7 +59,8 @@ const WILD_PAY: f64 = 1.5;
 /// What the wilds' quality table adds at its deepest and highest: the last
 /// rows of `backend/content/wilds.toml`'s `[quality]` (depth 10, height 8).
 /// Only the server's planner reads that file, so it's kept here and a test
-/// holds the two together ([#504](https://github.com/chrischaps/TheCapitol/issues/504)).
+/// holds the two together. It decides only whether a claim is worth the walk
+/// out; which node to gather is by the node's own quality (#504).
 pub(crate) const WILD_QUALITY_ADD: i32 = 18;
 /// The grade a citizen trusts itself to craft a good at: C. Its inputs'
 /// quality decides, and a citizen doesn't plan for them.
@@ -77,8 +78,9 @@ pub(crate) enum Ground {
 /// Whether `role` can gather or make `item` at `min_quality`, and where
 /// (S2.5). A node's quality is drawn across its spawn's range (in the
 /// wilds from the row's floor up to the resource's top and
-/// [`WILD_QUALITY_ADD`]); a citizen counts on the top third of it, since a
-/// node's own quality isn't on the wire (#504). The
+/// [`WILD_QUALITY_ADD`]); a citizen counts on the top third of it before it
+/// sets out. Once there it gathers only from nodes at the grade, by each
+/// node's own quality (#504). The
 /// wild veins count for mining only: `role` is the job that answers for
 /// `item`, so they count for anyone willing to mine (Callings K1.2). A
 /// good no node yields is crafted, and made up to [`MADE_REACH`].
@@ -222,6 +224,13 @@ impl Board {
     /// Whether a claim of its own on `item` is to come from the wilds.
     pub(super) fn wild(&self, item: &str) -> bool {
         self.owing().any(|(c, m)| m.item_type == item && self.wild.contains(&c.commission_id))
+    }
+
+    /// The least quality its claims of its own on `item` ask a unit for: the
+    /// most demanding claim's, so a node that gives it serves them all (#504).
+    /// None when none asks for a grade.
+    pub(super) fn grade_wanted(&self, item: &str) -> Option<i32> {
+        self.owing().filter(|(_, m)| m.item_type == item && m.min_quality > 0).map(|(_, m)| m.min_quality).max()
     }
 }
 
@@ -636,6 +645,27 @@ mod tests {
         // A crafted good, up to C
         assert_eq!(ground(Role::Crafter(Craft::Planks), &catalog, "plank", 55), Some(Ground::Home));
         assert_eq!(ground(Role::Crafter(Craft::Planks), &catalog, "plank", 75), None);
+    }
+
+    /// A citizen holding claims on ore at C and at B gathers for the B: a
+    /// node that gives it serves both (#504). One met in full, or on another
+    /// good, or at no grade, asks nothing.
+    #[test]
+    fn the_grade_wanted_is_the_most_demanding_claims() {
+        use crate::commissions::tests::{claim, commission};
+        let mut board = Board::new();
+        assert_eq!(board.grade_wanted("iron_ore"), None);
+        board.commissions = vec![
+            commission(1, "iron_ore", 60, 10, 0),
+            commission(2, "iron_ore", 75, 10, 0),
+            commission(3, "iron_ore", 90, 10, 0),
+            commission(4, "wood", 85, 10, 0),
+            commission(5, "iron_ore", 0, 10, 0),
+        ];
+        board.claims = vec![claim(11, 1, 5, 0), claim(12, 2, 5, 2), claim(13, 3, 5, 5), claim(14, 4, 5, 0), claim(15, 5, 5, 0)];
+        assert_eq!(board.grade_wanted("iron_ore"), Some(75), "the A claim is met");
+        assert_eq!(board.grade_wanted("wood"), Some(85));
+        assert_eq!(board.grade_wanted("stone"), None);
     }
 
     #[test]

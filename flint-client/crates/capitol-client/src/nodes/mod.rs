@@ -625,6 +625,7 @@ mod tests {
             x: 3400.0,
             y: 4000.0,
             state: state.into(),
+            base_quality: None,
         }
     }
 

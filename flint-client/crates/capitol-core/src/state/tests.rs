@@ -60,6 +60,7 @@ fn node(id: Uuid, state: &str) -> ResourceNodeInfo {
         x: 8310.0,
         y: 8310.0,
         state: state.into(),
+        base_quality: None,
     }
 }
 

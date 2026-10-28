@@ -65,6 +65,7 @@ impl Sample {
                     x,
                     y,
                     state: "available".into(),
+                    base_quality: None,
                 },
             );
             if work {

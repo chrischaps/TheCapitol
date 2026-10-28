@@ -695,7 +695,7 @@ pub fn lapsed_words(mine: bool, name: &str, citizen: bool, quantity: i32, delive
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use capitol_protocol::rest::ClaimsResponse;
 
@@ -710,7 +710,7 @@ mod tests {
         DateTime::from_timestamp(1_790_000_000, 0).unwrap() + chrono::Duration::minutes(minutes)
     }
 
-    fn commission(n: u128, item: &str, min_quality: i32, quantity: i32, minutes: i64) -> Commission {
+    pub(crate) fn commission(n: u128, item: &str, min_quality: i32, quantity: i32, minutes: i64) -> Commission {
         Commission {
             id: Uuid::from_u128(n),
             poster_id: Uuid::from_u128(POSTER),
@@ -732,7 +732,7 @@ mod tests {
         }
     }
 
-    fn claim(n: u128, on: u128, quantity: i32, delivered: i32) -> CommissionClaim {
+    pub(crate) fn claim(n: u128, on: u128, quantity: i32, delivered: i32) -> CommissionClaim {
         CommissionClaim {
             id: Uuid::from_u128(n),
             commission_id: Uuid::from_u128(on),

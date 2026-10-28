@@ -634,6 +634,7 @@ mod tests {
             x,
             y: 0.0,
             state: state.into(),
+            base_quality: None,
         };
         let nodes = [
             node("grass", 30.0, "available"),

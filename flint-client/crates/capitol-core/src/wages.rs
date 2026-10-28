@@ -1001,6 +1001,7 @@ mod tests {
             x,
             y,
             state: "available".into(),
+            base_quality: None,
         };
         let bounds = Bounds { min_x: 0.0, min_y: 0.0, max_x: 100.0, max_y: 100.0 };
         let nodes = [node(1, "grass", 10.0, 10.0), node(2, "oak_tree", 50.0, 90.0), node(3, "grass", 60.0, 60.0), node(4, "iron_vein", 150.0, 10.0)];

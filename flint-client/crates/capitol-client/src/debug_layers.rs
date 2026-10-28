@@ -285,6 +285,7 @@ mod tests {
             x: 6900.0,
             y: 6800.0,
             state: "available".into(),
+            base_quality: None,
         };
         let far = ResourceNodeInfo { id: Uuid::from_u128(2), x: 6800.0 + REACH + 10.0, ..near.clone() };
         state.apply_rest(&capitol_core::net::RestResponse::AllNodes(capitol_core::protocol::rest::NearbyResponse {

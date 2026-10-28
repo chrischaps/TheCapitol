@@ -1758,20 +1758,17 @@ impl SimBot {
     /// the same with the same tool (#336), finding one first.
     ///
     /// For a claim whose goods come from the wilds (S2.5), only a node out
-    /// there will do.
+    /// there will do, and for a claim at a grade, only a node at it (#504).
     fn gather(&mut self, resource: &str) -> Result<(), BotError> {
         let kinds = kinds(self.bot.state().catalog(), resource);
-        let wild = self
-            .bot
-            .state()
-            .catalog()
-            .resource_type(resource)
-            .is_some_and(|r| self.board.wild(&r.yields_item));
+        let yields = self.bot.state().catalog().resource_type(resource).map(|r| r.yields_item.clone());
+        let wild = yields.as_ref().is_some_and(|item| self.board.wild(item));
+        let at_least = yields.as_ref().and_then(|item| self.board.grade_wanted(item));
         let mut explored = 0;
         for _ in 0..MAX_EXPLORES {
             self.learn_nodes();
             let pick = self.random();
-            let Some(node) = self.nearest(&kinds, pick, wild) else {
+            let Some(node) = self.nearest(&kinds, pick, wild, at_least) else {
                 self.explore(&kinds, explored)?;
                 explored += 1;
                 continue;
@@ -1816,9 +1813,11 @@ impl SimBot {
     /// available, or was depleted long enough ago to have grown back. One of
     /// the three nearest, picked by `pick` (in [0, 1)), so a crowd spreads
     /// out rather than queueing at one patch. With `wild`, only one in the
-    /// Wilderness: any there, since a node's quality isn't on the wire
-    /// ([#504](https://github.com/chrischaps/TheCapitol/issues/504)).
-    fn nearest(&self, kinds: &[String], pick: f64, wild: bool) -> Option<ResourceNodeInfo> {
+    /// Wilderness. With `at_least`, only one whose quality is that or more:
+    /// a gather never comes out better than its node (GDD §6.2), so a node
+    /// under a claim's grade is a wasted pull (#504). A node from a server
+    /// that doesn't say its quality is taken on trust.
+    fn nearest(&self, kinds: &[String], pick: f64, wild: bool, at_least: Option<i32>) -> Option<ResourceNodeInfo> {
         let regrown: HashMap<&str, Duration> = kinds
             .iter()
             .map(|kind| {
@@ -1844,7 +1843,7 @@ impl SimBot {
                 })
             })
             .filter(|s| state.harvester(s.node.id).is_none())
-            .filter(|s| !wild || Zone::from_position(s.node.x, s.node.y) == Zone::Wilderness)
+            .filter(|s| worth_a_pull(&s.node, wild, at_least))
             .map(|s| &s.node)
             .collect();
         near.sort_by(|a, b| (a.x - x).hypot(a.y - y).total_cmp(&(b.x - x).hypot(b.y - y)));
@@ -2489,9 +2488,45 @@ fn known_stations<'a>(seen: &'a HashMap<Uuid, StationInfo>, own: impl IntoIterat
         .collect()
 }
 
+/// Whether `node` is one [`SimBot::nearest`] may send a gatherer to: out in
+/// the Wilderness for a claim from the wilds, and at `at_least` or better for
+/// a claim at a grade (#504). A node whose quality the server didn't say is
+/// taken on trust.
+fn worth_a_pull(node: &ResourceNodeInfo, wild: bool, at_least: Option<i32>) -> bool {
+    (!wild || Zone::from_position(node.x, node.y) == Zone::Wilderness)
+        && at_least.is_none_or(|q| node.base_quality.is_none_or(|b| b >= q))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A claim at a grade passes over the nodes under it, wherever they are,
+    /// and a claim from the wilds over the nodes nearer in (#504).
+    #[test]
+    fn a_claim_at_a_grade_passes_over_the_nodes_under_it() {
+        let vein = |x: f64, quality: Option<i32>| ResourceNodeInfo {
+            id: Uuid::from_u128(x as u128),
+            resource_type: "iron_vein".into(),
+            x,
+            y: Zone::CENTER_Y,
+            state: "available".into(),
+            base_quality: quality,
+        };
+        let rural = vein(Zone::CENTER_X + 5000.0, Some(70));
+        let wild = vein(Zone::CENTER_X + 7000.0, Some(70));
+        // Any vein will do for a claim with no grade
+        assert!(worth_a_pull(&rural, false, None));
+        // B (75) isn't to be had at a 70 vein, wild or not
+        assert!(!worth_a_pull(&rural, false, Some(75)));
+        assert!(!worth_a_pull(&wild, true, Some(75)));
+        assert!(worth_a_pull(&vein(Zone::CENTER_X + 7000.0, Some(80)), true, Some(75)));
+        // C (60) is, but a claim from the wilds keeps to the wilds
+        assert!(worth_a_pull(&rural, false, Some(60)));
+        assert!(!worth_a_pull(&rural, true, Some(60)));
+        // A server that doesn't say is taken on trust
+        assert!(worth_a_pull(&vein(Zone::CENTER_X + 7000.0, None), true, Some(75)));
+    }
 
     fn station(kind: &str, x: f64, y: f64) -> (String, StationInfo) {
         let info = StationInfo {

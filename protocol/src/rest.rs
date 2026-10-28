@@ -1179,6 +1179,12 @@ pub struct ResourceNodeInfo {
     pub y: f64,
     /// Current state: "available", "harvesting", or "depleted"
     pub state: String,
+    /// The node's quality, 0 to 100: the best a gather here comes out at
+    /// (GDD §6.2; a tool's wear and a slip take some off). So a citizen with
+    /// a claim at a grade picks a node that gives it (#504). `None` from a
+    /// server before that.
+    #[serde(default)]
+    pub base_quality: Option<i32>,
 }
 
 /// `POST /world/extract`

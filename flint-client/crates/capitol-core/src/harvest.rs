@@ -203,6 +203,7 @@ mod tests {
                 x: 4200.0,
                 y: 4000.0,
                 state: "available".into(),
+                base_quality: None,
             }],
         }));
         state

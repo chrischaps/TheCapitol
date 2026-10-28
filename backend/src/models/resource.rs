@@ -132,6 +132,7 @@ impl From<&ResourceNodeState> for ResourceNodeInfo {
             x: node.x,
             y: node.y,
             state: String::from(node.state),
+            base_quality: Some(node.base_quality),
         }
     }
 }
@@ -154,6 +155,31 @@ mod tests {
     /// A short walk from the spawn, for Arrival's nodes (#443): what
     /// `/world/nearby` shows from it.
     const ARRIVAL_WALK: f64 = NEARBY_NODE_RANGE;
+
+    /// The nearby list and `/world/nodes` say each node's quality, so a
+    /// citizen with a claim at a grade can pick a node that gives it (#504).
+    #[test]
+    fn a_node_says_its_quality() {
+        let node = super::ResourceNodeState {
+            id: Uuid::from_u128(1),
+            resource_type: "iron_vein".into(),
+            x: 9000.0,
+            y: 8300.0,
+            base_quality: 82,
+            state: super::NodeState::Available,
+            harvested_by: None,
+            regenerates_at_tick: None,
+        };
+        let info = super::ResourceNodeInfo::from(&node);
+        assert_eq!(info.base_quality, Some(82));
+        assert_eq!(serde_json::to_value(&info).unwrap()["base_quality"], 82);
+        // An older server's node, without it, still reads
+        let old: super::ResourceNodeInfo = serde_json::from_value(serde_json::json!({
+            "id": node.id, "resource_type": "iron_vein", "x": 9000.0, "y": 8300.0, "state": "available"
+        }))
+        .unwrap();
+        assert_eq!(old.base_quality, None);
+    }
 
     const WORLD_SCALE_MIGRATION: &str =
         include_str!("../../migrations/20260212_001_world_scale.sql");
