@@ -1132,7 +1132,16 @@ mod tests {
         // startup's sync; the seeded grass moves out with the rings, and every
         // planned node is re-planned (`20261220_001_plots_v2_flip.sql` and
         // `post-content/20261220_001_plots_v2_flip_nodes.sql`).
-        assert_eq!(TerrainConfig::default_world().version(), "38cfec4d08f9918f");
+        //
+        // #467 made the station packing rule monotone, with rows along each
+        // side of a lot. The farms are laid as small as still takes 12, so
+        // some take it smaller: 911 farms for 900 (18 gone, 115 reshaped,
+        // 29 new ids), 2977 lots. Nothing outside the rural ring moved. The
+        // reshaped and dropped farms' rows are renamed `repack_` and
+        // released by startup's sync, and the rural ring's planned nodes are
+        // re-planned (`20270106_001_packing_rows.sql` and its post-content
+        // nodes).
+        assert_eq!(TerrainConfig::default_world().version(), "7c5330637253da07");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

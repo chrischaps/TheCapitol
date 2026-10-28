@@ -210,9 +210,10 @@ fn ordered(
     let middle = at(&c, 0.5, 0.5);
     let fits = |p: (f64, f64)| {
         quad_contains(&c, p.0, p.1)
-            && (0..4).all(|i| to_segment(p, c[i], c[(i + 1) % 4]) >= edge)
+            // Give or take rounding: a row of `staggered`'s stands exactly `edge` in
+            && (0..4).all(|i| to_segment(p, c[i], c[(i + 1) % 4]) >= edge - 1e-6)
             && without.is_none_or(|f| {
-                !quad_contains(f, p.0, p.1) && (0..4).all(|i| to_segment(p, f[i], f[(i + 1) % 4]) >= edge)
+                !quad_contains(f, p.0, p.1) && (0..4).all(|i| to_segment(p, f[i], f[(i + 1) % 4]) >= edge - 1e-6)
             })
             && taken.iter().all(|s| clear(*s, p))
     };
@@ -254,7 +255,137 @@ fn ordered(
             best = (n, order);
         }
     }
+    // Then the staggered rows, where the greedy orders fall short (#467)
+    staggered(&c, edge, &fits, best.0, &mut |rows| {
+        let n = pack(&rows, taken, enough).len();
+        if n > best.0 {
+            best = (n, rows);
+        }
+        best.0 >= enough
+    });
     best.1
+}
+
+/// Rows of stations along each side of the lot, of two kinds. Even rows are
+/// spread over the lot's depth, each shifted from the last as far as its
+/// spacing needs (a square grid once they're [`SPOT_SPACING`] apart),
+/// started at a few phases along the side. Or a full row is `across`
+/// stations spread over the lot's width, and a shifted row stands between
+/// them, one fewer, as close to the rows either side as the spacing lets it
+/// (a hex packing at the closest). Each shifted row has full rows either
+/// side, and there are as many changes and full rows after full ones as the
+/// depth takes, the full ones first or last. They're spaced by
+/// construction, so each is a packing as it stands. `visit` is given those
+/// that might beat `best`, kept to the points that `fits`, and stops them by
+/// returning true.
+///
+/// On a box, the rows along its first two sides (at phase 0) pack no fewer
+/// on a box at least as large each way, so what a lot takes never falls as it grows
+/// (#467): the greedy orders alone left cliffs, a 150 × 120 box taking 6
+/// where a 140 × 127 one takes 8. The backend's copy is
+/// `models::station_room::staggered`: keep the two in step.
+fn staggered(c: &[P; 4], edge: f64, fits: &dyn Fn(P) -> bool, best: usize, visit: &mut dyn FnMut(Vec<P>) -> bool) {
+    let d = SPOT_SPACING;
+    let middle = ((c[0].0 + c[1].0 + c[2].0 + c[3].0) / 4.0, (c[0].1 + c[1].1 + c[2].1 + c[3].1) / 4.0);
+    for i in 0..4 {
+        let (a, b) = (c[i], c[(i + 1) % 4]);
+        let len = dist(a, b);
+        if len < 1e-9 {
+            continue;
+        }
+        let dir = ((b.0 - a.0) / len, (b.1 - a.1) / len);
+        // Across the lot from this side
+        let mut n = (-dir.1, dir.0);
+        if (middle.0 - a.0) * n.0 + (middle.1 - a.1) * n.1 < 0.0 {
+            n = (-n.0, -n.1);
+        }
+        let x = |p: P| (p.0 - a.0) * dir.0 + (p.1 - a.1) * dir.1;
+        let y = |p: P| (p.0 - a.0) * n.0 + (p.1 - a.1) * n.1;
+        let (x0, x1) = c.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &p| (lo.min(x(p)), hi.max(x(p))));
+        let (y0, y1) = c.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &p| (lo.min(y(p)), hi.max(y(p))));
+        let (wide, deep) = ((x1 - x0 - 2.0 * edge).max(0.0), (y1 - y0 - 2.0 * edge).max(0.0));
+        let at = |u: f64, v: f64| (a.0 + dir.0 * (x0 + edge + u) + n.0 * (y0 + edge + v), a.1 + dir.1 * (x0 + edge + u) + n.1 * (y0 + edge + v));
+        // Even rows spread over the depth, each shifted from the last as far
+        // as its spacing needs: a square grid once they're the spacing apart
+        let most_rows = (2.0 * deep / d + 1e-9).floor() as usize + 1;
+        for rows in 1..=most_rows {
+            let step_y = if rows > 1 { deep / (rows - 1) as f64 } else { 0.0 };
+            let shift = if rows > 1 && step_y < d { (d * d - step_y * step_y).sqrt() } else { 0.0 };
+            let step_x = d.max(2.0 * shift);
+            // No phase of these rows packs more than a full row each
+            if rows * ((wide / step_x + 1e-9).floor() as usize + 1) <= best {
+                continue;
+            }
+            for parity in 0..if shift > 0.0 { 2 } else { 1 } {
+                let mut phase = 0.0;
+                while phase < step_x - 1e-9 {
+                    let mut points = Vec::new();
+                    for k in 0..rows {
+                        let mut u = phase + ((k + parity) % 2) as f64 * shift - step_x;
+                        while u <= wide + 1e-6 {
+                            let p = at(u, k as f64 * step_y);
+                            if fits(p) {
+                                points.push(p);
+                            }
+                            u += step_x;
+                        }
+                    }
+                    if visit(points) {
+                        return;
+                    }
+                    phase += 2.0 * FINE;
+                }
+            }
+        }
+        for across in 1..=(wide / d + 1e-9).floor() as usize + 1 {
+            // A full row spread over the width, and a shifted row between its
+            // stations: with one across, the shifted row is at the far side
+            let (full, between, step, shift) = match across {
+                1 => (1, 1, 0.0, wide),
+                k => (k, k - 1, wide / (k - 1) as f64, wide / (k - 1) as f64 / 2.0),
+            };
+            // Rows apart: the spacing between two rows alike, less between a
+            // full one and a shifted one, but never so little that the rows
+            // either side of a shifted one come too close
+            let near = (d * d - shift * shift).max(0.0).sqrt().max(d / 2.0);
+            if most_rows * full <= best {
+                continue;
+            }
+            // `switches` changes between full and shifted rows, each shifted
+            // row alone between full ones, and `alike` full rows after full
+            // ones, all of it within the depth
+            for switches in 0..=(deep / near + 1e-9).floor() as usize {
+                let alike = ((deep - switches as f64 * near) / d + 1e-9).floor() as usize;
+                for alike_first in [true, false] {
+                    let mut gaps = vec![d; alike];
+                    let changes = (0..switches).map(|_| near);
+                    if alike_first {
+                        gaps.extend(changes);
+                    } else {
+                        gaps.splice(0..0, changes);
+                    }
+                    let mut points = Vec::new();
+                    let (mut v, mut shifted) = (0.0, false);
+                    for k in 0..=gaps.len() {
+                        if k > 0 {
+                            v += gaps[k - 1];
+                            shifted = gaps[k - 1] < d && !shifted;
+                        }
+                        let (count, start) = if shifted { (between, shift) } else { (full, 0.0) };
+                        for j in 0..count {
+                            let p = at(start + j as f64 * step, v);
+                            if fits(p) {
+                                points.push(p);
+                            }
+                        }
+                    }
+                    if visit(points) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The spots of `order` a station goes on, one at a time, each clear of
@@ -429,6 +560,25 @@ pub(crate) mod tests {
         }
     }
 
+    /// A box at least as large each way never takes fewer (#467), from 25
+    /// each way, where the edge is the full 10 (not quite everywhere, #563), as the backend's
+    /// `station_room` finds; and the cliffs the issue found are gone.
+    #[test]
+    fn a_larger_box_never_takes_fewer() {
+        let boxed = |w: f64, h: f64| [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
+        let sizes: Vec<f64> = (0..44).map(|k| 25.0 + 4.0 * k as f64).collect();
+        let most: Vec<Vec<usize>> = sizes.iter().map(|&w| sizes.iter().map(|&h| layout(boxed(w, h), 40).len()).collect()).collect();
+        for (i, row) in most.iter().enumerate() {
+            for (j, &n) in row.iter().enumerate() {
+                assert!(i == 0 || n >= most[i - 1][j], "{} × {}: {n} < {}", sizes[i], sizes[j], most[i - 1][j]);
+                assert!(j == 0 || n >= row[j - 1], "{} × {}: {n} < {}", sizes[i], sizes[j], row[j - 1]);
+            }
+        }
+        for (w, h) in [(150.0, 120.0), (140.0, 127.0), (160.0, 115.0), (130.0, 116.0)] {
+            assert!(takes(&lot(boxed(w, h), 0), 8), "{w} × {h} takes 8");
+        }
+    }
+
     /// An urban lot: 4 indoors and no yard, so every spot is inside, and a
     /// full building leaves none (V3.1, #473)
     #[test]
@@ -526,7 +676,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// The card's plan: the building's footprint, and the stations inside it first
+    /// The card's plan: the building's footprint, and the stations inside it
+    /// first, 5 of them in a hex row of 2, 1 and 2 since #467
     #[test]
     fn a_layout_fills_the_building_then_the_yard() {
         let corners = [(0.0, 0.0), (130.0, 0.0), (130.0, 130.0), (0.0, 130.0)];
@@ -534,7 +685,7 @@ pub(crate) mod tests {
         let f = f.expect("a house");
         assert_eq!(dots.len(), 6);
         let indoors = dots.iter().filter(|p| quad_contains(&f, p.0, p.1)).count();
-        assert_eq!(indoors, 4, "{dots:?}");
+        assert_eq!(indoors, 5, "{dots:?}");
         let (none, _) = layout_in(corners, Zone::GuildDistrict, 4);
         assert_eq!(none, None);
     }

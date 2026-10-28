@@ -79,7 +79,10 @@ pub enum OnOwned {
 /// (#459, `20261220_001_plots_v2_flip.sql`), when every zone moved out to its
 /// v2 ring: the new lots keep the `sub_` and `farm_` schemes. The urban lots
 /// kept theirs, since the first three rings of blocks didn't move.
-pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_", "urban_plot_", "rw2_"];
+///
+/// `repack_` is the farms the monotone packing rule reshaped or dropped
+/// (#467, `20270106_001_packing_rows.sql`): the new ones keep their ids.
+pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_", "urban_plot_", "rw2_", "repack_"];
 
 fn retired(terrain_id: &str) -> bool {
     RETIRED_LOTS.iter().any(|prefix| terrain_id.starts_with(prefix))
