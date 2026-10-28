@@ -2530,6 +2530,8 @@ mod tests {
         let player = crate::ws::load_player(&db, account).await.unwrap();
         game.add_player(PlayerState { x: CENTER_X, y: CENTER_Y, ..player });
         steer(&mut game, ada, 0, 10, Some((CENTER_X + 3.0, CENTER_Y)));
+        // The first tick stands (#480), then two walk
+        game.process_movement();
         game.process_movement();
         game.process_movement();
         assert!(game.players[&ada].steer.is_some());
