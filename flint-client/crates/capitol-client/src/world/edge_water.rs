@@ -7,7 +7,9 @@
 //! - **Where it runs.** A priority-flood comes in over the [`settled`]
 //!   land from a ring short of the flat ([`SINK`]), as W3's does from the
 //!   edge, so every cell drains out over the lowest pass it has. A course
-//!   leaves its mouth straight out, then follows that drainage.
+//!   leaves its mouth straight out, then follows that drainage. Near the
+//!   edge the flood sees the ground fall steeply outward ([`RIM`]), so no
+//!   course turns along the edge before its valley has come in (#479).
 //! - **Where they meet.** The widest go first. A course that reaches one
 //!   already run on joins it there as a tributary, level with it ([`meet`]):
 //!   where it arrives lower, the other comes down to it in rapids.
@@ -63,6 +65,13 @@ const VALLEY_SLOPE: f64 = 0.45;
 const VALLEY_REACH: f64 = 300.0;
 /// How far past the world's edge the valleys take to come in.
 const VALLEY_IN: f64 = 60.0;
+/// How far past [`INNER`] the flood keeps the drainage running out, and how
+/// steeply it slopes the ground it sees there down to that (rise over run,
+/// steeper than any range): within it, every cell drains out, so a course
+/// can't turn along the edge, where its inward bank would be the server's
+/// land, with no valley (#479).
+const RIM: f64 = 100.0;
+const RIM_SLOPE: f64 = 5.0;
 /// The valleys' index buckets (server units).
 const VALLEY_BUCKET: f64 = 150.0;
 /// A pond's radius: this many times its course's width, within limits.
@@ -578,7 +587,8 @@ impl Grid {
                 }
                 seen[c] = true;
                 grid.parent[c] = Some(at);
-                open.push(Open { level: h.max(level), seq, at: c });
+                let rim = (INNER + RIM - grid.radius(c)).max(0.0) * RIM_SLOPE;
+                open.push(Open { level: (h + rim).max(level), seq, at: c });
                 seq += 1;
             }
         }
@@ -799,9 +809,28 @@ mod tests {
         }
         eprintln!("valley sides: {steep} of {sides} climb over 1, the steepest {worst:.2}");
         assert!(sides > 1000, "{sides}");
-        // 1% until the 16600 world (#459), where a river runs along the
-        // edge and its inward bank keeps the ranges' slope: 2.2% (#479).
-        assert!(steep * 100 <= sides * 3, "{steep} of {sides} sides climb steeper than 45°");
+        assert!(steep * 100 <= sides, "{steep} of {sides} sides climb steeper than 45°");
+    }
+
+    #[test]
+    fn none_runs_along_the_edge() {
+        // Past its turn out of the mouth, every course keeps its inward bank
+        // far enough out that the valley has come in over the 90 the test
+        // above climbs (#479). river_23 used to run along at r8376 to r8413.
+        let clear = WILDERNESS_OUTER_RADIUS + VALLEY_IN + 90.0;
+        let mut nearest = f64::MAX;
+        for (was, now) in edge_courses() {
+            let mut along = 0.0;
+            for w in now.points[was.points.len() - 1..].windows(2) {
+                along += dist([w[0].x, w[0].y], [w[1].x, w[1].y]);
+                let bank = radius(&w[1]) - 0.5 * w[1].width;
+                if along > TURN_MAX {
+                    assert!(bank >= clear, "{} {along:.0} along: its bank at r{bank:.0}", now.id);
+                    nearest = nearest.min(bank);
+                }
+            }
+        }
+        eprintln!("the nearest bank past a turn: r{nearest:.0}");
     }
 
     #[test]
