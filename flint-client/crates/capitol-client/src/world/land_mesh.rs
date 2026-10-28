@@ -697,11 +697,18 @@ mod tests {
             })
             .unwrap();
         for lod in 0..LODS {
-            let started = std::time::Instant::now();
-            for _ in 0..4 {
-                build(&land.field, &shore, chunk, lod);
-            }
-            let each = started.elapsed().as_secs_f64() * 1000.0 / 4.0;
+            // The fastest of several builds, each timed alone: a busy machine
+            // only ever adds time, so the mean of a run measured the load as
+            // much as the build (47 ms against an idle 7, #575), while the
+            // fastest is near what a build costs. A build that does more work
+            // is slower every time, so this still finds it.
+            let each = (0..12)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    build(&land.field, &shore, chunk, lod);
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .fold(f64::INFINITY, f64::min);
             // Debug builds are several times slower than release.
             eprintln!("a chunk at stride {}: {each:.2} ms", 1 << lod);
             assert!(each < 40.0, "{each} ms at stride {}", 1 << lod);
