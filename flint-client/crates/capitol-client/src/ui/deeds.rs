@@ -490,11 +490,10 @@ fn slip(ui: &mut egui::Ui, view: &View, taxes: Vec<(Zone, i64)>) {
         });
 }
 
-/// A sample register for `--deeds-sample`: the default world's farms near
-/// the road in, as `/bureaucracy/free-lots?zone=rural` lists them. The
-/// streets are the default world's nearest the hall (#483), the numbers
-/// made up. Offline only the rural list is fed in; the other tabs fetch
-/// and wait ([#574](https://github.com/chrischaps/TheCapitol/issues/574)).
+/// A sample register for `--deeds-sample`: the default world's lots of
+/// `zone` near the hall, as `/bureaucracy/free-lots?zone=…` lists them, and
+/// what each tab is answered with offline (#574). The streets are the
+/// default world's nearest the hall (#483), the numbers made up.
 pub fn sample_lots(zone: Zone) -> FreeLotsResponse {
     use capitol_core::protocol::rules::{CENTER_X, CENTER_Y};
     let (r, fits, area, walk0) = match zone {

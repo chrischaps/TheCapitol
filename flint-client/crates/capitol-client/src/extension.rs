@@ -3538,7 +3538,7 @@ impl PlayerExtension for CapitolExtension {
         if let Some(facts) = &self.zone_card_sample {
             let _ = self.zone_card.show(ctx, Some(facts));
         }
-        if let Some(sample) = &self.deeds_sample {
+        if let Some(sample) = &mut self.deeds_sample {
             let view = ui::deeds::View {
                 facts: Some(&sample.facts),
                 lots: Some(&sample.lots),
@@ -3550,6 +3550,8 @@ impl PlayerExtension for CapitolExtension {
             match self.deeds.show(ctx, &view) {
                 Some(ui::deeds::Action::ShowMe(shown)) => self.shown_lot = Some(shown),
                 Some(ui::deeds::Action::StopShowing) => self.shown_lot = None,
+                // A tab's list comes from the sample, as the server would send it
+                Some(ui::deeds::Action::List(zone)) => sample.lots = ui::deeds::sample_lots(zone),
                 _ => {}
             }
             if let Some(lot) = &self.shown_chip {
