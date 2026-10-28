@@ -25,6 +25,9 @@ use capitol_core::state::GameState;
 use capitol_core::steering::Steering;
 use uuid::Uuid;
 
+/// Your id offline, which `--citizen-sample` leaves out of its row (#515).
+pub const ME: Uuid = Uuid::from_u128(1);
+
 /// You, offline, and your server. See the module docs.
 pub struct OfflineAvatar {
     round_trip: Duration,
@@ -59,7 +62,7 @@ impl OfflineAvatar {
 
     /// Stands you at `at`, in server units, on `ground`, connected at `now`.
     pub fn place(&mut self, now: Instant, at: (f64, f64), ground: Arc<Ground>) {
-        let server = Loopback::new(now, Uuid::from_u128(1), at, ground.clone())
+        let server = Loopback::new(now, ME, at, ground.clone())
             .named("You")
             .round_trip(self.round_trip);
         let mut motion = Motion::new();
@@ -104,7 +107,7 @@ impl OfflineAvatar {
             w.server.send(now, message);
         }
         let poses = w.motion.sample(now);
-        if let Some(p) = poses.iter().find(|p| p.id == Uuid::from_u128(1)) {
+        if let Some(p) = poses.iter().find(|p| p.id == ME) {
             w.at = (p.x, p.y);
         }
         Some((poses, &w.state))

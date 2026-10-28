@@ -552,8 +552,9 @@ impl CapitolExtension {
         focus::focus_holding(&candidates, (x, y), view, held.as_ref().map(|(k, id)| (*k, id.as_str())))
     }
 
-    /// Offline, the samples' nodes and stations, so a capture can show the
-    /// focus with no server (`--node-sample`, `--station-sample`).
+    /// Offline, the samples' nodes, stations and people, so a capture can
+    /// show the focus with no server (`--node-sample`, `--station-sample`,
+    /// `--citizen-sample`, #515).
     fn sample_candidates(&self) -> Vec<capitol_core::focus::Candidate> {
         use capitol_core::catalog::Catalog;
         use capitol_core::focus;
@@ -564,6 +565,9 @@ impl CapitolExtension {
         }
         if let Some(Some(b)) = &self.building_sample {
             out.extend(focus::from_state(&b.state));
+        }
+        if let Some(Some((state, _))) = &self.citizen_sample {
+            out.extend(focus::from_state(state));
         }
         if let Some(sample) = &self.node_sampled {
             let catalog = CATALOG.get_or_init(Catalog::fallback);
@@ -2113,14 +2117,19 @@ impl PlayerExtension for CapitolExtension {
                     let street = self.built.as_ref().and_then(|b| crate::entities::Street::at(&b.roads, t));
                     self.citizen_stroll = Some(Stroll { target: t, camera: c, street, from: ctx.clock.total_time });
                 }
-                *sample = Some(crate::entities::sample(t, c));
+                // With the avatar, it's you, and the row stands ahead of it (#515)
+                let you = self.offline_avatar.as_ref().map(|_| crate::offline_avatar::ME);
+                *sample = Some(crate::entities::sample(t, c, you));
             }
             if let Some(s) = self.citizen_stroll {
                 *sample = Some(crate::entities::stroll(s.target, s.camera, s.street, (ctx.clock.total_time - s.from) as f32));
             }
             if let Some((state, poses)) = sample {
                 let dt = ctx.clock.delta_time.min(0.1) as f32;
-                self.players.update(ctx, poses, state, dt, &self.shared);
+                // Once the avatar stands, it draws the row with you (#515)
+                if !self.offline_avatar.as_ref().is_some_and(|a| a.placed()) {
+                    self.players.update(ctx, poses, state, dt, &self.shared);
+                }
                 if let Some(talk) = &mut self.talk_sample {
                     let now = ctx.clock.total_time;
                     murmurs(&mut self.sound, &talk.tick(now, state, poses));
@@ -2141,7 +2150,14 @@ impl PlayerExtension for CapitolExtension {
             let walk_to = self.shared.move_to.lock().ok().and_then(|mut m| m.take());
             if let Some((poses, state)) = avatar.update(now, way, walk_to.map(|[x, y]| (x, y))) {
                 let dt = ctx.clock.delta_time.min(0.1) as f32;
-                self.players.update(ctx, poses, state, dt, &self.shared);
+                match self.citizen_sample.as_ref().and_then(|s| s.as_ref()) {
+                    // One update for both, or the second would drop the first's people
+                    Some(row) => {
+                        let (poses, state) = with_row(poses, state, row);
+                        self.players.update(ctx, &poses, &state, dt, &self.shared);
+                    }
+                    None => self.players.update(ctx, poses, state, dt, &self.shared),
+                }
             }
             if let Ok(mut d) = self.shared.destination.lock() {
                 *d = avatar.destination().map(|(x, y)| crate::coords::to_world(x, y));
@@ -3663,6 +3679,26 @@ fn speak(shared: &script_api::Shared, bubble: impl Fn(uuid::Uuid) -> Option<scri
             label.line = bubble(label.id);
         }
     }
+}
+
+/// Offline, the avatar's poses and store with `--citizen-sample`'s row in
+/// them, so one `Players` update draws you both (#515). The avatar's is the
+/// store you're `me` in.
+fn with_row(
+    poses: &[capitol_core::motion::Pose],
+    state: &capitol_core::state::GameState,
+    row: &(capitol_core::state::GameState, Vec<capitol_core::motion::Pose>),
+) -> (Vec<capitol_core::motion::Pose>, capitol_core::state::GameState) {
+    use capitol_core::protocol::ws::ServerMessage;
+    let (row_state, row_poses) = row;
+    let me = state.me();
+    let mut state = state.clone();
+    let mut poses = poses.to_vec();
+    for p in row_state.players().values().filter(|p| Some(p.id) != me) {
+        state.apply_ws(&ServerMessage::PlayerJoined { player: p.clone() });
+    }
+    poses.extend(row_poses.iter().filter(|p| Some(p.id) != me).cloned());
+    (poses, state)
 }
 
 /// A murmur for each line just heard: a local one where it was said, a

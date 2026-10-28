@@ -470,29 +470,36 @@ pub fn stroll(target: [f32; 2], camera: [f32; 2], street: Option<Street>, t: f32
 /// `--citizen-sample` (C0.2): people and citizens side by side, in a row
 /// across the view where the camera looks, turned a little toward it,
 /// with you in the middle, for captures of the mark.
-pub fn sample(target: [f32; 2], camera: [f32; 2]) -> (GameState, Vec<Pose>) {
+///
+/// With `--offline-avatar` the avatar is you (`stood_in`, its id) and
+/// stands where the camera looks, so the row stands [`AHEAD`] beyond it
+/// with Ada in your place: in reach and straight ahead, so a capture can
+/// put a person in focus and show the trade line (#515).
+pub fn sample(target: [f32; 2], camera: [f32; 2], stood_in: Option<Uuid>) -> (GameState, Vec<Pose>) {
     use capitol_core::net::ConnectionState;
     use capitol_core::protocol::ws::{PlayerPosition, ServerMessage};
     // Name, citizen, and guild tag (S4.4)
-    const ROW: [(&str, bool, Option<&str>); 5] = [
+    let row: [(&str, bool, Option<&str>); 5] = [
         ("Wren Ashby", false, Some("ROPE")),
         ("Corin", true, Some("ROPE")),
-        ("You", false, None),
+        (if stood_in.is_some() { "Ada" } else { "You" }, false, None),
         ("Tam Hollis", false, None),
         ("Elsbeth", true, Some("KILN")),
     ];
     const SPACING: f32 = 1.6;
-    let me = Uuid::from_u128(0xc0_02_00 + 2);
+    let me = stood_in.unwrap_or(Uuid::from_u128(0xc0_02_00 + 2));
     let mut state = GameState::new();
     state.apply_connection(&ConnectionState::Connected { player_id: me });
     let mut poses = Vec::new();
     let (dx, dz) = (camera[0] - target[0], camera[1] - target[1]);
     let len = dx.hypot(dz).max(1e-3);
     let across = [dz / len, -dx / len];
+    let ahead = if stood_in.is_some() { AHEAD } else { 0.0 };
+    let target = [target[0] - dx / len * ahead, target[1] - dz / len * ahead];
     // The server's heading toward the camera: east 0, south (+Z) π/2.
     let toward = f64::from(dz).atan2(f64::from(dx));
-    let mid = (ROW.len() as f32 - 1.0) / 2.0;
-    for (i, (name, citizen, tag)) in ROW.into_iter().enumerate() {
+    let mid = (row.len() as f32 - 1.0) / 2.0;
+    for (i, (name, citizen, tag)) in row.into_iter().enumerate() {
         let k = (i as f32 - mid) * SPACING;
         let [x, y] = crate::coords::to_server(target[0] + across[0] * k, target[1] + across[1] * k);
         let id = Uuid::from_u128(0xc0_02_00 + i as u128);
@@ -518,6 +525,11 @@ pub fn sample(target: [f32; 2], camera: [f32; 2]) -> (GameState, Vec<Pose>) {
     }
     (state, poses)
 }
+
+/// How far beyond you the sample's row stands when the avatar stands in
+/// for you (m): well inside a trade's reach, and far enough that the two
+/// beside Ada are off to the side of her.
+pub const AHEAD: f32 = 3.0;
 
 /// What the sample's row says (`--talk-sample`, Commons S1.2): who (their
 /// place in the row), when (game seconds) and the line. The second is long
@@ -903,7 +915,7 @@ mod tests {
 
     #[test]
     fn the_sample_stands_people_and_citizens_where_the_camera_looks() {
-        let (state, poses) = sample([10.0, 20.0], [10.0, 40.0]);
+        let (state, poses) = sample([10.0, 20.0], [10.0, 40.0], None);
         assert_eq!(poses.len(), 5);
         assert!(state
             .me()
@@ -920,6 +932,25 @@ mod tests {
                 "{x}, {z}"
             );
         }
+    }
+
+    #[test]
+    fn with_the_avatar_the_row_stands_ahead_and_ada_is_the_focus() {
+        use capitol_core::focus;
+        // You stand where the camera looks, and look away from it (#515)
+        let you = Uuid::from_u128(1);
+        let (state, poses) = sample([10.0, 20.0], [10.0, 40.0], Some(you));
+        assert_eq!(state.me(), Some(you));
+        assert_eq!(poses.len(), 5, "the whole row, none of it you");
+        assert!(poses.iter().all(|p| p.id != you));
+        let [x, y] = crate::coords::to_server(10.0, 20.0);
+        let [cx, cy] = crate::coords::to_server(10.0, 40.0);
+        let len = (x - cx).hypot(y - cy);
+        let view = ((x - cx) / len, (y - cy) / len);
+        let f = focus::focus(&focus::from_state(&state), (x, y), view).expect("someone in front");
+        assert_eq!(f.label, "Ada");
+        assert_eq!(f.shift_label.as_deref(), Some("Trade with Ada"));
+        assert!(f.distance <= capitol_core::protocol::rules::TRADE_RANGE, "{}", f.distance);
     }
 
     #[test]
