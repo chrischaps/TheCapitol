@@ -837,6 +837,12 @@ pub enum ServerMessage {
     /// To each member: the guild was dissolved for `owed` in unpaid dues
     /// (or closed as its last member left, with `owed` 0), and `share` of
     /// what its treasury held is yours. Sent as you come back if you were away.
+    /// Its hall's stations came down first (S4.3): their kits went home to
+    /// whoever placed them, and what was in them to whoever owns it
+    /// (`inventory_updated` comes first). What of yours found no room went to
+    /// your impound (#141), `impounded`, and `lost` found no room even there
+    /// (#512). Anyone with something there hears this too, member or not and
+    /// on a disbanding as well, with a `share` of 0 if they had none.
     #[serde(rename = "guild_dissolved")]
     GuildDissolved {
         guild_id: Uuid,
@@ -844,6 +850,10 @@ pub enum ServerMessage {
         tag: String,
         owed: i64,
         share: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        impounded: Vec<ItemCount>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lost: Vec<ItemCount>,
     },
     // Commons S2.6: wages (D7). The first three go to everyone, so the
     // board's Work page stays live.

@@ -298,8 +298,18 @@ pub enum StateEvent {
     /// to its officers and leader: at `dissolves_at` it's dissolved.
     GuildDues { guild_id: Uuid, guild: String, owed: i64, dissolves_at: i64 },
     /// Your guild was dissolved for its dues (`guild_dissolved`, S4.2), and
-    /// `share` of its treasury came to you.
-    GuildDissolved { guild_id: Uuid, guild: String, owed: i64, share: i64 },
+    /// `share` of its treasury came to you. Its hall came down first:
+    /// `impounded` is what of yours there your inventory had no room for,
+    /// waiting in your impound (#141), and `lost` what found no room even
+    /// there (#512).
+    GuildDissolved {
+        guild_id: Uuid,
+        guild: String,
+        owed: i64,
+        share: i64,
+        impounded: Vec<ItemCount>,
+        lost: Vec<ItemCount>,
+    },
     /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). Flint
     /// toasts it (E3.11).
     BazaarSale {
@@ -1064,11 +1074,13 @@ impl GameState {
                 owed: *owed,
                 dissolves_at: *dissolves_at,
             }),
-            M::GuildDissolved { guild_id, guild, owed, share, .. } => out.push(StateEvent::GuildDissolved {
+            M::GuildDissolved { guild_id, guild, owed, share, impounded, lost, .. } => out.push(StateEvent::GuildDissolved {
                 guild_id: *guild_id,
                 guild: guild.clone(),
                 owed: *owed,
                 share: *share,
+                impounded: impounded.clone(),
+                lost: lost.clone(),
             }),
             // Commons S2.6: wages, to everyone. The Work page's store keeps
             // them (`wages::Wages`, S2.7).

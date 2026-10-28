@@ -404,6 +404,17 @@ pub enum PlotNote {
         impounded: Vec<ItemCount>,
         lost: Vec<ItemCount>,
     },
+    /// Your guild `guild` closed: dissolved for `owed` in dues, or disbanded
+    /// with `owed` 0, and `share` of its treasury came to you. Its hall came
+    /// down first, and what of yours there your pack had no room for waits
+    /// in your impound (`impounded`); `lost` found no room even there (#512).
+    GuildClosed {
+        guild: String,
+        owed: i64,
+        share: i64,
+        impounded: Vec<ItemCount>,
+        lost: Vec<ItemCount>,
+    },
     /// Not about a plot, but a notice like the tax ones, and shown the same
     /// way: your subscription ran out at `until` (E4.1).
     SubscriptionLapsed {
@@ -3192,6 +3203,20 @@ impl Session {
                     } => self.plot_notes.push(PlotNote::Reclaimed {
                         refund: *refund,
                         deed: *deed,
+                        impounded: impounded.clone(),
+                        lost: lost.clone(),
+                    }),
+                    StateEvent::GuildDissolved {
+                        guild,
+                        owed,
+                        share,
+                        impounded,
+                        lost,
+                        ..
+                    } => self.plot_notes.push(PlotNote::GuildClosed {
+                        guild: guild.clone(),
+                        owed: *owed,
+                        share: *share,
                         impounded: impounded.clone(),
                         lost: lost.clone(),
                     }),

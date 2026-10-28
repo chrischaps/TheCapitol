@@ -68,7 +68,7 @@ use super::ledger::Flows;
 use super::notices;
 use super::plot_sync::release_plot;
 use super::property_tax::{charge_hour, foreclosure_threshold, notice_due, weekly_tax, TaxNotice};
-use super::station_removal::return_plot_stations;
+use super::station_removal::{return_plot_stations, ReturnedStations};
 use super::GameEvent;
 use crate::models::StationState;
 use capitol_protocol::rest::{GuildBooks, GuildEntry, GuildEntryKind, GuildHall, GuildTreasury, PlotGuild};
@@ -824,7 +824,8 @@ enum Closing {
 /// members by tenure ([`guild::share_by_tenure`]), the longest-serving first
 /// on a tie, and its roster and invitations are cleared. On a dissolution
 /// each member hears what they were given (`guild_dissolved`), queued for
-/// anyone away. Commit with [`super::ledger::commit`] and the `Told`'s
+/// anyone away, and anyone whose things from the hall went to their impound
+/// or were lost hears that in theirs, on a disbanding too (#512). Commit with [`super::ledger::commit`] and the `Told`'s
 /// flows, and give the game its halls ([`Told::release_halls`]).
 async fn close(
     conn: &mut PgConnection,
@@ -840,15 +841,16 @@ async fn close(
             .bind(guild_id)
             .fetch_optional(&mut *conn)
             .await?;
+    // What found no room went to its owner's impound, or was lost: each
+    // owner hears it in their `guild_dissolved` (#512)
+    let mut returned = ReturnedStations::default();
     if let Some((plot_id, assessed_value, tax_owed, terrain_id)) = hall {
-        // What found no room went to its owner's impound, and nobody is
-        // told so yet ([#512](https://github.com/chrischaps/TheCapitol/issues/512))
-        let returned = return_plot_stations(conn, plot_id).await?;
+        returned = return_plot_stations(conn, plot_id).await?;
         returned.count_into(&mut flows);
         let removed_stations = release_plot(conn, plot_id).await?;
         let refund = (assessed_value as i64 - tax_owed as i64).max(0);
         refund_hall(conn, guild_id, refund, "The hall's deed as the guild closed, less the tax it owed", now).await?;
-        halls.push(HallReleased { terrain_id, removed_stations, returned_to: returned.containers });
+        halls.push(HallReleased { terrain_id, removed_stations, returned_to: returned.containers.clone() });
     }
     let (treasury, owed): (i64, i64) = sqlx::query_as("SELECT treasury, dues_owed FROM guilds WHERE id = $1")
         .bind(guild_id)
@@ -887,19 +889,32 @@ async fn close(
         .map_err(|e| GuildError::Db(sqlx::Error::Protocol(e)))?;
         paid.push(*member);
     }
-    let mut notices = Vec::new();
+    // On a dissolution every member hears it. Whoever had something of
+    // theirs impounded or lost from the hall hears it too, member or not,
+    // and on a disbanding as well (#512)
+    let mut told: Vec<(Uuid, i64)> = Vec::new();
     if closing == Closing::Dissolved {
-        for (member, share) in members.iter().zip(&shares) {
-            let message = ServerMessage::GuildDissolved {
-                guild_id,
-                guild: held.name.clone(),
-                tag: held.tag.clone(),
-                owed,
-                share: *share,
-            };
-            let id = notices::queue(&mut *conn, *member, &guild_id.to_string(), &message).await?;
-            notices.push((*member, id, message));
+        told.extend(members.iter().copied().zip(shares.iter().copied()));
+    }
+    for (player, ..) in returned.impounded.iter().chain(&returned.lost) {
+        if !told.iter().any(|(p, _)| p == player) {
+            let share = members.iter().position(|m| m == player).map_or(0, |i| shares[i]);
+            told.push((*player, share));
         }
+    }
+    let mut notices = Vec::new();
+    for (player, share) in told {
+        let message = ServerMessage::GuildDissolved {
+            guild_id,
+            guild: held.name.clone(),
+            tag: held.tag.clone(),
+            owed,
+            share,
+            impounded: returned.impounded_for(player),
+            lost: returned.lost_for(player),
+        };
+        let id = notices::queue(&mut *conn, player, &guild_id.to_string(), &message).await?;
+        notices.push((player, id, message));
     }
     sqlx::query("DELETE FROM guild_members WHERE guild_id = $1")
         .bind(guild_id)
@@ -2505,6 +2520,105 @@ mod tests {
         assert_eq!((hall.terrain_id.as_deref(), &hall.removed_stations[..]), (Some("hall-1"), &[station][..]));
         assert_eq!(hall_row(&db, lot).await.0, None);
         assert_eq!(balances_of(&db, [ada]).await[&ada], 10_000 - guild::FOUNDING_FEE - 50, "all but the founding and the tax owed");
+        assert!(told.notices.is_empty(), "the kit found room, so a disbanding tells nobody");
         assert_audited(&db, &start).await;
+    }
+
+    /// What of a closing hall's finds no room goes to its owner's impound,
+    /// and each owner hears what in their `guild_dissolved`, member or not,
+    /// on a dissolution or a disbanding (#512)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_closing_halls_owners_hear_what_went_to_their_impound(db: PgPool) {
+        use capitol_protocol::ws::ItemCount;
+        let count = |item_type: &str, quantity| ItemCount { item_type: item_type.into(), quantity };
+        // A hall with a chest in it, its box holding someone else's rope
+        async fn chest_in(db: &PgPool, lot: Uuid, placer: Uuid, rope_owner: Uuid) {
+            let station = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality)
+                 SELECT $1, 'storage_chest', $2, world_x, world_y, id, 50 FROM plots WHERE id = $3",
+            )
+            .bind(station)
+            .bind(placer)
+            .bind(lot)
+            .execute(db)
+            .await
+            .unwrap();
+            let chest_box = Uuid::new_v4();
+            sqlx::query("INSERT INTO containers (id, container_type, station_id) VALUES ($1, 'station_inventory', $2)")
+                .bind(chest_box)
+                .bind(station)
+                .execute(db)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+                 VALUES ($1, 'rope', 60, 12, $2, $3, 0)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(rope_owner)
+            .bind(chest_box)
+            .execute(db)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE plots SET station_count = 1 WHERE id = $1").bind(lot).execute(db).await.unwrap();
+        }
+
+        // Dissolved: Ada and Bea are members, Cy isn't. None has an
+        // inventory, so Bea's kit and Cy's rope go to their impounds
+        let ada = subscriber(&db, "Ada", 10_000, 30).await;
+        let bea = player(&db, "Bea", 0).await;
+        let cy = player(&db, "Cy", 0).await;
+        let ropers = rope_walkers(&db, ada).await;
+        // The treasury pays Bea's roster fee
+        deposit(&db, ada, ropers, HALL + 600, at(0)).await.unwrap();
+        take_in(&db, ropers, ada, bea, 0).await;
+        let lot = hall_lot(&db, 1).await;
+        claim_hall(&db, ada, ropers, lot, &Tunables::default(), at(1)).await.unwrap();
+        chest_in(&db, lot, bea, cy).await;
+
+        let mut tx = db.begin().await.unwrap();
+        let held = hold(&mut tx, ropers).await.unwrap();
+        let mut told = close(&mut tx, ropers, &held, Closing::Dissolved, at(6)).await.unwrap();
+        super::super::ledger::commit(tx, std::mem::take(&mut told.flows)).await.unwrap();
+        let heard: Vec<(Uuid, i64, Vec<ItemCount>, Vec<ItemCount>)> = told
+            .notices
+            .iter()
+            .map(|(p, _, m)| match m {
+                ServerMessage::GuildDissolved { share, impounded, lost, .. } => (*p, *share, impounded.clone(), lost.clone()),
+                other => panic!("not a guild_dissolved: {other:?}"),
+            })
+            .collect();
+        let [(a, a_share, a_pound, a_lost), (b, b_share, b_pound, b_lost), (c, c_share, c_pound, c_lost)] = &heard[..] else {
+            panic!("Ada, Bea and Cy: {heard:?}")
+        };
+        assert_eq!((*a, *b, *c), (ada, bea, cy));
+        assert!(*a_share > 0 && *b_share > 0, "the members' shares: {a_share}, {b_share}");
+        assert_eq!(*c_share, 0, "Cy had no share");
+        assert!(a_pound.is_empty() && a_lost.is_empty(), "nothing of Ada's was there");
+        assert_eq!((&b_pound[..], b_lost.is_empty()), (&[count("chest_kit", 1)][..], true));
+        assert_eq!((&c_pound[..], c_lost.is_empty()), (&[count("rope", 12)][..], true));
+        // Queued for them, so they hear it as they come back
+        let rate = capitol_protocol::tunables::PROPERTY_TAX_RATE;
+        let waiting = notices::take_all(&db, cy, rate).await.unwrap();
+        assert!(
+            matches!(&waiting[..], [ServerMessage::GuildDissolved { impounded, .. }] if impounded == &[count("rope", 12)]),
+            "Cy's: {waiting:?}"
+        );
+
+        // Disbanded: Dee leaves her guild of one, and hears where her kit went
+        let dee = subscriber(&db, "Dee", 10_000, 30).await;
+        let alone = found(&db, dee, "Alone", "ALONE", "", at(6)).await.unwrap().0;
+        deposit(&db, dee, alone, HALL + 100, at(6)).await.unwrap();
+        let lot = hall_lot(&db, 2).await;
+        claim_hall(&db, dee, alone, lot, &Tunables::default(), at(6)).await.unwrap();
+        chest_in(&db, lot, dee, dee).await;
+        let told = leave(&db, dee, alone, at(7)).await.unwrap();
+        let [(p, _, ServerMessage::GuildDissolved { owed: 0, share, impounded, lost, .. })] = &told.notices[..] else {
+            panic!("Dee's: {:?}", told.notices)
+        };
+        assert_eq!((*p, *share > 0), (dee, true));
+        assert_eq!((&impounded[..], lost.is_empty()), (&[count("chest_kit", 1), count("rope", 12)][..], true));
     }
 }

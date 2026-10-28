@@ -1631,10 +1631,27 @@ fn guild_messages_are_reported() {
         state.apply_ws(&dues),
         vec![StateEvent::GuildDues { guild_id, guild: "The Rope Walkers".into(), owed: 130, dissolves_at: 260 }]
     );
-    let gone = M::GuildDissolved { guild_id, guild: "The Rope Walkers".into(), tag: "ROPE".into(), owed: 260, share: 12 };
+    // What of yours its hall had, gone to your impound (#512)
+    let kit = vec![capitol_protocol::ws::ItemCount { item_type: "chest_kit".into(), quantity: 1 }];
+    let gone = M::GuildDissolved {
+        guild_id,
+        guild: "The Rope Walkers".into(),
+        tag: "ROPE".into(),
+        owed: 260,
+        share: 12,
+        impounded: kit.clone(),
+        lost: vec![],
+    };
     assert_eq!(
         state.apply_ws(&gone),
-        vec![StateEvent::GuildDissolved { guild_id, guild: "The Rope Walkers".into(), owed: 260, share: 12 }]
+        vec![StateEvent::GuildDissolved {
+            guild_id,
+            guild: "The Rope Walkers".into(),
+            owed: 260,
+            share: 12,
+            impounded: kit,
+            lost: vec![],
+        }]
     );
 }
 

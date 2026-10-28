@@ -4288,6 +4288,32 @@ fn plots(
                 }
                 (title.into(), body)
             }
+            PlotNote::GuildClosed {
+                guild,
+                owed,
+                share,
+                impounded,
+                lost,
+            } => {
+                let catalog = session.state().catalog();
+                let (title, mut body) = if owed > 0 {
+                    (format!("{guild} was dissolved"), format!("{owed} Strands of dues went unpaid"))
+                } else {
+                    (format!("{guild} has closed"), "Its last member left".to_string())
+                };
+                if share > 0 {
+                    body.push_str(&format!(". {share} Strands of its treasury came to you"));
+                }
+                if !impounded.is_empty() {
+                    let held = ui::impound::counted(catalog, &impounded);
+                    body.push_str(&format!(". Its hall came down, and your pack was full: {held} wait in your impound"));
+                }
+                if !lost.is_empty() {
+                    let gone = ui::impound::counted(catalog, &lost);
+                    body.push_str(&format!(". No room even there for {gone}"));
+                }
+                (title, body)
+            }
         };
         let mut data = toml::Table::new();
         data.insert("title".into(), title.into());
