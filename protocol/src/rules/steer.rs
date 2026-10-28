@@ -12,6 +12,11 @@
 //!   past that the oldest goes.
 //! - **The lease.** A steer lapses after [`LEASE_TICKS`] ticks unless
 //!   another renews it, so a client that vanishes doesn't walk on forever.
+//! - **The first tick stands** (#480). A steer taken from standing walks
+//!   from the tick after, so the server's copy of the walk runs a whole
+//!   tick behind the prediction. A stop, made part way through a step,
+//!   then lands before the server walks that step: it walks on to `at` and
+//!   stops there, and never steps past it and back.
 //!
 //! [`Steering`] is a walker's steer under way, [`take`] takes a steer into
 //! it and [`tick`] walks a tick of it. The server walks its players with
@@ -57,6 +62,8 @@ pub struct Steering {
     pub waypoints: VecDeque<Waypoint>,
     /// Ticks until it lapses unless a steer renews it
     pub lease_ticks: u16,
+    /// Taken from standing and not yet ticked: its first tick stands (#480)
+    pub held: bool,
 }
 
 /// A point a steering walker walks to before going on.
@@ -92,6 +99,7 @@ pub fn take(steering: &mut Option<Steering>, from: (f64, f64), heading: u16, thr
         throttle: 0,
         waypoints: VecDeque::new(),
         lease_ticks: LEASE_TICKS,
+        held: true,
     });
     if let Some((x, y)) = at {
         let pace = [steering.throttle, throttle].into_iter().find(|&t| t > 0).unwrap_or(FULL);
@@ -116,6 +124,8 @@ pub fn take(steering: &mut Option<Steering>, from: (f64, f64), heading: u16, thr
 ///
 /// - A waypoint that can't be reached is dropped where the walk stopped.
 /// - Blocked on the heading, the walker stands and keeps the steer.
+/// - A steer's first tick stands, so the walk runs a tick behind the
+///   prediction and a stop lands before the step it cut short (#480).
 /// - The lease runs down a tick at a time, and the steer clears when it
 ///   runs out, or when a stop has walked its waypoints.
 ///
@@ -125,6 +135,10 @@ pub fn tick(steering: &mut Option<Steering>, from: (f64, f64), ground: &Ground, 
         return Step { x: from.0, y: from.1, blocked: None };
     };
     let step = match steer.waypoints.front().copied() {
+        _ if steer.held => {
+            steer.held = false;
+            Step { x: from.0, y: from.1, blocked: None }
+        }
         Some(wp) => {
             let to = (wp.x, wp.y);
             let near = (to.0 - from.0).stable_hypot(to.1 - from.1) < ARRIVAL_EPSILON;

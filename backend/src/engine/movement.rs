@@ -446,12 +446,23 @@ mod tests {
         (player.x, player.y)
     }
 
+    /// A steer taken from standing stands its first tick, so a stop lands
+    /// before the step it cuts short (#480).
+    fn stands_its_first_tick(player: &mut PlayerState, ground: &Ground) {
+        let was = at(player);
+        let result = process_movement(player, ground);
+        assert_eq!(at(player), was, "a steer's first tick stands");
+        assert!(result.blocked.is_none());
+        assert!(player.steer.is_some());
+    }
+
     #[test]
     fn a_steer_walks_its_heading_at_a_moves_speed() {
         let ground = &world().1;
         let mut walker = make_player(CENTER_X, CENTER_Y, Some(CENTER_X + 1000.0), Some(CENTER_Y));
         let mut steerer = make_player(CENTER_X, CENTER_Y, None, None);
         steer(&mut steerer, EAST, 10, None);
+        stands_its_first_tick(&mut steerer, ground);
         for _ in 0..10 {
             process_movement(&mut walker, ground);
             process_movement(&mut steerer, ground);
@@ -462,6 +473,7 @@ mod tests {
         // Half throttle, half the pace; and south is +y
         let mut half = make_player(CENTER_X, CENTER_Y, None, None);
         steer(&mut half, SOUTH, 5, None);
+        stands_its_first_tick(&mut half, ground);
         process_movement(&mut half, ground);
         assert!(near(at(&half), (CENTER_X, CENTER_Y + 2.5)), "{:?}", at(&half));
 
@@ -491,6 +503,7 @@ mod tests {
         let mut player = make_player(CENTER_X, CENTER_Y, None, None);
         // Heading south, from a corner 3 east
         steer(&mut player, SOUTH, 10, Some((CENTER_X + 3.0, CENTER_Y)));
+        stands_its_first_tick(&mut player, ground);
         process_movement(&mut player, ground);
         assert_eq!(at(&player), (CENTER_X + 3.0, CENTER_Y), "the tick that reaches the corner ends on it");
         process_movement(&mut player, ground);
@@ -504,6 +517,7 @@ mod tests {
         steer(&mut player, EAST, 5, None);
         // Speeding up at a corner 10 on: the server walks there at the old 5
         steer(&mut player, SOUTH, 10, Some((CENTER_X + 10.0, CENTER_Y)));
+        stands_its_first_tick(&mut player, ground);
         process_movement(&mut player, ground);
         assert!(near(at(&player), (CENTER_X + 2.5, CENTER_Y)), "{:?}", at(&player));
     }
@@ -513,6 +527,7 @@ mod tests {
         let ground = &world().1;
         let mut player = make_player(CENTER_X, CENTER_Y, None, None);
         steer(&mut player, EAST, 10, None);
+        stands_its_first_tick(&mut player, ground);
         process_movement(&mut player, ground);
         // The client stopped 12 further on than the server has it
         let stop = (CENTER_X + 17.0, CENTER_Y);
@@ -578,7 +593,8 @@ mod tests {
         }
         assert!(player.steer.is_none(), "30 ticks after the last steer");
         let walked = at(&player);
-        assert!(near(walked, (CENTER_X + f64::from(2 * LEASE_TICKS - 1), CENTER_Y)), "{walked:?}");
+        // A unit a tick, but for the first, which stands
+        assert!(near(walked, (CENTER_X + f64::from(2 * LEASE_TICKS - 2), CENTER_Y)), "{walked:?}");
         process_movement(&mut player, ground);
         assert_eq!(at(&player), walked, "and it stands");
     }
@@ -590,6 +606,7 @@ mod tests {
         let start = (CENTER_X + WILDERNESS_OUTER_RADIUS - 1.0, CENTER_Y);
         let mut player = make_player(start.0, start.1, None, None);
         steer(&mut player, EAST, 10, None);
+        stands_its_first_tick(&mut player, ground);
         for _ in 0..3 {
             let result = process_movement(&mut player, ground);
             assert!(result.blocked.is_some());

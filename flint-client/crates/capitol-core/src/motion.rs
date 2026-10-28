@@ -81,9 +81,9 @@
 //! that draws a step the server has already taken). Off both, the
 //! prediction moves to where the server will be after `lag` of the same
 //! steer, and keeps walking: it never stops for a standing server or a
-//! `movement_blocked`, and never follows. After a stop, the rest of the
-//! step it cut short is allowed too, since the server can have walked it
-//! before it heard. [`Loopback`] is a server to try it all against.
+//! `movement_blocked`, and never follows. The server's copy starts a tick
+//! late (`rules::steer`), so a stop lands before it walks past `at`, and it
+//! never walks back (#480). [`Loopback`] is a server to try it all against.
 //!
 //! [`Motion::sample`] fills a buffer the `Motion` owns and returns it, so it
 //! doesn't allocate once the buffer has grown to the number of players.
@@ -291,8 +291,10 @@ impl Motion {
         if let Some(local) = &mut self.local {
             if local.synced {
                 local.advance(now, &self.config, self.ground.as_deref());
+                let behind = local.walk.is_some().then(|| local.behind(now));
                 local.stop();
                 local.dest = Some((x, y));
+                local.joined = behind.map(|behind| [behind, (local.x, local.y), (x, y)]);
             }
         }
     }
@@ -629,10 +631,10 @@ struct Local {
     following: bool,
     /// Walking on a heading (T0.4), instead of to `dest`.
     walk: Option<Walk>,
-    /// The step a steer's stop cut short, from the stop to where the step
-    /// would have ended. The server may walk it before it hears the stop,
-    /// then walks back (#480).
-    cut: Option<((f64, f64), (f64, f64))>,
+    /// A click that ended a steer: where the server can be on the steer's
+    /// path when it hears (a lag and a tick back, up to here), and the
+    /// click. Its walk from there is somewhere in that triangle (#480).
+    joined: Option<[(f64, f64); 3]>,
     /// Added to the prediction when drawing. It decays to zero, so a
     /// correction blends instead of jumping.
     offset: (f64, f64),
@@ -665,7 +667,7 @@ impl Local {
             dest: None,
             following: false,
             walk: None,
-            cut: None,
+            joined: None,
             offset: (0.0, 0.0),
             facing: 0.0,
             advanced: now,
@@ -696,7 +698,15 @@ impl Local {
         self.dest = None;
         self.following = false;
         self.walk = None;
-        self.cut = None;
+        self.joined = None;
+    }
+
+    /// Where the server can be on the trail at `now`, at the most: a lag
+    /// and a tick back, since a steer's first tick stands (#480).
+    fn behind(&self, now: Instant) -> (f64, f64) {
+        let back = Duration::from_secs_f64(self.lag) + TICK;
+        let (x, y, _, _) = sample_at(self.trail.as_slice(), now.checked_sub(back).unwrap_or(now), Duration::ZERO);
+        (x, y)
     }
 
     /// Jumps straight to `(x, y)`: no blend, no trail. A click's walk stops;
@@ -707,7 +717,7 @@ impl Local {
         self.y = y;
         self.dest = None;
         self.following = false;
-        self.cut = None;
+        self.joined = None;
         self.offset = (0.0, 0.0);
         self.advanced = now;
         self.trail.reset(Sample { at: now, x, y });
@@ -850,14 +860,6 @@ impl Local {
             }
             return;
         }
-        // A steer's stop is where the prediction stood, part way through a
-        // step. A server that ticks early has walked the rest of the step
-        // before it hears, and walks back.
-        if let Some((a, b)) = self.cut {
-            if off_segment(a.0, a.1, b.0, b.1, sx, sy).0 <= config.reconcile_distance {
-                return;
-            }
-        }
         if self.walk.is_some() {
             // Steering: ahead on the steer's own path, as for a click below.
             if self.on_the_way(sx, sy, config, ground) {
@@ -885,6 +887,13 @@ impl Local {
         if let Some((dx, dy)) = self.dest {
             let (off, along) = off_segment(self.x, self.y, dx, dy, sx, sy);
             if off <= config.reconcile_distance && along <= config.speed * window {
+                return;
+            }
+        }
+        // A click that ended a steer: the server, a tick or more behind on
+        // the steer's path, walks to it from there (#480).
+        if let Some(corners) = self.joined {
+            if off_triangle(corners, sx, sy) <= config.reconcile_distance {
                 return;
             }
         }
@@ -972,7 +981,6 @@ impl Local {
             return None;
         }
         if throttle == 0 {
-            self.cut = Some(((self.x, self.y), walk.to));
             self.walk = None;
             return Some((self.x, self.y));
         }
@@ -1133,6 +1141,20 @@ fn nearest_on_trail(
         }
     }
     best
+}
+
+/// How far `(x, y)` is from the triangle `corners`: 0 inside it.
+fn off_triangle(corners: [(f64, f64); 3], x: f64, y: f64) -> f64 {
+    let side = |(ax, ay): (f64, f64), (bx, by): (f64, f64)| (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+    let [a, b, c] = corners;
+    let sides = [side(a, b), side(b, c), side(c, a)];
+    if sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0) {
+        return 0.0;
+    }
+    [(a, b), (b, c), (c, a)]
+        .into_iter()
+        .map(|(p, q)| off_segment(p.0, p.1, q.0, q.1, x, y).0)
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// How far `(x, y)` is from the segment `a`–`b`, and how far along it from

@@ -189,8 +189,11 @@ fn a_stop_ends_where_it_was_made_with_no_slide_on() {
             assert!(back <= 1e-9, "{}: stepped back {back}", play.label);
             let on = play.last().drawn.0 - released.0;
             assert!(on.abs() <= 1e-9, "{}: slid on {on} after letting go", play.label);
-            // And the server is there too.
+            // And the server is there too, and never walked past it and
+            // back, so nobody else saw a step back either (#480).
             assert!((play.last().server.0 - released.0).abs() <= 0.5, "{}", play.label);
+            let back = play.frames.windows(2).map(|w| w[0].server.0 - w[1].server.0).fold(0.0, f64::max);
+            assert!(back <= 1e-9, "{}: the server stepped back {back}", play.label);
         }
     });
 }

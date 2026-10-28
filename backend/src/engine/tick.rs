@@ -2129,7 +2129,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(told, [0, 20, 40]);
+        // From tick 1: a steer's first tick stands (#480)
+        assert_eq!(told, [1, 21, 41]);
         assert!(game.players[&id].steer.is_some(), "still pushing");
     }
 
