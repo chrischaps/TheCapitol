@@ -166,6 +166,10 @@ pub struct CapitolExtension {
     /// meshes, and whether it's in (the flat disc is open over the wilds
     /// once it is).
     land: world::land::Builder,
+    /// An offline capture (`--screenshot*` or `--exit-after`): the land and
+    /// the walk graph are waited for, so they come in on the same frame
+    /// every run (#469).
+    capture: bool,
     land_meshes: world::land_mesh::LandMeshes,
     land_in: bool,
     plot_panel: ui::plot::PlotPanel,
@@ -356,6 +360,7 @@ impl CapitolExtension {
             talk_sample: None,
             grass: world::grass::Grass::default(),
             land: world::land::Builder::default(),
+            capture: false,
             land_meshes: world::land_mesh::LandMeshes::default(),
             land_in: false,
             plot_panel: ui::plot::PlotPanel::default(),
@@ -630,6 +635,14 @@ impl CapitolExtension {
             base,
             top,
         }
+    }
+
+    /// An offline capture waits for its off-thread builds (#469): see
+    /// `capture`.
+    pub fn with_capture(mut self, on: bool) -> Self {
+        self.capture = on && self.session.is_none();
+        self.terrain.wait_for_walks = self.capture;
+        self
     }
 
     /// Play no sound (`--mute`, and every capture).
@@ -1024,7 +1037,8 @@ impl CapitolExtension {
             return;
         };
         let mut names = Vec::new();
-        if let Some(sampled) = self.land.take() {
+        let sampled = if self.capture { self.land.wait() } else { self.land.take() };
+        if let Some(sampled) = sampled {
             let field = std::sync::Arc::new(sampled.field);
             world::land::set(Some(field.clone()));
             if let Some(projector) = &self.shared.projector {

@@ -42,6 +42,9 @@ pub struct TerrainSource {
     ground: Option<Arc<Ground>>,
     /// `current`'s walk graph, for click-to-walk round the water (#267).
     walks: Walks,
+    /// Wait for the walk graph rather than walk straight until it's in:
+    /// an offline capture (#469).
+    pub wait_for_walks: bool,
     origin: Origin,
 }
 
@@ -74,9 +77,16 @@ impl Walks {
         Self { built: None, building: Some(rx) }
     }
 
-    fn get(&mut self) -> Option<Arc<WalkGraph>> {
+    /// The graph once it's in, or with `wait`, waited for: an offline
+    /// capture's, so a click walks the same way every run (#469).
+    fn get(&mut self, wait: bool) -> Option<Arc<WalkGraph>> {
         if let Some(rx) = &self.building {
-            match rx.try_recv() {
+            let got = if wait {
+                rx.recv().map_err(|_| mpsc::TryRecvError::Disconnected)
+            } else {
+                rx.try_recv()
+            };
+            match got {
                 Ok(graph) => {
                     self.built = Some(graph);
                     self.building = None;
@@ -115,6 +125,7 @@ impl TerrainSource {
             fetch: None,
             ground: Some(Arc::new(Ground::from_terrain(&terrain))),
             walks: Walks::build(&terrain),
+            wait_for_walks: false,
             current: Some(terrain),
             changed: true,
             origin: Origin::File,
@@ -138,6 +149,7 @@ impl TerrainSource {
             changed: cached.is_some(),
             ground: cached.as_ref().map(|t| Arc::new(Ground::from_terrain(t))),
             walks: cached.as_ref().map(Walks::build).unwrap_or_default(),
+            wait_for_walks: false,
             current: cached,
         }
     }
@@ -194,7 +206,7 @@ impl TerrainSource {
 
     /// The current terrain's walk graph, once it's built.
     pub fn walks(&mut self) -> Option<Arc<WalkGraph>> {
-        self.walks.get()
+        self.walks.get(self.wait_for_walks)
     }
 
     /// The current terrain's landmark of `kind`, such as the Exchange hall.

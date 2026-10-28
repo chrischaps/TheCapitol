@@ -270,6 +270,12 @@ impl Nodes {
                 }
             }
         }
+        // The far ones first, so a nearer node's ring is drawn over a
+        // farther one's, the same every run: they came in the store's
+        // `HashMap` order, which changes per process (#469).
+        let eye = [ctx.camera.position.x, ctx.camera.position.z];
+        let far = |m: &NodeMark| (m.at[0] - eye[0]).hypot(m.at[1] - eye[1]);
+        marks.sort_by(|a, b| far(b).total_cmp(&far(a)).then_with(|| a.id.cmp(&b.id)));
         if let Ok(mut shared) = shared.nodes.lock() {
             *shared = marks;
         }

@@ -314,6 +314,14 @@ impl Builder {
         self.pending = None;
         Some(field)
     }
+
+    /// The land asked for, waited for: an offline capture's, so it comes
+    /// in on the same frame every run (#469).
+    pub fn wait(&mut self) -> Option<Sampled> {
+        let field = self.pending.as_ref()?.recv().ok();
+        self.pending = None;
+        field
+    }
 }
 
 /// The land everything stands on, once it's in.

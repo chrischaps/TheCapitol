@@ -400,6 +400,9 @@ fn main() -> Result<()> {
         (args.screenshot_at.is_some() || args.screenshot_every.is_some())
             .then(|| PathBuf::from("renders/capitol.png"))
     });
+    // An offline run that shoots or stops on time waits for its off-thread
+    // builds, so the same run gives the same picture (#469)
+    let shooting = args.offline.is_some() && (screenshot.is_some() || args.exit_after.is_some());
     player.capture = flint_player::CaptureConfig::new(
         screenshot,
         args.screenshot_at.unwrap_or(0.0),
@@ -459,6 +462,7 @@ fn main() -> Result<()> {
         .with_citizen_sample(args.citizen_sample.as_deref())
         .with_talk_sample(args.talk_sample)
         .with_offline_avatar(args.offline_avatar)
+        .with_capture(shooting)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_controls(args.controls.or_else(|| capture.then_some(settings::ControlMode::Click)))
         // Captures keep no stats, so a recipe never writes the player's (T3.1)

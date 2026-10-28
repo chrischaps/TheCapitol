@@ -396,6 +396,13 @@ impl Stations {
             station.puffs(ctx, *id);
             station.smokes(ctx, *id, chimney);
         }
+        // The far ones first, so the scripts draw a nearer mark over a
+        // farther one. They came in the stations' `HashMap` order, which
+        // changes per process, so two marks that overlapped swapped which
+        // was in front between runs of the same capture (#469).
+        let eye = [ctx.camera.position.x, ctx.camera.position.z];
+        let far = |m: &StationMark| (m.at[0] - eye[0]).hypot(m.at[1] - eye[1]);
+        marks.sort_by(|a, b| far(b).total_cmp(&far(a)).then_with(|| a.id.cmp(&b.id)));
         if let Ok(mut shared) = shared.stations.lock() {
             *shared = marks;
         }
