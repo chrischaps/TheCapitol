@@ -97,8 +97,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let player_id = player.id;
-    // Who says this socket's lines, and from where while the avatar's away (S1.1)
-    let (my_name, my_citizen, home) = (player.name.clone(), player.citizen, (player.x, player.y));
     let key = authed.key;
     // A key with only `read` watches: it never holds the avatar (`api_keys`).
     let may_hold = key.is_none_or(|key| key.scopes.takes_presence());
@@ -109,6 +107,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         let mut game = state.game.write().await;
         game.open_socket(player_id, authed.holder, may_hold)
     };
+    // What it knows of its player between messages (#463)
+    let mut socket = Socket::new(&state, &player, authed.account_id, key, connection_id);
     // Fires when the socket's API key is revoked
     let (_unrevokable, unrevokable) = tokio::sync::oneshot::channel::<String>();
     let mut revoked = match key {
@@ -186,7 +186,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     // Handle messages and events
-    let mut subscribed_position = false;
     // The interest cell this socket's player was in at the last `positions`, and
     // whether the last one sent was empty, so one out of the world isn't sent
     // an empty list ten times a second (C0.4)
@@ -197,21 +196,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut seen: Option<std::sync::Arc<crate::engine::interest::Positions>> = None;
     // Whether everyone in the world was in sight in it, so nothing needs filtering
     let mut sees_everyone = false;
-    // The items whose market channel this connection watches (E3.3)
-    let mut market_items: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // This connection's command allowance (E0.7)
-    let limit_key = state.limiter.connection();
-    // Whether this socket holds the avatar, as its last `presence` said: only
-    // then does it hear local talk (Commons D1)
-    let mut holds_avatar = false;
-    // The newest Capitol line this socket has, from the backlog or since
-    let mut heard_capitol: u64 = 0;
-    // Who this socket's player has muted (S1.4): read on subscribe, and
-    // again whenever they mute or unmute someone, on any device
-    let mut muted: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
-    // The guild this socket's player is in (S4.4), whose talk it hears: read
-    // on subscribe, and again whenever their guild changes
-    let mut my_guild: Option<Uuid> = None;
 
     loop {
         tokio::select! {
@@ -220,7 +204,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             event = presence_events.recv() => {
                 match event {
                     Some(PresenceEvent::Changed { yours, held_by }) => {
-                        holds_avatar = yours;
+                        socket.holds_avatar = yours;
                         let msg = ServerMessage::Presence { yours, held_by };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
@@ -256,741 +240,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
-                            // Every `error` below names the command it refuses (#89).
-                            let command = client_msg.type_name();
-                            // Talk has its own bucket, so it never costs a step (Commons D2),
-                            // and so does steering, so a turn never costs a command (controls T0.3)
-                            let bucket = crate::rate_limit::Key::of_ws(limit_key, &client_msg);
-                            let allowance = bucket.map_or(Ok(()), |bucket| state.limiter.check(bucket));
-                            if allowance.is_err() && matches!(client_msg, ClientMessage::Steer { .. }) {
-                                // Dropped unanswered: the client never waits on a steer
-                                tracing::debug!("Rate limited WS steer from player {player_id}");
-                                continue;
-                            }
-                            if let Err(wait) = allowance {
-                                tracing::info!("Rate limited WS {command} from player {player_id}");
-                                let _ = sender.send(Message::Text(
-                                    serde_json::to_string(&ServerMessage::Error {
-                                        message: crate::rate_limit::ws_message(wait),
-                                        command: command.into(),
-                                    }).unwrap().into()
-                                )).await;
-                                continue;
-                            }
-                            if let Some(key) = key {
-                                let needed = api_keys::ws_scope(&client_msg);
-                                if !key.scopes.allows(needed) {
-                                    let msg = ServerMessage::Error {
-                                        message: api_keys::refusal(command, Some(needed)),
-                                        command: command.to_string(),
-                                    };
-                                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                    continue;
-                                }
-                            }
-                            // Only the socket holding the avatar drives it. A watcher may
-                            // still use the market and automation (E0.8).
-                            if presence::drives_avatar_ws(&client_msg)
-                                && !state.game.read().await.holds_presence(player_id, connection_id)
-                            {
-                                let msg = ServerMessage::Error {
-                                    message: presence::NOT_HOLDING.into(),
-                                    command: command.to_string(),
-                                };
+                            for msg in socket.handle(&state, client_msg).await {
                                 let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                continue;
-                            }
-                            match client_msg {
-                                ClientMessage::Subscribe { channel } => {
-                                    if channel == "position" {
-                                        let first = !subscribed_position;
-                                        subscribed_position = true;
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::Subscribed { channel }).unwrap().into()
-                                        )).await;
-                                        // What waited while they were away (#138). Events since
-                                        // auth are already on `event_rx`; whichever path takes a
-                                        // notice first sends it. A watcher takes none.
-                                        if first && state.game.read().await.holds_presence(player_id, connection_id) {
-                                            let rate = state.tunables.get().property_tax_rate;
-                                            match crate::engine::notices::take_all(&state.db, player_id, rate).await {
-                                                Ok(waiting) => {
-                                                    for msg in waiting {
-                                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                                    }
-                                                }
-                                                Err(e) => tracing::error!("Failed to load notices for {}: {:?}", player_id, e),
-                                            }
-                                        }
-                                        // The Capitol channel's last lines (S1.1), but the muted's
-                                        // (S1.4); any still on `event_rx` are numbered at or
-                                        // below `heard_capitol`
-                                        if first {
-                                            muted = read_mutes(&state, player_id, muted).await;
-                                            my_guild = read_guild(&state, player_id, my_guild).await;
-                                            let (seq, lines) = state.talk.backlog(&muted);
-                                            heard_capitol = seq;
-                                            for msg in lines {
-                                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                            }
-                                        }
-                                    }
-                                }
-                                ClientMessage::SubscribeMarket { item_type } => {
-                                    let refusal = if market_items.len() >= MARKET_CHANNELS && !market_items.contains(&item_type) {
-                                        Some(format!("Watch at most {MARKET_CHANNELS} items at once"))
-                                    } else {
-                                        match sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM item_types WHERE id = $1)")
-                                            .bind(&item_type)
-                                            .fetch_one(&state.db)
-                                            .await
-                                        {
-                                            Ok(true) => None,
-                                            Ok(false) => Some("There's no such item".to_string()),
-                                            Err(e) => Some(format!("Database error: {e}")),
-                                        }
-                                    };
-                                    let msg = match refusal {
-                                        Some(message) => ServerMessage::Error { message, command: command.into() },
-                                        None => {
-                                            market_items.insert(item_type.clone());
-                                            // The depth as last published: the diffs already on
-                                            // `event_rx` are at or below its `seq`, and the client skips them
-                                            let depth = state.market.depth(&item_type);
-                                            ServerMessage::MarketDepth { item_type, seq: depth.seq, full: true, levels: depth.levels }
-                                        }
-                                    };
-                                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                }
-                                ClientMessage::ClaimPresence => {
-                                    // A fresh row, for when the avatar has to come back into
-                                    // the world; one already there carries on as it is.
-                                    let claimed = match load_player(&state.db, authed.account_id).await {
-                                        Ok(player) => state
-                                            .game
-                                            .write()
-                                            .await
-                                            .claim_presence(player, connection_id)
-                                            .map_err(|why| why.to_string()),
-                                        Err(msg) => Err(msg),
-                                    };
-                                    if let Err(message) = claimed {
-                                        let msg = ServerMessage::Error { message, command: command.into() };
-                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                    }
-                                }
-                                // Talk (S1.1): the avatar's place now, or where it was last
-                                ClientMessage::Say { channel, text } => {
-                                    let (events, (x, y)) = {
-                                        let game = state.game.read().await;
-                                        let at = game.players.get(&player_id).map_or(home, |p| (p.x, p.y));
-                                        (game.event_sender.clone(), at)
-                                    };
-                                    let speaker = crate::engine::talk::Speaker {
-                                        player_id,
-                                        account_id: authed.account_id,
-                                        name: my_name.clone(),
-                                        citizen: my_citizen,
-                                        x,
-                                        y,
-                                        holds_avatar,
-                                        guild: my_guild,
-                                    };
-                                    match state.talk.say(&events, &state.limiter, speaker, channel, &text) {
-                                        // Judged here, untested: the socket has no harness (#463)
-                                        Ok(()) => {
-                                            crate::engine::tutorial::saw(&state.db, &events, player_id, crate::engine::tutorial::Did::Said(channel)).await;
-                                        }
-                                        Err(message) => {
-                                            let msg = ServerMessage::Error { message, command: command.into() };
-                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                        }
-                                    }
-                                }
-                                // What only the screen shows (#441, plan D7): taken for the
-                                // steps the client may report, and refused for the rest. The
-                                // market box's waiver is judged too (#446): `tutorial::seen`
-                                ClientMessage::TutorialSeen { step } => {
-                                    let events = state.game.read().await.event_sender.clone();
-                                    if let Err(message) = crate::engine::tutorial::seen(&state.db, &events, player_id, step).await {
-                                        let msg = ServerMessage::Error { message, command: command.into() };
-                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                    }
-                                }
-                                ClientMessage::UnsubscribeMarket { item_type } => match item_type {
-                                    Some(item_type) => {
-                                        market_items.remove(&item_type);
-                                    }
-                                    None => market_items.clear(),
-                                },
-                                ClientMessage::Move { x, y } => {
-                                    // Only a destination on the world disc (W1, #194)
-                                    if capitol_protocol::rules::in_world(x, y) {
-                                        let mut game = state.game.write().await;
-                                        game.queue_command(crate::engine::Command::Move {
-                                            player_id,
-                                            dest_x: x,
-                                            dest_y: y,
-                                        });
-                                    }
-                                }
-                                // Walk on a heading (T0.2): the tick checks `at` against where
-                                // the player is
-                                ClientMessage::Steer { heading, throttle, at } => {
-                                    state.game.write().await.queue_command(crate::engine::Command::Steer {
-                                        player_id,
-                                        heading,
-                                        throttle,
-                                        at: at.map(|[x, y]| (x, y)),
-                                    });
-                                }
-                                ClientMessage::Extract { node_id } => {
-                                    if let Ok(node_uuid) = Uuid::parse_str(&node_id) {
-                                        // Grass on someone's lot is theirs (#102), unless
-                                        // they're on a wage shift for it (Commons D7)
-                                        let (wage, refusal) = match crate::engine::container_access::gathering_terms(
-                                            &state.db, &state.game, player_id, node_uuid,
-                                        ).await {
-                                            Ok(Ok(wage)) => (wage, None),
-                                            Ok(Err(why)) => (None, Some(why)),
-                                            Err(e) => (None, Some(format!("Database error: {}", e))),
-                                        };
-                                        // The best tool for it, if it takes one (E1.5)
-                                        let tool = crate::engine::tools::tool_for_node(
-                                            &state.db, &state.game, player_id, node_uuid,
-                                        ).await;
-                                        let (tool, refusal) = match tool {
-                                            Ok(tool) => (tool, refusal),
-                                            Err(e) => (None, refusal.or(Some(format!("Database error: {}", e)))),
-                                        };
-                                        if let Some(reason) = refusal {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::ExtractionFailed {
-                                                    player_id,
-                                                    reason,
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                        let mut game = state.game.write().await;
-                                        game.queue_command(crate::engine::Command::StartExtraction {
-                                            player_id,
-                                            node_id: node_uuid,
-                                            tool,
-                                            wage,
-                                        });
-                                    } else {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::ExtractionFailed {
-                                                player_id,
-                                                reason: format!("Invalid resource node id '{}'", node_id),
-                                            }).unwrap().into()
-                                        )).await;
-                                    }
-                                }
-                                ClientMessage::CancelExtraction => {
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::CancelExtraction {
-                                        player_id,
-                                    });
-                                }
-                                // M3: Crafting
-                                ClientMessage::Craft { recipe_id, input_item_ids } => {
-                                    // Parse input item IDs
-                                    let item_uuids: Vec<Uuid> = input_item_ids
-                                        .iter()
-                                        .filter_map(|id| Uuid::parse_str(id).ok())
-                                        .collect();
-
-                                    // Fetch items from database to validate ownership and get qualities
-                                    let items = fetch_player_items(&state, player_id, &item_uuids).await;
-
-                                    if items.is_empty() && !item_uuids.is_empty() {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::CraftingFailed {
-                                                player_id,
-                                                reason: "Invalid or unauthorized items".to_string(),
-                                            }).unwrap().into()
-                                        )).await;
-                                        continue;
-                                    }
-
-                                    let tool = match crate::engine::tools::tool_for_recipe(&state.db, &state.game, player_id, &recipe_id).await {
-                                        Ok(tool) => tool,
-                                        Err(e) => {
-                                            tracing::error!("Tool lookup for {} failed: {:?}", player_id, e);
-                                            None
-                                        }
-                                    };
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::StartCrafting {
-                                        player_id,
-                                        recipe_id,
-                                        inputs: items,
-                                        tool,
-                                    });
-                                }
-                                ClientMessage::CancelCrafting => {
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::CancelCrafting {
-                                        player_id,
-                                    });
-                                }
-                                // M3.5: Inventory
-                                ClientMessage::MoveItem { item_id, target_container_id, target_slot } => {
-                                    let item_uuid = match Uuid::parse_str(&item_id) {
-                                        Ok(id) => id,
-                                        Err(_) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: "Invalid item ID".to_string(),
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-                                    let container_uuid = match Uuid::parse_str(&target_container_id) {
-                                        Ok(id) => id,
-                                        Err(_) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: "Invalid container ID".to_string(),
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-
-                                    // Handle move directly via database (synchronous for immediate feedback)
-                                    match handle_move_item(&state, player_id, item_uuid, container_uuid, target_slot).await {
-                                        Ok(source_container) => {
-                                            // A move between containers changes both,
-                                            // so name each one that changed (#77).
-                                            for container_id in moved_containers(source_container, container_uuid) {
-                                                let msg = ServerMessage::InventoryUpdated { player_id, container_id };
-                                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: e,
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                        }
-                                    }
-                                }
-                                ClientMessage::SplitStack { item_id, quantity, to_slot, to_container_id, qualities } => {
-                                    let parsed = Uuid::parse_str(&item_id)
-                                        .map_err(|_| "Invalid item ID")
-                                        .and_then(|item| match to_container_id.as_deref().map(Uuid::parse_str) {
-                                            None => Ok((item, None)),
-                                            Some(Ok(to)) => Ok((item, Some(to))),
-                                            Some(Err(_)) => Err("Invalid container ID"),
-                                        });
-                                    let (item_uuid, to_container) = match parsed {
-                                        Ok(ids) => ids,
-                                        Err(message) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: message.to_string(),
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-                                    match handle_split_stack(&state, player_id, item_uuid, quantity, to_container, to_slot, qualities.as_ref()).await {
-                                        // Into another container, both changed (#190)
-                                        Ok((source, target)) => {
-                                            for container_id in moved_containers(Some(source), target) {
-                                                let msg = ServerMessage::InventoryUpdated { player_id, container_id };
-                                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                            }
-                                        }
-                                        Err(message) => {
-                                            let msg = ServerMessage::Error { message, command: command.into() };
-                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                        }
-                                    }
-                                }
-                                // M4: Stations
-                                ClientMessage::PlaceStation { station_type, x, y, kit_item_id, floor } => {
-                                    let kit_uuid = match Uuid::parse_str(&kit_item_id) {
-                                        Ok(id) => id,
-                                        Err(_) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: "Invalid kit item ID".to_string(),
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-
-                                    match crate::engine::station_placement::place_station(&state, player_id, &station_type, x, y, floor, kit_uuid).await {
-                                        Ok(result) => {
-                                            result.remember(&state).await;
-                                            let station_info = result.info;
-
-                                            // Notify client
-                                            let msg = ServerMessage::StationPlaced {
-                                                station_id: station_info.id,
-                                                station_type: station_info.station_type,
-                                                name: station_info.name,
-                                                owner_id: station_info.owner_id,
-                                                x: station_info.x,
-                                                y: station_info.y,
-                                                container_id: station_info.container_id.unwrap_or(Uuid::nil()),
-                                                quality: station_info.quality,
-                                                indoors: station_info.indoors,
-                                                floor: station_info.floor,
-                                            };
-                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                        }
-                                        Err(e) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e.message(), command: command.into() }).unwrap().into()
-                                            )).await;
-                                        }
-                                    }
-                                }
-                                ClientMessage::RemoveStation { station_id } => {
-                                    let station_uuid = match Uuid::parse_str(&station_id) {
-                                        Ok(id) => id,
-                                        Err(_) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: "Invalid station ID".to_string(),
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-
-                                    match crate::engine::station_removal::remove_station(&state.db, player_id, station_uuid).await {
-                                        Ok(removed) => {
-                                            // Everyone sees it go. The owner's inventory now holds the
-                                            // kit and their things from the box, and a guest's deposit
-                                            // went back to the guest (#489).
-                                            let mut game = state.game.write().await;
-                                            game.stations.remove(&station_uuid);
-                                            let _ = game.event_sender.send(GameEvent::StationRemoved { station_id: station_uuid });
-                                            for (player_id, container_id) in removed.returned_to {
-                                                let _ = game.event_sender.send(GameEvent::InventoryUpdated {
-                                                    player_id,
-                                                    container_id,
-                                                    slots: vec![],
-                                                });
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e.message(), command: command.into() }).unwrap().into()
-                                            )).await;
-                                        }
-                                    }
-                                }
-                                ClientMessage::InstallTool { station_id, item_id } => {
-                                    let (Ok(station_uuid), Ok(item_uuid)) = (Uuid::parse_str(&station_id), Uuid::parse_str(&item_id)) else {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::Error {
-                                                message: "Invalid station or item ID".to_string(),
-                                                command: command.into(),
-                                            }).unwrap().into()
-                                        )).await;
-                                        continue;
-                                    };
-                                    let at = live_position(&state.game, player_id).await;
-                                    let result = crate::engine::station_tools::install_tool(&state.db, player_id, station_uuid, item_uuid, at).await;
-                                    announce_tool_slot(&state, &mut sender, player_id, station_uuid, command, result).await;
-                                }
-                                ClientMessage::RemoveTool { station_id } => {
-                                    let Ok(station_uuid) = Uuid::parse_str(&station_id) else {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::Error {
-                                                message: "Invalid station ID".to_string(),
-                                                command: command.into(),
-                                            }).unwrap().into()
-                                        )).await;
-                                        continue;
-                                    };
-                                    let at = live_position(&state.game, player_id).await;
-                                    let result = crate::engine::station_tools::remove_tool(&state.db, player_id, station_uuid, at).await;
-                                    announce_tool_slot(&state, &mut sender, player_id, station_uuid, command, result).await;
-                                }
-                                ClientMessage::ConfigureAutomation { ref station_id, .. }
-                                | ClientMessage::StartAutomation { ref station_id }
-                                | ClientMessage::StopAutomation { ref station_id } => {
-                                    let Ok(station_uuid) = Uuid::parse_str(station_id) else {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::Error {
-                                                message: "Invalid station ID".to_string(),
-                                                command: command.into(),
-                                            }).unwrap().into()
-                                        )).await;
-                                        continue;
-                                    };
-                                    let (recipes, events) = {
-                                        let game = state.game.read().await;
-                                        (game.recipes.clone(), game.event_sender.clone())
-                                    };
-                                    let result = match &client_msg {
-                                        ClientMessage::ConfigureAutomation { recipe_id, mode, .. } => {
-                                            crate::engine::automation::configure(&state.db, &events, &recipes, player_id, station_uuid, recipe_id, *mode).await
-                                        }
-                                        ClientMessage::StartAutomation { .. } => {
-                                            crate::engine::automation::start(&state.db, &recipes, player_id, station_uuid).await
-                                        }
-                                        _ => crate::engine::automation::stop(&state.db, player_id, station_uuid).await,
-                                    };
-                                    match result {
-                                        Ok(automation) => {
-                                            let game = state.game.read().await;
-                                            crate::engine::automation::announce(&game, station_uuid, automation);
-                                        }
-                                        Err(e) => {
-                                            let msg = ServerMessage::Error { message: e.message(), command: command.into() };
-                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                        }
-                                    }
-                                }
-                                ClientMessage::OpenStation { station_id } => {
-                                    let station_uuid = match Uuid::parse_str(&station_id) {
-                                        Ok(id) => id,
-                                        Err(_) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: "Invalid station ID".to_string(),
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-
-                                    match handle_open_station(&state, player_id, station_uuid).await {
-                                        Ok((station_type, name, container_id)) => {
-                                            let msg = ServerMessage::StationOpened {
-                                                player_id,
-                                                station_id: station_uuid,
-                                                station_type,
-                                                name,
-                                                container_id,
-                                            };
-                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                        }
-                                        Err(e) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e, command: command.into() }).unwrap().into()
-                                            )).await;
-                                        }
-                                    }
-                                }
-                                ClientMessage::CloseStation => {
-                                    let msg = ServerMessage::StationClosed { player_id };
-                                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                                }
-                                ClientMessage::CraftAtStation { station_id, recipe_id, input_item_ids } => {
-                                    let station_uuid = match Uuid::parse_str(&station_id) {
-                                        Ok(id) => id,
-                                        Err(_) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::CraftingFailed {
-                                                    player_id,
-                                                    reason: "Invalid station ID".to_string(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-
-                                    // The same station rule as opening it (#80). The
-                                    // tick checks range again, but not who may use it.
-                                    let at = live_position(&state.game, player_id).await;
-                                    let wage = match check_station_use(&state.db, player_id, station_uuid, at).await {
-                                        Ok(StationUse::Free { .. }) => None,
-                                        Ok(StationUse::Shift(work)) => Some(work),
-                                        Err(e) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::CraftingFailed {
-                                                    player_id,
-                                                    reason: e.message(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-                                    // Worn out by the weather, it's out of use by hand too (V3.2)
-                                    if let Ok(Some(reason)) = crate::engine::weather::out_of_use(&state.db, station_uuid).await {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::CraftingFailed { player_id, reason }).unwrap().into()
-                                        )).await;
-                                        continue;
-                                    }
-                                    // On a wage shift, only the offer's recipe (Commons D7)
-                                    if let Some(reason) = wage.as_ref().and_then(|w| crate::engine::wages::recipe_refusal(w, &recipe_id)) {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::CraftingFailed { player_id, reason }).unwrap().into()
-                                        )).await;
-                                        continue;
-                                    }
-
-                                    let item_uuids: Vec<Uuid> = input_item_ids
-                                        .iter()
-                                        .filter_map(|id| Uuid::parse_str(id).ok())
-                                        .collect();
-
-                                    // Fetch items for crafting validation: the player's
-                                    // own, or on a wage shift the station box's
-                                    let items = match &wage {
-                                        Some(_) => fetch_box_items(&state, station_uuid, &item_uuids).await,
-                                        None => fetch_player_items(&state, player_id, &item_uuids).await,
-                                    };
-
-                                    if items.is_empty() && !item_uuids.is_empty() {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::CraftingFailed {
-                                                player_id,
-                                                reason: "Invalid or unauthorized items".to_string(),
-                                            }).unwrap().into()
-                                        )).await;
-                                        continue;
-                                    }
-
-                                    // The station's own tool if it holds the right one (E1.6)
-                                    let tool = match crate::engine::station_tools::tool_for_station_recipe(&state.db, &state.game, player_id, station_uuid, &recipe_id).await {
-                                        Ok(tool) => tool,
-                                        Err(e) => {
-                                            tracing::error!("Tool lookup for {} failed: {:?}", player_id, e);
-                                            None
-                                        }
-                                    };
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::CraftAtStation {
-                                        player_id,
-                                        station_id: station_uuid,
-                                        recipe_id,
-                                        inputs: items,
-                                        tool,
-                                        wage,
-                                    });
-                                }
-                                // M5: Trading
-                                ClientMessage::TradeInitiate { target_player_id } => {
-                                    let target_uuid = match Uuid::parse_str(&target_player_id) {
-                                        Ok(id) => id,
-                                        Err(_) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error {
-                                                    message: "Invalid player ID".to_string(),
-                                                    command: command.into(),
-                                                }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::InitiateTrade {
-                                        player_id,
-                                        target_player_id: target_uuid,
-                                    });
-                                }
-                                ClientMessage::TradeAcceptRequest => {
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::AcceptTradeRequest {
-                                        player_id,
-                                    });
-                                }
-                                ClientMessage::TradeDeclineRequest => {
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::DeclineTradeRequest {
-                                        player_id,
-                                    });
-                                }
-                                ClientMessage::TradeOffer { items, strands } => {
-                                    let offer_lines = match validate_trade_offer(&state, player_id, &items, strands).await {
-                                        Ok(lines) => lines,
-                                        Err(message) => {
-                                            let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message, command: command.into() }).unwrap().into()
-                                            )).await;
-                                            continue;
-                                        }
-                                    };
-
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::UpdateTradeOffer {
-                                        player_id,
-                                        items: offer_lines,
-                                        strands,
-                                    });
-                                }
-                                ClientMessage::TradeAccept => {
-                                    // Handle acceptance directly (not queued) to avoid race condition
-                                    let (should_execute, trade_id_opt) = {
-                                        let mut game = state.game.write().await;
-                                        match game.trade_manager.set_accepted(player_id, true) {
-                                            Ok(both_accepted) => {
-                                                if let Some(trade) = game.trade_manager.get_player_trade(player_id) {
-                                                    let trade_id = trade.id;
-                                                    // Broadcast that this player accepted
-                                                    let _ = game.event_sender.send(GameEvent::TradeAccepted {
-                                                        trade_id,
-                                                        player_id,
-                                                    });
-                                                    (both_accepted, Some(trade_id))
-                                                } else {
-                                                    (false, None)
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!("Trade accept failed: {}", e);
-                                                let _ = sender.send(Message::Text(
-                                                    serde_json::to_string(&ServerMessage::Error { message: e, command: command.into() }).unwrap().into()
-                                                )).await;
-                                                (false, None)
-                                            }
-                                        }
-                                    };
-
-                                    if should_execute {
-                                        // Execute trade with DB access
-                                        match execute_trade(&state, player_id).await {
-                                            Ok((trade_id, balances)) => {
-                                                // Broadcast trade executed, and tell each side its balance
-                                                let game = state.game.read().await;
-                                                let _ = game.event_sender.send(GameEvent::TradeExecuted { trade_id });
-                                                announce_balances(&game.event_sender, balances);
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("Trade execution failed: {}", e);
-                                                // Cancel the trade
-                                                let mut game = state.game.write().await;
-                                                if let Some(trade_id) = trade_id_opt {
-                                                    let _ = game.trade_manager.cancel_trade(player_id);
-                                                    let _ = game.event_sender.send(GameEvent::TradeCancelled {
-                                                        trade_id,
-                                                        reason: e,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                ClientMessage::TradeCancel => {
-                                    let mut game = state.game.write().await;
-                                    game.queue_command(crate::engine::Command::CancelTrade {
-                                        player_id,
-                                    });
-                                }
-                                _ => {}
                             }
                         }
                     }
@@ -1006,9 +257,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
 
-            // Handle game events
+            // Handle game events: still inline here, so untested (#566)
             heard = event_rx.recv() => {
-                if !subscribed_position {
+                if !socket.subscribed_position {
                     continue;
                 }
                 let event = match heard {
@@ -1023,10 +274,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         seen = None;
                         sees_everyone = false;
                         // A `mutes_changed` may be among what it missed
-                        muted = read_mutes(&state, player_id, muted).await;
+                        socket.muted = read_mutes(&state, player_id, socket.muted).await;
                         // And a `guild_changed`
-                        my_guild = read_guild(&state, player_id, my_guild).await;
-                        let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &market_items).await;
+                        socket.my_guild = read_guild(&state, player_id, socket.my_guild).await;
+                        let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &socket.market_items).await;
                         let mut sent = Ok(());
                         for msg in messages {
                             sent = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
@@ -1086,16 +337,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     // Talk (S1.1): local by the cell and then the distance, Capitol to all
                     Ok(GameEvent::Said { seq, line }) => {
-                        let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > heard_capitol;
-                        if fresh && crate::engine::talk::hears(&line, player_id, holds_avatar, seen.as_deref(), my_cell, &muted, my_guild) {
-                            heard_capitol = heard_capitol.max(seq);
+                        let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > socket.heard_capitol;
+                        if fresh && crate::engine::talk::hears(&line, player_id, socket.holds_avatar, seen.as_deref(), my_cell, &socket.muted, socket.my_guild) {
+                            socket.heard_capitol = socket.heard_capitol.max(seq);
                             let _ = sender.send(Message::Text(serde_json::to_string(&line.message()).unwrap().into())).await;
                         }
                     }
                     // They muted or unmuted someone, here or on another device (S1.4)
                     Ok(GameEvent::MutesChanged { player_id: who }) => {
                         if who == player_id {
-                            muted = read_mutes(&state, player_id, muted).await;
+                            socket.muted = read_mutes(&state, player_id, socket.muted).await;
                         }
                     }
                     // Their guild changed, or they joined or left one (S4.1)
@@ -1107,7 +358,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Ok(GameEvent::GuildChanged { guild_id, players }) => {
                         if players.contains(&player_id) {
                             // In, out or still in: whose talk it hears (S4.4)
-                            my_guild = read_guild(&state, player_id, my_guild).await;
+                            socket.my_guild = read_guild(&state, player_id, socket.my_guild).await;
                             let msg = ServerMessage::GuildChanged { guild_id };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
@@ -1404,13 +655,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                     }
                     Ok(GameEvent::MarketDepth { item_type, seq, levels }) => {
-                        if market_items.contains(&item_type) {
+                        if socket.market_items.contains(&item_type) {
                             let msg = ServerMessage::MarketDepth { item_type, seq, full: false, levels };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
                     Ok(GameEvent::MarketTrade { trade }) => {
-                        if market_items.contains(&trade.item_type) {
+                        if socket.market_items.contains(&trade.item_type) {
                             let msg = ServerMessage::MarketTrade { trade };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
@@ -1457,6 +708,751 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         tracing::info!("Player {} disconnected", player_id);
     } else {
         tracing::info!("Player {}'s watching connection {} ended", player_id, connection_id);
+    }
+}
+
+/// What one socket knows of its player between messages (#463): who it is,
+/// and what it has asked to hear. The socket's loop keeps it, and `handle`
+/// reads and changes it, so a test can drive it without a socket.
+pub(crate) struct Socket {
+    player_id: Uuid,
+    account_id: Uuid,
+    connection_id: u64,
+    /// The API key it signed in with, if it did
+    key: Option<KeyGrant>,
+    /// Who says this socket's lines, and from where while the avatar's away (S1.1)
+    name: String,
+    citizen: bool,
+    home: (f64, f64),
+    /// This connection's command allowance (E0.7)
+    limit_key: crate::rate_limit::Key,
+    subscribed_position: bool,
+    /// The items whose market channel this connection watches (E3.3)
+    market_items: std::collections::HashSet<String>,
+    /// Whether this socket holds the avatar, as its last `presence` said: only
+    /// then does it hear local talk (Commons D1)
+    holds_avatar: bool,
+    /// The newest Capitol line this socket has, from the backlog or since
+    heard_capitol: u64,
+    /// Who this socket's player has muted (S1.4): read on subscribe, and
+    /// again whenever they mute or unmute someone, on any device
+    muted: std::collections::HashSet<Uuid>,
+    /// The guild this socket's player is in (S4.4), whose talk it hears: read
+    /// on subscribe, and again whenever their guild changes
+    my_guild: Option<Uuid>,
+}
+
+impl Socket {
+    fn new(state: &AppState, player: &PlayerState, account_id: Uuid, key: Option<KeyGrant>, connection_id: u64) -> Self {
+        Socket {
+            player_id: player.id,
+            account_id,
+            connection_id,
+            key,
+            name: player.name.clone(),
+            citizen: player.citizen,
+            home: (player.x, player.y),
+            limit_key: state.limiter.connection(),
+            subscribed_position: false,
+            market_items: Default::default(),
+            holds_avatar: false,
+            heard_capitol: 0,
+            muted: Default::default(),
+            my_guild: None,
+        }
+    }
+
+    /// One message from this socket's client (#463): what it may do, judged,
+    /// and done. What goes back to this socket alone is returned, in order;
+    /// what others hear goes out on the game's events.
+    async fn handle(&mut self, state: &AppState, client_msg: ClientMessage) -> Vec<ServerMessage> {
+        let (player_id, connection_id) = (self.player_id, self.connection_id);
+        let mut out = Vec::new();
+        // Every `error` below names the command it refuses (#89).
+        let command = client_msg.type_name();
+        // Talk has its own bucket, so it never costs a step (Commons D2),
+        // and so does steering, so a turn never costs a command (controls T0.3)
+        let bucket = crate::rate_limit::Key::of_ws(self.limit_key, &client_msg);
+        let allowance = bucket.map_or(Ok(()), |bucket| state.limiter.check(bucket));
+        if allowance.is_err() && matches!(client_msg, ClientMessage::Steer { .. }) {
+            // Dropped unanswered: the client never waits on a steer
+            tracing::debug!("Rate limited WS steer from player {player_id}");
+            return out;
+        }
+        if let Err(wait) = allowance {
+            tracing::info!("Rate limited WS {command} from player {player_id}");
+            out.push(ServerMessage::Error {
+                    message: crate::rate_limit::ws_message(wait),
+                    command: command.into(),
+                });
+            return out;
+        }
+        if let Some(key) = self.key {
+            let needed = api_keys::ws_scope(&client_msg);
+            if !key.scopes.allows(needed) {
+                let msg = ServerMessage::Error {
+                    message: api_keys::refusal(command, Some(needed)),
+                    command: command.to_string(),
+                };
+                out.push(msg);
+                return out;
+            }
+        }
+        // Only the socket holding the avatar drives it. A watcher may
+        // still use the market and automation (E0.8).
+        if presence::drives_avatar_ws(&client_msg)
+            && !state.game.read().await.holds_presence(player_id, connection_id)
+        {
+            let msg = ServerMessage::Error {
+                message: presence::NOT_HOLDING.into(),
+                command: command.to_string(),
+            };
+            out.push(msg);
+            return out;
+        }
+        match client_msg {
+            ClientMessage::Subscribe { channel } => {
+                if channel == "position" {
+                    let first = !self.subscribed_position;
+                    self.subscribed_position = true;
+                    out.push(ServerMessage::Subscribed { channel });
+                    // What waited while they were away (#138). Events since
+                    // auth are already on `event_rx`; whichever path takes a
+                    // notice first sends it. A watcher takes none.
+                    if first && state.game.read().await.holds_presence(player_id, connection_id) {
+                        let rate = state.tunables.get().property_tax_rate;
+                        match crate::engine::notices::take_all(&state.db, player_id, rate).await {
+                            Ok(waiting) => {
+                                for msg in waiting {
+                                    out.push(msg);
+                                }
+                            }
+                            Err(e) => tracing::error!("Failed to load notices for {}: {:?}", player_id, e),
+                        }
+                    }
+                    // The Capitol channel's last lines (S1.1), but the muted's
+                    // (S1.4); any still on `event_rx` are numbered at or
+                    // below `heard_capitol`
+                    if first {
+                        self.muted = read_mutes(state, player_id, std::mem::take(&mut self.muted)).await;
+                        self.my_guild = read_guild(state, player_id, self.my_guild).await;
+                        let (seq, lines) = state.talk.backlog(&self.muted);
+                        self.heard_capitol = seq;
+                        for msg in lines {
+                            out.push(msg);
+                        }
+                    }
+                }
+            }
+            ClientMessage::SubscribeMarket { item_type } => {
+                let refusal = if self.market_items.len() >= MARKET_CHANNELS && !self.market_items.contains(&item_type) {
+                    Some(format!("Watch at most {MARKET_CHANNELS} items at once"))
+                } else {
+                    match sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM item_types WHERE id = $1)")
+                        .bind(&item_type)
+                        .fetch_one(&state.db)
+                        .await
+                    {
+                        Ok(true) => None,
+                        Ok(false) => Some("There's no such item".to_string()),
+                        Err(e) => Some(format!("Database error: {e}")),
+                    }
+                };
+                let msg = match refusal {
+                    Some(message) => ServerMessage::Error { message, command: command.into() },
+                    None => {
+                        self.market_items.insert(item_type.clone());
+                        // The depth as last published: the diffs already on
+                        // `event_rx` are at or below its `seq`, and the client skips them
+                        let depth = state.market.depth(&item_type);
+                        ServerMessage::MarketDepth { item_type, seq: depth.seq, full: true, levels: depth.levels }
+                    }
+                };
+                out.push(msg);
+            }
+            ClientMessage::ClaimPresence => {
+                // A fresh row, for when the avatar has to come back into
+                // the world; one already there carries on as it is.
+                let claimed = match load_player(&state.db, self.account_id).await {
+                    Ok(player) => state
+                        .game
+                        .write()
+                        .await
+                        .claim_presence(player, connection_id)
+                        .map_err(|why| why.to_string()),
+                    Err(msg) => Err(msg),
+                };
+                if let Err(message) = claimed {
+                    let msg = ServerMessage::Error { message, command: command.into() };
+                    out.push(msg);
+                }
+            }
+            // Talk (S1.1): the avatar's place now, or where it was last
+            ClientMessage::Say { channel, text } => {
+                let (events, (x, y)) = {
+                    let game = state.game.read().await;
+                    let at = game.players.get(&player_id).map_or(self.home, |p| (p.x, p.y));
+                    (game.event_sender.clone(), at)
+                };
+                let speaker = crate::engine::talk::Speaker {
+                    player_id,
+                    account_id: self.account_id,
+                    name: self.name.clone(),
+                    citizen: self.citizen,
+                    x,
+                    y,
+                    holds_avatar: self.holds_avatar,
+                    guild: self.my_guild,
+                };
+                match state.talk.say(&events, &state.limiter, speaker, channel, &text) {
+                    // Judged here: `tests::a_say_counts_for_the_road_in` (#463)
+                    Ok(()) => {
+                        crate::engine::tutorial::saw(&state.db, &events, player_id, crate::engine::tutorial::Did::Said(channel)).await;
+                    }
+                    Err(message) => {
+                        let msg = ServerMessage::Error { message, command: command.into() };
+                        out.push(msg);
+                    }
+                }
+            }
+            // What only the screen shows (#441, plan D7): taken for the
+            // steps the client may report, and refused for the rest. The
+            // market box's waiver is judged too (#446): `tutorial::seen`
+            ClientMessage::TutorialSeen { step } => {
+                let events = state.game.read().await.event_sender.clone();
+                if let Err(message) = crate::engine::tutorial::seen(&state.db, &events, player_id, step).await {
+                    let msg = ServerMessage::Error { message, command: command.into() };
+                    out.push(msg);
+                }
+            }
+            ClientMessage::UnsubscribeMarket { item_type } => match item_type {
+                Some(item_type) => {
+                    self.market_items.remove(&item_type);
+                }
+                None => self.market_items.clear(),
+            },
+            ClientMessage::Move { x, y } => {
+                // Only a destination on the world disc (W1, #194)
+                if capitol_protocol::rules::in_world(x, y) {
+                    let mut game = state.game.write().await;
+                    game.queue_command(crate::engine::Command::Move {
+                        player_id,
+                        dest_x: x,
+                        dest_y: y,
+                    });
+                }
+            }
+            // Walk on a heading (T0.2): the tick checks `at` against where
+            // the player is
+            ClientMessage::Steer { heading, throttle, at } => {
+                state.game.write().await.queue_command(crate::engine::Command::Steer {
+                    player_id,
+                    heading,
+                    throttle,
+                    at: at.map(|[x, y]| (x, y)),
+                });
+            }
+            ClientMessage::Extract { node_id } => {
+                if let Ok(node_uuid) = Uuid::parse_str(&node_id) {
+                    // Grass on someone's lot is theirs (#102), unless
+                    // they're on a wage shift for it (Commons D7)
+                    let (wage, refusal) = match crate::engine::container_access::gathering_terms(
+                        &state.db, &state.game, player_id, node_uuid,
+                    ).await {
+                        Ok(Ok(wage)) => (wage, None),
+                        Ok(Err(why)) => (None, Some(why)),
+                        Err(e) => (None, Some(format!("Database error: {}", e))),
+                    };
+                    // The best tool for it, if it takes one (E1.5)
+                    let tool = crate::engine::tools::tool_for_node(
+                        &state.db, &state.game, player_id, node_uuid,
+                    ).await;
+                    let (tool, refusal) = match tool {
+                        Ok(tool) => (tool, refusal),
+                        Err(e) => (None, refusal.or(Some(format!("Database error: {}", e)))),
+                    };
+                    if let Some(reason) = refusal {
+                        out.push(ServerMessage::ExtractionFailed {
+                                player_id,
+                                reason,
+                            });
+                        return out;
+                    }
+                    let mut game = state.game.write().await;
+                    game.queue_command(crate::engine::Command::StartExtraction {
+                        player_id,
+                        node_id: node_uuid,
+                        tool,
+                        wage,
+                    });
+                } else {
+                    out.push(ServerMessage::ExtractionFailed {
+                            player_id,
+                            reason: format!("Invalid resource node id '{}'", node_id),
+                        });
+                }
+            }
+            ClientMessage::CancelExtraction => {
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::CancelExtraction {
+                    player_id,
+                });
+            }
+            // M3: Crafting
+            ClientMessage::Craft { recipe_id, input_item_ids } => {
+                // Parse input item IDs
+                let item_uuids: Vec<Uuid> = input_item_ids
+                    .iter()
+                    .filter_map(|id| Uuid::parse_str(id).ok())
+                    .collect();
+
+                // Fetch items from database to validate ownership and get qualities
+                let items = fetch_player_items(state, player_id, &item_uuids).await;
+
+                if items.is_empty() && !item_uuids.is_empty() {
+                    out.push(ServerMessage::CraftingFailed {
+                            player_id,
+                            reason: "Invalid or unauthorized items".to_string(),
+                        });
+                    return out;
+                }
+
+                let tool = match crate::engine::tools::tool_for_recipe(&state.db, &state.game, player_id, &recipe_id).await {
+                    Ok(tool) => tool,
+                    Err(e) => {
+                        tracing::error!("Tool lookup for {} failed: {:?}", player_id, e);
+                        None
+                    }
+                };
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::StartCrafting {
+                    player_id,
+                    recipe_id,
+                    inputs: items,
+                    tool,
+                });
+            }
+            ClientMessage::CancelCrafting => {
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::CancelCrafting {
+                    player_id,
+                });
+            }
+            // M3.5: Inventory
+            ClientMessage::MoveItem { item_id, target_container_id, target_slot } => {
+                let item_uuid = match Uuid::parse_str(&item_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        out.push(ServerMessage::Error {
+                                message: "Invalid item ID".to_string(),
+                                command: command.into(),
+                            });
+                        return out;
+                    }
+                };
+                let container_uuid = match Uuid::parse_str(&target_container_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        out.push(ServerMessage::Error {
+                                message: "Invalid container ID".to_string(),
+                                command: command.into(),
+                            });
+                        return out;
+                    }
+                };
+
+                // Handle move directly via database (synchronous for immediate feedback)
+                match handle_move_item(state, player_id, item_uuid, container_uuid, target_slot).await {
+                    Ok(source_container) => {
+                        // A move between containers changes both,
+                        // so name each one that changed (#77).
+                        for container_id in moved_containers(source_container, container_uuid) {
+                            let msg = ServerMessage::InventoryUpdated { player_id, container_id };
+                            out.push(msg);
+                        }
+                    }
+                    Err(e) => {
+                        out.push(ServerMessage::Error {
+                                message: e,
+                                command: command.into(),
+                            });
+                    }
+                }
+            }
+            ClientMessage::SplitStack { item_id, quantity, to_slot, to_container_id, qualities } => {
+                let parsed = Uuid::parse_str(&item_id)
+                    .map_err(|_| "Invalid item ID")
+                    .and_then(|item| match to_container_id.as_deref().map(Uuid::parse_str) {
+                        None => Ok((item, None)),
+                        Some(Ok(to)) => Ok((item, Some(to))),
+                        Some(Err(_)) => Err("Invalid container ID"),
+                    });
+                let (item_uuid, to_container) = match parsed {
+                    Ok(ids) => ids,
+                    Err(message) => {
+                        out.push(ServerMessage::Error {
+                                message: message.to_string(),
+                                command: command.into(),
+                            });
+                        return out;
+                    }
+                };
+                match handle_split_stack(state, player_id, item_uuid, quantity, to_container, to_slot, qualities.as_ref()).await {
+                    // Into another container, both changed (#190)
+                    Ok((source, target)) => {
+                        for container_id in moved_containers(Some(source), target) {
+                            let msg = ServerMessage::InventoryUpdated { player_id, container_id };
+                            out.push(msg);
+                        }
+                    }
+                    Err(message) => {
+                        let msg = ServerMessage::Error { message, command: command.into() };
+                        out.push(msg);
+                    }
+                }
+            }
+            // M4: Stations
+            ClientMessage::PlaceStation { station_type, x, y, kit_item_id, floor } => {
+                let kit_uuid = match Uuid::parse_str(&kit_item_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        out.push(ServerMessage::Error {
+                                message: "Invalid kit item ID".to_string(),
+                                command: command.into(),
+                            });
+                        return out;
+                    }
+                };
+
+                match crate::engine::station_placement::place_station(state, player_id, &station_type, x, y, floor, kit_uuid).await {
+                    Ok(result) => {
+                        result.remember(state).await;
+                        let station_info = result.info;
+
+                        // Notify client
+                        let msg = ServerMessage::StationPlaced {
+                            station_id: station_info.id,
+                            station_type: station_info.station_type,
+                            name: station_info.name,
+                            owner_id: station_info.owner_id,
+                            x: station_info.x,
+                            y: station_info.y,
+                            container_id: station_info.container_id.unwrap_or(Uuid::nil()),
+                            quality: station_info.quality,
+                            indoors: station_info.indoors,
+                            floor: station_info.floor,
+                        };
+                        out.push(msg);
+                    }
+                    Err(e) => {
+                        out.push(ServerMessage::Error { message: e.message(), command: command.into() });
+                    }
+                }
+            }
+            ClientMessage::RemoveStation { station_id } => {
+                let station_uuid = match Uuid::parse_str(&station_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        out.push(ServerMessage::Error {
+                                message: "Invalid station ID".to_string(),
+                                command: command.into(),
+                            });
+                        return out;
+                    }
+                };
+
+                match crate::engine::station_removal::remove_station(&state.db, player_id, station_uuid).await {
+                    Ok(removed) => {
+                        // Everyone sees it go. The owner's inventory now holds the
+                        // kit and their things from the box, and a guest's deposit
+                        // went back to the guest (#489).
+                        let mut game = state.game.write().await;
+                        game.stations.remove(&station_uuid);
+                        let _ = game.event_sender.send(GameEvent::StationRemoved { station_id: station_uuid });
+                        for (player_id, container_id) in removed.returned_to {
+                            let _ = game.event_sender.send(GameEvent::InventoryUpdated {
+                                player_id,
+                                container_id,
+                                slots: vec![],
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        out.push(ServerMessage::Error { message: e.message(), command: command.into() });
+                    }
+                }
+            }
+            ClientMessage::InstallTool { station_id, item_id } => {
+                let (Ok(station_uuid), Ok(item_uuid)) = (Uuid::parse_str(&station_id), Uuid::parse_str(&item_id)) else {
+                    out.push(ServerMessage::Error {
+                            message: "Invalid station or item ID".to_string(),
+                            command: command.into(),
+                        });
+                    return out;
+                };
+                let at = live_position(&state.game, player_id).await;
+                let result = crate::engine::station_tools::install_tool(&state.db, player_id, station_uuid, item_uuid, at).await;
+                announce_tool_slot(state, &mut out, player_id, station_uuid, command, result).await;
+            }
+            ClientMessage::RemoveTool { station_id } => {
+                let Ok(station_uuid) = Uuid::parse_str(&station_id) else {
+                    out.push(ServerMessage::Error {
+                            message: "Invalid station ID".to_string(),
+                            command: command.into(),
+                        });
+                    return out;
+                };
+                let at = live_position(&state.game, player_id).await;
+                let result = crate::engine::station_tools::remove_tool(&state.db, player_id, station_uuid, at).await;
+                announce_tool_slot(state, &mut out, player_id, station_uuid, command, result).await;
+            }
+            ClientMessage::ConfigureAutomation { ref station_id, .. }
+            | ClientMessage::StartAutomation { ref station_id }
+            | ClientMessage::StopAutomation { ref station_id } => {
+                let Ok(station_uuid) = Uuid::parse_str(station_id) else {
+                    out.push(ServerMessage::Error {
+                            message: "Invalid station ID".to_string(),
+                            command: command.into(),
+                        });
+                    return out;
+                };
+                let (recipes, events) = {
+                    let game = state.game.read().await;
+                    (game.recipes.clone(), game.event_sender.clone())
+                };
+                let result = match &client_msg {
+                    ClientMessage::ConfigureAutomation { recipe_id, mode, .. } => {
+                        crate::engine::automation::configure(&state.db, &events, &recipes, player_id, station_uuid, recipe_id, *mode).await
+                    }
+                    ClientMessage::StartAutomation { .. } => {
+                        crate::engine::automation::start(&state.db, &recipes, player_id, station_uuid).await
+                    }
+                    _ => crate::engine::automation::stop(&state.db, player_id, station_uuid).await,
+                };
+                match result {
+                    Ok(automation) => {
+                        let game = state.game.read().await;
+                        crate::engine::automation::announce(&game, station_uuid, automation);
+                    }
+                    Err(e) => {
+                        let msg = ServerMessage::Error { message: e.message(), command: command.into() };
+                        out.push(msg);
+                    }
+                }
+            }
+            ClientMessage::OpenStation { station_id } => {
+                let station_uuid = match Uuid::parse_str(&station_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        out.push(ServerMessage::Error {
+                                message: "Invalid station ID".to_string(),
+                                command: command.into(),
+                            });
+                        return out;
+                    }
+                };
+
+                match handle_open_station(state, player_id, station_uuid).await {
+                    Ok((station_type, name, container_id)) => {
+                        let msg = ServerMessage::StationOpened {
+                            player_id,
+                            station_id: station_uuid,
+                            station_type,
+                            name,
+                            container_id,
+                        };
+                        out.push(msg);
+                    }
+                    Err(e) => {
+                        out.push(ServerMessage::Error { message: e, command: command.into() });
+                    }
+                }
+            }
+            ClientMessage::CloseStation => {
+                let msg = ServerMessage::StationClosed { player_id };
+                out.push(msg);
+            }
+            ClientMessage::CraftAtStation { station_id, recipe_id, input_item_ids } => {
+                let station_uuid = match Uuid::parse_str(&station_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        out.push(ServerMessage::CraftingFailed {
+                                player_id,
+                                reason: "Invalid station ID".to_string(),
+                            });
+                        return out;
+                    }
+                };
+
+                // The same station rule as opening it (#80). The
+                // tick checks range again, but not who may use it.
+                let at = live_position(&state.game, player_id).await;
+                let wage = match check_station_use(&state.db, player_id, station_uuid, at).await {
+                    Ok(StationUse::Free { .. }) => None,
+                    Ok(StationUse::Shift(work)) => Some(work),
+                    Err(e) => {
+                        out.push(ServerMessage::CraftingFailed {
+                                player_id,
+                                reason: e.message(),
+                            });
+                        return out;
+                    }
+                };
+                // Worn out by the weather, it's out of use by hand too (V3.2)
+                if let Ok(Some(reason)) = crate::engine::weather::out_of_use(&state.db, station_uuid).await {
+                    out.push(ServerMessage::CraftingFailed { player_id, reason });
+                    return out;
+                }
+                // On a wage shift, only the offer's recipe (Commons D7)
+                if let Some(reason) = wage.as_ref().and_then(|w| crate::engine::wages::recipe_refusal(w, &recipe_id)) {
+                    out.push(ServerMessage::CraftingFailed { player_id, reason });
+                    return out;
+                }
+
+                let item_uuids: Vec<Uuid> = input_item_ids
+                    .iter()
+                    .filter_map(|id| Uuid::parse_str(id).ok())
+                    .collect();
+
+                // Fetch items for crafting validation: the player's
+                // own, or on a wage shift the station box's
+                let items = match &wage {
+                    Some(_) => fetch_box_items(state, station_uuid, &item_uuids).await,
+                    None => fetch_player_items(state, player_id, &item_uuids).await,
+                };
+
+                if items.is_empty() && !item_uuids.is_empty() {
+                    out.push(ServerMessage::CraftingFailed {
+                            player_id,
+                            reason: "Invalid or unauthorized items".to_string(),
+                        });
+                    return out;
+                }
+
+                // The station's own tool if it holds the right one (E1.6)
+                let tool = match crate::engine::station_tools::tool_for_station_recipe(&state.db, &state.game, player_id, station_uuid, &recipe_id).await {
+                    Ok(tool) => tool,
+                    Err(e) => {
+                        tracing::error!("Tool lookup for {} failed: {:?}", player_id, e);
+                        None
+                    }
+                };
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::CraftAtStation {
+                    player_id,
+                    station_id: station_uuid,
+                    recipe_id,
+                    inputs: items,
+                    tool,
+                    wage,
+                });
+            }
+            // M5: Trading
+            ClientMessage::TradeInitiate { target_player_id } => {
+                let target_uuid = match Uuid::parse_str(&target_player_id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        out.push(ServerMessage::Error {
+                                message: "Invalid player ID".to_string(),
+                                command: command.into(),
+                            });
+                        return out;
+                    }
+                };
+
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::InitiateTrade {
+                    player_id,
+                    target_player_id: target_uuid,
+                });
+            }
+            ClientMessage::TradeAcceptRequest => {
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::AcceptTradeRequest {
+                    player_id,
+                });
+            }
+            ClientMessage::TradeDeclineRequest => {
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::DeclineTradeRequest {
+                    player_id,
+                });
+            }
+            ClientMessage::TradeOffer { items, strands } => {
+                let offer_lines = match validate_trade_offer(state, player_id, &items, strands).await {
+                    Ok(lines) => lines,
+                    Err(message) => {
+                        out.push(ServerMessage::Error { message, command: command.into() });
+                        return out;
+                    }
+                };
+
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::UpdateTradeOffer {
+                    player_id,
+                    items: offer_lines,
+                    strands,
+                });
+            }
+            ClientMessage::TradeAccept => {
+                // Handle acceptance directly (not queued) to avoid race condition
+                let (should_execute, trade_id_opt) = {
+                    let mut game = state.game.write().await;
+                    match game.trade_manager.set_accepted(player_id, true) {
+                        Ok(both_accepted) => {
+                            if let Some(trade) = game.trade_manager.get_player_trade(player_id) {
+                                let trade_id = trade.id;
+                                // Broadcast that this player accepted
+                                let _ = game.event_sender.send(GameEvent::TradeAccepted {
+                                    trade_id,
+                                    player_id,
+                                });
+                                (both_accepted, Some(trade_id))
+                            } else {
+                                (false, None)
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Trade accept failed: {}", e);
+                            out.push(ServerMessage::Error { message: e, command: command.into() });
+                            (false, None)
+                        }
+                    }
+                };
+
+                if should_execute {
+                    // Execute trade with DB access
+                    match execute_trade(state, player_id).await {
+                        Ok((trade_id, balances)) => {
+                            // Broadcast trade executed, and tell each side its balance
+                            let game = state.game.read().await;
+                            let _ = game.event_sender.send(GameEvent::TradeExecuted { trade_id });
+                            announce_balances(&game.event_sender, balances);
+                        }
+                        Err(e) => {
+                            tracing::error!("Trade execution failed: {}", e);
+                            // Cancel the trade
+                            let mut game = state.game.write().await;
+                            if let Some(trade_id) = trade_id_opt {
+                                let _ = game.trade_manager.cancel_trade(player_id);
+                                let _ = game.event_sender.send(GameEvent::TradeCancelled {
+                                    trade_id,
+                                    reason: e,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            ClientMessage::TradeCancel => {
+                let mut game = state.game.write().await;
+                game.queue_command(crate::engine::Command::CancelTrade {
+                    player_id,
+                });
+            }
+            _ => {}
+        }
+        out
     }
 }
 
@@ -1953,7 +1949,7 @@ fn moved_containers(source: Option<Uuid>, target: Uuid) -> Vec<Uuid> {
 /// goes to the player alone.
 async fn announce_tool_slot(
     state: &AppState,
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    out: &mut Vec<ServerMessage>,
     player_id: Uuid,
     station_id: Uuid,
     command: &str,
@@ -1970,8 +1966,7 @@ async fn announce_tool_slot(
             });
         }
         Err(e) => {
-            let msg = ServerMessage::Error { message: e.message(), command: command.into() };
-            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+            out.push(ServerMessage::Error { message: e.message(), command: command.into() });
         }
     }
 }
@@ -2560,5 +2555,177 @@ mod tests {
         (broke.offer_a.strands, broke.offer_b.strands) = (500, 499);
         let mut tx = db.begin().await.unwrap();
         assert!(settle_trade(&mut tx, &broke).await.unwrap_err().contains("insufficient"));
+    }
+
+    /// A socket driven without one (#463): `player` signed in on a test
+    /// `AppState`, holding the avatar as a client does once its `presence`
+    /// is out. `send` hands its `Socket` a message and returns what came back
+    /// to it; `heard` is what went out on the game's events meanwhile.
+    struct Harness {
+        state: AppState,
+        socket: Socket,
+        events: tokio::sync::broadcast::Receiver<GameEvent>,
+    }
+
+    impl Harness {
+        async fn signed_in(state: AppState, player: Uuid) -> Harness {
+            let account: Uuid = sqlx::query_scalar("SELECT account_id FROM players WHERE id = $1")
+                .bind(player)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            let row = load_player(&state.db, account).await.unwrap();
+            let (socket, events) = {
+                let mut game = state.game.write().await;
+                let (connection, _) = game.open_socket(player, Holder::Session("test".into()), true);
+                let mut socket = Socket::new(&state, &row, account, None, connection);
+                game.claim_presence(row, connection).unwrap();
+                socket.holds_avatar = true;
+                (socket, game.subscribe())
+            };
+            Harness { state, socket, events }
+        }
+
+        async fn send(&mut self, msg: ClientMessage) -> Vec<ServerMessage> {
+            self.socket.handle(&self.state, msg).await
+        }
+
+        fn heard(&mut self) -> Vec<GameEvent> {
+            std::iter::from_fn(|| self.events.try_recv().ok()).collect()
+        }
+
+        /// The commands it queued for the tick, taken
+        async fn queued(&self) -> Vec<crate::engine::Command> {
+            std::mem::take(&mut self.state.game.write().await.command_queue)
+        }
+    }
+
+    /// A local line goes out to the world, and counts for the road in's
+    /// `say_local`: the step is kept and the player's sockets told (#439)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn a_say_counts_for_the_road_in(db: sqlx::PgPool) {
+        use capitol_protocol::tutorial::Step;
+        use capitol_protocol::ws::Channel;
+        let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
+        let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
+
+        let back = socket.send(ClientMessage::Say { channel: Channel::Local, text: "Morning, all".into() }).await;
+        assert_eq!(back, vec![], "a line said comes back on the events, like anyone's");
+        let heard = socket.heard();
+        assert!(matches!(&heard[0], GameEvent::Said { line, .. } if line.from == ada && line.text == "Morning, all" && line.channel == Channel::Local));
+        assert!(matches!(
+            &heard[1],
+            GameEvent::Tutorial { player_id, message: ServerMessage::TutorialStep { step: Step::SayLocal, done } }
+                if *player_id == ada && done.has(Step::SayLocal)
+        ));
+        assert_eq!(heard.len(), 2);
+        let done = crate::engine::tutorial::progress(&db, ada).await.unwrap().done;
+        assert!(done.has(Step::SayLocal));
+
+        // The Capitol channel is talk, but not the step
+        socket.send(ClientMessage::Say { channel: Channel::Capitol, text: "Hello, Capitol".into() }).await;
+        let heard = socket.heard();
+        assert_eq!(heard.len(), 1);
+        assert!(matches!(&heard[0], GameEvent::Said { seq: 1, line } if line.channel == Channel::Capitol));
+    }
+
+    /// Subscribing to `position` answers `subscribed`, then what waited while
+    /// they were away (#138), then the Capitol channel's backlog (S1.1)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn subscribing_sends_what_waited_then_the_capitols_lines(db: sqlx::PgPool) {
+        use capitol_protocol::ws::Channel;
+        let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
+        let gone = ServerMessage::PlotForeclosed { terrain_id: "lot".into(), tax_owed: 80, refund: 20, impounded: vec![], lost: vec![] };
+        crate::engine::notices::queue(&db, ada, "lot", &gone).await.unwrap();
+        let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
+        socket.send(ClientMessage::Say { channel: Channel::Capitol, text: "Anyone about?".into() }).await;
+        assert!(!socket.socket.subscribed_position);
+
+        let back = socket.send(ClientMessage::Subscribe { channel: "position".into() }).await;
+        let tags: Vec<&str> = back.iter().map(ServerMessage::type_name).collect();
+        assert_eq!(tags, ["subscribed", "plot_foreclosed", "said"]);
+        assert_eq!(back[1], gone);
+        assert!(socket.socket.subscribed_position);
+        assert_eq!(socket.socket.heard_capitol, 1);
+
+        // Again, it's only answered: the notice is taken, the backlog heard
+        let back = socket.send(ClientMessage::Subscribe { channel: "position".into() }).await;
+        assert_eq!(back, vec![ServerMessage::Subscribed { channel: "position".into() }]);
+    }
+
+    /// Placing a workbench from its kit answers `station_placed`; opening it
+    /// answers `station_opened` with its box, and closing it `station_closed`
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn a_station_placed_opens_and_closes(db: sqlx::PgPool) {
+        use crate::engine::units::test_units::stack_of;
+        let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
+        let pack = Uuid::new_v4();
+        sqlx::query("INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'player_inventory', $2)")
+            .bind(pack)
+            .bind(ada)
+            .execute(&db)
+            .await
+            .unwrap();
+        let kit = stack_of(&db, ada, pack, 0, "workbench_kit", &Units::uniform(1, 50)).await;
+        sqlx::query("UPDATE players SET position_x = 0, position_y = 0 WHERE id = $1").bind(ada).execute(&db).await.unwrap();
+        let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
+
+        let back = socket
+            .send(ClientMessage::PlaceStation { station_type: "workbench".into(), x: 0.0, y: 0.0, kit_item_id: kit.to_string(), floor: 0 })
+            .await;
+        let [ServerMessage::StationPlaced { station_id, owner_id, container_id, .. }] = back.as_slice() else {
+            panic!("placing answered {back:?}");
+        };
+        let (station_id, container_id) = (*station_id, *container_id);
+        assert_eq!(*owner_id, ada);
+        assert!(socket.state.game.read().await.stations.contains_key(&station_id), "the game has it");
+
+        let back = socket.send(ClientMessage::OpenStation { station_id: station_id.to_string() }).await;
+        assert!(
+            matches!(
+                back.as_slice(),
+                [ServerMessage::StationOpened { player_id, station_id: opened, station_type, container_id: its_box, .. }]
+                    if *player_id == ada && *opened == station_id && station_type == "workbench" && *its_box == container_id
+            ),
+            "opening answered {back:?}"
+        );
+        let back = socket.send(ClientMessage::CloseStation).await;
+        assert_eq!(back, vec![ServerMessage::StationClosed { player_id: ada }]);
+    }
+
+    /// Steering and walking are queued for the tick, unanswered (T0.2); a
+    /// socket that doesn't hold the avatar is refused, and queues nothing (E0.8)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn steering_is_queued_for_the_holder_alone(db: sqlx::PgPool) {
+        use crate::engine::Command;
+        let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
+        let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
+
+        let back = socket.send(ClientMessage::Steer { heading: 90, throttle: 255, at: Some([10.0, 20.0]) }).await;
+        assert_eq!(back, vec![]);
+        let back = socket.send(ClientMessage::Move { x: 8300.0, y: 8300.0 }).await;
+        assert_eq!(back, vec![]);
+        let queued = socket.queued().await;
+        assert!(
+            matches!(
+                queued.as_slice(),
+                [
+                    Command::Steer { player_id, heading: 90, throttle: 255, at: Some((x, y)) },
+                    Command::Move { dest_x, dest_y, .. },
+                ] if *player_id == ada && (*x, *y) == (10.0, 20.0) && (*dest_x, *dest_y) == (8300.0, 8300.0)
+            ),
+            "{queued:?}"
+        );
+
+        // Another of Ada's sockets, watching
+        let watcher = socket.state.game.write().await.open_socket(ada, Holder::Session("phone".into()), true).0;
+        socket.socket.connection_id = watcher;
+        let back = socket.send(ClientMessage::Steer { heading: 0, throttle: 255, at: None }).await;
+        assert_eq!(back, vec![ServerMessage::Error { message: presence::NOT_HOLDING.into(), command: "steer".into() }]);
+        assert!(socket.queued().await.is_empty());
     }
 }
