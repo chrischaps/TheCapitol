@@ -494,7 +494,9 @@ pub struct SeriesQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_ms: Option<i64>,
     /// The sample's fields to send, comma-separated (`load,strands`); each
-    /// sample keeps its times too. The default is all of them.
+    /// sample keeps its times too. The default is all of them. A field is a
+    /// path, its keys split on `.`, with `*` for every key of an object
+    /// (`load.tick_p95_ms,load.phases.*.secs`), and keeps its place (#411).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<String>,
 }

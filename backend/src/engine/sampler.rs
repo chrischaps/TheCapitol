@@ -274,7 +274,10 @@ pub async fn store(db: &PgPool, sample: &Sample) -> Result<(), sqlx::Error> {
 /// The samples after `from_ms` and up to `to_ms` (Unix ms), oldest first,
 /// for `/admin/series` (D0.3): from the ring where it reaches, and before
 /// that from `metrics_samples`, a minute apart. With `fields`, each holds
-/// only those and its times (`SERIES_TIMES`).
+/// only those and its times (`SERIES_TIMES`). A field is a path into the
+/// sample (#411), its keys split on `.`, and `*` stands for every key of an
+/// object there: `load.tick_p95_ms`, `load.phases.*.secs`. What a path
+/// reaches keeps its place, so a projected sample is a partial `Sample`.
 pub async fn series(
     ring: &Samples,
     db: &PgPool,
@@ -282,8 +285,14 @@ pub async fn series(
     to_ms: i64,
     fields: Option<&[String]>,
 ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let keep: Option<Vec<String>> =
-        fields.map(|f| SERIES_TIMES.iter().map(|t| t.to_string()).chain(f.iter().cloned()).collect());
+    let keep: Option<Vec<Vec<String>>> = fields.map(|f| {
+        SERIES_TIMES
+            .iter()
+            .map(|t| t.to_string())
+            .chain(f.iter().cloned())
+            .map(|f| f.split('.').map(str::to_string).collect())
+            .collect()
+    });
     // Read the ring first, so the table is read only up to where the ring
     // was then: a day's oldest sample popped in between leaves no gap
     let ring_from = ring.oldest_ms().unwrap_or(i64::MAX);
@@ -296,44 +305,115 @@ pub async fn series(
     samples.extend(ring.iter().filter_map(|s| {
         let value = serde_json::to_value(s).ok()?;
         Some(match &keep {
-            Some(keep) => project(value, keep),
+            Some(keep) => project(&value, keep),
             None => value,
         })
     }));
     Ok(samples)
 }
 
-/// `sample` with only the keys in `keep`.
-fn project(sample: serde_json::Value, keep: &[String]) -> serde_json::Value {
-    match sample {
-        serde_json::Value::Object(map) => map.into_iter().filter(|(k, _)| keep.contains(k)).collect(),
-        other => other,
+/// `sample` with only what the paths in `keep` reach, each where it was.
+fn project(sample: &serde_json::Value, keep: &[Vec<String>]) -> serde_json::Value {
+    let mut out = serde_json::Value::Object(Default::default());
+    for path in keep {
+        if let Some(part) = reach(sample, path) {
+            merge(&mut out, part);
+        }
+    }
+    out
+}
+
+/// What `path` reaches in `value`, inside the objects that lead to it, or
+/// nothing when a key on the way isn't there. `*` takes every key of an
+/// object, and keeps those the rest of the path reaches.
+fn reach(value: &serde_json::Value, path: &[String]) -> Option<serde_json::Value> {
+    let Some((key, rest)) = path.split_first() else {
+        return Some(value.clone());
+    };
+    let serde_json::Value::Object(map) = value else {
+        return None;
+    };
+    if key == "*" {
+        Some(map.iter().filter_map(|(k, v)| Some((k.clone(), reach(v, rest)?))).collect())
+    } else {
+        let part = reach(map.get(key)?, rest)?;
+        Some(serde_json::Value::Object([(key.clone(), part)].into_iter().collect()))
     }
 }
 
+/// Puts `part` into `into`, object by object, so two paths into one object
+/// both keep what they reached.
+fn merge(into: &mut serde_json::Value, part: serde_json::Value) {
+    match (into, part) {
+        (serde_json::Value::Object(into), serde_json::Value::Object(part)) => {
+            for (k, v) in part {
+                match into.get_mut(&k) {
+                    Some(had) => merge(had, v),
+                    None => {
+                        into.insert(k, v);
+                    }
+                }
+            }
+        }
+        (into, part) => *into = part,
+    }
+}
+
+/// The keys of `path` before its first `*`: as far as the database can
+/// reach for it.
+fn plain_prefix(path: &[String]) -> String {
+    path.iter().take_while(|k| *k != "*").cloned().collect::<Vec<_>>().join(".")
+}
+
 /// The stored samples after `from_ms` and up to `to_ms` (Unix ms), oldest
-/// first; with `keep`, only those keys of each.
+/// first; with `keep`, only what those paths reach in each.
 async fn stored(
     db: &PgPool,
     from_ms: i64,
     to_ms: i64,
-    keep: Option<&[String]>,
+    keep: Option<&[Vec<String>]>,
 ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
     let from = DateTime::<Utc>::from_timestamp_millis(from_ms).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     let to = DateTime::<Utc>::from_timestamp_millis(to_ms).unwrap_or_else(Utc::now);
     let rows: Vec<serde_json::Value> = match keep {
         // Projected in the database, so a month of whole samples never
-        // crosses the wire for one chart's field
+        // crosses the wire for one chart's field. The database reaches each
+        // path up to its first `*` (`#>`, one `[value]` or `[]` a path, in
+        // order), and the rest is done here, in the same `project` as the ring
         Some(keep) => {
-            sqlx::query_scalar(
-                "SELECT COALESCE((SELECT jsonb_object_agg(key, value) FROM jsonb_each(sample) WHERE key = ANY($3)), '{}'::jsonb)
+            let mut prefixes: Vec<String> = keep.iter().map(|p| plain_prefix(p)).collect();
+            prefixes.sort();
+            prefixes.dedup();
+            let reached: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT COALESCE((
+                     SELECT jsonb_agg(CASE WHEN sample #> string_to_array(p, '.') IS NULL THEN '[]'::jsonb
+                                           ELSE jsonb_build_array(sample #> string_to_array(p, '.')) END
+                                      ORDER BY i)
+                     FROM unnest($3::text[]) WITH ORDINALITY AS t(p, i)), '[]'::jsonb)
                  FROM metrics_samples WHERE at > $1 AND at <= $2 ORDER BY at",
             )
             .bind(from)
             .bind(to)
-            .bind(keep)
+            .bind(&prefixes)
             .fetch_all(db)
-            .await?
+            .await?;
+            reached
+                .into_iter()
+                .map(|row| {
+                    let mut partial = serde_json::Value::Object(Default::default());
+                    let found = row.as_array().map(Vec::as_slice).unwrap_or_default();
+                    for (prefix, value) in prefixes.iter().zip(found) {
+                        let Some(value) = value.as_array().and_then(|v| v.first()) else { continue };
+                        let path: Vec<String> =
+                            if prefix.is_empty() { vec![] } else { prefix.split('.').map(str::to_string).collect() };
+                        let placed = path.iter().rev().fold(value.clone(), |v, k| {
+                            serde_json::Value::Object([(k.clone(), v)].into_iter().collect())
+                        });
+                        merge(&mut partial, placed);
+                    }
+                    project(&partial, keep)
+                })
+                .collect()
         }
         None => {
             sqlx::query_scalar("SELECT sample FROM metrics_samples WHERE at > $1 AND at <= $2 ORDER BY at")
@@ -386,6 +466,101 @@ mod tests {
         assert_eq!(since.iter().map(|s| s.at_ms / 10_000).collect::<Vec<_>>(), vec![8643, 8644, 8645]);
         // From before the oldest: the whole ring, the first five gone
         assert_eq!(samples.since(0)[0].at_ms, 6 * 10_000);
+    }
+
+    fn paths(fields: &[&str]) -> Vec<Vec<String>> {
+        fields.iter().map(|f| f.split('.').map(str::to_string).collect()).collect()
+    }
+
+    /// A sample whose tick ran every phase and loop, as a busy server's does
+    fn busy_sample() -> serde_json::Value {
+        use super::super::load::{Loop, Phase};
+        use capitol_protocol::ledger::{PhaseLoad, TICK_BUCKETS_MS};
+        let load = |n: u64| {
+            let work = |k: u64| PhaseLoad {
+                runs: 100 * n,
+                secs: 0.0123 * (n * k) as f64,
+                max_ms: 4.5,
+                buckets: (0..=TICK_BUCKETS_MS.len() as u64).map(|b| n * k * (b + 1)).collect(),
+                slow_statements: n,
+            };
+            Load {
+                tick_period_ms: 100.0,
+                ticks: 100 * n,
+                tick_secs: 0.4 * n as f64,
+                tick_buckets: (0..=TICK_BUCKETS_MS.len() as u64).map(|b| n * (b + 3)).collect(),
+                phases: Phase::ALL.iter().zip(1..).map(|(p, k)| (p.as_str().to_string(), work(k))).collect(),
+                loops: Loop::ALL.iter().zip(1..).map(|(l, k)| (l.as_str().to_string(), work(k))).collect(),
+                sockets_open: 3,
+                ..Load::default()
+            }
+        };
+        let ledger = |at_ms, n| Ledger {
+            at_ms,
+            booted_ms: 1,
+            accounts: vec![],
+            escrow_strands: 0,
+            units: BTreeMap::new(),
+            unit_flows: BTreeMap::new(),
+            units_settled: true,
+            crafts: BTreeMap::new(),
+            grants: Default::default(),
+            held_flows: Default::default(),
+            load: load(n),
+        };
+        serde_json::to_value(Sample::between(&ledger(90_000, 1), &ledger(100_000, 2), &HashSet::new())).unwrap()
+    }
+
+    /// A path keeps what it reaches where it was, `*` takes each key of an
+    /// object, two paths into one object both keep theirs, and a path that
+    /// reaches nothing adds nothing
+    #[test]
+    fn fields_reach_inside_a_sample() {
+        let sample = busy_sample();
+        let kept = project(&sample, &paths(&["at_ms", "load.tick_p95_ms", "load.ticks", "load.phases.movement.mean_ms", "nope.at.all", "load.nope"]));
+        assert_eq!(
+            kept,
+            serde_json::json!({
+                "at_ms": 100_000,
+                "load": {
+                    "tick_p95_ms": sample["load"]["tick_p95_ms"],
+                    "ticks": 100,
+                    "phases": { "movement": { "mean_ms": sample["load"]["phases"]["movement"]["mean_ms"] } },
+                },
+            })
+        );
+        let secs = project(&sample, &paths(&["load.phases.*.secs"]));
+        let phases = secs["load"]["phases"].as_object().unwrap();
+        assert_eq!(phases.len(), 12);
+        assert!(phases.values().all(|p| p.as_object().unwrap().keys().eq(["secs"])), "{phases:?}");
+        // The whole and a part of it: the whole
+        assert_eq!(project(&sample, &paths(&["load.ticks", "load"]))["load"], sample["load"]);
+        assert_eq!(project(&sample, &paths(&["load", "load.ticks"]))["load"], sample["load"]);
+        // A key under a number reaches nothing
+        assert_eq!(project(&sample, &paths(&["at_ms.x"])), serde_json::json!({}));
+        // What the paths keep reads as a partial sample
+        let tick = project(&sample, &paths(&["at_ms", "booted_ms", "since_ms", "load.tick_mean_ms", "load.tick_p95_ms"]));
+        assert_eq!(tick["load"]["tick_mean_ms"], sample["load"]["tick_mean_ms"]);
+    }
+
+    /// A day of one phase is a small part of a day of the whole tick (#411):
+    /// the console's tick chart asks for four numbers, not every phase
+    #[test]
+    fn a_day_of_one_phase_is_a_sliver_of_the_tick() {
+        let sample = busy_sample();
+        let day = |fields: &[&str]| {
+            let mut keep = paths(&SERIES_TIMES);
+            keep.extend(paths(fields));
+            serde_json::to_vec(&project(&sample, &keep)).unwrap().len() * RING_SAMPLES
+        };
+        let whole = day(&["load"]);
+        let tick = day(&["load.tick_mean_ms", "load.tick_p95_ms", "load.tick_period_ms", "load.ticks_over"]);
+        let phase = day(&["load.phases.movement"]);
+        let secs = day(&["load.phases.*.secs"]);
+        println!("a day of: the whole load {whole} B, the tick chart {tick} B, one phase {phase} B, every phase's secs {secs} B");
+        assert!(tick * 8 < whole, "{tick} against {whole}");
+        assert!(phase * 8 < whole, "{phase} against {whole}");
+        assert!(secs * 2 < whole, "{secs} against {whole}");
     }
 
     mod db {
@@ -552,6 +727,15 @@ mod tests {
                 let mut keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
                 keys.sort();
                 assert_eq!(keys, ["at_ms", "booted_ms", "since_ms", "strands"], "{s}");
+            }
+            // A path reaches inside a sample the same in the table as in the
+            // ring (#411), `*` and all
+            let fields = ["load.ticks".to_string(), "load.phases.*.secs".to_string(), "load.nope".to_string()];
+            let some = series(&ring, &db, now - 5 * 60_000, now, Some(&fields)).await.unwrap();
+            assert_eq!(some.len(), 15);
+            for s in &some {
+                assert_eq!(s["load"], serde_json::json!({ "ticks": 0, "phases": {} }), "{s}");
+                assert_eq!(s.as_object().unwrap().len(), 4, "{s}");
             }
             // Within the ring, the table isn't read
             assert_eq!(series(&ring, &db, now - 30_000, now, None).await.unwrap().len(), 3);

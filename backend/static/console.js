@@ -244,13 +244,26 @@
 
   function addSample(sample) {
     const had = state.samples.get(sample.at_ms);
-    state.samples.set(sample.at_ms, had ? Object.assign(had, sample) : sample);
+    state.samples.set(sample.at_ms, had ? merge(had, sample) : sample);
     state.sorted = null;
     // Keep a day, the ring's length
     const old = Date.now() - DAY_MS - SAMPLE_MS;
     if (state.samples.size > 9000) {
       for (const at of state.samples.keys()) if (at < old) state.samples.delete(at);
     }
+  }
+
+  /** `part` put into `into`, object by object: a series asks for paths
+   * inside a sample (#411), so one set's `load` holds a few of its numbers,
+   * and mustn't take the place of those another set or the stream brought */
+  function merge(into, part) {
+    for (const [k, v] of Object.entries(part)) {
+      const had = into[k];
+      const objects = had && v && typeof had === "object" && typeof v === "object" && !Array.isArray(had) && !Array.isArray(v);
+      if (objects) merge(had, v);
+      else into[k] = v;
+    }
+    return into;
   }
 
   function addAnnotation(a) {
@@ -260,14 +273,26 @@
     return true;
   }
 
-  // The fields each set of charts reads: the tick's `load` is most of a
-  // sample, so it's read only for the performance tab (#411), with the event
-  // bus's backlog beside it (D3.1), and the money's flows and trades, and the
-  // wealth by trade, only for the economy tab, and the units and crafts too
-  // (D2.4)
+  // The fields each set of charts reads, as paths into a sample (#411). The
+  // base has the few numbers of the tick the overview's tiles and the tick's
+  // chart draw. The rest of `load` that's drawn, the queues, sockets and
+  // pool, and four numbers of each phase and loop for their table (about
+  // 17 MB a day, #572), is read only for the performance tab, with the event bus's backlog beside it
+  // (D3.1); the money's flows and trades, and the wealth by trade, only for
+  // the economy tab, and the units and crafts too (D2.4)
+  const TICK_FIELDS = ["ticks", "secs", "tick_mean_ms", "tick_p95_ms", "tick_p99_ms", "tick_period_ms", "ticks_over", "sockets_open"];
+  const LOAD_FIELDS = [
+    "commands", "command_queue_p99", "writer_queued", "writer_lag_ms", "events_lagged", "socket_resyncs",
+    "sockets_opened", "sockets_dropped", "players_in_world", "db_pool_size", "db_pool_idle", "db_transactions_per_sec",
+  ];
+  const WORK_FIELDS = ["runs", "secs", "p95_ms", "slow_statements"];
   const FIELDS = {
-    base: "players,strands,drift",
-    load: "load,events",
+    base: ["players", "strands", "drift", ...TICK_FIELDS.map((f) => `load.${f}`)].join(","),
+    load: [
+      ...LOAD_FIELDS.map((f) => `load.${f}`),
+      ...["phases", "loops"].flatMap((part) => WORK_FIELDS.map((f) => `load.${part}.*.${f}`)),
+      "events",
+    ].join(","),
     money: "strand_flows,new_accounts,grants,market,bazaar,distribution,books",
     making: "units,unit_flows,crafts",
     town: "town",
@@ -303,7 +328,7 @@
             state.tab === "economy" ? readSeries("money") : null,
             state.tab === "economy" ? readSeries("making") : null,
             state.tab === "town" ? readSeries("town") : null,
-            state.tab === "tuning" ? Promise.all([readSeries("money"), readSeries("making"), readSeries("load")]) : null,
+            state.tab === "tuning" ? Promise.all([readSeries("money"), readSeries("making")]) : null,
           ]);
         }
         setLive("live");
@@ -943,9 +968,8 @@
 
   // The overview's tiles (D1.2): each reads the newest sample that has its
   // field, says whether that's well, and draws a sparkline over the range.
-  // The tick's tiles read `load`, which the series sends only for the
-  // performance tab (#411), so until that tab is opened their sparklines
-  // hold what the stream has brought since the page opened.
+  // The tick's tiles read the few numbers of `load` in the base field set
+  // (#411), so their sparklines run the whole range from the first read.
   const TILES = [
     {
       key: "health",
@@ -3205,10 +3229,11 @@
   async function tuning() {
     if (!knobs) await loadKnobs();
     const from = rangeFrom();
-    if (!books || state.covered.money > from || state.covered.making > from || state.covered.load > from) {
+    // The tick's chart draws from the base field set (#411)
+    if (!books || state.covered.money > from || state.covered.making > from) {
       try {
         books ??= await getJson("/admin/books");
-        await Promise.all([readSeries("money"), readSeries("making"), readSeries("load")]);
+        await Promise.all([readSeries("money"), readSeries("making")]);
       } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
     }
     // The economy's own sums, which its tab's stories write too
