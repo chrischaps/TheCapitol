@@ -347,6 +347,7 @@ fn subscription_follows_auth_ok_me_and_the_lapse() {
         subscription: active(30),
         fees: Default::default(),
         is_admin: false,
+        day_offset_ms: 0,
     });
     assert!(state.is_patron());
 
@@ -393,6 +394,7 @@ fn auth_ok_sets_the_local_player() {
         subscription: Default::default(),
         fees: Default::default(),
         is_admin: false,
+        day_offset_ms: 0,
     });
     assert!(events.is_empty());
     assert_eq!(state.me(), Some(ME));
@@ -407,8 +409,24 @@ fn auth_ok_sets_the_local_player() {
         subscription: Default::default(),
         fees: Default::default(),
         is_admin: false,
+        day_offset_ms: 0,
     });
     assert!((state.server_time_ms().unwrap() - now_ms()).abs() < 1000);
+
+    // A dev server's day clock set to an hour (#427): the hour moves, the
+    // server's clock doesn't
+    let offset = capitol_protocol::rules::day_offset_to(9.0, now_ms());
+    state.apply_ws(&M::AuthOk {
+        player_id: ME,
+        server_time_ms: now_ms(),
+        subscription: Default::default(),
+        fees: Default::default(),
+        is_admin: false,
+        day_offset_ms: offset,
+    });
+    assert!((state.server_time_ms().unwrap() - now_ms()).abs() < 1000);
+    let nine = state.time_of_day().unwrap() * 24.0;
+    assert!((nine - 9.0).abs() < 0.01, "{nine}");
 }
 
 fn now_ms() -> i64 {
@@ -1662,7 +1680,7 @@ fn the_fees_follow_the_server() {
     let mut state = GameState::new();
     assert_eq!(state.fees(), Fees::default(), "the defaults before the server says");
     let dear = Fees { exchange_fee_rate: 0.02, listing_fee_percent: 3.0, stall_rent_per_day: 40 };
-    state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: now_ms(), subscription: Default::default(), fees: dear, is_admin: false });
+    state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: now_ms(), subscription: Default::default(), fees: dear, is_admin: false, day_offset_ms: 0 });
     assert_eq!(state.fees(), dear);
     let cheap = Fees { listing_fee_percent: 0.5, ..dear };
     assert!(state.apply_ws(&M::FeesChanged { fees: cheap }).is_empty());
@@ -1680,6 +1698,7 @@ fn auth_ok_says_whether_the_token_is_an_admins() {
         subscription: Default::default(),
         fees: Default::default(),
         is_admin,
+        day_offset_ms: 0,
     };
     state.apply_ws(&auth_ok(true));
     assert!(state.is_admin());

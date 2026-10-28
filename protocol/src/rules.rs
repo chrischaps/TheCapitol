@@ -71,6 +71,20 @@ pub fn time_of_day(unix_ms: i64) -> f64 {
     unix_ms.rem_euclid(day_ms) as f64 / day_ms as f64
 }
 
+/// The offset to add to `unix_ms` for [`time_of_day`] to read `hour` (0 to
+/// 24), from 0 up to a day: a dev server's day clock set to an hour of its
+/// own (`PUT /admin/clock`, #427).
+pub fn day_offset_to(hour: f64, unix_ms: i64) -> i64 {
+    let day_ms = DAY_LENGTH_SECS * 1000;
+    let want = (hour.rem_euclid(24.0) / 24.0 * day_ms as f64).round() as i64;
+    (want - unix_ms.rem_euclid(day_ms)).rem_euclid(day_ms)
+}
+
+/// For serde: a day offset of 0 is left off the wire
+pub(crate) fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
 /// The in-game day `unix_ms` falls in: whole days since the Unix epoch. The
 /// Gazette (E3.9) is filed by it.
 pub fn day_number(unix_ms: i64) -> i64 {
@@ -669,6 +683,19 @@ mod tests {
         assert_eq!(time_of_day(-day / 4), 0.75);
         // In-game midnight falls on UTC midnight (2026-10-17T00:00:00Z).
         assert_eq!(time_of_day(1_792_195_200_000), 0.0);
+    }
+
+    #[test]
+    fn a_day_offset_sets_the_hour() {
+        let day = DAY_LENGTH_SECS * 1000;
+        let now = 1_792_195_200_000 + day / 3;
+        for hour in [0.0, 6.5, 9.0, 12.0, 23.75] {
+            let offset = day_offset_to(hour, now);
+            assert!((0..day).contains(&offset), "{hour}: {offset}");
+            assert!((time_of_day(now + offset) * 24.0 - hour).abs() < 1e-6, "{hour}");
+        }
+        assert_eq!(day_offset_to(8.0, 1_792_195_200_000 + day / 3), 0, "it's 08:00 already");
+        assert_eq!(day_offset_to(24.0, now), day_offset_to(0.0, now));
     }
 
     #[test]

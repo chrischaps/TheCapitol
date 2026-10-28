@@ -534,6 +534,9 @@ pub struct GameState {
     me: Option<Uuid>,
     /// The server's clock minus this machine's, in ms, from the last `AuthOk`.
     clock_offset_ms: Option<i64>,
+    /// What the server's day clock adds to its clock (#427), from the last
+    /// `AuthOk`: 0 but on a dev server whose day was set to an hour.
+    day_offset_ms: i64,
 
     players: HashMap<Uuid, PlayerPosition>,
     activities: HashMap<Uuid, Activity>,
@@ -606,6 +609,7 @@ impl GameState {
             ever_connected: false,
             me: None,
             clock_offset_ms: None,
+            day_offset_ms: 0,
             players: HashMap::new(),
             activities: HashMap::new(),
             zone: None,
@@ -704,11 +708,13 @@ impl GameState {
                 subscription,
                 fees,
                 is_admin,
+                day_offset_ms,
             } => {
                 self.me = Some(*player_id);
                 self.subscription = Some(*subscription);
                 self.fees = *fees;
                 self.is_admin = *is_admin;
+                self.day_offset_ms = *day_offset_ms;
                 // Rebased on every AuthOk, so a reconnect corrects any drift.
                 self.clock_offset_ms = Some(server_time_ms - local_unix_ms());
             }
@@ -1580,6 +1586,7 @@ impl GameState {
             | R::Series(_)
             | R::Annotations(_)
             | R::Tunables(_)
+            | R::Clock(_)
             | R::Walkers(_) => {}
         }
         out
@@ -1608,10 +1615,17 @@ impl GameState {
         self.clock_offset_ms.map(|offset| local_unix_ms() + offset)
     }
 
-    /// [`rules::time_of_day`] on the server's clock: 0 midnight, 0.5 noon.
-    /// `None` until the first `AuthOk`; offline has no server clock.
+    /// [`rules::time_of_day`] on the server's day clock: 0 midnight, 0.5
+    /// noon. `None` until the first `AuthOk`; offline has no server clock.
     pub fn time_of_day(&self) -> Option<f64> {
-        self.server_time_ms().map(capitol_protocol::rules::time_of_day)
+        self.day_clock_ms().map(capitol_protocol::rules::time_of_day)
+    }
+
+    /// The server's day clock now: its clock, plus the offset a dev server's
+    /// day may be set to (#427). For the hour of the day alone: timestamps
+    /// and day numbers go by [`Self::server_time_ms`].
+    pub fn day_clock_ms(&self) -> Option<i64> {
+        self.server_time_ms().map(|ms| ms + self.day_offset_ms)
     }
 
     /// The local player's name and server position. Known from `GET

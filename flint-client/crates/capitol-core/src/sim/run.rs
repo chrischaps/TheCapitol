@@ -639,7 +639,7 @@ impl SimBot {
             let phase = self.phase();
             if let (Some(town), Some(phase)) = (town, phase) {
                 town.health(|h| h.phase = Some(phase));
-                town.server_time_was(self.bot.state().server_time_ms());
+                town.day_clock_was(self.bot.state().day_clock_ms());
                 match phase {
                     // Dusk, the change of shift: home, then the night's
                     // work. A session that starts at night goes home first

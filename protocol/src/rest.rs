@@ -596,6 +596,31 @@ pub struct HealthResponse {
     /// reads it to turn its wall clock into game hours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sim_tick_scale: Option<f64>,
+    /// The day clock's offset from `server_time_ms`, when a dev server's was
+    /// set to an hour of its own (`PUT /admin/clock`, #427), as `auth_ok`
+    /// gives it. Absent at 0.
+    #[serde(default, skip_serializing_if = "crate::rules::is_zero")]
+    pub day_offset_ms: i64,
+}
+
+/// `PUT /admin/clock`: set a dev server's day clock to read `hour` now, 0 to
+/// 24 (#427). Only a server started with `DEV_CLOCK=on` takes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct SetClockRequest {
+    pub hour: f64,
+}
+
+/// `GET` and `PUT /admin/clock`: the day clock now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ClockResponse {
+    /// What the day clock adds to the server's, 0 to a day
+    pub day_offset_ms: i64,
+    /// `rules::time_of_day` on the day clock now: 0 midnight, 0.5 noon
+    pub time_of_day: f64,
+    /// Whether this server lets an admin set it (`DEV_CLOCK=on`)
+    pub settable: bool,
 }
 
 // ---------------------------------------------------------------------------

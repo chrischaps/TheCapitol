@@ -149,6 +149,10 @@ FLAGS:
                       it doesn't name goes back to its default. One knob a
                       line, `property_tax_rate = 0.2`; a family's by its id,
                       `\"yield.grass\" = 1.5` or under `[yield]`
+    --start-at <hour> With soak, set the server's day clock to this hour
+                      first, 9 or 13:30, so the soak lives the hours it
+                      asks for whenever it starts (#427). Needs a server
+                      started with DEV_CLOCK=on
     --out <md>        With compare, where to write it [default: printed]
     --count <n>       With mint, how many citizens to make
     --online <n>      With mint, make enough citizens to keep n on, on
@@ -273,6 +277,8 @@ struct Options {
     always_on: bool,
     /// With soak, the preset to run under (D6.3)
     tunables: Option<PathBuf>,
+    /// With soak, the hour to set the server's day clock to first (#427)
+    start_at: Option<f64>,
 }
 
 impl Options {
@@ -311,6 +317,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         sample: Duration::from_secs(60),
         always_on: false,
         tunables: None,
+        start_at: None,
     };
     let mut admin_given = false;
     let mut every_given = false;
@@ -394,6 +401,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 log_mb_given = true;
             }
             "--report" => options.report = true,
+            "--start-at" => options.start_at = Some(hour(&arg, &value()?)?),
             "--hours" => {
                 let h: f64 = number(&arg, &value()?)?;
                 if h.is_nan() || h <= 0.0 {
@@ -528,10 +536,31 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     if options.tunables.is_some() && !matches!(options.action, Action::Soak { .. }) {
         return Err("--tunables goes with soak".into());
     }
+    if options.start_at.is_some() && !matches!(options.action, Action::Soak { .. }) {
+        return Err("--start-at goes with soak".into());
+    }
     if out.is_some() {
         return Err("--out goes with compare".into());
     }
     Ok(Some(options))
+}
+
+/// An hour of the day, 0 to 24: `9`, `13.5` or `13:30`
+fn hour(flag: &str, value: &str) -> Result<f64, String> {
+    let h = match value.split_once(':') {
+        Some((h, m)) => {
+            let (h, m): (f64, f64) = (number(flag, h)?, number(flag, m)?);
+            if !(0.0..60.0).contains(&m) {
+                return Err(format!("{flag}: {value:?} has no such minute"));
+            }
+            h + m / 60.0
+        }
+        None => number(flag, value)?,
+    };
+    if !(0.0..=24.0).contains(&h) {
+        return Err(format!("{flag}: {value:?} is outside 0 to 24"));
+    }
+    Ok(h)
 }
 
 fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
@@ -779,6 +808,12 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
         }
         println!("capitol-town: the knobs are {}'s", path.display());
     }
+    // Before the books and before any citizen signs in, so each hears the
+    // day clock in its auth_ok and the whole soak lives from that hour
+    if let Some(hour) = options.start_at {
+        let clock = admin.set_clock(&config, hour)?;
+        println!("capitol-town: the day's clock reads {} (#427)", schedule::clock(clock.time_of_day));
+    }
     let knobs = balance::off_default(&tunables);
     for (key, value) in &knobs {
         println!("    {key} = {value}");
@@ -845,7 +880,8 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
     let label = preset.as_ref().map_or("the server's knobs".to_string(), |(path, _)| {
         path.file_name().map_or(path.display().to_string(), |n| n.to_string_lossy().into_owned())
     });
-    if let Some(run) = Balance::of(&report, &label, knobs, &targets(&config)) {
+    if let Some(mut run) = Balance::of(&report, &label, knobs, &targets(&config)) {
+        run.day_offset_ms = day_offset(&server);
         let path = md.with_extension("balance.json");
         let json = capitol_core::serde_json::to_string_pretty(&run).map_err(|e| format!("writing the balance: {e}"))?;
         std::fs::write(&path, json).map_err(|e| format!("writing {}: {e}", path.display()))?;
@@ -919,6 +955,15 @@ fn load_line(before: &Ledger, now: &Ledger) -> String {
     )
 }
 
+/// What the server's day clock adds to its clock (#427), from its health;
+/// 0 if it won't say.
+fn day_offset(server: &str) -> i64 {
+    match net::call_once(&NetConfig::with_base_url(server), None, &RestRequest::Health) {
+        Ok(RestResponse::Health(health)) => health.day_offset_ms,
+        _ => 0,
+    }
+}
+
 /// The server's `SIM_TICK_SCALE`, from its health; 1 if it won't say.
 fn tick_scale(server: &str) -> f64 {
     match net::call_once(&NetConfig::with_base_url(server), None, &RestRequest::Health) {
@@ -959,6 +1004,7 @@ fn live(
     }
     let poster = report_to_server(options, roster, server, &town);
     let status = &roster.path;
+    let day_offset = day_offset(server);
     let began = Instant::now();
     let mut next = began + options.every;
     let mut next_sample = began + options.sample;
@@ -976,7 +1022,7 @@ fn live(
             break;
         }
         if now >= next {
-            report(&town, server, status);
+            report(&town, server, status, day_offset);
             next += options.every;
         }
         if until.is_some() && now >= next_sample {
@@ -988,7 +1034,7 @@ fn live(
     stop.store(true, Ordering::Relaxed);
     println!("capitol-town: stopping; each citizen finishes its step");
     let stuck = town.wait(GRACE);
-    report(&town, server, status);
+    report(&town, server, status, day_offset);
     if let Some(poster) = poster {
         poster.finish();
     }
@@ -1232,9 +1278,9 @@ fn audition(name: &str) -> Result<(), String> {
 /// Prints the health and writes it beside the roster, appends who was
 /// where in their day to the presence log (C1.2), and keeps the citizens'
 /// stints (Callings K1.2).
-fn report(town: &Town, server: &str, roster: &Path) {
+fn report(town: &Town, server: &str, roster: &Path, day_offset_ms: i64) {
     let now_ms = unix_ms();
-    let game = schedule::clock(capitol_core::protocol::rules::time_of_day(now_ms));
+    let game = schedule::clock(capitol_core::protocol::rules::time_of_day(now_ms + day_offset_ms));
     let header = format!("capitol-town · {server} · {} · game {game} · {}", now_utc(), town.tally());
     let lines = town.health_lines();
     println!("── {header}");
@@ -1247,7 +1293,7 @@ fn report(town: &Town, server: &str, roster: &Path) {
         eprintln!("capitol-town: writing {}: {e}", status.display());
     }
     let presence = town::presence_path(roster);
-    if let Err(e) = append_presence(&presence, &town.presence(now_ms)) {
+    if let Err(e) = append_presence(&presence, &town.presence(now_ms, day_offset_ms)) {
         eprintln!("capitol-town: writing {}: {e}", presence.display());
     }
     // Each citizen's stint and what it did lately, for its next session
@@ -1405,6 +1451,12 @@ mod tests {
         assert!(!parse(args("run")).unwrap().unwrap().always_on);
         assert!(parse(args("run --always-on")).unwrap().unwrap().always_on);
         assert!(parse(args("soak --hours 2 --always-on")).unwrap().unwrap().always_on);
+        // A soak's day clock, from an hour or a time of day (#427)
+        assert_eq!(parse(args("soak --hours 2 --start-at 9")).unwrap().unwrap().start_at, Some(9.0));
+        assert_eq!(parse(args("soak --hours 2 --start-at 13:30")).unwrap().unwrap().start_at, Some(13.5));
+        assert!(parse(args("soak --hours 2 --start-at 25")).is_err());
+        assert!(parse(args("soak --hours 2 --start-at 9:75")).is_err());
+        assert!(parse(args("run --start-at 9")).is_err(), "--start-at goes with soak");
         assert_eq!(parse(args("--status")).unwrap().unwrap().action, Action::Status);
         assert_eq!(parse(args("status")).unwrap().unwrap().action, Action::Status);
         let o = parse(args("run --every 5 --server http://x:3001")).unwrap().unwrap();

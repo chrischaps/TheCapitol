@@ -44,5 +44,6 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
         server_time_ms: chrono::Utc::now().timestamp_millis(),
         catalog_version: Some(catalog_version),
         sim_tick_scale: (state.config.sim_tick_scale != 1.0).then_some(state.config.sim_tick_scale),
+        day_offset_ms: state.day_offset_ms(),
     })
 }

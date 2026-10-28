@@ -753,6 +753,7 @@ mod tests {
             server_time_ms: 0,
             catalog_version: None,
             sim_tick_scale: None,
+            day_offset_ms: 0,
         };
         auth.observe(&NetEvent::Rest(TAG + 1, Ok(RestResponse::Health(health))));
         assert_eq!(auth.reachable(), Some(true));

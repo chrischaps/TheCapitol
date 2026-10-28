@@ -287,6 +287,9 @@ pub enum RestRequest {
     /// `PUT /admin/tunables`: set knobs, all or none, for a balance run's
     /// preset (D6.3). Needs an admin's token.
     SetTunables(TunablesUpdate),
+    /// `PUT /admin/clock`: set a dev server's day clock to an hour, for a
+    /// soak that starts there (#427). Needs an admin's token.
+    SetClock(SetClockRequest),
     /// `GET /admin/walkers`: the players near a point, with where the server
     /// is walking them, for the admin's world layers
     Walkers(WalkersQuery),
@@ -421,6 +424,7 @@ pub enum RestResponse {
     Series(Box<Series>),
     Annotations(Vec<Annotation>),
     Tunables(TunablesResponse),
+    Clock(ClockResponse),
     Walkers(Vec<Walker>),
 }
 
@@ -518,6 +522,7 @@ impl RestRequest {
             | SetByline(_)
             | ConfigureAutomation { .. }
             | SetTunables(_)
+            | SetClock(_)
             | SetTutorialDismissed(_)
             | SetGuildRole { .. }
             | Mute { .. } => Method::PUT,
@@ -698,6 +703,7 @@ impl RestRequest {
             Series(_) => "/admin/series".into(),
             Annotations(_) => "/admin/annotations".into(),
             Tunables | SetTunables(_) => "/admin/tunables".into(),
+            SetClock(_) => "/admin/clock".into(),
             Walkers(_) => "/admin/walkers".into(),
         }
     }
@@ -741,6 +747,7 @@ impl RestRequest {
             CreateCitizen(b) => req.json(b),
             TownReport(b) => req.json(b),
             SetTunables(b) => req.json(b),
+            SetClock(b) => req.json(b),
             SetTutorialDismissed(b) => req.json(b),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             Leaderboards(q) => req.query(q),
@@ -877,6 +884,7 @@ impl RestRequest {
             Q::Series(_) => A::Series(Box::new(de(body)?)),
             Q::Annotations(_) => A::Annotations(de(body)?),
             Q::Tunables | Q::SetTunables(_) => A::Tunables(de(body)?),
+            Q::SetClock(_) => A::Clock(de(body)?),
             Q::Walkers(_) => A::Walkers(de(body)?),
         })
     }
@@ -1268,6 +1276,7 @@ mod tests {
             (RestRequest::Annotations(Default::default()), "GET", "/admin/annotations".into()),
             (RestRequest::Tunables, "GET", "/admin/tunables".into()),
             (RestRequest::SetTunables(TunablesUpdate { values: Default::default() }), "PUT", "/admin/tunables".into()),
+            (RestRequest::SetClock(SetClockRequest { hour: 9.0 }), "PUT", "/admin/clock".into()),
             (
                 RestRequest::Walkers(WalkersQuery { x: 1.0, y: 2.0, radius: 3.0 }),
                 "GET",

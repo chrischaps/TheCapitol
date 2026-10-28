@@ -125,6 +125,10 @@ pub struct Balance {
     /// which hours of the citizens' day the run lived
     pub started_ms: i64,
     pub ended_ms: i64,
+    /// What the server's day clock added to those (#427): a soak that set
+    /// its hour (`--start-at`). 0 on the real clock, and for a run before it
+    #[serde(default)]
+    pub day_offset_ms: i64,
     /// The citizens' Strands by trade, at each end
     pub trades: Vec<TradeMoney>,
     /// The Gini of the citizens' Strands at each end, and the share the
@@ -246,6 +250,7 @@ impl Balance {
             scale: report.sim.scale,
             started_ms: soak.start.at_ms,
             ended_ms: soak.end.at_ms,
+            day_offset_ms: 0,
             trades: report
                 .trades
                 .iter()
@@ -297,19 +302,19 @@ impl Balance {
 
     /// The game clock at `unix_ms`: "21:45"
     fn clock(&self, unix_ms: i64) -> String {
-        super::schedule::clock(capitol_protocol::rules::time_of_day(unix_ms))
+        super::schedule::clock(capitol_protocol::rules::time_of_day(unix_ms + self.day_offset_ms))
     }
 
     /// Whether two runs lived the same hours of the citizens' day: their
-    /// starts within a game half hour of each other, or both whole days.
-    /// A run can't choose its hours (#427), so `balance.ps1` runs both
-    /// towns at once.
+    /// starts within a game half hour of each other on their day clocks, or
+    /// both whole days. `balance.ps1` runs both towns at once, or starts
+    /// both at the hour `-StartAt` gives (#427).
     pub fn same_hours(&self, other: &Balance) -> bool {
         if self.day_hours >= 24.0 && other.day_hours >= 24.0 {
             return true;
         }
         let day_ms = capitol_protocol::rules::DAY_LENGTH_SECS * 1000;
-        let apart = (self.started_ms - other.started_ms).rem_euclid(day_ms);
+        let apart = (self.started_ms + self.day_offset_ms - other.started_ms - other.day_offset_ms).rem_euclid(day_ms);
         apart.min(day_ms - apart) <= day_ms / 48
     }
 
@@ -417,7 +422,7 @@ pub fn compare(a: &Balance, b: &Balance) -> String {
     if !a.same_hours(b) {
         let _ = writeln!(
             md,
-            "**They lived different hours of the citizens' day**, so their work, market and night differ as well as their knobs. `scripts/balance.ps1` runs both at once to keep them together.\n"
+            "**They lived different hours of the citizens' day**, so their work, market and night differ as well as their knobs. `scripts/balance.ps1` runs both at once to keep them together, or `-StartAt` starts both at one hour.\n"
         );
     }
     knobs_md(&mut md, a, b);
@@ -831,6 +836,7 @@ mod tests {
             scale: 10.0,
             started_ms: 0,
             ended_ms: 600_000,
+            day_offset_ms: 0,
             trades: vec![money("gatherer-fiber", 4, 400, 1200), money("crafter-planks", 2, 200, 150)],
             gini_start: Some(0.0),
             gini_end: Some(0.41),
@@ -965,6 +971,15 @@ mod tests {
         // A game minute short of midnight is next to just past it
         b.started_ms = 7_200_000 - 60_000;
         assert!(a.same_hours(&b));
+        // Half an hour apart on the real clock, but each set to start at 09:00 (#427)
+        let mut a = a;
+        b.started_ms = a.started_ms + 1_800_000;
+        b.ended_ms = b.started_ms + 600_000;
+        a.day_offset_ms = capitol_protocol::rules::day_offset_to(9.0, a.started_ms);
+        b.day_offset_ms = capitol_protocol::rules::day_offset_to(9.0, b.started_ms);
+        assert!(a.same_hours(&b));
+        let md = compare(&a, &b);
+        assert!(md.contains("from game 09:00 to 11:00") && !md.contains("different hours"), "{md}");
     }
 
     #[test]

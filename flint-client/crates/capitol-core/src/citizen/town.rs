@@ -51,7 +51,7 @@ use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
     CitizenReport, DecisionBrief, RoadInReport, StintReport, TownFailure, TownReport, TOWN_FAILURES,
 };
-use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
+use capitol_protocol::rest::{ClockResponse, CreateCitizenRequest, LoginRequest, SetClockRequest};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use serde::Deserialize;
@@ -691,6 +691,21 @@ impl Admin {
         }
     }
 
+    /// Sets a dev server's day clock to read `hour` now, `PUT /admin/clock`,
+    /// for a soak that starts at an hour of its own (#427). Refused unless
+    /// the server was started with `DEV_CLOCK=on`.
+    pub fn set_clock(&self, config: &NetConfig, hour: f64) -> Result<ClockResponse, String> {
+        let token = self.sign_in(config)?;
+        match net::call_once(config, Some(&token), &RestRequest::SetClock(SetClockRequest { hour })) {
+            Ok(RestResponse::Clock(clock)) => Ok(clock),
+            Ok(other) => Err(format!("setting the day clock: unexpected {other:?}")),
+            Err(e) if e.status() == Some(403) => {
+                Err(format!("setting the day clock: {e}. Is {} an admin, and the server started with DEV_CLOCK=on?", self.email))
+            }
+            Err(e) => Err(format!("setting the day clock: {e}")),
+        }
+    }
+
     /// Every live knob, `GET /admin/tunables` (D6.1)
     pub fn tunables(&self, config: &NetConfig) -> Result<TunablesResponse, String> {
         self.tunables_call(config, &RestRequest::Tunables, "reading the tunables")
@@ -1053,14 +1068,15 @@ impl Tether<'_> {
         *self.kept.lock().unwrap_or_else(|e| e.into_inner()) = kept;
     }
 
-    /// Notes the server's clock, as a life signed in reads it.
-    pub(crate) fn server_time_was(&self, server_ms: Option<i64>) {
+    /// Notes the server's day clock, as a life signed in reads it: its
+    /// clock and the day's offset (#427).
+    pub(crate) fn day_clock_was(&self, server_ms: Option<i64>) {
         if let Some(ms) = server_ms {
             self.clock_offset_ms.store(ms - local_unix_ms(), Ordering::Relaxed);
         }
     }
 
-    /// The time of day on the server's clock, as last seen.
+    /// The time of day on the server's day clock, as last seen.
     fn time_of_day(&self) -> f64 {
         rules::time_of_day(local_unix_ms() + self.clock_offset_ms.load(Ordering::Relaxed))
     }
@@ -1229,9 +1245,10 @@ impl Town {
     }
 
     /// Who was where in their day at `unix_ms`, a CSV row a citizen under
-    /// [`PRESENCE_HEADER`]: what C1.2's chart of a day is drawn from.
-    pub fn presence(&self, unix_ms: i64) -> Vec<String> {
-        let time = schedule::clock(rules::time_of_day(unix_ms));
+    /// [`PRESENCE_HEADER`]: what C1.2's chart of a day is drawn from. Its
+    /// game time is on the server's day clock, `day_offset_ms` on (#427).
+    pub fn presence(&self, unix_ms: i64, day_offset_ms: i64) -> Vec<String> {
+        let time = schedule::clock(rules::time_of_day(unix_ms + day_offset_ms));
         self.health
             .iter()
             .map(|h| {
@@ -1375,7 +1392,7 @@ fn one_life(
 ) -> Result<Ended, BotError> {
     let key = citizen.key().map_err(BotError::Failed)?;
     let bot = Bot::with_api_key(NetConfig::with_base_url(server), &key)?.quiet();
-    tether.server_time_was(bot.state().server_time_ms());
+    tether.day_clock_was(bot.state().day_clock_ms());
     // The roster checked the layers
     let cascade = Cascade::from_names(&citizen.layers).map_err(BotError::Failed)?;
     let mut mind = Mind::new(cascade, citizen.persona.temperament).with_pulse(pulse.clone());

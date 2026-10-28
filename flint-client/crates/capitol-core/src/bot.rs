@@ -2984,6 +2984,7 @@ mod tests {
             subscription: Default::default(),
             fees: Default::default(),
             is_admin: false,
+            day_offset_ms: 0,
         });
         let apart = |d: f64| ServerMessage::Positions {
             players: vec![

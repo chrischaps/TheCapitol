@@ -148,6 +148,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         subscription,
         fees: state.tunables.get().fees,
         is_admin: authed.is_admin,
+        day_offset_ms: state.day_offset_ms(),
     };
     let _ = sender
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))

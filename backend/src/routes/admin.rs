@@ -14,12 +14,12 @@ use capitol_protocol::metrics::{Feed, SeriesQuery, TownLatest, TownReport};
 use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use capitol_protocol::rest::{
-    AdminBooks, AdminMap, ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, FillHeat, MapPlot,
-    MapQuery, MapZone, MapStation, PlayerDetail, PlayerQuery, StrandMove, StrandPoint, SuccessResponse, Walker,
+    AdminBooks, AdminMap, ApiKeyScope, CitizenInfo, ClockResponse, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, FillHeat, MapPlot,
+    MapQuery, MapZone, MapStation, PlayerDetail, PlayerQuery, SetClockRequest, StrandMove, StrandPoint, SuccessResponse, Walker,
     WalkersQuery, MAP_HEAT_MAX_HOURS, PLAYER_MOVES, PLAYER_POINTS, WALKERS_MAX_RADIUS,
 };
 use capitol_protocol::metrics::Trades;
-use capitol_protocol::rules::Zone;
+use capitol_protocol::rules::{self, Zone};
 use tower_http::compression::CompressionLayer;
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use chrono::Utc;
@@ -55,6 +55,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/stream", get(stream))
         .route("/series", get(get_series))
         .route("/tunables", get(get_tunables).put(put_tunables))
+        .route("/clock", get(get_clock).put(put_clock))
         .route("/tunables/preset", get(get_tunables_preset).put(put_tunables_preset))
         .route("/walkers", get(get_walkers))
         .route("/positions", get(get_positions).layer(CompressionLayer::new()))
@@ -439,6 +440,47 @@ pub async fn get_series(
 async fn known_ids(state: &AppState) -> Result<tunables::Known, AppError> {
     let resources: Vec<String> = state.game.read().await.resource_types.keys().cloned().collect();
     Ok(tunables::Known::read(&state.db, resources).await?)
+}
+
+/// The day clock now (#427)
+pub async fn get_clock(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<ClockResponse>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(clock_now(&state)))
+}
+
+/// Sets the day clock to read `hour` now, so a balance run lives the hours
+/// it asks for (#427). Only on a server started with `DEV_CLOCK=on`: the
+/// day clock is what every client's sky and every citizen's day go by. It
+/// moves the hour alone; timestamps and day numbers stay real. A client
+/// hears the new offset in its next `auth_ok`.
+pub async fn put_clock(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(request): Json<SetClockRequest>,
+) -> Result<Json<ClockResponse>, AppError> {
+    require_admin(&user)?;
+    if !state.config.dev_clock {
+        return Err(AppError::Forbidden("The day clock is real time here: start the server with DEV_CLOCK=on".into()));
+    }
+    if !(0.0..=24.0).contains(&request.hour) {
+        return Err(AppError::BadRequest(format!("hour: {} is outside 0 to 24", request.hour)));
+    }
+    let offset = rules::day_offset_to(request.hour, Utc::now().timestamp_millis());
+    state.day_offset_ms.store(offset, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("{} set the day clock to {:.2} (an offset of {offset} ms)", user.account_id, request.hour);
+    Ok(Json(clock_now(&state)))
+}
+
+fn clock_now(state: &AppState) -> ClockResponse {
+    let offset = state.day_offset_ms();
+    ClockResponse {
+        day_offset_ms: offset,
+        time_of_day: rules::time_of_day(Utc::now().timestamp_millis() + offset),
+        settable: state.config.dev_clock,
+    }
 }
 
 /// Every live tunable (D6.1) with its unit, range, default and value, one per

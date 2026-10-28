@@ -255,6 +255,7 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
                         subscription: Default::default(),
                         fees: Default::default(),
                         is_admin: false,
+                        day_offset_ms: 0,
                     },
                 )
                 .await;

@@ -14,7 +14,7 @@
   prices against their targets.
 
     scripts\balance.ps1 A.toml [B.toml] [-Hours 2] [-Citizens 20] [-Merchants 2] [-Scale 10]
-                         [-Roster R.toml | -Roster RA.toml,RB.toml]
+                         [-StartAt 9] [-Roster R.toml | -Roster RA.toml,RB.toml]
 
   With one preset there's one town, a, and no comparison: a soak of
   -Citizens under that preset, its report and balance in a\.
@@ -27,8 +27,14 @@
   clock (a game day is two real hours), so two runs one after the other
   would live different hours of it: one at the market, the other asleep.
   At once, they live the same hours on the same machine, in half the time.
-  Which hours is the real clock's choice: a run can't start at a game hour
-  of its own (#427), but -Hours 24 lives a whole day.
+
+  -StartAt picks the hours: each soak sets its server's day clock to that
+  game hour (9, or 13:30) as it starts, before any citizen signs in, so
+  the run lives from there whenever it's started (#427). Runs started
+  apart, even on different days, then live the same hours and compare.
+  Without it, the hours are the real clock's; -Hours 24 lives a whole day
+  either way. The servers run with DEV_CLOCK=on, which lets an admin set
+  the day clock; it moves the hour of the day alone, never timestamps.
 
   A preset is TOML, one knob a line, as GET /admin/tunables keys them:
 
@@ -56,8 +62,8 @@
   its report, books and balance, and the comparison beside them as
   balance.md. run.log there is this script's own lines, in UTF-8 however
   it was started. Two runs started in the same second get <when> and
-  <when>-2: the folder is taken whole or not at all (#554). Two hours of the day's clock is ten real minutes, plus the
-  servers' first start.
+  <when>-2: the folder is taken whole or not at all (#554). Two hours of
+  the day's clock is ten real minutes, plus the servers' first start.
 
   The towns have databases, ports and Redis dbs of their own, so they
   never touch the usual world or the town, and can run beside them. Two
@@ -66,8 +72,8 @@
   nothing reaps it with the shell that started it:
 
     Start-Process powershell -WindowStyle Hidden -ArgumentList '-File scripts\balance.ps1 a.toml -Hours 24'
- The
-  servers are the backend's soak build, optimised but with the debug
+
+  The servers are the backend's soak build, optimised but with the debug
   assertions that let SIM_TICK_SCALE run, and run with RATE_LIMITS=off,
   since citizens at ten times the pace go over every limit.
 
@@ -90,6 +96,7 @@
   powershell -File scripts\balance.ps1 scripts\presets\tax-2pct.toml scripts\presets\tax-20pct.toml
   powershell -File scripts\balance.ps1 a.toml b.toml -Hours 0.5 -Citizens 8 -Merchants 1
   powershell -File scripts\balance.ps1 scripts\presets\tax-2pct.toml -Citizens 200 -Roster line-3000.toml
+  powershell -File scripts\balance.ps1 a.toml b.toml -Hours 4 -StartAt 8     # the working day, from 08:00
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
@@ -100,7 +107,8 @@ param(
     [int]$Citizens = 20,
     [int]$Merchants = 2,
     [int]$Scale = 10,
-    [string[]]$Roster = @()
+    [string[]]$Roster = @(),
+    [string]$StartAt
 )
 
 # Invoke-WebRequest's progress bar slows every health check in 5.1.
@@ -118,7 +126,7 @@ $backendExe = Join-Path $root "target\balance\capitol-backend.exe"
 $townExe = Join-Path $root "flint-client\target\balance\capitol-town.exe"
 $townExeA = if ($env:BALANCE_TOWN_A) { (Resolve-Path -LiteralPath $env:BALANCE_TOWN_A).Path } else { $townExe }
 $logMb = if ($env:BALANCE_LOG_MB) { [int]$env:BALANCE_LOG_MB } else { 0 }
-$backendEnv = @{ SIM_TICK_SCALE = "$Scale"; RATE_LIMITS = "off" }
+$backendEnv = @{ SIM_TICK_SCALE = "$Scale"; RATE_LIMITS = "off"; DEV_CLOCK = "on" }
 $sayAs = "balance"
 # town-common.ps1 works on one town at a time: Use-Town points it at one
 $port = $null; $db = $null; $redisDb = $null; $server = $null
@@ -184,6 +192,7 @@ function Start-Soak([hashtable]$town) {
     Use-Town $town
     $soakArgs = @("soak", "--hours", "$Hours", "--always-on", "--log-mb", "$logMb",
         "--tunables", "`"$($town.Preset)`"", "--roster", "`"$roster`"", "--server", $server)
+    if ($StartAt) { $soakArgs += @("--start-at", $StartAt) }
     $town.Log = Join-Path $dir "soak.log"
     $town.Soak = Invoke-WithEnv $town.Admin {
         Start-Process $town.Exe -ArgumentList $soakArgs -WorkingDirectory (Join-Path $root "flint-client") `
@@ -237,9 +246,9 @@ $drifted = $false
 try {
     foreach ($town in $towns) { New-BalanceTown $town }
     if ($towns.Count -gt 1) {
-        Say "both soaks start now, so they live the same hours: $Hours of the day's clock at ${Scale}x"
+        Say "both soaks start now, so they live the same hours: $Hours of the day's clock at ${Scale}x$(if ($StartAt) { ", from $StartAt" })"
     } else {
-        Say "the soak starts now: $Hours of the day's clock at ${Scale}x"
+        Say "the soak starts now: $Hours of the day's clock at ${Scale}x$(if ($StartAt) { ", from $StartAt" })"
     }
     foreach ($town in $towns) { Start-Soak $town }
     Say "the output is in $(Join-Path $runs 'a\soak.log')$(if ($towns.Count -gt 1) { " and b's" })"

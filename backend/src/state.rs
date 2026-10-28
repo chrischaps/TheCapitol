@@ -8,6 +8,7 @@ use crate::engine::GameState;
 use crate::rate_limit::RateLimiter;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -65,6 +66,16 @@ pub struct AppState {
     pub town: Arc<Town>,
     /// The Capitol channel's last lines, in memory only (Commons S1.1)
     pub talk: Arc<Talk>,
+    /// What the day clock adds to the real one, 0 unless a dev server's was
+    /// set (`PUT /admin/clock`, #427). In memory: a restart is real time.
+    pub day_offset_ms: Arc<AtomicI64>,
+}
+
+impl AppState {
+    /// The day clock's offset now, for `auth_ok` and `/health` (#427)
+    pub fn day_offset_ms(&self) -> i64 {
+        self.day_offset_ms.load(Ordering::Relaxed)
+    }
 }
 
 impl AppState {
@@ -87,6 +98,7 @@ impl AppState {
             samples: Arc::new(Samples::new()),
             town: Arc::new(Town::new()),
             talk: Arc::new(Talk::new()),
+            day_offset_ms: Arc::default(),
         }
     }
 }
@@ -113,6 +125,7 @@ pub async fn for_tests(db: PgPool) -> AppState {
         rate_limits: Default::default(),
         mock_subscriptions: true,
         dev_grants: false,
+        dev_clock: false,
         sim_tick_scale: 1.0,
         slow_statement: Duration::from_millis(50),
         sample_secs: 0,

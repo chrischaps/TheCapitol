@@ -243,7 +243,11 @@ pub enum ServerMessage {
     /// after. A server older than D6.1 sends none, and charges the defaults.
     /// `is_admin` is the token's (D5.3), so a client can show the admin's
     /// overlay; it's left out for everyone else, and the admin routes check
-    /// the token again whatever a client shows.
+    /// the token again whatever a client shows. `day_offset_ms` is a dev
+    /// server's day clock set to an hour of its own (#427): add it to the
+    /// server's clock for [`crate::rules::time_of_day`], and to nothing
+    /// else, since timestamps and day numbers stay on the real clock. Left
+    /// out when 0, as it always is on a real server.
     #[serde(rename = "auth_ok")]
     AuthOk {
         player_id: Uuid,
@@ -254,6 +258,8 @@ pub enum ServerMessage {
         fees: Fees,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_admin: bool,
+        #[serde(default, skip_serializing_if = "crate::rules::is_zero")]
+        day_offset_ms: i64,
     },
     #[serde(rename = "auth_error")]
     AuthError { message: String },
