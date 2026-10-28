@@ -452,6 +452,7 @@ impl SimBot {
             }
             let n = left.min(stack.quantity);
             let price = worn_price(price, &stack);
+            // The stack's lowest units, at one price for every grade (#578)
             let listing = bazaar::stock(&stack, n, price, listings).map_err(|e| BotError::Failed(e.message()))?;
             self.bot.stock(listing)?;
             left -= n;

@@ -23,6 +23,11 @@
 //!
 //! Units are never averaged away: a sale names exactly the units it takes,
 //! and what's left in the stack is each unit as it was.
+//!
+//! The mind still chooses per item: its quotes have no grade, so the price
+//! is carried to the grade after it decides, and the bid's grade is a rule
+//! of thrift, not a choice (#579). A stall still stocks the lowest units at
+//! one price (#578).
 
 use capitol_protocol::rest::DepthLevel;
 use capitol_protocol::rules::market::{grade_floor, OrderSide};
