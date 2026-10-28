@@ -2590,10 +2590,10 @@ mod tests {
                 other => panic!("not a guild_dissolved: {other:?}"),
             })
             .collect();
-        let [(a, a_share, a_pound, a_lost), (b, b_share, b_pound, b_lost), (c, c_share, c_pound, c_lost)] = &heard[..] else {
-            panic!("Ada, Bea and Cy: {heard:?}")
-        };
-        assert_eq!((*a, *b, *c), (ada, bea, cy));
+        // By who it's for: Ada and Bea joined in the same instant, so the
+        // members' order falls to their ids (#564)
+        assert_eq!(heard.len(), 3, "Ada, Bea and Cy: {heard:?}");        let to = |who: Uuid| heard.iter().find(|(p, ..)| *p == who).unwrap_or_else(|| panic!("{who}'s: {heard:?}"));
+        let ((_, a_share, a_pound, a_lost), (_, b_share, b_pound, b_lost), (_, c_share, c_pound, c_lost)) = (to(ada), to(bea), to(cy));
         assert!(*a_share > 0 && *b_share > 0, "the members' shares: {a_share}, {b_share}");
         assert_eq!(*c_share, 0, "Cy had no share");
         assert!(a_pound.is_empty() && a_lost.is_empty(), "nothing of Ada's was there");
