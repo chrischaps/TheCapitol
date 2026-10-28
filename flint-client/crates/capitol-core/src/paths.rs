@@ -519,9 +519,9 @@ impl WalkGraph {
         true
     }
 
-    /// The slope along the line ([`ground::slope_lets_through`]), looking
-    /// again where it kinks at a valley's floor (#520). The backend planted
-    /// the wild nodes by the same rule without that (#347, #567).
+    /// The slope along the line, by the rule the backend plants wild nodes
+    /// by ([`ground::slope_lets_through`], #347), which looks again where it
+    /// kinks at a valley's floor (#520, #567).
     fn slope_lets_through(&self, a: Point, b: Point) -> bool {
         let land = self.ground.land();
         ground::slope_lets_through(a, b, |x, y| land::slope_at(x, y, land))

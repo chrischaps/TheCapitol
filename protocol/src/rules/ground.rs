@@ -85,20 +85,9 @@ const KINK_SAMPLE: f64 = 0.25;
 /// more than [`KINK`] is tested again more finely, for the face past a
 /// valley's floor (#520).
 ///
-/// The Flint client's walk graph tests its lines with it (#280).
+/// The Flint client's walk graph tests its lines with it (#280), and the
+/// backend plants wild nodes only where its lines reach (#347, #567).
 pub fn slope_lets_through(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64, f64) -> f64) -> bool {
-    slope_strides_let_through(a, b, slope_at, true)
-}
-
-/// [`slope_lets_through`] without the second look at a kink: the rule the
-/// backend plants wild nodes by (#347). The stricter rule re-deals the whole
-/// wilds plan, so the flood keeps this one until the wild nodes are
-/// re-planned ([#567](https://github.com/chrischaps/TheCapitol/issues/567)).
-pub fn slope_lets_through_by_strides(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64, f64) -> f64) -> bool {
-    slope_strides_let_through(a, b, slope_at, false)
-}
-
-fn slope_strides_let_through(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64, f64) -> f64, kinks: bool) -> bool {
     let length = (b.0 - a.0).stable_hypot(b.1 - a.1);
     let at = |along: f64| {
         let t = along / length;
@@ -112,7 +101,7 @@ fn slope_strides_let_through(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64
         along = (along + if slope > STEEP { STEEP_SAMPLE } else { SLOPE_SAMPLE }).min(length);
         let here = at(along);
         let mut last = slope;
-        if kinks && (here - slope).abs() > KINK {
+        if (here - slope).abs() > KINK {
             let n = ((along - from) / KINK_SAMPLE).ceil() as usize;
             for k in 1..n {
                 let between = at(from + (along - from) * k as f64 / n as f64);
@@ -767,7 +756,6 @@ mod tests {
         };
         // Strides of 2 from 10.5 land either side of the face, at 50.5 and 52.5
         assert!(!slope_lets_through((10.5, 0.0), (90.0, 0.0), floor));
-        assert!(slope_lets_through_by_strides((10.5, 0.0), (90.0, 0.0), floor), "as the wild nodes were planted (#567)");
         // Up to the floor is walkable, and so is off the face, down its slope
         assert!(slope_lets_through((10.5, 0.0), (51.0, 0.0), floor));
         assert!(slope_lets_through((51.5, 0.0), (90.0, 0.0), floor));

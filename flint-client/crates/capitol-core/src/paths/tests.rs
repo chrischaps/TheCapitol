@@ -535,17 +535,18 @@ fn print_click_times() {
 
 /// How many of the backend's wild nodes a walker gets to from the Exchange
 /// hall and back, walked by the server's own step (#347): every `WILD_EVERY`th
-/// (3) of the nodes a migration inserts, `NODES_SQL` (the wilds' last
-/// re-plan, by default; not the reeds, which are gathered from a bank). The
-/// fixture must be the world the plan is of:
+/// (3) of the nodes the migrations in `NODES_SQL` leave, `;` between them
+/// (the wilds' re-plans, by default; not the reeds, which are gathered from a
+/// bank). The fixture must be the world the plan is of:
 /// `cargo test -p capitol-core --release --lib print_wild_node_reach -- --ignored --nocapture`.
 /// At #347, 4439 of 4511, all but 4 of the rest given up on by the grid
 /// (#521), and 4 a leg the server slides on (#520). Since #520, 4443: the
-/// 68 left are all given up on by the grid.
+/// 68 left are all given up on by the grid. Since #567 re-planned the tin
+/// and the outcrops by #520's test, 4460: 51 given up on.
 #[test]
 #[ignore]
 fn print_wild_node_reach() {
-    let sql = std::env::var("NODES_SQL").ok().map(std::path::PathBuf::from).unwrap_or_else(wilds_sql);
+    let sql = std::env::var("NODES_SQL").map_or_else(|_| wilds_sql(), |s| s.split(';').map(std::path::PathBuf::from).collect());
     let every: usize = std::env::var("WILD_EVERY").ok().and_then(|n| n.parse().ok()).unwrap_or(3);
     let (_, graph) = world();
     let nodes = wild_nodes(&sql, every);
@@ -560,25 +561,31 @@ fn print_wild_node_reach() {
     eprintln!("{} of {} wild nodes there and back, {} not, in {:?}", nodes.len() - failed.len(), nodes.len(), failed.len(), start.elapsed());
 }
 
-/// The wilds' last re-plan (#347), the migration [`wild_nodes`] reads by default.
-fn wilds_sql() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../backend/migrations/post-content/20261224_001_wilds_reached_nodes.sql")
+/// The wilds' re-plans since #347, in the order they run: what
+/// [`wild_nodes`] reads by default.
+fn wilds_sql() -> Vec<std::path::PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../backend/migrations/post-content");
+    ["20261224_001_wilds_reached_nodes.sql", "20270107_001_wilds_kink_nodes.sql"].map(|f| dir.join(f)).into()
 }
 
-/// Every `every`th node a migration inserts, by kind, but the reeds, which
-/// are gathered from a bank.
-fn wild_nodes(sql: &Path, every: usize) -> Vec<(String, Point)> {
-    std::fs::read_to_string(sql)
-        .unwrap()
-        .lines()
-        .filter_map(|line| {
+/// Every `every`th node the migrations `sqls` leave, by kind, but the reeds,
+/// which are gathered from a bank. Each deletes the rows it lists by id (a
+/// `'id',` line) and inserts its own, as `models::resource`'s
+/// `migrated_plan` reads them.
+fn wild_nodes(sqls: &[std::path::PathBuf], every: usize) -> Vec<(String, Point)> {
+    let mut rows: Vec<(String, String, Point)> = Vec::new();
+    for sql in sqls {
+        let text = std::fs::read_to_string(sql).unwrap();
+        let deleted: std::collections::HashSet<&str> =
+            text.lines().filter_map(|line| line.trim().trim_end_matches(',').strip_prefix('\'')?.strip_suffix('\'')).collect();
+        rows.retain(|(id, _, _)| !deleted.contains(id.as_str()));
+        rows.extend(text.lines().filter_map(|line| {
             let row = line.trim().strip_prefix("('")?.trim_end_matches([',', ';']).strip_suffix(')')?;
             let f: Vec<&str> = row.split(',').map(|f| f.trim().trim_matches('\'')).collect();
-            Some((f[1].to_string(), (f[2].parse().ok()?, f[3].parse().ok()?)))
-        })
-        .filter(|(kind, _)| kind != "reed_bed")
-        .step_by(every)
-        .collect()
+            Some((f[0].to_string(), f[1].to_string(), (f[2].parse().ok()?, f[3].parse().ok()?)))
+        }));
+    }
+    rows.into_iter().filter(|(_, kind, _)| kind != "reed_bed").map(|(_, kind, p)| (kind, p)).step_by(every).collect()
 }
 
 /// Each node walked to from the Exchange hall and back, planned on the graph

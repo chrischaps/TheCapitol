@@ -529,7 +529,7 @@ mod tests {
     /// each deletes the planned rows it lists by id (a `'id',` line), if any,
     /// and inserts its own (a `('id', 'type', x, y, quality)` line), from
     /// `print_node_replan`, or from `print_new_nodes` for one that only adds.
-    const REPLAN_MIGRATIONS: [&str; 4] = [
+    const REPLAN_MIGRATIONS: [&str; 5] = [
         // Arrival's commons round the spawn (#443): only adds
         include_str!("../../migrations/post-content/20261222_001_arrival_commons.sql"),
         // The wilds on a spacing grid of their own (#340)
@@ -538,6 +538,8 @@ mod tests {
         include_str!("../../migrations/post-content/20261224_001_wilds_reached_nodes.sql"),
         // The farms a monotone packing rule lays (#467)
         include_str!("../../migrations/post-content/20270106_001_packing_rows_nodes.sql"),
+        // The wilds' nodes only where the walk graph climbs to them (#567)
+        include_str!("../../migrations/post-content/20270107_001_wilds_kink_nodes.sql"),
     ];
 
     /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every
