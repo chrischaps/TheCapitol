@@ -16,7 +16,7 @@
 //!   - otherwise a working stock ([`STOCK`]) of the goods its leanings use
 //!     ([`surplus::wants`](super::surplus::wants)).
 //! - **The price** ([`patron_menu`]) runs from the books' worth to twice
-//!   it, a kit's from its target until one trades
+//!   it, from its target until it trades (a kit since K2.3, a good since #410)
 //!   ([`worth_unbooked`](super::worth_unbooked)). Through the court's fee
 //!   and escrow, at the board's grade ([`POST_GRADE`]) and under its limit
 //!   ([`MAX_POSTS`]).

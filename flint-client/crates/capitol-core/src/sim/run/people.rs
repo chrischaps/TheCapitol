@@ -232,8 +232,8 @@ impl SimBot {
         Ok(())
     }
 
-    /// What `item` is worth by the citizen's books, or for a tool none has
-    /// traded yet, its target (Callings K2.1).
+    /// What `item` is worth by the citizen's books, or before it has
+    /// traded, its target (a tool's since K2.1, a good's since #410).
     pub(super) fn worth(&self, item: &str) -> Option<i64> {
         let state = self.bot.state();
         meet::worth(state, item).or_else(|| worth_unbooked(state.catalog(), item))

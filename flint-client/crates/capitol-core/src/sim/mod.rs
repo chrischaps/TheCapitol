@@ -365,12 +365,13 @@ pub fn fewest_uses(catalog: &Catalog, item: &str) -> Option<i32> {
     Some((tool.max_durability / 2).max(1))
 }
 
-/// What `item` is worth when the books can't say (K2.1): a tool's target
-/// price, so the first one can be priced before any has traded. A good
-/// has none: its books say, or nobody prices it.
+/// What `item` is worth when the books can't say: its target price, D5's
+/// labour value, so the first one can be priced before any has traded. A
+/// tool's since K2.1, and a good's since #410: a fresh town's books are
+/// empty, and without a worth nobody bids or stocks a stall, so a town with
+/// no merchant on never opened a market. Once it trades, the books say.
 pub fn worth_unbooked(catalog: &Catalog, item: &str) -> Option<i64> {
-    let unbooked = is_tool(item) || catalog.station_for_kit(item).is_some();
-    unbooked.then(|| catalog.item_type(item)?.target_price).flatten()
+    catalog.target_price(item)
 }
 
 impl Role {
@@ -1428,6 +1429,28 @@ mod tests {
         assert!(stall_menu(&h, "log", STALL_AT, Some(10), Some(full - 1)).is_some());
     }
 
+    #[test]
+    fn empty_books_still_open_a_market() {
+        // A fresh town with no merchant (#410): nothing has traded and the
+        // book is empty, so the books put no worth to a log. Its target
+        // does, so a gatherer with logs to spare asks a stall question and
+        // a builder short of them asks a bid one.
+        let catalog = Catalog::fallback();
+        let books = crate::citizen::decide::rules::worth_in(&[], "log");
+        assert_eq!(books, None);
+        let worth = books.or_else(|| worth_unbooked(&catalog, "log"));
+        let mut h = Holdings {
+            strands: 300,
+            plot_room: None,
+            deed_cost: 0,
+            ..Holdings::default()
+        };
+        h.items.insert("log".into(), STALL_AT);
+        assert!(matches!(&stall_menu(&h, "log", STALL_AT, worth, None).unwrap()[0], Choice::Stock { .. }));
+        h.items.clear();
+        assert!(matches!(&bid_menu(&h, "log", &["log"], worth, false).unwrap()[0], Choice::Bid { .. }));
+    }
+
     /// C1.1's choice of step: bank at [`BANK_FIBER_AT`], else the first goal's.
     fn c1_1_step(role: Role, catalog: &Catalog, h: &Holdings) -> Option<Step> {
         if role == Role::Gatherer(Gather::Fiber) && h.count("fiber") >= BANK_FIBER_AT {
@@ -1754,9 +1777,10 @@ mod tests {
         // A worn tool costs more a use
         assert!(per_use(50, 10) > per_use(130, 200));
         assert_eq!(per_use(60, 0), 60.0);
-        // An untraded tool is worth its target; a good, what its books say
+        // An untraded tool or good is worth its target (#410)
         assert_eq!(worth_unbooked(&catalog, "stone_axe"), Some(50));
-        assert_eq!(worth_unbooked(&catalog, "log"), None);
+        assert!(worth_unbooked(&catalog, "log").is_some_and(|w| Some(w) == catalog.target_price("log")));
+        assert_eq!(worth_unbooked(&catalog, "unobtainium"), None);
         assert!(watched().any(|i| i == "iron_pickaxe") && watched().any(|i| i == "log"));
     }
 
