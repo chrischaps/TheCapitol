@@ -116,19 +116,21 @@ pub fn taker(book: Option<&Book>, grade: &str) -> Option<i64> {
 /// What units of `grade` sell for, when the mind chose `price` for units at
 /// `at` ([`sale_quality`]): `price` itself for the best bid's grade; a bid's
 /// own price for a grade someone bids for; else `price` carried to the
-/// grade's middle, but no dearer than the cheapest ask at it.
+/// grade's middle, but no dearer than the cheapest ask at it. Never less
+/// than the best bid that takes the grade ([`taker`]): a bid for any grade
+/// at 6 takes D units too, so a D bid at 1 doesn't make them worth 1.
 pub fn graded_price(price: i64, at: i32, grade: &str, book: Option<&Book>) -> i64 {
     if bid_grade_of(book) == Some(grade) {
         return price.max(1);
     }
-    if let Some(bid) = bid_at(book, grade) {
-        return bid.max(1);
-    }
     let Some(mid) = grade_mid(grade) else {
         return price.max(1);
     };
-    let carried = carried(price, at, mid);
-    ask_at(book, grade).map_or(carried, |ask| carried.min(ask)).max(1)
+    let guess = bid_at(book, grade).unwrap_or_else(|| {
+        let carried = carried(price, at, mid);
+        ask_at(book, grade).map_or(carried, |ask| carried.min(ask))
+    });
+    guess.max(taker(book, grade).unwrap_or(1)).max(1)
 }
 
 /// The units of `held` at `grade`.
@@ -317,6 +319,17 @@ mod tests {
         assert_eq!(graded_price(10, 17, "B", Some(&b)), 15);
         assert_eq!(graded_price(10, 17, "C", Some(&b)), carried(10, 17, 64));
         assert_eq!(graded_price(12, 17, "F", Some(&b)), 12, "the bid's grade sells at the mind's price");
+    }
+
+    #[test]
+    fn a_grade_never_sells_under_a_bid_that_takes_it() {
+        // Seen in a soak (#429): a merchant bid 6 for any logs while a
+        // citizen bid 1 for D
+        let b = book(vec![level(OrderSide::Buy, 6, "F", 20), level(OrderSide::Buy, 1, "D", 6)]);
+        assert_eq!(graded_price(6, 17, "D", Some(&b)), 6);
+        let b = book(vec![level(OrderSide::Buy, 9, "F", 20), level(OrderSide::Buy, 12, "D", 6)].into_iter().rev().collect());
+        assert_eq!(graded_price(12, 44, "C", Some(&b)), carried(12, 44, 64), "carried from the D bid");
+        assert_eq!(graded_price(12, 44, "F", Some(&b)), 9);
     }
 
     #[test]
