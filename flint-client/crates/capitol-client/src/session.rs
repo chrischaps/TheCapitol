@@ -2246,11 +2246,25 @@ impl Session {
         self.walk(now, x, y);
     }
 
+    /// Walk to your guild's hall (#508), its middle at (`x`, `y`).
+    pub fn walk_to_guild_hall(&mut self, now: Instant, x: f64, y: f64) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        self.harvest.walked();
+        self.visit.walked();
+        self.approach.walked();
+        self.stall.walked();
+        self.hall.walked();
+        self.walk(now, x, y);
+    }
+
     fn tend_guilds(&mut self) {
         if self.auth.phase() != Phase::InWorld {
             return;
         }
         use capitol_core::guilds::Ask;
+        use capitol_core::protocol::rest::GuildStrands;
         let Some(ask) = self.guilds.wants() else { return };
         let request = match &ask {
             Ask::Mine => RestRequest::MyGuild,
@@ -2269,6 +2283,23 @@ impl Session {
                 guild_id: *guild_id,
                 player_id: *player_id,
                 request: capitol_core::protocol::rest::SetGuildRole { role: *role },
+            },
+            Ask::Books(id) => RestRequest::GuildBooks { guild_id: *id },
+            Ask::Deposit { guild_id, strands } => RestRequest::DepositToGuild {
+                guild_id: *guild_id,
+                request: GuildStrands { strands: *strands, note: String::new() },
+            },
+            Ask::Withdraw { guild_id, strands, note } => RestRequest::WithdrawFromGuild {
+                guild_id: *guild_id,
+                request: GuildStrands { strands: *strands, note: note.clone() },
+            },
+            Ask::SetLimit { guild_id, strands } => RestRequest::SetGuildLimit {
+                guild_id: *guild_id,
+                request: GuildStrands { strands: *strands, note: String::new() },
+            },
+            Ask::ClaimHall { guild_id, plot_id } => RestRequest::ClaimGuildHall {
+                guild_id: *guild_id,
+                request: capitol_core::protocol::rest::ClaimHall { plot_id: *plot_id },
             },
         };
         self.guilds.sent(ask);
@@ -2976,6 +3007,7 @@ impl Session {
                     }
                     Ok(RestResponse::Guilds(answer)) => self.guilds.listed(answer.guilds.clone()),
                     Ok(RestResponse::Guild(guild)) => self.guilds.shown(guild.clone()),
+                    Ok(RestResponse::GuildBooks(books)) => self.guilds.booked(books.entries.clone()),
                     Ok(RestResponse::Card(card)) => self.guilds.found(card),
                     Ok(other) => tracing::warn!("guilds: an answer it didn't ask for: {other:?}"),
                     Err(e) => {

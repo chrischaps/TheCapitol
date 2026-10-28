@@ -32,12 +32,19 @@
 //! (V3.5, #477; `capitol_core::plot::upward`). While a floor goes up it says
 //! so instead, with a bar of the time left.
 //!
+//! A guild's hall (S4.3) names its guild under the owner, its leader. A
+//! free lot in the guild district isn't for a person: its panel offers it
+//! to a guild's leader instead, as the guild's hall, paid from the
+//! treasury, at the Exchange hall, or says why not
+//! (`capitol_core::guilds::hall_offer`, #508).
+//!
 //! The panel is edged in gold, the colour of what's yours (plan §1), and
 //! the claimed plot's gold edge in the world answers it.
 
 use super::hire;
 use super::theme::{self, size, DIM, ENOUGH, GOLD, SHORT, TEXT};
 use capitol_core::deeds::DeedOffer;
+use capitol_core::guilds::{self as gd, HallOffer};
 use capitol_core::plot::{self as plots, words, Offer, Upward};
 use capitol_core::protocol::rest::PlotInfo;
 use capitol_core::protocol::rules::wages::Work;
@@ -66,6 +73,8 @@ pub enum Action {
     Wages(hire::Act),
     /// Build the next floor (V3.5)
     BuildFloor(uuid::Uuid),
+    /// Claim it as your guild's hall (S4.3, #508)
+    ClaimHall { guild_id: uuid::Uuid, plot_id: uuid::Uuid },
     Close,
 }
 
@@ -90,6 +99,8 @@ pub struct View<'a> {
     pub upward: Option<Upward>,
     /// A floor is being bought.
     pub building: bool,
+    /// What a free lot in the guild district offers about halls (#508).
+    pub hall: Option<HallOffer>,
 }
 
 /// What the hire form on a plot of yours draws from.
@@ -258,6 +269,9 @@ fn body(
         _ => theme::dim("Unclaimed"),
     };
     row(ui, "Owner", owner);
+    if let Some(guild) = &plot.guild {
+        row(ui, "Hall of", RichText::new(guild.name.clone()).color(theme::GUILD));
+    }
     if plot.owner_id.is_some() {
         row(
             ui,
@@ -290,6 +304,12 @@ fn body(
             });
         }
         Offer::Taken { .. } => {}
+        _ if view.hall.is_some() => {
+            section(ui);
+            if let Some(a) = view.hall.as_ref().and_then(|h| hall(ui, plot, h, view)) {
+                action = Some(a);
+            }
+        }
         offer => {
             section(ui);
             if let Some(a) = claim(ui, plot, offer, view) {
@@ -518,6 +538,31 @@ fn claim(ui: &mut egui::Ui, plot: &PlotInfo, offer: &Offer, view: &View) -> Opti
         .then_some(Action::Claim(plot.id))
 }
 
+/// A free guild-district lot as a hall: the deed from the treasury, what
+/// stands in the way, and for a leader who may, the button.
+fn hall(ui: &mut egui::Ui, plot: &PlotInfo, offer: &HallOffer, view: &View) -> Option<Action> {
+    ui.vertical_centered(|ui| {
+        if let Some(cost) = offer.cost() {
+            let mut job = egui::text::LayoutJob::default();
+            let format = |font, color| egui::TextFormat { font_id: font, color, ..Default::default() };
+            job.append("Hall's deed: ", 0.0, format(theme::body(size::LARGE), DIM));
+            job.append(&gd::strands_words(cost), 0.0, format(theme::strong(size::LARGE), GOLD));
+            ui.label(job);
+        }
+        let ink = if matches!(offer, HallOffer::Short { .. }) { SHORT } else { DIM };
+        ui.add(egui::Label::new(RichText::new(offer.words()).color(ink).size(size::LABEL)).wrap());
+    });
+    let HallOffer::Claim { guild_id, guild, .. } = offer else {
+        return None;
+    };
+    ui.add_space(8.0);
+    let words = if view.claiming { "Claiming…".to_owned() } else { format!("Claim for {guild}") };
+    theme::accent_button(ui, &words, theme::GUILD, !view.claiming)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+        .then_some(Action::ClaimHall { guild_id: *guild_id, plot_id: plot.id })
+}
+
 /// The road in's deed, under the price (#448): "Claim with your deed",
 /// asked twice, or where it waits.
 fn deed(ui: &mut egui::Ui, plot: &PlotInfo, view: &View, confirm: &mut Option<uuid::Uuid>) -> Option<Action> {
@@ -623,16 +668,20 @@ fn weekly_tax(plot: &PlotInfo) -> Option<i64> {
 }
 
 /// `--plot-panel-sample` (V3.5): an urban lot of yours with a building,
-/// and what you hold.
+/// and what you hold; or a guild-district lot (#508).
 pub struct Sample {
     pub plot: PlotInfo,
     pub pack: capitol_core::state::Container,
     pub strands: i64,
+    pub offer: Offer,
+    pub hall: Option<HallOffer>,
 }
 
 /// [`Sample`]: `next`, one floor up and the second's bill open with all it
 /// takes in your pack; `short`, the same short of planks, ingots and
-/// Strands; `going-up`, the second floor going up, 12 minutes to go.
+/// Strands; `going-up`, the second floor going up, 12 minutes to go;
+/// `hall`, a free guild-district lot as its guild's leader sees it at the
+/// Exchange hall; `hall-held`, a guild's hall (#508).
 pub fn sample(which: &str) -> Sample {
     use capitol_core::protocol::rest::{Bounds, FloorBill, SlotItem};
     use capitol_core::protocol::rules::floors;
@@ -677,6 +726,39 @@ pub fn sample(which: &str) -> Sample {
         floors,
         next_floor: Some(bill(floors + 1)),
     };
+    let rope = uuid::Uuid::from_u128(100);
+    let (plot, offer, hall) = match which {
+        "hall" | "hall-held" => {
+            let held = which == "hall-held";
+            let plot = PlotInfo {
+                zone_id: "guild_district".into(),
+                size_category: "medium".into(),
+                owner_id: held.then(|| uuid::Uuid::from_u128(1)),
+                owner_name: held.then(|| "Wren Hollis".into()),
+                guild: held.then(|| capitol_core::protocol::rest::PlotGuild {
+                    id: rope,
+                    name: "The Rope Walkers".into(),
+                    tag: "ROPE".into(),
+                }),
+                assessed_value: if held { 5000 } else { 0 },
+                forecloses_at: held.then_some(400),
+                deed_cost: Some(5000),
+                station_count: 0,
+                station_capacity: 10,
+                terrain_id: Some("guild_plot_in_1_2".into()),
+                indoor_room: None,
+                yard_room: None,
+                floor_ready_at: None,
+                floors: 0,
+                next_floor: None,
+                ..plot
+            };
+            let offer = if held { Offer::Taken { owner: "Wren Hollis".into() } } else { Offer::Claimable { cost: 5000 } };
+            let hall = (!held).then(|| HallOffer::Claim { guild_id: rope, guild: "The Rope Walkers".into(), cost: 5000 });
+            (plot, offer, hall)
+        }
+        _ => (plot, Offer::Yours, None),
+    };
     let catalog = capitol_core::catalog::Catalog::fallback();
     let goods: &[(&str, i32)] = match which {
         "short" => &[("plank", 22), ("brick", 70), ("iron_nails", 15)],
@@ -691,6 +773,8 @@ pub fn sample(which: &str) -> Sample {
         plot,
         pack: capitol_core::state::Container::new(uuid::Uuid::from_u128(0x2351), "player_inventory", 24, 6, &slots),
         strands: if which == "short" { 650 } else { 2400 },
+        offer,
+        hall,
     }
 }
 
@@ -802,6 +886,7 @@ mod tests {
             hire: None,
             upward: None,
             building: false,
+            hall: None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.expect("drawn");
@@ -830,6 +915,7 @@ mod tests {
             hire: None,
             upward: None,
             building: false,
+            hall: None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.unwrap();
@@ -857,6 +943,7 @@ mod tests {
             hire: None,
             upward: None,
             building: false,
+            hall: None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.unwrap();
@@ -886,6 +973,7 @@ mod tests {
             hire: None,
             upward: None,
             building: false,
+            hall: None,
         };
         let ctx = theme::test_context();
         let mut panel = PlotPanel::default();
@@ -948,6 +1036,7 @@ mod tests {
             hire: None,
             upward,
             building: false,
+            hall: None,
         };
         let ctx = theme::test_context();
         let mut panel = PlotPanel::default();
@@ -1013,6 +1102,7 @@ mod tests {
             hire: None,
             upward: None,
             building: false,
+            hall: None,
         };
         assert_eq!(run(&view, None), (None, None));
     }
@@ -1054,6 +1144,7 @@ mod tests {
             }),
             upward: None,
             building: false,
+            hall: None,
         };
         let ctx = theme::test_context();
         let mut panel = PlotPanel { hiring: true, ..Default::default() };

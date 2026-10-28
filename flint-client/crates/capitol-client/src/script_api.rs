@@ -102,6 +102,9 @@ pub struct Shared {
     /// The bazaar's stalls (E3.11) as the extension left them this frame.
     /// `None` when the terrain has no bazaar.
     pub bazaar: Arc<Mutex<Option<BazaarMark>>>,
+    /// The guild halls' boards (#508) as the extension left them this
+    /// frame: each hall that stands, and its guild's name.
+    pub hall_signs: Arc<Mutex<Vec<HallSignMark>>>,
     /// Where the road in's card leads this frame (#442), for its ring.
     /// `None` while the card leads nowhere, or is hidden.
     pub lead: Arc<Mutex<Option<LeadMark>>>,
@@ -190,6 +193,20 @@ pub struct HallMark {
     pub deed_waits: bool,
     /// The Deeds Office's panel is open.
     pub office_open: bool,
+}
+
+/// A guild hall's board over its door (#508), in world metres, and the
+/// name to write on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HallSignMark {
+    /// The middle of the board's face, and the way it looks.
+    pub at: [f32; 3],
+    pub facing: [f32; 3],
+    /// How wide and tall the lettering may run.
+    pub width: f32,
+    pub height: f32,
+    pub name: String,
+    pub tag: String,
 }
 
 /// The bazaar (E3.11) as scripts see it: its stalls, in world metres.
@@ -1199,6 +1216,32 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("stalls".into(), stalls.into());
         m.insert("walking".into(), opt(&b.walking));
         m.into()
+    });
+    // `cap_hall_signs() -> [#{ x, y, z, fx, fz, w, h, name, tag }]`: each
+    // guild hall that stands (#508), the middle of the board over its door
+    // (world metres), the way the board faces, how wide and tall its
+    // lettering may run, and its guild's name and tag.
+    let signs = shared.hall_signs.clone();
+    engine.register_fn("cap_hall_signs", move || -> rhai::Array {
+        let Ok(signs) = signs.lock() else {
+            return rhai::Array::new();
+        };
+        signs
+            .iter()
+            .map(|s| {
+                let mut m = rhai::Map::new();
+                m.insert("x".into(), (s.at[0] as f64).into());
+                m.insert("y".into(), (s.at[1] as f64).into());
+                m.insert("z".into(), (s.at[2] as f64).into());
+                m.insert("fx".into(), (s.facing[0] as f64).into());
+                m.insert("fz".into(), (s.facing[2] as f64).into());
+                m.insert("w".into(), (s.width as f64).into());
+                m.insert("h".into(), (s.height as f64).into());
+                m.insert("name".into(), s.name.clone().into());
+                m.insert("tag".into(), s.tag.clone().into());
+                rhai::Dynamic::from_map(m)
+            })
+            .collect()
     });
     // `cap_stall_at(x, z) -> id or ()`: the stall whose footprint holds the
     // ground point (x, z), world metres.

@@ -56,6 +56,10 @@ pub const BOARDS: u32 = 0xa07c55;
 pub const CUT: u32 = 0x3b2f2a;
 /// A shop's carriage arch, in shadow, and its shop window's frame.
 pub const ARCH: u32 = 0x231d1a;
+/// A guild hall's board over its door (#508), and its frame: copper gone
+/// to verdigris, the guild panel's green weathered darker.
+pub const HALL_SIGN: u32 = 0x1c2622;
+pub const HALL_SIGN_RIM: u32 = 0x4a8473;
 pub const SHOPFRONT: u32 = 0x2f3a33;
 /// Scaffolding while a floor goes up: galvanised poles, timber boards.
 pub const SCAFFOLD: u32 = 0x8d9296;

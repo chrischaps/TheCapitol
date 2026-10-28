@@ -1587,6 +1587,7 @@ impl GameState {
             | R::Annotations(_)
             | R::Tunables(_)
             | R::Clock(_)
+            | R::GuildBooks(_)
             | R::Walkers(_) => {}
         }
         out

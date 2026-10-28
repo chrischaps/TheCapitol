@@ -18,13 +18,26 @@
 //! Who may do what is `rules::guild::GuildRole`'s, the server's own rights:
 //! [`roster_acts`] and [`waiting_acts`] offer only what it would allow. The
 //! words are here too, so they're tested without egui.
+//!
+//! The treasury (S4.2) comes with your guild, to members only. Its books
+//! are read as the panel opens on your guild and after anything moves
+//! them, newest first. Anyone deposits; [`withdrawable`] is what you may
+//! take, by the server's rule: the leader anything the treasury holds, an
+//! officer what's left of the leader's weekly limit. [`Purse`] checks an
+//! amount as typed against both.
+//!
+//! The hall (S4.3) is the leader's to buy, from the treasury, at the
+//! Exchange hall: [`hall_offer`] says what a free guild-district lot's
+//! panel offers whoever's looking, and why not.
 
 use std::collections::VecDeque;
 
 use capitol_protocol::rest::{
-    FoundGuild, GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary, MyGuild, PlayerCard,
+    FoundGuild, GuildDetail, GuildEntry, GuildEntryKind, GuildInvite, GuildInviteKind, GuildMember, GuildSummary,
+    GuildTreasury, MyGuild, PlayerCard, PlotInfo,
 };
 use capitol_protocol::rules::guild::{self, GuildRole};
+use capitol_protocol::rules::Zone;
 use capitol_protocol::ws::GuildNoticeKind;
 use uuid::Uuid;
 
@@ -53,6 +66,16 @@ pub enum Ask {
     Expel { guild_id: Uuid, player_id: Uuid },
     /// `PUT /guilds/{id}/members/{player}`
     SetRole { guild_id: Uuid, player_id: Uuid, role: GuildRole },
+    /// `GET /guilds/{id}/books`: the treasury's moves
+    Books(Uuid),
+    /// `POST /guilds/{id}/deposit`
+    Deposit { guild_id: Uuid, strands: i64 },
+    /// `POST /guilds/{id}/withdraw`, with what it's for
+    Withdraw { guild_id: Uuid, strands: i64, note: String },
+    /// `PUT /guilds/{id}/limit`: what an officer may take in a week
+    SetLimit { guild_id: Uuid, strands: i64 },
+    /// `POST /guilds/{id}/hall`, at the Exchange hall
+    ClaimHall { guild_id: Uuid, plot_id: Uuid },
 }
 
 impl Ask {
@@ -61,7 +84,7 @@ impl Ask {
         let guild = mine.guild.as_ref().map(|g| g.name.clone());
         let them = |id: &Uuid| name_of(*id).unwrap_or_else(|| "them".into());
         Some(match self {
-            Ask::Mine | Ask::Registry | Ask::Guild(_) | Ask::Find { .. } => return None,
+            Ask::Mine | Ask::Registry | Ask::Guild(_) | Ask::Find { .. } | Ask::Books(_) => return None,
             Ask::Found(f) => format!("{} is founded, and you lead it.", f.name),
             Ask::Apply(_) => match guild {
                 Some(g) => format!("You're in {g}."),
@@ -82,6 +105,14 @@ impl Ask {
                 GuildRole::Leader => format!("The lead is {}'s now.", them(player_id)),
                 GuildRole::Officer => format!("{} is an officer.", them(player_id)),
                 GuildRole::Member => format!("{} is a member.", them(player_id)),
+            },
+            Ask::Deposit { strands, .. } => format!("You put {} in the treasury.", strands_words(*strands)),
+            Ask::Withdraw { strands, .. } => format!("You took {} from the treasury.", strands_words(*strands)),
+            Ask::SetLimit { strands: 0, .. } => "Officers may take nothing from the treasury now.".into(),
+            Ask::SetLimit { strands, .. } => format!("Officers may take {} a week.", strands_words(*strands)),
+            Ask::ClaimHall { .. } => match guild {
+                Some(g) => format!("The hall is {}.", possessive(&g)),
+                None => "The hall is the guild's.".into(),
             },
         })
     }
@@ -231,10 +262,304 @@ impl Draft {
     }
 }
 
+/// What you may take from the treasury now, as `role`: the leader all of
+/// it, an officer what's left of the week's limit, a member nothing.
+pub fn withdrawable(role: Option<GuildRole>, treasury: &GuildTreasury) -> i64 {
+    match role {
+        Some(GuildRole::Leader) => treasury.strands.max(0),
+        Some(r) if r.may_withdraw() => {
+            (treasury.withdrawal_limit - treasury.withdrawn_this_week).clamp(0, treasury.strands.max(0))
+        }
+        _ => 0,
+    }
+}
+
+/// The treasury's fields, as typed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Purse {
+    pub deposit: String,
+    pub withdraw: String,
+    /// What a withdrawal is for, kept in the books
+    pub note: String,
+    pub limit: String,
+}
+
+/// A whole number of Strands as typed, or what's wrong with it. Commas and
+/// spaces are allowed, as the panel writes them.
+pub fn amount(typed: &str) -> Result<i64, String> {
+    let digits: String = typed.chars().filter(|c| !matches!(c, ',' | ' ' | '_')).collect();
+    if digits.is_empty() {
+        return Err("How many Strands?".into());
+    }
+    match digits.parse::<i64>() {
+        Ok(n) if n > 0 => Ok(n),
+        Ok(_) => Err("A whole number of Strands, more than none.".into()),
+        Err(_) => Err("A whole number of Strands.".into()),
+    }
+}
+
+impl Purse {
+    /// The deposit as typed, against what you hold.
+    pub fn check_deposit(&self, balance: Option<i64>) -> Result<i64, String> {
+        let n = amount(&self.deposit)?;
+        match balance {
+            Some(held) if held < n => Err(format!("You hold {}.", strands_words(held))),
+            _ => Ok(n),
+        }
+    }
+
+    /// The withdrawal as typed, against what `role` may take.
+    pub fn check_withdraw(&self, role: Option<GuildRole>, treasury: &GuildTreasury) -> Result<i64, String> {
+        let n = amount(&self.withdraw)?;
+        let most = withdrawable(role, treasury);
+        if n <= most {
+            return Ok(n);
+        }
+        Err(match role {
+            Some(GuildRole::Leader) => format!("The treasury holds {}.", strands_words(treasury.strands)),
+            _ if most == 0 => "You've taken your limit this week.".into(),
+            _ => format!("You may take {} more this week.", strands_words(most)),
+        })
+    }
+
+    /// The officers' weekly limit as typed: none is allowed, to stop them.
+    pub fn check_limit(&self) -> Result<i64, String> {
+        if self.limit.trim() == "0" {
+            return Ok(0);
+        }
+        amount(&self.limit)
+    }
+}
+
+/// What a free lot's panel offers about a hall (S4.3), for a lot in the
+/// guild district.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HallOffer {
+    /// You lead a guild with no hall, it can pay, and you're at the hall
+    Claim { guild_id: Uuid, guild: String, cost: i64 },
+    /// As above, away from the Exchange hall, where it's done
+    AwayFromHall { guild: String, cost: i64 },
+    /// The treasury is `short` of the deed
+    Short { guild: String, cost: i64, short: i64 },
+    /// Your guild has a hall already
+    HasAHall { guild: String },
+    /// You're in a guild and don't lead it
+    NotLeader { guild: String },
+    /// You're in no guild
+    NoGuild,
+}
+
+/// What `plot`'s panel says of halls to `mine`, standing `at_hall` or not:
+/// `None` for a lot outside the guild district, or one that's held. The
+/// deed is the plot's `deed_cost`, and the treasury pays it.
+pub fn hall_offer(plot: &PlotInfo, mine: Option<&MyGuild>, at_hall: bool) -> Option<HallOffer> {
+    if plot.zone_id != Zone::GuildDistrict.as_str() || plot.owner_id.is_some() {
+        return None;
+    }
+    let cost = plot.deed_cost? as i64;
+    let Some(guild) = mine.and_then(|m| m.guild.as_ref()) else {
+        return Some(HallOffer::NoGuild);
+    };
+    let name = guild.name.clone();
+    if mine.and_then(|m| m.role) != Some(GuildRole::Leader) {
+        return Some(HallOffer::NotLeader { guild: name });
+    }
+    if guild.hall.is_some() {
+        return Some(HallOffer::HasAHall { guild: name });
+    }
+    let held = guild.treasury.as_ref().map_or(0, |t| t.strands);
+    Some(if held < cost {
+        HallOffer::Short { guild: name, cost, short: cost - held }
+    } else if !at_hall {
+        HallOffer::AwayFromHall { guild: name, cost }
+    } else {
+        HallOffer::Claim { guild_id: guild.id, guild: name, cost }
+    })
+}
+
+impl HallOffer {
+    /// The line under the price.
+    pub fn words(&self) -> String {
+        match self {
+            HallOffer::Claim { guild, .. } => format!("{} treasury pays the deed, and the hall's tax after.", possessive(guild)),
+            HallOffer::AwayFromHall { .. } => "A hall is bought at the Exchange hall, in the Capitol.".into(),
+            HallOffer::Short { guild, short, .. } => format!("{} treasury is {} short.", possessive(guild), strands_words(*short)),
+            HallOffer::HasAHall { guild } => format!("{guild} holds a hall already. A guild holds one."),
+            HallOffer::NotLeader { guild } => format!("A guild hall. {} leader buys one for the guild.", possessive(guild)),
+            HallOffer::NoGuild => "A guild hall: a guild's leader buys it from the treasury.".into(),
+        }
+    }
+
+    /// The deed, where there's one to show.
+    pub fn cost(&self) -> Option<i64> {
+        match self {
+            HallOffer::Claim { cost, .. } | HallOffer::AwayFromHall { cost, .. } | HallOffer::Short { cost, .. } => Some(*cost),
+            _ => None,
+        }
+    }
+}
+
+/// "The Kiln Yard's", "The Rope Walkers'".
+pub fn possessive(name: &str) -> String {
+    if name.ends_with('s') {
+        format!("{name}'")
+    } else {
+        format!("{name}'s")
+    }
+}
+
+/// "1 Strand", "1,240 Strands".
+pub fn strands_words(n: i64) -> String {
+    if n.abs() == 1 {
+        format!("{n} Strand")
+    } else {
+        format!("{} Strands", thousands(n))
+    }
+}
+
+/// "1,240", "-80".
+pub fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
+/// How the week's dues are made up: "50, and 5 for each of 6 members,
+/// charged by the hour".
+pub fn dues_words(members: usize) -> String {
+    format!(
+        "{}, and {} for each of {}, charged by the hour",
+        guild::DUES_BASE,
+        guild::DUES_PER_MEMBER,
+        members_words(members),
+    )
+}
+
+/// How far the debt has gone toward dissolving the guild, 0 to 1.
+pub fn debt_share(treasury: &GuildTreasury) -> f32 {
+    if treasury.dissolves_at <= 0 {
+        return 0.0;
+    }
+    (treasury.owed as f32 / treasury.dissolves_at as f32).clamp(0.0, 1.0)
+}
+
+/// The debt, in a line, or `None` with none owed.
+pub fn debt_words(treasury: &GuildTreasury) -> Option<String> {
+    (treasury.owed > 0).then(|| {
+        format!(
+            "Owes {} in dues. Deposits pay it off first; at {} owed the guild is dissolved, and what's left shared.",
+            strands_words(treasury.owed),
+            thousands(treasury.dissolves_at),
+        )
+    })
+}
+
+/// What moved the treasury, in a word or two.
+pub fn entry_kind_words(kind: GuildEntryKind) -> &'static str {
+    match kind {
+        GuildEntryKind::Deposit => "Deposit",
+        GuildEntryKind::Withdrawal => "Withdrawal",
+        GuildEntryKind::Dues => "Dues",
+        GuildEntryKind::Fee => "Roster fee",
+        GuildEntryKind::Share => "Share",
+        GuildEntryKind::Hall => "The hall's deed",
+        GuildEntryKind::Tax => "The hall's tax",
+        GuildEntryKind::Refund => "The deed refunded",
+    }
+}
+
+/// A line of the books: what, who, and the note, as "Withdrawal · Ada
+/// Reeder · rope for the sheds". A note that only says what it is ("Dues")
+/// isn't said twice.
+pub fn entry_words(entry: &GuildEntry) -> String {
+    let kind = entry_kind_words(entry.kind);
+    let mut line = kind.to_string();
+    if let Some(by) = &entry.by {
+        line.push_str(" · ");
+        line.push_str(&by.name);
+    }
+    let note = entry.note.trim();
+    if !note.is_empty() && !note.eq_ignore_ascii_case(kind) {
+        line.push_str(" · ");
+        line.push_str(note);
+    }
+    line
+}
+
+/// A line of the books as the panel shows it: an entry, or a run of the
+/// hourly ones folded together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookLine {
+    /// The newest of them
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub kind: GuildEntryKind,
+    pub words: String,
+    /// What the treasury gained, negative for what it lost, all told
+    pub strands: i64,
+    /// The treasury after the newest
+    pub treasury: i64,
+}
+
+/// `entries`, newest first, as lines: a run of hours' dues, or of the
+/// hall's tax, one line ("Dues, 12 hours"), since the server books each
+/// hour and a page of them would hide everything else.
+pub fn book_lines(entries: &[GuildEntry]) -> Vec<BookLine> {
+    let hourly = |k: GuildEntryKind| matches!(k, GuildEntryKind::Dues | GuildEntryKind::Tax);
+    let mut lines: Vec<(BookLine, usize)> = Vec::new();
+    for entry in entries {
+        if let Some((last, n)) = lines.last_mut() {
+            if hourly(entry.kind) && last.kind == entry.kind && entry.note.trim().eq_ignore_ascii_case(entry_kind_words(entry.kind)) {
+                last.strands += entry.strands;
+                *n += 1;
+                continue;
+            }
+        }
+        let line = BookLine {
+            at: entry.at,
+            kind: entry.kind,
+            words: entry_words(entry),
+            strands: entry.strands,
+            treasury: entry.treasury,
+        };
+        lines.push((line, 1));
+    }
+    lines
+        .into_iter()
+        .map(|(mut line, n)| {
+            if n > 1 {
+                line.words = format!("{}, {n} hours", entry_kind_words(line.kind));
+            }
+            line
+        })
+        .collect()
+}
+
+/// "+50", "-8".
+pub fn signed(n: i64) -> String {
+    if n > 0 {
+        format!("+{}", thousands(n))
+    } else {
+        thousands(n)
+    }
+}
+
 /// Your guilds, and the calls for them.
 #[derive(Debug, Clone, Default)]
 pub struct Guilds {
     mine: Option<MyGuild>,
+    /// Your guild's books, by its id, newest first
+    books: Option<(Uuid, Vec<GuildEntry>)>,
+    books_stale: bool,
     registry: Option<Vec<GuildSummary>>,
     /// The guild opened from the registry
     viewing: Option<GuildDetail>,
@@ -275,6 +600,11 @@ impl Guilds {
         if self.stale || self.mine.is_none() {
             return Some(Ask::Mine);
         }
+        if self.books_stale {
+            if let Some(id) = self.guild().filter(|g| g.treasury.is_some()).map(|g| g.id) {
+                return Some(Ask::Books(id));
+            }
+        }
         self.registry_stale.then_some(Ask::Registry)
     }
 
@@ -285,6 +615,7 @@ impl Guilds {
         match ask {
             Ask::Mine => self.stale = false,
             Ask::Registry => self.registry_stale = false,
+            Ask::Books(_) => self.books_stale = false,
             _ => {}
         }
         self.asked = Some(ask);
@@ -304,6 +635,13 @@ impl Guilds {
     pub fn changed(&mut self) {
         self.stale = true;
         self.registry_stale |= self.registry.is_some();
+    }
+
+    /// The panel opened on your guild: it and its books are read again,
+    /// since dues move the treasury by the hour and say nothing.
+    pub fn look_in(&mut self) {
+        self.stale = true;
+        self.books_stale = true;
     }
 
     /// The registry's wanted (the panel opened on it).
@@ -342,7 +680,31 @@ impl Guilds {
         if joined_or_left {
             self.viewing = None;
         }
+        // Whatever moved the guild may have moved its treasury: books once
+        // read are read again
+        if self.books.is_some() && mine.guild.as_ref().is_some_and(|g| g.treasury.is_some()) {
+            self.books_stale = true;
+        }
+        if self.books.as_ref().map(|b| b.0) != mine.guild.as_ref().map(|g| g.id) {
+            self.books = None;
+        }
         self.mine = Some(mine);
+    }
+
+    /// `GET /guilds/{id}/books` came back.
+    pub fn booked(&mut self, entries: Vec<GuildEntry>) {
+        if let Some(Ask::Books(id)) = self.asked {
+            self.asked = None;
+            if self.guild_id() == Some(id) {
+                self.books = Some((id, entries));
+            }
+        }
+    }
+
+    /// Your guild's books, newest first, once read.
+    pub fn books(&self) -> Option<&[GuildEntry]> {
+        let (id, entries) = self.books.as_ref()?;
+        (self.guild_id() == Some(*id)).then_some(entries.as_slice())
     }
 
     /// `GET /guilds` came back.
@@ -385,6 +747,10 @@ impl Guilds {
             }
             Some(Ask::Registry) => {
                 self.registry.get_or_insert_with(Vec::new);
+            }
+            Some(Ask::Books(id)) => {
+                // Shown empty rather than reading for ever
+                self.books.get_or_insert((id, Vec::new()));
             }
             Some(Ask::Find { name, .. }) if not_found => {
                 self.done = None;
@@ -434,7 +800,8 @@ impl Guilds {
 
     /// A call of yours is out or waiting: the buttons hold still.
     pub fn busy(&self) -> bool {
-        !self.pending.is_empty() || self.asked.as_ref().is_some_and(|a| !matches!(a, Ask::Mine | Ask::Registry))
+        !self.pending.is_empty()
+            || self.asked.as_ref().is_some_and(|a| !matches!(a, Ask::Mine | Ask::Registry | Ask::Books(_)))
     }
 
     pub fn refused(&self) -> Option<&str> {
@@ -708,6 +1075,194 @@ mod tests {
         guilds.answered(mine(GuildRole::Member));
         assert!(guilds.viewing().is_none());
         assert_eq!(guilds.done(), Some("You're in The Rope Walkers."));
+    }
+
+    fn treasury(strands: i64, limit: i64, withdrawn: i64) -> GuildTreasury {
+        GuildTreasury {
+            strands,
+            owed: 0,
+            weekly_dues: guild::weekly_dues(6),
+            dissolves_at: 4 * guild::weekly_dues(6),
+            withdrawal_limit: limit,
+            withdrawn_this_week: withdrawn,
+        }
+    }
+
+    #[test]
+    fn the_leader_takes_anything_an_officer_their_limit_a_member_nothing() {
+        let t = treasury(900, 200, 150);
+        assert_eq!(withdrawable(Some(GuildRole::Leader), &t), 900);
+        assert_eq!(withdrawable(Some(GuildRole::Officer), &t), 50, "what's left of the week");
+        assert_eq!(withdrawable(Some(GuildRole::Member), &t), 0);
+        assert_eq!(withdrawable(None, &t), 0);
+        assert_eq!(withdrawable(Some(GuildRole::Officer), &treasury(30, 200, 0)), 30, "no more than it holds");
+        assert_eq!(withdrawable(Some(GuildRole::Officer), &treasury(900, 200, 260)), 0, "never below none");
+    }
+
+    #[test]
+    fn the_purse_checks_what_is_typed() {
+        assert_eq!(amount("1,240"), Ok(1240));
+        assert!(amount("").is_err() && amount("0").is_err() && amount("-5").is_err() && amount("ten").is_err());
+        let purse = Purse { deposit: "500".into(), withdraw: "80".into(), note: String::new(), limit: "0".into() };
+        assert_eq!(purse.check_deposit(Some(600)), Ok(500));
+        assert_eq!(purse.check_deposit(Some(400)), Err("You hold 400 Strands.".into()));
+        assert_eq!(purse.check_deposit(None), Ok(500), "the server decides while your balance isn't known");
+        let t = treasury(900, 200, 150);
+        assert_eq!(purse.check_withdraw(Some(GuildRole::Leader), &t), Ok(80));
+        assert_eq!(purse.check_withdraw(Some(GuildRole::Officer), &t), Err("You may take 50 Strands more this week.".into()));
+        assert_eq!(purse.check_withdraw(Some(GuildRole::Officer), &treasury(900, 200, 200)), Err("You've taken your limit this week.".into()));
+        assert_eq!(purse.check_limit(), Ok(0), "a limit of none stops the officers");
+    }
+
+    fn lot(zone: &str, owner: Option<Uuid>) -> PlotInfo {
+        use capitol_protocol::rest::Bounds;
+        PlotInfo {
+            guild: None,
+            id: Uuid::from_u128(9),
+            zone_id: zone.into(),
+            world_x: 0.0,
+            world_y: 0.0,
+            bounds: Bounds::new(0.0, 0.0, 10.0, 10.0),
+            size_category: "medium".into(),
+            plot_type: "standard".into(),
+            owner_id: owner,
+            owner_name: None,
+            claimed_at: None,
+            assessed_value: 0,
+            tax_owed: 0,
+            forecloses_at: None,
+            deed_cost: Some(5000),
+            station_count: 0,
+            station_capacity: 9,
+            terrain_id: None,
+            corners: None,
+            indoor_room: None,
+            yard_room: None,
+            owner_citizen: false,
+            floor_ready_at: None,
+            floors: 0,
+            next_floor: None,
+        }
+    }
+
+    #[test]
+    fn only_a_leader_with_the_strands_claims_a_hall_and_at_the_exchange() {
+        let free = lot("guild_district", None);
+        assert_eq!(hall_offer(&lot("urban", None), None, true), None, "a home lot isn't a hall");
+        assert_eq!(hall_offer(&lot("guild_district", Some(BRAM)), None, true), None, "a held one isn't offered");
+        assert_eq!(hall_offer(&free, None, true), Some(HallOffer::NoGuild));
+        let mut rich = mine(GuildRole::Leader);
+        rich.guild.as_mut().unwrap().treasury = Some(treasury(6000, 200, 0));
+        let name = "The Rope Walkers".to_string();
+        assert_eq!(hall_offer(&free, Some(&rich), true), Some(HallOffer::Claim { guild_id: ROPE, guild: name.clone(), cost: 5000 }));
+        assert_eq!(hall_offer(&free, Some(&rich), false), Some(HallOffer::AwayFromHall { guild: name.clone(), cost: 5000 }));
+        let mut poor = rich.clone();
+        poor.guild.as_mut().unwrap().treasury = Some(treasury(1200, 200, 0));
+        assert_eq!(hall_offer(&free, Some(&poor), true), Some(HallOffer::Short { guild: name.clone(), cost: 5000, short: 3800 }));
+        let mut officer = rich.clone();
+        officer.role = Some(GuildRole::Officer);
+        assert_eq!(hall_offer(&free, Some(&officer), true), Some(HallOffer::NotLeader { guild: name.clone() }));
+        let mut housed = rich.clone();
+        housed.guild.as_mut().unwrap().hall = Some(capitol_protocol::rest::GuildHall {
+            plot_id: Uuid::from_u128(40),
+            terrain_id: None,
+            x: 0.0,
+            y: 0.0,
+            claimed_at: when(),
+            tax_owed: 0,
+        });
+        assert_eq!(hall_offer(&free, Some(&housed), true), Some(HallOffer::HasAHall { guild: name }));
+    }
+
+    #[test]
+    fn the_books_are_read_with_the_guild_and_after_it_moves() {
+        let mut guilds = Guilds::default();
+        guilds.connected();
+        let mut rich = mine(GuildRole::Officer);
+        rich.guild.as_mut().unwrap().treasury = Some(treasury(900, 200, 0));
+        guilds.sent(Ask::Mine);
+        guilds.answered(rich.clone());
+        assert_eq!(guilds.wants(), None, "books wait for the panel");
+        guilds.look_in();
+        assert_eq!(guilds.wants(), Some(Ask::Mine), "your guild first");
+        guilds.sent(Ask::Mine);
+        guilds.answered(rich.clone());
+        assert_eq!(guilds.wants(), Some(Ask::Books(ROPE)));
+        guilds.sent(Ask::Books(ROPE));
+        assert!(!guilds.busy(), "a read holds no button still");
+        let entry = GuildEntry {
+            at: when(),
+            kind: GuildEntryKind::Withdrawal,
+            strands: -80,
+            treasury: 900,
+            by: Some(who(BRAM, "Bram")),
+            note: "rope for the sheds".into(),
+        };
+        guilds.booked(vec![entry.clone()]);
+        assert_eq!(guilds.books().map(<[_]>::len), Some(1));
+        assert_eq!(entry_words(&entry), "Withdrawal · Bram · rope for the sheds");
+
+        // A deposit answers with the guild, and the books are read again
+        let deposit = Ask::Deposit { guild_id: ROPE, strands: 50 };
+        guilds.queue(deposit.clone());
+        guilds.sent(deposit);
+        guilds.answered(rich);
+        assert_eq!(guilds.done(), Some("You put 50 Strands in the treasury."));
+        assert_eq!(guilds.wants(), Some(Ask::Books(ROPE)));
+
+        // Out of the guild, its books go
+        guilds.sent(Ask::Books(ROPE));
+        guilds.answered(MyGuild::default());
+        assert_eq!(guilds.books(), None);
+    }
+
+    #[test]
+    fn a_run_of_hourly_dues_is_one_line() {
+        let entry = |kind, strands, treasury, note: &str| GuildEntry {
+            at: when(),
+            kind,
+            strands,
+            treasury,
+            by: (kind == GuildEntryKind::Deposit).then(|| who(BRAM, "Bram")),
+            note: note.into(),
+        };
+        let entries = vec![
+            entry(GuildEntryKind::Dues, -1, 897, "Dues"),
+            entry(GuildEntryKind::Dues, -1, 898, "Dues"),
+            entry(GuildEntryKind::Dues, 0, 899, "Dues"),
+            entry(GuildEntryKind::Deposit, 100, 899, ""),
+            entry(GuildEntryKind::Dues, -5, 799, "Dues, and 4 owed"),
+            entry(GuildEntryKind::Tax, -2, 804, "Tax"),
+        ];
+        let lines = book_lines(&entries);
+        let words: Vec<_> = lines.iter().map(|l| (l.words.as_str(), l.strands, l.treasury)).collect();
+        assert_eq!(
+            words,
+            [
+                ("Dues, 3 hours", -2, 897),
+                ("Deposit · Bram", 100, 899),
+                ("Dues · Dues, and 4 owed", -5, 799),
+                ("The hall's tax · Tax", -2, 804),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_treasury_words() {
+        assert_eq!(thousands(1_240), "1,240");
+        assert_eq!(thousands(-1_000_000), "-1,000,000");
+        assert_eq!(signed(50), "+50");
+        assert_eq!(signed(-8), "-8");
+        assert_eq!(strands_words(1), "1 Strand");
+        assert_eq!(possessive("The Rope Walkers"), "The Rope Walkers'");
+        assert_eq!(possessive("Oak & Iron"), "Oak & Iron's");
+        let mut t = treasury(0, 200, 0);
+        assert_eq!(t.weekly_dues, 80);
+        assert_eq!(dues_words(6), "50, and 5 for each of 6 members, charged by the hour");
+        assert_eq!(debt_words(&t), None);
+        t.owed = 80;
+        assert!((debt_share(&t) - 0.25).abs() < 1e-6, "a week's dues of four");
+        assert!(debt_words(&t).unwrap().starts_with("Owes 80 Strands in dues."));
     }
 
     #[test]

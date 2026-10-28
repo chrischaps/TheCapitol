@@ -101,6 +101,11 @@
 // walking to breathes; the one under the cursor says whose it is and what
 // a click does.
 //
+// A guild hall (S4.3) carries its guild's name on the board over its door
+// (cap_hall_signs, #508), cream on the dark board in its copper frame, as
+// the bazaar's signs are: world text, so whatever stands in front hides it,
+// and it reads at dusk as by day.
+//
 // The Gazette's notice board (E3.9) stands in the hall's forecourt, on the
 // side nearer the tower. A click on it (cap_board_at, tried up its posts)
 // opens the paper (cap_read_gazette) wherever you are: reading needs no
@@ -571,6 +576,7 @@ fn on_draw_ui() {
         stall_under_cursor()
     } else if focus_is(focus, "stall") { focus.id } else { () };
     if bazaar != () { draw_bazaar(bazaar, over_stall, now); }
+    for s in cap_hall_signs() { draw_hall_sign(s); }
     let lead = cap_lead();
     if lead != () && !cap_clean() { draw_lead(lead, now); }
     if focus != () && placing == () { draw_focus(focus, now); }
@@ -1557,6 +1563,28 @@ fn draw_sign(s) {
             shadow: [size * 0.05, size * 0.05, 0.0, 0.0, 0.0, 0.6 * fade],
         });
     }
+}
+
+// A guild hall's name on the board over its door (#508), as wide and tall
+// as the board lets it run, cream with a sign-writer's shade. Too far off
+// to read, it fades out.
+fn draw_hall_sign(s) {
+    let at = world_to_screen(s.x, s.y, s.z);
+    if !at.visible { return; }
+    let edge = world_to_screen(s.x, s.y + s.h, s.z);
+    if !edge.visible { return; }
+    // How many points the lettering's height spans
+    let px = (edge.y - at.y).abs();
+    if px < 9.0 { return; }
+    let fade = ((px - 9.0) / 6.0).min(1.0);
+    // Measured with its letter spacing, a twenty-fifth of the em, so a
+    // long name still fits the board
+    let m = measure_text_ex(s.name, 20.0, "display", 0.8);
+    let size = (s.w * 20.0 / m.width).min(s.h * 0.8);
+    draw_world_text(s.x, s.y, s.z, s.name, size, #{
+        font: "display", color: [0.96, 0.92, 0.82, 0.97 * fade], facing: [s.fx, 0.0, s.fz], spacing: size * 0.04,
+        shadow: [size * 0.04, size * 0.04, 0.0, 0.0, 0.0, 0.65 * fade],
+    });
 }
 
 // A stall's footprint traced in amber, and over it its name (or "Stall n,

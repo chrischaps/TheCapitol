@@ -3,12 +3,26 @@
 //! guilds' verdigris (`theme::GUILD`), the green of an old hall's copper
 //! sign.
 //!
-//! Three pages:
+//! Four pages:
 //! - **Your guild**, once you're in one: its banner (the name, the tag as it
 //!   hangs after a member's name, who founded it and who leads it), the
 //!   charter on a sheet of the Gazette's paper, and the roster by role. An
 //!   officer or the leader invites by name and answers who's waiting; the
 //!   leader sets roles and hands on the lead; anyone may leave.
+//! - **Treasury**, beside it for members (#508), so the roster stays in
+//!   view on a 720-point screen:
+//!   - **The treasury** (S4.2) is a strongbox edged in brass: what it
+//!     holds, the week's dues and any debt, with a bar toward the debt that
+//!     dissolves the guild. Anyone deposits; an officer withdraws up to
+//!     what's left of the leader's weekly limit, and the leader anything,
+//!     and sets the limit. Its books' last entries are a ledger on the
+//!     Gazette's paper, in its inks: what came in in green, what went out
+//!     in red, and the treasury after.
+//!   - **The hall** (S4.3): where it stands, when it was taken and
+//!     any tax it owes, with the walk there; or, with none, how one is
+//!     bought. The leader alt-clicks a free lot in the guild district, and
+//!     its plot panel claims it for the guild at the Exchange hall
+//!     (`capitol_core::guilds::hall_offer`).
 //! - **Browse**: invitations to you, then every guild, the largest first. A
 //!   guild opens on its charter and roster, with *Apply*.
 //! - **Found**, outside a guild: the form, the tag previewed after your
@@ -21,8 +35,11 @@
 //! an [`Action`]: a name that opens a card, the walk to the hall, the ×.
 
 use capitol_core::chrono::{DateTime, Utc};
-use capitol_core::guilds::{self, Ask, Draft, Guilds, RosterAct, WaitAct};
-use capitol_core::protocol::rest::{GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary};
+use capitol_core::guilds::{self, Ask, Draft, Guilds, Purse, RosterAct, WaitAct};
+use capitol_core::protocol::rest::{
+    GuildDetail, GuildEntry, GuildEntryKind, GuildHall, GuildInvite, GuildInviteKind, GuildMember, GuildSummary,
+    GuildTreasury,
+};
 use capitol_core::protocol::rules::guild::{self as rules, GuildRole};
 use egui::{Align, Align2, Color32, Id, Layout, Margin, RichText, Sense, Stroke};
 use uuid::Uuid;
@@ -38,18 +55,25 @@ const WIDTH: f32 = 520.0;
 const SCROLL_ROOM: f32 = 12.0;
 /// The banner's name.
 const BANNER: f32 = 22.0;
+/// What the treasury holds, in the strongbox.
+const HOLDS: f32 = 26.0;
+/// How many of the books' entries are shown.
+const BOOK_LINES: usize = 6;
 
 /// What the panel asks of the rest of the game.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// See who someone is: their card (S0.3)
     Card { id: Uuid, name: String, citizen: bool },
-    /// Walk to the Exchange hall, to found a guild there
+    /// Walk to the Exchange hall, to found a guild or buy a hall there
     ToHall,
+    /// Walk to your guild's hall, at its middle (server units)
+    ToGuildHall { x: f64, y: f64 },
     Close,
 }
 
 /// What the panel draws from, beside the guilds themselves.
+#[derive(Clone)]
 pub struct View {
     pub me: Option<Uuid>,
     /// Your name, for the tag's preview
@@ -71,6 +95,8 @@ pub struct View {
 pub enum Page {
     #[default]
     Yours,
+    /// Your guild's treasury, its books and its hall (#508)
+    Treasury,
     Browse,
     Found,
 }
@@ -87,6 +113,8 @@ pub struct GuildPanel {
     pub draft: Draft,
     /// The name to invite, as typed
     pub invite: String,
+    /// The treasury's fields, as typed
+    pub purse: Purse,
     /// *Leave* was pressed once: it asks again
     leaving: bool,
 }
@@ -114,13 +142,15 @@ impl GuildPanel {
         let in_guild = guilds.guild().is_some();
         self.page = match (self.page, in_guild) {
             (Page::Found, true) => Page::Yours,
-            (Page::Yours, false) => Page::Browse,
+            (Page::Yours | Page::Treasury, false) => Page::Browse,
             (page, _) => page,
         };
         if self.open && !self.was_open {
             ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, Id::new("capitol_guild")));
-            if self.page == Page::Browse {
-                guilds.browse();
+            match self.page {
+                Page::Browse => guilds.browse(),
+                Page::Yours | Page::Treasury => guilds.look_in(),
+                Page::Found => {}
             }
         }
         self.was_open = self.open;
@@ -177,13 +207,14 @@ impl GuildPanel {
         }
         let shown = match self.page {
             Page::Yours => self.yours(ui, guilds, view),
+            Page::Treasury => self.treasury_page(ui, guilds, view),
             Page::Browse => browse(ui, guilds, view),
             Page::Found => self.found(ui, guilds, view),
         };
         action.or(shown)
     }
 
-    /// Your guild, Browse and, outside one, Found.
+    /// Your guild, its treasury and Browse, or outside one, Browse and Found.
     fn tabs(&mut self, ui: &mut egui::Ui, guilds: &mut Guilds) {
         let invited = match guilds.invitations() {
             0 => "Browse".to_string(),
@@ -192,15 +223,21 @@ impl GuildPanel {
         let mut page = self.page;
         ui.horizontal(|ui| match guilds.guild() {
             Some(_) => {
-                theme::segmented(ui, &mut page, &[(Page::Yours, "Your guild"), (Page::Browse, invited.as_str())]);
+                theme::segmented(
+                    ui,
+                    &mut page,
+                    &[(Page::Yours, "Your guild"), (Page::Treasury, "Treasury"), (Page::Browse, invited.as_str())],
+                );
             }
             None => {
                 theme::segmented(ui, &mut page, &[(Page::Browse, invited.as_str()), (Page::Found, "Found one")]);
             }
         });
         if page != self.page {
-            if page == Page::Browse {
-                guilds.browse();
+            match page {
+                Page::Browse => guilds.browse(),
+                Page::Yours | Page::Treasury => guilds.look_in(),
+                Page::Found => {}
             }
             self.page = page;
             self.leaving = false;
@@ -273,6 +310,135 @@ impl GuildPanel {
             self.leave(ui, guilds, &guild, role, busy);
         });
         action
+    }
+
+    /// The treasury and the hall, on a page of their own.
+    fn treasury_page(&mut self, ui: &mut egui::Ui, guilds: &mut Guilds, view: &View) -> Option<Action> {
+        let Some(guild) = guilds.guild().cloned() else {
+            ui.label(theme::dim(if view.online { "Reading your guild…" } else { "In no guild." }).italics());
+            return None;
+        };
+        let role = guilds.role();
+        let busy = guilds.busy();
+        let mut action = None;
+        let room = (ui.available_height() - 4.0).max(160.0);
+        theme::scrolled(ui, "capitol_guild_treasury", room, |ui| {
+            // Clear of the scroll handle, which shows at rest
+            ui.set_max_width(ui.available_width() - SCROLL_ROOM);
+            match &guild.treasury {
+                Some(treasury) => self.treasury(ui, guilds, &guild, treasury, role, view, busy),
+                None => {
+                    ui.label(theme::dim(if view.online { "Reading the treasury…" } else { "The treasury is shut offline." }).italics());
+                }
+            }
+            ui.add_space(12.0);
+            action = hall(ui, &guild, role, view);
+        });
+        action
+    }
+
+    /// The treasury: what it holds, its dues and any debt, the fields each
+    /// role may use, and the books' last entries.
+    #[allow(clippy::too_many_arguments)]
+    fn treasury(
+        &mut self,
+        ui: &mut egui::Ui,
+        guilds: &mut Guilds,
+        guild: &GuildDetail,
+        t: &GuildTreasury,
+        role: Option<GuildRole>,
+        view: &View,
+        busy: bool,
+    ) {
+        ui.label(theme::label("Treasury"));
+        ui.add_space(4.0);
+        egui::Frame::none()
+            .fill(theme::WELL)
+            .stroke(Stroke::new(1.0_f32, theme::BRASS.gamma_multiply(0.55)))
+            .rounding(6.0)
+            .inner_margin(Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(guilds::thousands(t.strands)).font(theme::display(HOLDS)).color(GOLD));
+                    ui.label(theme::dim(if t.strands == 1 { "Strand" } else { "Strands" }));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{} a week", guilds::thousands(t.weekly_dues))).font(theme::strong(size::BODY)).color(theme::BRASS_LIGHT));
+                        ui.label(theme::label("Dues"));
+                    });
+                });
+                ui.label(theme::dim(guilds::dues_words(guild.members.len())).size(size::LABEL));
+                if let Some(words) = guilds::debt_words(t) {
+                    ui.add_space(6.0);
+                    let near = guilds::debt_share(t);
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), Sense::hover());
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 2.0, theme::BAR_TRACK);
+                    let mut filled = rect;
+                    filled.set_width(rect.width() * near);
+                    // Brass while there's time, red as the end nears
+                    painter.rect_filled(filled, 2.0, theme::BRASS.lerp_to_gamma(theme::SHORT, near));
+                    ui.add_space(3.0);
+                    ui.label(RichText::new(words).size(size::SMALL).color(theme::SHORT));
+                }
+                ui.add_space(6.0);
+                let limit_words = match role {
+                    Some(GuildRole::Leader) if t.withdrawal_limit > 0 => {
+                        format!("Officers may each take {} a week. You may take any of it.", guilds::strands_words(t.withdrawal_limit))
+                    }
+                    Some(GuildRole::Leader) => "Officers may take nothing until you set them a limit. You may take any of it.".into(),
+                    Some(GuildRole::Officer) if t.strands <= 0 => "Nothing to take: the treasury is empty.".into(),
+                    Some(GuildRole::Officer) => format!(
+                        "You may take {} more this week, of the leader's {}.",
+                        guilds::thousands(guilds::withdrawable(role, t)),
+                        guilds::thousands(t.withdrawal_limit),
+                    ),
+                    _ => "Anyone may pay in. Officers and the leader draw on it.".into(),
+                };
+                ui.label(theme::dim(limit_words).size(size::LABEL));
+            });
+        ui.add_space(6.0);
+        self.purse(ui, guilds, guild.id, t, role, view, busy);
+        ui.add_space(6.0);
+        books(ui, guilds.books(), view);
+    }
+
+    /// Deposit for anyone, withdraw for an officer or the leader, and the
+    /// officers' limit for the leader: each an amount, checked as it's
+    /// typed, and its button.
+    #[allow(clippy::too_many_arguments)]
+    fn purse(
+        &mut self,
+        ui: &mut egui::Ui,
+        guilds: &mut Guilds,
+        guild_id: Uuid,
+        t: &GuildTreasury,
+        role: Option<GuildRole>,
+        view: &View,
+        busy: bool,
+    ) {
+        let ready = !busy && view.online;
+        let deposit = self.purse.check_deposit(view.strands);
+        if let Some(n) = purse_row(ui, "capitol_guild_deposit", &mut self.purse.deposit, None, "Deposit", &deposit, ready) {
+            guilds.queue(Ask::Deposit { guild_id, strands: n });
+            self.purse.deposit.clear();
+        }
+        if role.is_some_and(GuildRole::may_withdraw) {
+            let withdraw = self.purse.check_withdraw(role, t);
+            let note = Some(&mut self.purse.note);
+            if let Some(n) = purse_row(ui, "capitol_guild_withdraw", &mut self.purse.withdraw, note, "Withdraw", &withdraw, ready) {
+                let note = std::mem::take(&mut self.purse.note).trim().to_string();
+                guilds.queue(Ask::Withdraw { guild_id, strands: n, note });
+                self.purse.withdraw.clear();
+            }
+        }
+        if role == Some(GuildRole::Leader) {
+            let limit = self.purse.check_limit();
+            if let Some(n) = purse_row(ui, "capitol_guild_limit", &mut self.purse.limit, None, "Set officers' limit", &limit, ready) {
+                guilds.queue(Ask::SetLimit { guild_id, strands: n });
+                self.purse.limit.clear();
+            }
+        }
     }
 
     /// The way out: asked twice. A leader with others leaves last.
@@ -497,6 +663,178 @@ fn opened(ui: &mut egui::Ui, guilds: &mut Guilds, guild: &GuildDetail, view: &Vi
     action
 }
 
+/// An amount, perhaps a note, and the button that sends it, enabled while
+/// `checked` holds and `ready`. What's wrong shows under it once something
+/// is typed. The amount it sends, when pressed or entered.
+fn purse_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    amount: &mut String,
+    note: Option<&mut String>,
+    words: &str,
+    checked: &Result<i64, String>,
+    ready: bool,
+) -> Option<i64> {
+    let mut sent = None;
+    ui.horizontal(|ui| {
+        let typed = ui.add(
+            egui::TextEdit::singleline(amount)
+                .id(Id::new(id))
+                .hint_text("Strands")
+                .desired_width(84.0)
+                .margin(Margin::symmetric(8.0, 5.0)),
+        );
+        let mut entered = typed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if let Some(note) = note {
+            let field = ui.add(
+                egui::TextEdit::singleline(note)
+                    .id(Id::new(format!("{id}_note")))
+                    .hint_text("What for")
+                    .char_limit(80)
+                    .desired_width((ui.available_width() - 150.0).max(80.0))
+                    .margin(Margin::symmetric(8.0, 5.0)),
+            );
+            entered |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        }
+        let ok = ready && checked.is_ok();
+        let pressed = ui.add_enabled(ok, egui::Button::new(RichText::new(words).color(GUILD))).clicked();
+        if ok && (pressed || entered) {
+            sent = checked.as_ref().ok().copied();
+        }
+    });
+    if let Err(why) = checked {
+        if !amount.trim().is_empty() {
+            ui.label(RichText::new(why).size(size::SMALL).color(theme::SHORT));
+        }
+    }
+    sent
+}
+
+/// The books' last entries on a sheet of the Gazette's paper, as a ledger:
+/// the day, what moved and who, the sum in or out, and the treasury after.
+fn books(ui: &mut egui::Ui, entries: Option<&[GuildEntry]>, view: &View) {
+    egui::Frame::none()
+        .fill(theme::PAPER)
+        .stroke(Stroke::new(1.0_f32, theme::PAPER_EDGE))
+        .rounding(3.0)
+        .inner_margin(Margin::symmetric(14.0, 10.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("THE BOOKS").font(theme::strong(size::LABEL)).color(theme::INK_DIM).extra_letter_spacing(1.6));
+            ui.add_space(4.0);
+            let Some(entries) = entries else {
+                let words = if view.online { "Reading the books…" } else { "The books are shut offline." };
+                ui.label(RichText::new(words).size(size::BODY).color(theme::INK_DIM).italics());
+                return;
+            };
+            if entries.is_empty() {
+                ui.label(RichText::new("Nothing in the books yet.").size(size::BODY).color(theme::INK_DIM).italics());
+                return;
+            }
+            let lines = guilds::book_lines(entries);
+            ui.spacing_mut().item_spacing.y = 3.0;
+            for (i, line) in lines.iter().take(BOOK_LINES).enumerate() {
+                if i > 0 {
+                    theme::rule_in(ui, theme::INK_RULE.gamma_multiply(0.35));
+                }
+                // The day, what moved and who, then from the right the
+                // treasury after and the sum in or out
+                ui.horizontal(|ui| {
+                    let day = line.at.format("%e %b").to_string();
+                    ui.add_sized([44.0, 18.0], egui::Label::new(RichText::new(day.trim()).size(size::SMALL).color(theme::INK_DIM)));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_sized(
+                            [54.0, 18.0],
+                            egui::Label::new(RichText::new(guilds::thousands(line.treasury)).size(size::SMALL).color(theme::INK_DIM)),
+                        );
+                        let ink = if line.strands >= 0 { theme::INK_UP } else { theme::INK_DOWN };
+                        ui.add_sized(
+                            [54.0, 18.0],
+                            egui::Label::new(RichText::new(guilds::signed(line.strands)).font(theme::strong(size::SMALL)).color(ink)),
+                        );
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.add(egui::Label::new(RichText::new(&line.words).size(size::SMALL).color(theme::INK)).truncate());
+                        });
+                    });
+                });
+            }
+            if lines.len() > BOOK_LINES {
+                ui.add_space(2.0);
+                ui.label(RichText::new("and more before, as far back as 200 entries").size(size::LABEL).color(theme::INK_DIM).italics());
+            }
+        });
+}
+
+/// The hall: where it stands, when it was taken and any tax it owes, and
+/// the walk there; or with none, how one's bought, and by whom.
+fn hall(ui: &mut egui::Ui, guild: &GuildDetail, role: Option<GuildRole>, view: &View) -> Option<Action> {
+    let mut action = None;
+    ui.label(theme::label("Hall"));
+    ui.add_space(4.0);
+    egui::Frame::none()
+        .fill(theme::WELL)
+        .stroke(Stroke::new(1.0_f32, GUILD.gamma_multiply(0.35)))
+        .rounding(6.0)
+        .inner_margin(Margin::symmetric(14.0, 10.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match &guild.hall {
+                Some(hall) => action = standing_hall(ui, guild, hall, view),
+                None => action = no_hall(ui, role, view),
+            }
+        });
+    action
+}
+
+/// A hall that stands: its sign's words, when it was taken, its tax. Not
+/// its address or its weekly tax, which `GuildHall` doesn't carry (#582).
+fn standing_hall(ui: &mut egui::Ui, guild: &GuildDetail, hall: &GuildHall, view: &View) -> Option<Action> {
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(&guild.name).font(theme::display(size::LARGE)).color(theme::PAPER));
+        ui.label(theme::dim("over the door, in the guild district"));
+    });
+    let taken = hall.claimed_at.format("%e %B %Y").to_string();
+    ui.label(theme::dim(format!("Taken {}", taken.trim())).size(size::LABEL));
+    ui.add_space(4.0);
+    if hall.tax_owed > 0 {
+        ui.label(
+            RichText::new(format!(
+                "Owes {} in tax. Deposits pay it off before anything else.",
+                guilds::strands_words(hall.tax_owed)
+            ))
+            .size(size::SMALL)
+            .color(theme::SHORT),
+        );
+    } else {
+        ui.label(theme::dim("Its tax comes from the treasury by the hour.").size(size::LABEL));
+    }
+    ui.add_space(4.0);
+    if view.online && theme::link(ui, "Walk to the hall", size::SMALL).clicked() {
+        action = Some(Action::ToGuildHall { x: hall.x, y: hall.y });
+    }
+    action
+}
+
+/// No hall yet: the leader learns how to buy one, everyone else who does.
+/// Nothing lists the free lots, so it's by alt-click (#581).
+fn no_hall(ui: &mut egui::Ui, role: Option<GuildRole>, view: &View) -> Option<Action> {
+    if role != Some(GuildRole::Leader) {
+        ui.label(theme::dim("No hall yet. The leader buys one in the guild district, from the treasury."));
+        return None;
+    }
+    ui.label(RichText::new("No hall yet.").font(theme::strong(size::BODY)).color(TEXT));
+    ui.label(theme::dim(
+        "The treasury buys a lot in the guild district at its deed's price, and pays its tax after. \
+         Alt-click a free one, and claim it for the guild from its panel at the Exchange hall.",
+    ));
+    if view.at_hall {
+        return None;
+    }
+    ui.add_space(6.0);
+    theme::accent_button(ui, "Walk to the Exchange hall", GUILD, view.online).clicked().then_some(Action::ToHall)
+}
+
 /// The guild's name large in its verdigris, its tag beside it, and who
 /// founded and leads it, on a faint wash of its colour.
 fn banner(ui: &mut egui::Ui, name: &str, tag: &str, founder: &str, leader: &str, founded: DateTime<Utc>, members: usize) {
@@ -715,10 +1053,13 @@ fn name_link(ui: &mut egui::Ui, id: Uuid, name: &str, citizen: bool, yours: bool
     r.clicked().then(|| Action::Card { id, name: name.to_owned(), citizen })
 }
 
-/// `--guild-sample [browse|yours|found|officer]`: the panel on a sample.
-/// `yours` is the leader's view of a guild of six with two waiting,
-/// `officer` the same as an officer, `browse` the registry with an
-/// invitation, `found` the form half filled at the hall.
+/// `--guild-sample [browse|yours|found|officer|treasury|debt|nohall]`: the
+/// panel on a sample. `yours` is the leader's view of a guild of six with
+/// two waiting, `officer` the same as an officer; `treasury` is the
+/// leader's Treasury page, its books and its hall; `debt` an officer's,
+/// the treasury in debt and most of the week's limit taken; `nohall` the
+/// leader's, with no hall yet, away from the Exchange; `browse` the
+/// registry with an invitation; `found` the form half filled at the hall.
 pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
     use capitol_core::protocol::rest::{Correspondent, MyGuild};
     let at = |days: i64| DateTime::from_timestamp(1_790_000_000, 0).unwrap() + capitol_core::chrono::Duration::days(days);
@@ -734,7 +1075,8 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
         standing: standing.into(),
     };
     let rope = Uuid::from_u128(100);
-    let my_role = if which == "officer" { GuildRole::Officer } else { GuildRole::Leader };
+    let officer = matches!(which, "officer" | "debt");
+    let my_role = if officer { GuildRole::Officer } else { GuildRole::Leader };
     let (lead_id, lead_name) = if which == "officer" { (2, "Ada Reeder") } else { (1, "Wren Hollis") };
     let mut members = vec![
         member(1, "Wren Hollis", false, my_role, 0, "Known for good work"),
@@ -759,7 +1101,6 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
         created_at: at(39),
     };
     let rope_detail = GuildDetail {
-        hall: None,
         id: rope,
         name: "The Rope Walkers".into(),
         tag: "ROPE".into(),
@@ -772,9 +1113,51 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
             invite(GuildInviteKind::Apply, who(7, "Dot Fenwick", false), who(7, "Dot Fenwick", false), "The Rope Walkers", "ROPE", rope),
             invite(GuildInviteKind::Invite, who(8, "Tam Ivers", true), who(1, "Wren Hollis", false), "The Rope Walkers", "ROPE", rope),
         ],
-        // The treasury's page comes with #508
-        treasury: None,
+        treasury: Some(GuildTreasury {
+            strands: if officer { 0 } else { 6_240 },
+            owed: if officer { 120 } else { 0 },
+            weekly_dues: rules::weekly_dues(6),
+            dissolves_at: rules::weekly_dues(6) * rules::DISSOLVE_AFTER_WEEKS,
+            withdrawal_limit: 200,
+            withdrawn_this_week: if officer { 150 } else { 0 },
+        }),
+        hall: (which != "nohall").then(|| GuildHall {
+            plot_id: Uuid::from_u128(400),
+            terrain_id: Some("guild_3_12".into()),
+            x: 8_640.0,
+            y: 7_910.0,
+            claimed_at: at(21),
+            tax_owed: 0,
+        }),
     };
+    // The books, newest first: hours of dues, a draw for rope, deposits,
+    // the hall's deed and a roster fee
+    let entry = |hours: i64, kind, strands: i64, treasury: i64, by: Option<Correspondent>, note: &str| GuildEntry {
+        at: now - capitol_core::chrono::Duration::hours(hours),
+        kind,
+        strands,
+        treasury,
+        by,
+        note: note.into(),
+    };
+    let mut books = Vec::new();
+    let mut held = 6_240;
+    for h in 0..14 {
+        let pay = (h % 2 == 0) as i64;
+        books.push(entry(h, GuildEntryKind::Dues, -pay, held, None, "Dues"));
+        held += pay;
+    }
+    books.push(entry(15, GuildEntryKind::Withdrawal, -150, held, Some(who(2, "Ada Reeder", false)), "hemp for the long shed"));
+    held += 150;
+    books.push(entry(30, GuildEntryKind::Deposit, 400, held, Some(who(3, "Cy Marlowe", true)), ""));
+    held -= 400;
+    books.push(entry(52, GuildEntryKind::Fee, -1, held, Some(who(1, "Wren Hollis", false)), "Bram Tolliver joins The Rope Walkers"));
+    held += 1;
+    books.push(entry(70, GuildEntryKind::Deposit, 1_200, held, Some(who(5, "Wen Calder", true)), ""));
+    held -= 1_200;
+    if which != "nohall" {
+        books.push(entry(19 * 24, GuildEntryKind::Hall, -5_000, held, Some(who(1, "Wren Hollis", false)), "A hall in the guild district"));
+    }
     let mut guilds = Guilds::default();
     let summary = |n: u128, name: &str, tag: &str, members: u32, leader: Correspondent| GuildSummary {
         id: Uuid::from_u128(n),
@@ -807,9 +1190,21 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
     };
     guilds.answered(mine);
     guilds.listed(registry);
+    if guilds.guild().is_some() {
+        guilds.sent(Ask::Books(rope));
+        // In debt the treasury is empty: what comes in pays the dues owed
+        let in_debt = vec![
+            entry(26, GuildEntryKind::Withdrawal, -150, 0, Some(who(1, "Wren Hollis", false)), "hemp for the long shed"),
+            entry(50, GuildEntryKind::Deposit, 100, 150, Some(who(3, "Cy Marlowe", true)), ""),
+            entry(51, GuildEntryKind::Dues, -1, 50, None, "Dues"),
+            entry(53, GuildEntryKind::Dues, -1, 51, None, "Dues"),
+        ];
+        guilds.booked(if officer { in_debt } else { books });
+    }
     let page = match which {
         "browse" => Page::Browse,
         "found" => Page::Found,
+        "treasury" | "debt" | "nohall" => Page::Treasury,
         _ => Page::Yours,
     };
     let draft = if which == "found" {
@@ -822,7 +1217,7 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
         my_name: "Wren Hollis".into(),
         strands: Some(1240),
         subscribed: true,
-        at_hall: true,
+        at_hall: which != "nohall",
         online: false,
         now,
     };
@@ -839,9 +1234,21 @@ mod tests {
     /// `click_at` on the sixth, and returns any action, where it was drawn,
     /// and the call the click queued.
     fn run(guilds: &Guilds, view: &View, page: Page, draft: &Draft, click_at: Option<egui::Pos2>) -> (Option<Action>, Option<egui::Rect>, Option<Ask>) {
+        run_with(guilds, view, page, draft, &Purse::default(), click_at)
+    }
+
+    /// As [`run`], with the treasury's fields typed in.
+    fn run_with(
+        guilds: &Guilds,
+        view: &View,
+        page: Page,
+        draft: &Draft,
+        purse: &Purse,
+        click_at: Option<egui::Pos2>,
+    ) -> (Option<Action>, Option<egui::Rect>, Option<Ask>) {
         let ctx = theme::test_context();
         let mut guilds = guilds.clone();
-        let mut panel = GuildPanel { draft: draft.clone(), ..Default::default() };
+        let mut panel = GuildPanel { draft: draft.clone(), purse: purse.clone(), ..Default::default() };
         panel.open_on(page);
         let (mut action, mut rect) = (None, None);
         for frame in 0..8 {
@@ -876,14 +1283,18 @@ mod tests {
     /// Every action and call a click somewhere on the panel makes, scanning
     /// it on a grid, so the test holds whatever the spacing.
     fn clicks_on(guilds: &Guilds, view: &View, page: Page, draft: &Draft) -> (Vec<Action>, Vec<Ask>) {
-        let (_, rect, _) = run(guilds, view, page, draft, None);
+        clicks_with(guilds, view, page, draft, &Purse::default())
+    }
+
+    fn clicks_with(guilds: &Guilds, view: &View, page: Page, draft: &Draft, purse: &Purse) -> (Vec<Action>, Vec<Ask>) {
+        let (_, rect, _) = run_with(guilds, view, page, draft, purse, None);
         let rect = rect.expect("drawn");
         let (mut actions, mut asks) = (Vec::new(), Vec::new());
         let mut y = rect.top() + 4.0;
         while y < rect.bottom() {
             let mut x = rect.left() + 20.0;
             while x < rect.right() {
-                let (action, _, ask) = run(guilds, view, page, draft, Some(egui::pos2(x, y)));
+                let (action, _, ask) = run_with(guilds, view, page, draft, purse, Some(egui::pos2(x, y)));
                 if let Some(a) = action.filter(|a| !actions.contains(a)) {
                     actions.push(a);
                 }
@@ -971,9 +1382,52 @@ mod tests {
         assert!(!found.iter().any(|a| matches!(a, Ask::Found(_))), "not away from the hall: {found:?}");
     }
 
+    fn typed(deposit: &str, withdraw: &str, limit: &str) -> Purse {
+        Purse { deposit: deposit.into(), withdraw: withdraw.into(), note: "rope".into(), limit: limit.into() }
+    }
+
+    #[test]
+    fn the_leader_deposits_withdraws_anything_and_sets_the_limit() {
+        let (guilds, view, page, draft) = sample("treasury");
+        let purse = typed("50", "4000", "300");
+        let (actions, found) = clicks_with(&guilds, &online(view), page, &draft, &purse);
+        assert!(found.contains(&Ask::Deposit { guild_id: ROPE, strands: 50 }), "{found:?}");
+        assert!(found.contains(&Ask::Withdraw { guild_id: ROPE, strands: 4000, note: "rope".into() }), "{found:?}");
+        assert!(found.contains(&Ask::SetLimit { guild_id: ROPE, strands: 300 }), "{found:?}");
+        assert!(actions.iter().any(|a| matches!(a, Action::ToGuildHall { .. })), "the walk to the hall: {actions:?}");
+    }
+
+    #[test]
+    fn an_officer_withdraws_within_the_week_and_a_member_only_deposits() {
+        let (mut guilds, view, page, draft) = sample("debt");
+        // An officer with 50 left of the week, and Strands to take them from
+        let mut mine = guilds.mine().unwrap().clone();
+        if let Some(t) = mine.guild.as_mut().and_then(|g| g.treasury.as_mut()) {
+            (t.strands, t.owed) = (900, 0);
+        }
+        guilds.answered(mine.clone());
+        let (_, found) = clicks_with(&guilds, &online(view.clone()), page, &draft, &typed("20", "50", "300"));
+        assert!(found.contains(&Ask::Withdraw { guild_id: ROPE, strands: 50, note: "rope".into() }), "{found:?}");
+        assert!(!found.iter().any(|a| matches!(a, Ask::SetLimit { .. })), "the leader's: {found:?}");
+        let (_, found) = clicks_with(&guilds, &online(view.clone()), page, &draft, &typed("20", "80", ""));
+        assert!(!found.iter().any(|a| matches!(a, Ask::Withdraw { .. })), "over the week's limit: {found:?}");
+        assert!(found.contains(&Ask::Deposit { guild_id: ROPE, strands: 20 }), "{found:?}");
+        mine.role = Some(GuildRole::Member);
+        guilds.answered(mine);
+        let (_, found) = clicks_with(&guilds, &online(view), page, &draft, &typed("20", "10", "300"));
+        assert_eq!(found, [Ask::Deposit { guild_id: ROPE, strands: 20 }]);
+    }
+
+    #[test]
+    fn a_leader_with_no_hall_is_walked_to_the_exchange_to_buy_one() {
+        let (guilds, view, page, draft) = sample("nohall");
+        let (actions, _) = clicks_on(&guilds, &online(view), page, &draft);
+        assert!(actions.contains(&Action::ToHall), "{actions:?}");
+    }
+
     #[test]
     fn every_sample_draws_inside_the_screen() {
-        for which in ["browse", "yours", "found", "officer"] {
+        for which in ["browse", "yours", "found", "officer", "treasury", "debt", "nohall"] {
             let (guilds, view, page, draft) = sample(which);
             let (_, rect, _) = run(&guilds, &view, page, &draft, None);
             let rect = rect.expect("drawn");

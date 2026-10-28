@@ -2290,6 +2290,40 @@ impl PlayerExtension for CapitolExtension {
                 &self.lots,
             );
         }
+        // Each guild hall's name on the board over its door (#508), once
+        // its house stands: online the store's halls, offline the guild
+        // district's lots in `--claim-sample`, as sample guilds' halls
+        let mut signs = Vec::new();
+        let mut sign = |id: &str, name: &str, tag: &str| {
+            let board = self.lots.get(id).filter(|_| self.houses.standing(id)).and_then(|lot| world::houses::hall_board(id, lot));
+            if let Some(b) = board {
+                signs.push(script_api::HallSignMark {
+                    at: b.at,
+                    facing: b.facing,
+                    width: b.width,
+                    height: b.height,
+                    name: name.to_owned(),
+                    tag: tag.to_owned(),
+                });
+            }
+        };
+        if let Some(session) = &self.session {
+            for (id, guild) in session.state().claimed_lots().iter().filter_map(|(id, c)| Some((id, c.guild.as_ref()?))) {
+                sign(id, &guild.name, &guild.tag);
+            }
+        } else if let Some(sample) = &self.claim_sample {
+            for id in &sample.claimed {
+                if self.lots.get(id).is_some_and(|l| l.zone == rules::Zone::GuildDistrict) {
+                    let (name, tag) = world::houses::Sample::hall_guild(id);
+                    sign(id, name, tag);
+                }
+            }
+        }
+        // In a steady order, so two captures draw them alike (#469)
+        signs.sort_by(|a, b| a.at[0].total_cmp(&b.at[0]).then(a.at[2].total_cmp(&b.at[2])));
+        if let Ok(mut shared) = self.shared.hall_signs.lock() {
+            *shared = signs;
+        }
         // Floors (V3.3): online each claimed lot's, the last in scaffolding
         // until it's up on the server's clock; offline the sample's.
         if let Some(session) = &self.session {
@@ -3072,6 +3106,7 @@ impl PlayerExtension for CapitolExtension {
                             session.walk_to_hall(now, hall);
                         }
                     }
+                    Some(ui::guild::Action::ToGuildHall { x, y }) => session.walk_to_guild_hall(now, x, y),
                     Some(ui::guild::Action::Close) | None => {}
                 }
                 // A person's card (S0.3), over the Gazette when it's opened from it
@@ -3130,6 +3165,14 @@ impl PlayerExtension for CapitolExtension {
                         capitol_core::plot::upward(p, state.me(), state.utc_now(), state.strands(), state.inventory(), state.catalog())
                     }),
                     building: session.building_floor(),
+                    // A free lot in the guild district, as a hall (#508)
+                    hall: picked.and_then(|p| {
+                        let at_hall = match (self.terrain.landmark(LandmarkKind::ExchangeHall), state.local_player()) {
+                            (Some(hall), Some(me)) => rules::market::at_the_hall(hall, me.x, me.y),
+                            _ => false,
+                        };
+                        capitol_core::guilds::hall_offer(p, session.guilds().mine(), at_hall)
+                    }),
                     deed: picked.map_or(capitol_core::deeds::DeedOffer::None, |p| {
                         capitol_core::deeds::offer(p, state.tutorial())
                     }),
@@ -3155,6 +3198,12 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::plot::Action::ClaimWithDeed(id)) => session.claim_with_grant(id),
                     Some(ui::plot::Action::PayTax(id, amount)) => session.pay_tax(id, amount),
                     Some(ui::plot::Action::BuildFloor(id)) => session.build_floor(id),
+                    Some(ui::plot::Action::ClaimHall { guild_id, plot_id }) => {
+                        // The answer, or the refusal, is said on the guild
+                        // panel, open where the hall shows
+                        session.guilds_mut().queue(capitol_core::guilds::Ask::ClaimHall { guild_id, plot_id });
+                        self.guild.open_on(ui::guild::Page::Treasury);
+                    }
                     Some(ui::plot::Action::AboutZone(zone)) => {
                         self.zone_card.open_one(&zone);
                         session.ask_zone_facts();
@@ -3444,7 +3493,7 @@ impl PlayerExtension for CapitolExtension {
             let upward = capitol_core::plot::upward(&sample.plot, me, now, Some(sample.strands), Some(&sample.pack), &catalog);
             let view = ui::plot::View {
                 plot: Some(&sample.plot),
-                offer: Offer::Yours,
+                offer: sample.offer.clone(),
                 strands: Some(sample.strands),
                 claiming: false,
                 paying: false,
@@ -3453,6 +3502,7 @@ impl PlayerExtension for CapitolExtension {
                 hire: None,
                 upward,
                 building: false,
+                hall: sample.hall.clone(),
             };
             let _ = self.plot_panel.show(ctx, &view, None);
         }

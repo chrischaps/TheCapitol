@@ -11,8 +11,9 @@
 //!   window); the suburb's a post-war house beside its lower workshop
 //!   wing; a farm's the farmhouse and its barn under one range, standing
 //!   back on a drive (the grass keeps off that [`Farmyard`], R6). Guild
-//!   halls keep a seeded stone box ([`GUILD`]). Colours are the house
-//!   tokens in `palette`.
+//!   halls keep a seeded stone box ([`GUILD`]), with a board over the door
+//!   framed in weathered copper ([`hall_board`], #508), where `input.rhai`
+//!   writes the guild's name. Colours are the house tokens in `palette`.
 //! - **What it shows past its plan** ([`Look`]): a storey for each floor
 //!   built (V3.3), scaffolding while one goes up and then the storey
 //!   rising, and a chimney over each kiln or forge indoors.
@@ -319,6 +320,76 @@ enum Door {
     /// A city workshop's front (V3.4): a carriage arch at one end, on the
     /// left or not, the shop door at the other, and its window between.
     Shop { arch_left: bool, colour: [f32; 4] },
+    /// A guild hall's front door, as `Front`, with the board for its
+    /// guild's name over it (#508).
+    Hall(f32, [f32; 4]),
+}
+
+/// The width of a front door, metres.
+const DOOR_WIDE: f32 = 0.85;
+
+/// Where a front door at share `k` stands along a wall `length` long,
+/// metres: kept off the corners.
+fn door_along(length: f32, k: f32) -> f32 {
+    (length * k).clamp(DOOR_WIDE * 0.5 + 0.15, length - DOOR_WIDE * 0.5 - 0.15)
+}
+
+/// A hall's board, over the fanlight and clear of the ground floor's
+/// windows (which stop at 0.78 of a 3 m storey), metres over the floor.
+const BOARD_FOOT: f32 = 2.42;
+const BOARD_HEAD: f32 = 2.92;
+/// Its copper frame, round the board.
+const BOARD_RIM: f32 = 0.07;
+/// How proud of the wall the board stands, in [`PROUD`]s: prouder than a
+/// pane, and its frame between.
+const BOARD_PROUD: f64 = 3.0;
+
+/// The board over a hall's door: its middle along a wall `length` long
+/// and its width, metres, from the door's middle. As wide as a name wants,
+/// short of the corners, and kept on the wall.
+fn board_along(length: f32, door: f32) -> (f32, f32) {
+    let w = (length - 0.8).clamp(1.2, 3.4);
+    (door.clamp(w * 0.5 + 0.4, (length - w * 0.5 - 0.4).max(w * 0.5 + 0.4)), w)
+}
+
+/// Where a guild hall's name is written (#508): the middle of its board's
+/// face, world metres, the way the face looks, and how wide and tall the
+/// lettering may run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HallBoard {
+    pub at: [f32; 3],
+    pub facing: [f32; 3],
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The board over the door of the hall on lot `id`, or `None` if the lot's
+/// house isn't a hall's (or has no room for a house).
+pub fn hall_board(id: &str, lot: &Lot) -> Option<HallBoard> {
+    let plan = plan(id, lot)?;
+    let b = plan.blocks.first()?;
+    let Door::Hall(k, _) = b.door else {
+        return None;
+    };
+    // A storey too low for it has no board (`openings` draws none)
+    if b.storey < BOARD_HEAD + 0.05 {
+        return None;
+    }
+    // The front, as `build` walks it: the first side round the rect
+    let c = b.rect.corners();
+    let (a, z) = (c[0], c[1]);
+    let length = dist(a, z) as f32 * S;
+    let (s, w) = board_along(length, door_along(length, k));
+    let dir = unit(sub(z, a));
+    let out = level(sub(scale(add(a, z), 0.5), b.rect.c));
+    let off = scale([out[0] as f64, out[2] as f64], metres(PROUD));
+    let p = add(add(a, scale(dir, metres(s))), scale(off, BOARD_PROUD + 0.4));
+    Some(HallBoard {
+        at: lift(p, FLOOR + (BOARD_FOOT + BOARD_HEAD) * 0.5),
+        facing: out,
+        width: w - 0.3,
+        height: BOARD_HEAD - BOARD_FOOT - 0.12,
+    })
 }
 
 /// Everything a house will be.
@@ -669,7 +740,7 @@ fn plan_seeded(id: &str, lot: &Lot) -> Option<Plan> {
     let pitch = rng.range(st.pitch);
     let storeys = rng.pick(st.storeys);
     let chimney = (!flat && rng.chance(st.chimney)).then(|| if rng.chance(0.5) { -0.62 } else { 0.62 });
-    let door = Door::Front(rng.range((0.25, 0.75)), hex(rng.pick(&palette::DOORS)));
+    let door = Door::Hall(rng.range((0.25, 0.75)), hex(rng.pick(&palette::DOORS)));
     Some(Plan {
         blocks: vec![Block {
             rect,
@@ -1338,9 +1409,9 @@ fn openings(
     let mut door_at = None;
     if front {
         match b.door {
-            Door::Front(k, colour) => {
-                let w = 0.85_f32;
-                let s = (length * k).clamp(w * 0.5 + 0.15, length - w * 0.5 - 0.15);
+            Door::Front(k, colour) | Door::Hall(k, colour) => {
+                let w = DOOR_WIDE;
+                let s = door_along(length, k);
                 let tall = (b.storey * 0.82).min(2.05);
                 if wall_top >= FLOOR + tall {
                     h.body.quad(
@@ -1359,6 +1430,28 @@ fn openings(
                         normal: out,
                         lit: true,
                     });
+                }
+                // A hall's board over it, dark in a copper frame, for its
+                // guild's name
+                if matches!(b.door, Door::Hall(..)) && wall_top >= FLOOR + BOARD_HEAD + 0.05 {
+                    let (bs, bw) = board_along(length, s);
+                    let (s0, s1) = (bs - bw * 0.5, bs + bw * 0.5);
+                    h.body.quad(
+                        quad_at(s0, s1, FLOOR + BOARD_FOOT, FLOOR + BOARD_HEAD, BOARD_PROUD - 1.0),
+                        out,
+                        hex(palette::HALL_SIGN_RIM),
+                    );
+                    h.body.quad(
+                        quad_at(
+                            s0 + BOARD_RIM,
+                            s1 - BOARD_RIM,
+                            FLOOR + BOARD_FOOT + BOARD_RIM,
+                            FLOOR + BOARD_HEAD - BOARD_RIM,
+                            BOARD_PROUD,
+                        ),
+                        out,
+                        hex(palette::HALL_SIGN),
+                    );
                 }
                 door_at = Some(s);
             }
@@ -1893,6 +1986,12 @@ impl Houses {
         }
     }
 
+    /// Whether `id`'s house stands whole: up, and not growing or opening.
+    /// A hall's board takes its name only then (#508).
+    pub fn standing(&self, id: &str) -> bool {
+        self.built.contains_key(id) && !self.growing.contains_key(id) && !self.open.contains_key(id)
+    }
+
     /// How far open `id`'s building is, 0 shut.
     #[cfg(test)]
     pub fn openness(&self, id: &str) -> f32 {
@@ -2109,7 +2208,26 @@ pub struct Sample {
 /// How many lots `--grow-at` claims.
 const SAMPLE_GROWN: usize = 8;
 
+/// The guilds whose halls `--claim-sample`'s guild-district lots are, by
+/// name and tag (#508).
+const SAMPLE_GUILDS: [(&str, &str); 8] = [
+    ("The Rope Walkers", "ROPE"),
+    ("Oak & Iron", "OAK"),
+    ("The Kiln Yard", "KILN"),
+    ("Riverside Carters", "CART"),
+    ("The Lamplighters", "LAMP"),
+    ("Worshipful Company of Coopers", "COOP"),
+    ("The Salt Road Company", "SALT"),
+    ("Wheelwrights", "WHEEL"),
+];
+
 impl Sample {
+    /// The sample guild whose hall the lot `id` is, picked by its id.
+    pub fn hall_guild(id: &str) -> (&'static str, &'static str) {
+        let k = (Seed::of(&format!("hall {id}")).unit() * SAMPLE_GUILDS.len() as f32) as usize;
+        SAMPLE_GUILDS[k.min(SAMPLE_GUILDS.len() - 1)]
+    }
+
     pub fn new(share: f32, grow_at: Option<f32>) -> Self {
         Self {
             share,
@@ -2793,6 +2911,38 @@ mod tests {
     }
 
     /// The fires find their buildings, and a chimney stands over each.
+    #[test]
+    fn a_hall_has_a_board_over_its_door_and_a_home_none() {
+        let mut boards = 0;
+        for (id, lot) in lots().iter().filter(|(_, l)| l.zone == Zone::GuildDistrict) {
+            let Some(plan) = plan(id, lot) else {
+                continue;
+            };
+            let board = hall_board(id, lot).expect("a hall has a board");
+            let b = &plan.blocks[0];
+            // On the front wall, facing the street, over the door
+            let [x, z] = [board.at[0], board.at[2]];
+            let at = to_server(x, z);
+            let front = scale(add(b.rect.corners()[0], b.rect.corners()[1]), 0.5);
+            let out = sub(front, b.rect.c);
+            let proud = dot(sub(at, front), unit(out)) as f32 * S;
+            assert!(proud > 0.0 && proud < 0.1, "{id}: {proud} m off the wall");
+            assert!(board.at[1] > FLOOR + 2.4 && board.at[1] < FLOOR + 2.95, "{id}: {:?}", board.at);
+            assert!(board.width >= 0.9 && board.height > 0.3, "{id}: {board:?}");
+            let facing = [board.facing[0] as f64, board.facing[2] as f64];
+            assert!(dot(facing, unit(out)) > 0.99, "{id}: faces the street");
+            // And the house draws it: the board's dark face is in the mesh
+            let h = house(id, lot, 1.0).unwrap();
+            let sign = hex(palette::HALL_SIGN);
+            assert!(h.body.vertices.iter().any(|v| v.color == sign), "{id}: no board drawn");
+            boards += 1;
+        }
+        // The fixture's guild district holds 72 lots
+        assert!(boards > 60, "{boards} halls");
+        let (id, lot) = first(Zone::Urban);
+        assert_eq!(hall_board(id, lot), None, "a home has no board");
+    }
+
     #[test]
     fn fires_indoors_get_chimneys() {
         let lots = lots();

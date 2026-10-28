@@ -82,6 +82,16 @@ pub enum RestRequest {
     LeaveGuild { guild_id: Uuid },
     /// `POST /guilds/{id}/deposit`: Strands into its treasury (S4.2)
     DepositToGuild { guild_id: Uuid, request: GuildStrands },
+    /// `POST /guilds/{id}/withdraw`: Strands out of it, an officer within
+    /// the leader's weekly limit (S4.2)
+    WithdrawFromGuild { guild_id: Uuid, request: GuildStrands },
+    /// `PUT /guilds/{id}/limit`: what an officer may withdraw in a week
+    SetGuildLimit { guild_id: Uuid, request: GuildStrands },
+    /// `GET /guilds/{id}/books`: the treasury's moves, newest first
+    GuildBooks { guild_id: Uuid },
+    /// `POST /guilds/{id}/hall`: the leader claims a guild-district lot for
+    /// it, at the Exchange hall, from the treasury (S4.3)
+    ClaimGuildHall { guild_id: Uuid, request: ClaimHall },
     /// `DELETE /guilds/{id}/members/{player}`: expel them
     ExpelFromGuild { guild_id: Uuid, player_id: Uuid },
     /// `PUT /guilds/{id}/members/{player}`: make them an officer, a member,
@@ -326,6 +336,8 @@ pub enum RestResponse {
     Guilds(GuildsResponse),
     /// A guild and its roster
     Guild(GuildDetail),
+    /// A treasury's books (S4.2)
+    GuildBooks(GuildBooks),
     Move(MoveResponse),
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
@@ -489,6 +501,8 @@ impl RestRequest {
             | InviteToGuild { .. }
             | LeaveGuild { .. }
             | DepositToGuild { .. }
+            | WithdrawFromGuild { .. }
+            | ClaimGuildHall { .. }
             | Extract(_)
             | MoveItem(_)
             | SplitStack { .. }
@@ -525,6 +539,7 @@ impl RestRequest {
             | SetClock(_)
             | SetTutorialDismissed(_)
             | SetGuildRole { .. }
+            | SetGuildLimit { .. }
             | Mute { .. } => Method::PUT,
             RemoveStation { .. }
             | RevokeApiKey { .. }
@@ -549,6 +564,7 @@ impl RestRequest {
             | MyGuild
             | Guilds
             | Guild { .. }
+            | GuildBooks { .. }
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby(_)
@@ -621,6 +637,10 @@ impl RestRequest {
             }
             LeaveGuild { guild_id } => format!("/guilds/{guild_id}/leave"),
             DepositToGuild { guild_id, .. } => format!("/guilds/{guild_id}/deposit"),
+            WithdrawFromGuild { guild_id, .. } => format!("/guilds/{guild_id}/withdraw"),
+            SetGuildLimit { guild_id, .. } => format!("/guilds/{guild_id}/limit"),
+            GuildBooks { guild_id } => format!("/guilds/{guild_id}/books"),
+            ClaimGuildHall { guild_id, .. } => format!("/guilds/{guild_id}/hall"),
             ExpelFromGuild { guild_id, player_id } | SetGuildRole { guild_id, player_id, .. } => {
                 format!("/guilds/{guild_id}/members/{player_id}")
             }
@@ -722,7 +742,10 @@ impl RestRequest {
             Letters(q) => req.query(q),
             FoundGuild(b) => req.json(b),
             SetGuildRole { request, .. } => req.json(request),
-            DepositToGuild { request, .. } => req.json(request),
+            DepositToGuild { request, .. } | WithdrawFromGuild { request, .. } | SetGuildLimit { request, .. } => {
+                req.json(request)
+            }
+            ClaimGuildHall { request, .. } => req.json(request),
             Extract(b) => req.json(b),
             MoveItem(b) => req.json(b),
             SplitStack { request, .. } => req.json(request),
@@ -800,10 +823,14 @@ impl RestRequest {
             | Q::DeclineGuildInvite { .. }
             | Q::LeaveGuild { .. }
             | Q::DepositToGuild { .. }
+            | Q::WithdrawFromGuild { .. }
+            | Q::SetGuildLimit { .. }
+            | Q::ClaimGuildHall { .. }
             | Q::ExpelFromGuild { .. }
             | Q::SetGuildRole { .. } => A::MyGuild(de(body)?),
             Q::Guilds => A::Guilds(de(body)?),
             Q::Guild { .. } => A::Guild(de(body)?),
+            Q::GuildBooks { .. } => A::GuildBooks(de(body)?),
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
@@ -1125,6 +1152,22 @@ mod tests {
                 RestRequest::DepositToGuild { guild_id: id, request: GuildStrands { strands: 5, note: String::new() } },
                 "POST",
                 format!("/guilds/{id}/deposit"),
+            ),
+            (
+                RestRequest::WithdrawFromGuild { guild_id: id, request: GuildStrands { strands: 5, note: "rope".into() } },
+                "POST",
+                format!("/guilds/{id}/withdraw"),
+            ),
+            (
+                RestRequest::SetGuildLimit { guild_id: id, request: GuildStrands { strands: 200, note: String::new() } },
+                "PUT",
+                format!("/guilds/{id}/limit"),
+            ),
+            (RestRequest::GuildBooks { guild_id: id }, "GET", format!("/guilds/{id}/books")),
+            (
+                RestRequest::ClaimGuildHall { guild_id: id, request: ClaimHall { plot_id: id } },
+                "POST",
+                format!("/guilds/{id}/hall"),
             ),
             (RestRequest::ExpelFromGuild { guild_id: id, player_id: id }, "DELETE", format!("/guilds/{id}/members/{id}")),
             (

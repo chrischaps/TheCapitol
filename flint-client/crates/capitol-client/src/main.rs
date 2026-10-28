@@ -172,7 +172,10 @@ struct Args {
     #[arg(long, value_name = "VIEW", num_args = 0..=1, default_missing_value = "in")]
     mail_sample: Option<String>,
     /// Offline, open the guild panel (S4.4) on a sample: "yours" (the
-    /// default: your guild as its leader), "officer", "browse" or "found"
+    /// default: your guild as its leader), "officer", "browse" or "found";
+    /// or its Treasury page (#508): "treasury" (the leader's, with its
+    /// hall), "debt" (an officer's, in debt) or "nohall" (the leader's,
+    /// with none yet)
     #[arg(long, value_name = "PAGE", num_args = 0..=1, default_missing_value = "yours")]
     guild_sample: Option<String>,
     /// Offline, the Exchange hall as if you stood where the camera looks
@@ -216,7 +219,9 @@ struct Args {
     /// Offline, open the plot panel on an urban lot of yours with a
     /// building (V3.5): `next` (a floor up, the second's bill open, all it
     /// takes in your pack), `short` (short of it) or `going-up` (the second
-    /// floor going up). Check it at --width 1280 --height 720 at 150%
+    /// floor going up); or on a guild-district lot (#508): `hall` (free, as
+    /// its guild's leader sees it at the Exchange) or `hall-held` (a guild's
+    /// hall). Check it at --width 1280 --height 720 at 150%
     #[arg(long, value_name = "WHICH", requires = "offline")]
     plot_panel_sample: Option<String>,
     /// With --building-sample, place a station from `KIT` (`workbench_kit`,
