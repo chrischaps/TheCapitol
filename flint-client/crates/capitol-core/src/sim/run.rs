@@ -1457,8 +1457,9 @@ impl SimBot {
         // Past what its calling still wants for its own, the room a
         // workbench may take, so it stays home (#499), and a dabble's
         // station outside its calling (D6)
-        let (lot_for, spare) = lot_kept(&self.calling, |kind| self.stations.contains_key(kind), h.plot_room);
-        h.lot_for = Some(lot_for);
+        let one_job = self.persona.is_none();
+        let (lot_for, spare) = lot_kept(&self.calling, one_job, |kind| self.stations.contains_key(kind), h.plot_room);
+        h.lot_for = lot_for;
         h.plot_spare = spare;
         h.owed = self.owed();
         h.promised = self.board.promised();
@@ -2332,8 +2333,20 @@ fn repair_bill(catalog: &Catalog, station: &str, condition: i32) -> Vec<(String,
 /// is kept for ([`Holdings::lot_for`]) and how much of its `room` the
 /// calling doesn't want ([`Holdings::plot_spare`]), with `owned` the
 /// station types it owns.
-fn lot_kept(calling: &Calling, owned: impl Fn(&str) -> bool, room: Option<i32>) -> (std::collections::HashSet<String>, i32) {
-    let kept = super::stint::lot_for(calling).into_iter().map(String::from).collect();
+///
+/// A swarm bot (`one_job`) keeps its lot for nothing in particular, as
+/// before callings (plan §5): it has no dabble whose station could take
+/// its calling's room, and its role's ladder climbs through stations its
+/// role doesn't work at. A plank bot's sawbench kit wants the kiln's
+/// bricks and the forge's nails, and with its lot kept for the sawbench
+/// alone, it never bought the lot to put the kiln on (#552).
+fn lot_kept(
+    calling: &Calling,
+    one_job: bool,
+    owned: impl Fn(&str) -> bool,
+    room: Option<i32>,
+) -> (Option<std::collections::HashSet<String>>, i32) {
+    let kept = (!one_job).then(|| super::stint::lot_for(calling).into_iter().map(String::from).collect());
     let spare = room.map_or(0, |room| (room - still_wanted(calling, owned)).max(0));
     (kept, spare)
 }
@@ -2424,8 +2437,8 @@ mod tests {
     /// What a round's holdings say of the lot, again ([`lot_kept`]).
     fn kept_again(calling: &Calling, h: &mut Holdings) {
         let owned = h.stations.clone();
-        let (lot_for, spare) = lot_kept(calling, |k| owned.contains(k), h.plot_room);
-        h.lot_for = Some(lot_for);
+        let (lot_for, spare) = lot_kept(calling, false, |k| owned.contains(k), h.plot_room);
+        h.lot_for = lot_for;
         h.plot_spare = spare;
     }
 
@@ -2622,6 +2635,57 @@ mod tests {
         };
         assert_eq!(stint::lot_for(&fiber), Vec::<&str>::new());
         assert_eq!(stint::room_for(&fiber), 1);
+    }
+
+    /// The swarm is one job (plan §5, #552): from nothing, every `MIX`
+    /// role climbs its whole ladder on the planner, buying the lot for
+    /// whatever station the climb wants first. A plank bot's sawbench kit
+    /// wants the kiln's bricks, so its lot goes to the kiln too; kept for
+    /// the sawbench alone, as a citizen's calling keeps it, it was stuck.
+    #[test]
+    fn a_swarm_bot_buys_its_lot_for_its_whole_ladder() {
+        use crate::sim::{plan, Commitment, Craft, MIX};
+        let catalog = Catalog::fallback();
+        // Its role's work played out from nothing, the lot as a round sees
+        // it after each step: what it put down, or where it was stuck
+        let climb = |role: Role, one_job: bool| -> Result<(Holdings, Vec<String>), String> {
+            let calling = Calling::single(role);
+            let mut h = Holdings {
+                strands: 10_000,
+                ..Holdings::default()
+            };
+            let mut placed = Vec::new();
+            for _ in 0..2000 {
+                let owned = h.stations.clone();
+                let (lot_for, spare) = lot_kept(&calling, one_job, |k| owned.contains(k), h.plot_room);
+                h.lot_for = lot_for;
+                h.plot_spare = spare;
+                let errands = role
+                    .errands_at(&catalog, &h, Commitment::Full)
+                    .map_err(|stuck| format!("{role} stuck after placing {placed:?}: {}", stuck.0))?;
+                let Some(errand) = errands.into_iter().next() else { break };
+                if let Step::Place { station, .. } = &errand.step {
+                    placed.push(station.clone());
+                }
+                plan::take(&catalog, &mut h, &errand.step);
+            }
+            Ok((h, placed))
+        };
+        let planks = Role::Crafter(Craft::Planks);
+        let stuck = climb(planks, false).err();
+        assert!(
+            stuck.as_deref().is_some_and(|s| s.contains("not a kiln")),
+            "kept for its sawbench alone: {stuck:?}"
+        );
+        for role in MIX.map(|(r, _)| r) {
+            let (h, placed) = climb(role, true).unwrap_or_else(|stuck| panic!("{stuck}"));
+            for station in role.lot_stations() {
+                assert!(h.stations.contains(*station), "{role} never put down its {station}: {placed:?}");
+            }
+            if role == planks {
+                assert!(placed.iter().any(|s| s == "kiln"), "{placed:?}");
+            }
+        }
     }
 
     #[test]
