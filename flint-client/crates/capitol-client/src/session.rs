@@ -4715,6 +4715,7 @@ mod tests {
                 qualities: None,
                 min_grade: None,
                 grade_rule: None,
+                min_durability: None,
             })
             .expect("placed the sell");
 
@@ -4757,6 +4758,8 @@ mod tests {
             quantity: 3,
             min_grade: "F".into(),
             grade_rule: GradeRule::Average,
+            durability: None,
+            min_durability: None,
             qualities: None,
         };
         let st = session.state();
@@ -5030,6 +5033,7 @@ mod tests {
                 qualities: None,
                 min_grade: Some("F".into()),
                 grade_rule: Some(GradeRule::Average),
+                min_durability: None,
             })
             .expect("placed a buy");
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -5057,6 +5061,7 @@ mod tests {
                 qualities: None,
                 min_grade: None,
                 grade_rule: None,
+                min_durability: None,
             })
             .expect("placed the sell");
         let buyer = Account::numbered(&format!("cbuyer{stamp}"), 1);

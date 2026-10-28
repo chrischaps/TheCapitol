@@ -1874,6 +1874,9 @@ pub struct PlaceOrder {
     /// Buy: how `min_grade` reads the units sold. Without it, `average`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade_rule: Option<rules::market::GradeRule>,
+    /// Buy, of a tool: the fewest uses left it takes (#547). Without it, any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_durability: Option<i32>,
 }
 
 /// An order, as its owner sees it.
@@ -1895,6 +1898,17 @@ pub struct MarketOrder {
     /// Buy: how `min_grade` reads the units sold
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade_rule: Option<rules::market::GradeRule>,
+    /// Buy, of a tool: the fewest uses left it takes (#547)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_durability: Option<i32>,
+    /// Sell, of a tool: its uses left (#547). Tools don't stack, so a
+    /// tool's sell is one tool. Absent for anything else, and once nothing
+    /// is left in escrow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<i32>,
+    /// Sell, of a tool: its uses new
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_durability: Option<i32>,
     /// Sell: the units still in escrow, which a fill hands over
     #[serde(default, skip_serializing_if = "Units::is_empty")]
     pub units: Units,
@@ -1934,6 +1948,9 @@ pub struct MarketTrade {
 /// grades, so a sell counts at the grade of each of its units: a lot of six
 /// 92s and four 70s is 6 at A and 4 at C. Units keep their own quality (D2),
 /// and the ladder shows them.
+///
+/// A tool's wear splits its levels too (#547): a sell of a tool counts at its
+/// uses left, of its most, and a buy at the fewest uses it takes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct DepthLevel {
@@ -1945,6 +1962,13 @@ pub struct DepthLevel {
     /// Buy: how its orders read the grade
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade_rule: Option<rules::market::GradeRule>,
+    /// Sell, of a tool: the uses left of each tool at this level. Buy: the
+    /// fewest uses left its orders take. Absent for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<i32>,
+    /// Sell, of a tool: the uses each tool at this level had new
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_durability: Option<i32>,
     /// Units at this level. In a diff, 0 means the level is gone.
     pub quantity: i64,
     /// Orders with units at this level
@@ -2087,6 +2111,11 @@ pub struct MarketListing {
     pub price: i64,
     /// Units still for sale
     pub quantity: i32,
+    /// A tool's uses left, and its uses new (#547). Absent for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_durability: Option<i32>,
     pub listed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }

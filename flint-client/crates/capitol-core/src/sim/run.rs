@@ -1246,6 +1246,19 @@ impl SimBot {
         (book.and_then(|b| b.best_bid()), book.and_then(|b| b.best_ask()))
     }
 
+    /// The fewest uses left a buy of the tool `item` at `price` asks for
+    /// (#547): those of the ask on its book that's the cheapest a use at
+    /// the price, so it gets that tool or a fresher one, never a worn one at
+    /// the same price; with none, [`fewest_uses`](super::fewest_uses). `None`
+    /// for a good.
+    fn uses_wanted(&self, item: &str, price: i64) -> Option<i32> {
+        let state = self.bot.state();
+        let half = super::fewest_uses(state.catalog(), item)?;
+        let life = state.catalog().item_type(item)?.tool.as_ref()?.max_durability;
+        let on_book = state.market().book(item).and_then(|b| b.cheapest_use(life, Some(price)));
+        Some(on_book.map_or(half, |(_, uses)| uses.max(1)))
+    }
+
     /// Sits out a game minute, or less if the town says stop.
     fn rest(&mut self, town: Option<&Tether>, activity: &str) {
         let Some(town) = town else {
@@ -1660,8 +1673,10 @@ impl SimBot {
         let order = match trade {
             Trade::Sell { item, quantity, price } => {
                 // The biggest stack; of tools, which don't stack, the
-                // freshest, since the book doesn't show wear (#547)
-                let (item_id, held) = self
+                // freshest, so it keeps its most worn to use up. The book
+                // shows a tool's wear (#547), so it's priced by the share of
+                // its uses left, as at a stall
+                let (item_id, held, price) = self
                     .bot
                     .state()
                     .inventory()
@@ -1670,17 +1685,18 @@ impl SimBot {
                             .filter(|i| &i.item_type == item)
                             .max_by_key(|i| (i.quantity, i.durability.unwrap_or(0)))
                     })
-                    .map(|i| (i.item_id, i.quantity))
+                    .map(|i| (i.item_id, i.quantity, people::worn_price(*price, i)))
                     .ok_or_else(|| BotError::Failed(format!("no {item} to sell")))?;
                 PlaceOrder {
                     side: OrderSide::Sell,
                     item_type: item.clone(),
-                    price: *price,
+                    price,
                     quantity: (*quantity).min(held),
                     item_id: Some(item_id),
                     qualities: None,
                     min_grade: None,
                     grade_rule: None,
+                    min_durability: None,
                 }
             }
             Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket | Trade::Post { .. } | Trade::Shop { .. } | Trade::Collect => {
@@ -1695,6 +1711,7 @@ impl SimBot {
                 qualities: None,
                 min_grade: None,
                 grade_rule: None,
+                min_durability: self.uses_wanted(item, *price),
             },
         };
         let placed = self.bot.place_order(order)?;

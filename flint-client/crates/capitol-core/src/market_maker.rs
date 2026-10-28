@@ -475,6 +475,7 @@ impl Maker {
                     qualities: None,
                     min_grade: None,
                     grade_rule: None,
+                    min_durability: None,
                 },
                 OrderSide::Sell => {
                     // From the biggest free stack, as much as it holds
@@ -495,6 +496,7 @@ impl Maker {
                         qualities: None,
                         min_grade: None,
                         grade_rule: None,
+                        min_durability: None,
                     }
                 }
             };
@@ -562,6 +564,9 @@ mod tests {
             status: OrderStatus::Open,
             min_grade: None,
             grade_rule: None,
+            durability: None,
+            max_durability: None,
+            min_durability: None,
             units: Units::default(),
             escrow_strands: 0,
             fee: 1,

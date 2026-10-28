@@ -144,6 +144,8 @@ pub enum OrderError {
     BadQuantity,
     /// A grade that isn't A to F
     BadGrade,
+    /// A fewest-uses floor on anything but a buy of a tool, or under 1 (#547)
+    BadWear,
 }
 
 impl OrderError {
@@ -152,6 +154,7 @@ impl OrderError {
             OrderError::BadPrice => "Price each must be from 1 to 1,000,000,000 Strands",
             OrderError::BadQuantity => "An order is for 1 to 10,000 units",
             OrderError::BadGrade => "A grade is A, B, C, D or F",
+            OrderError::BadWear => "Only a buy of a tool can ask for uses left, and at least 1",
         }
     }
 }
@@ -197,6 +200,16 @@ pub fn meets_grade(units: &Units, min_grade: &str, rule: GradeRule) -> bool {
         GradeRule::EveryUnit => units.min(),
     };
     shown.is_some_and(|q| q >= floor)
+}
+
+/// Whether a sell whose tool has `durability` uses left meets a buy that
+/// takes at least `min_durability` (#547). A buy that names none takes any;
+/// one that names some takes only a tool with as many.
+pub fn meets_wear(durability: Option<i32>, min_durability: Option<i32>) -> bool {
+    match min_durability {
+        None => true,
+        Some(min) => durability.is_some_and(|d| d >= min),
+    }
 }
 
 /// Which units of a sell's `units` a buy for up to `want` of them, at
@@ -289,8 +302,9 @@ fn largest(lo: i64, hi: i64, ok: impl Fn(i64) -> bool) -> Option<i64> {
 
 /// Where a level sits in a book: bids best first (price high to low), then
 /// asks best first (low to high). At one price the better grade comes first,
-/// then `average` before `every_unit`.
-fn level_key(level: &DepthLevel) -> (u8, i64, &str, u8) {
+/// then `average` before `every_unit`, then the tool with the most uses left
+/// (on a bid, the most asked for), then the most uses new (#547).
+fn level_key(level: &DepthLevel) -> (u8, i64, &str, u8, i32, i32) {
     let (side, price) = match level.side {
         OrderSide::Buy => (0, -level.price),
         OrderSide::Sell => (1, level.price),
@@ -300,7 +314,8 @@ fn level_key(level: &DepthLevel) -> (u8, i64, &str, u8) {
         Some(GradeRule::Average) => 1,
         Some(GradeRule::EveryUnit) => 2,
     };
-    (side, price, level.grade.as_str(), rule)
+    let worn = |d: Option<i32>| -d.unwrap_or(-1);
+    (side, price, level.grade.as_str(), rule, worn(level.durability), worn(level.max_durability))
 }
 
 /// Put `levels` in book order.
@@ -514,7 +529,16 @@ mod tests {
     }
 
     fn level(side: OrderSide, price: i64, grade: &str, rule: Option<GradeRule>, quantity: i64) -> DepthLevel {
-        DepthLevel { side, price, grade: grade.into(), grade_rule: rule, quantity, orders: 1 }
+        DepthLevel {
+            side,
+            price,
+            grade: grade.into(),
+            grade_rule: rule,
+            durability: None,
+            max_durability: None,
+            quantity,
+            orders: 1,
+        }
     }
 
     #[test]
@@ -543,6 +567,46 @@ mod tests {
     }
 
     #[test]
+    fn a_tools_levels_split_by_wear_the_freshest_first() {
+        let tool = |side, price, uses: i32, most: Option<i32>| DepthLevel {
+            durability: Some(uses),
+            max_durability: most,
+            ..level(side, price, "C", (side == OrderSide::Buy).then_some(GradeRule::Average), 1)
+        };
+        let mut levels = vec![
+            tool(OrderSide::Sell, 50, 2, Some(60)),
+            tool(OrderSide::Sell, 50, 60, Some(60)),
+            level(OrderSide::Sell, 50, "C", None, 1),
+            tool(OrderSide::Buy, 40, 10, None),
+            tool(OrderSide::Buy, 40, 30, None),
+        ];
+        sort_levels(&mut levels);
+        let order: Vec<_> = levels.iter().map(|l| (l.side, l.durability)).collect();
+        assert_eq!(
+            order,
+            [
+                (OrderSide::Buy, Some(30)),
+                (OrderSide::Buy, Some(10)),
+                (OrderSide::Sell, Some(60)),
+                (OrderSide::Sell, Some(2)),
+                (OrderSide::Sell, None),
+            ]
+        );
+        // A wear apart is a level apart: a diff keeps them both
+        let diff = depth_diff(&levels[2..3], &levels[2..4]);
+        assert_eq!(diff, vec![levels[3].clone()]);
+    }
+
+    #[test]
+    fn a_buy_asking_for_uses_takes_only_a_tool_with_them() {
+        assert!(meets_wear(None, None));
+        assert!(meets_wear(Some(1), None), "a buy that names none takes any");
+        assert!(meets_wear(Some(30), Some(30)));
+        assert!(!meets_wear(Some(29), Some(30)));
+        assert!(!meets_wear(None, Some(1)), "a sell with no wear isn't a tool");
+    }
+
+    #[test]
     fn a_diff_applied_to_the_old_book_makes_the_new() {
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         let mut next = move |n: u64| {
@@ -559,7 +623,12 @@ mod tests {
                     OrderSide::Buy => Some(if next(2) == 0 { GradeRule::Average } else { GradeRule::EveryUnit }),
                     OrderSide::Sell => None,
                 };
-                let l = level(side, 8 + next(5) as i64, ["A", "B", "F"][next(3) as usize], rule, 1 + next(4) as i64);
+                let mut l = level(side, 8 + next(5) as i64, ["A", "B", "F"][next(3) as usize], rule, 1 + next(4) as i64);
+                // Some of them tools, at a few wears (#547)
+                if next(3) == 0 {
+                    l.durability = Some(1 + next(3) as i32 * 20);
+                    l.max_durability = (side == OrderSide::Sell).then_some(60);
+                }
                 if !levels.iter().any(|x| level_key(x) == level_key(&l)) {
                     levels.push(l);
                 }

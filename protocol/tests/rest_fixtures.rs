@@ -10,7 +10,10 @@
 //! `market_summary.json` are `GET /market/orders`, `/market/history` and
 //! `/market/summary` (E3.3).
 //! `fixtures/rest/market_listings.json` is `GET /market/listings` (#493): a
-//! blended lot of planks listed after a single quality of rope.
+//! blended lot of planks listed after a single quality of rope, and before
+//! them a stone axe with its wear (#547).
+//! `fixtures/rest/market_depth_tools.json` is a tool's book (#547): a bid for
+//! at least 30 uses over one for any, and asks split by the wear of each tool.
 //! `fixtures/rest/bazaar_directory.json` and `bazaar_shop.json` are
 //! `GET /bazaar` and `GET /bazaar/stalls/{id}` (E3.10).
 //! `fixtures/rest/gazette.json` is `GET /gazette/latest` (E3.9), written by the
@@ -149,6 +152,7 @@ fn a_bare_buy_order_takes_the_defaults() {
     let order: PlaceOrder =
         serde_json::from_str(r#"{"side":"buy","item_type":"plank","price":12,"quantity":20}"#).unwrap();
     assert_eq!((order.item_id, order.qualities, order.min_grade, order.grade_rule), (None, None, None, None));
+    assert_eq!(order.min_durability, None);
     assert_eq!(GradeRule::default(), GradeRule::Average);
 }
 
@@ -159,6 +163,19 @@ fn a_book_round_trips_in_book_order() {
     let mut sorted = depth.levels.clone();
     sort_levels(&mut sorted);
     assert_eq!(sorted, depth.levels);
+    assert_eq!(serde_json::to_string(&depth).unwrap(), json);
+}
+
+#[test]
+fn a_tools_book_splits_its_levels_by_wear() {
+    let json = fixture("market_depth_tools.json");
+    let depth: MarketDepthResponse = serde_json::from_str(&json).unwrap();
+    let mut sorted = depth.levels.clone();
+    sort_levels(&mut sorted);
+    assert_eq!(sorted, depth.levels);
+    let asks: Vec<_> = depth.levels.iter().filter(|l| l.side == OrderSide::Sell).collect();
+    assert!(asks.iter().all(|l| l.durability.is_some_and(|d| Some(d) <= l.max_durability)));
+    assert_eq!(asks[0].price, asks[1].price, "two tools at one price, a level each");
     assert_eq!(serde_json::to_string(&depth).unwrap(), json);
 }
 
@@ -181,6 +198,9 @@ fn the_newest_listings_round_trip_newest_first() {
     let listings: MarketListingsResponse = serde_json::from_str(&json).unwrap();
     assert!(listings.listings.windows(2).all(|w| w[0].listed_at >= w[1].listed_at));
     assert!(listings.listings.iter().all(|l| l.min_quality <= l.quality));
+    let tools: Vec<_> = listings.listings.iter().filter(|l| l.durability.is_some()).collect();
+    assert_eq!(tools.len(), 1, "a tool's listing carries its wear, and only a tool's");
+    assert!(tools[0].durability < tools[0].max_durability);
     assert_eq!(serde_json::to_string(&listings).unwrap(), json);
 }
 

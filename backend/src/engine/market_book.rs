@@ -55,6 +55,11 @@ pub struct BookOrder {
     pub units: Units,
     /// A buy's grade and rule; `None` on a sell
     pub grade: Option<(String, GradeRule)>,
+    /// A buy of a tool: the fewest uses left it takes (#547)
+    pub min_durability: Option<i32>,
+    /// A sell of a tool: its uses left, and its uses new (#547)
+    pub durability: Option<i32>,
+    pub max_durability: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -78,6 +83,9 @@ impl BookOrder {
             remaining: order.quantity_remaining,
             units: order.units.clone(),
             grade,
+            min_durability: order.min_durability,
+            durability: order.durability,
+            max_durability: order.max_durability,
             created_at: order.created_at,
             expires_at: order.expires_at,
         })
@@ -497,6 +505,11 @@ impl Book {
                 continue;
             }
             let Some((grade, rule)) = &buy.grade else { continue };
+            // A tool's wear never changes on the book, so a sell that's too
+            // worn for a buy stays so (#547)
+            if !market::meets_wear(sell.durability, buy.min_durability) {
+                continue;
+            }
             let Some(units) = fill_units(&sell.units, buy.remaining.min(sell.remaining), grade, *rule) else {
                 continue;
             };
@@ -574,17 +587,21 @@ impl Book {
 
     /// `item_type`'s book, aggregated by price and grade, in book order
     /// (`rules::market::sort_levels`): a buy at its `min_grade` and rule, a
-    /// sell at the grade of each of its units. Expired and stalled orders
-    /// count until they leave the book.
+    /// sell at the grade of each of its units. A tool's wear splits them too
+    /// (#547): a buy at the fewest uses it takes, a sell at its uses left of
+    /// its uses new. Expired and stalled orders count until they leave the
+    /// book.
     pub fn depth(&self, item_type: &str) -> Vec<DepthLevel> {
-        type LevelKey = (OrderSide, i64, &'static str, Option<GradeRule>);
+        type Wear = (Option<i32>, Option<i32>);
+        type LevelKey = (OrderSide, i64, &'static str, Option<GradeRule>, Wear);
         let mut levels: HashMap<LevelKey, (i64, i32)> = HashMap::new();
         for side in [OrderSide::Buy, OrderSide::Sell] {
             for order in self.side(item_type, side) {
                 match &order.grade {
                     Some((grade, rule)) => {
                         let Some(grade) = market::grade_floor(grade).map(quality_grade) else { continue };
-                        let level = levels.entry((side, order.price, grade, Some(*rule))).or_default();
+                        let wear = (order.min_durability, None);
+                        let level = levels.entry((side, order.price, grade, Some(*rule), wear)).or_default();
                         level.0 += order.remaining as i64;
                         level.1 += 1;
                     }
@@ -593,8 +610,9 @@ impl Book {
                         for (quality, count) in order.units.pairs() {
                             *grades.entry(quality_grade(quality)).or_default() += count as i64;
                         }
+                        let wear = (order.durability, order.max_durability);
                         for (grade, count) in grades {
-                            let level = levels.entry((side, order.price, grade, None)).or_default();
+                            let level = levels.entry((side, order.price, grade, None, wear)).or_default();
                             level.0 += count;
                             level.1 += 1;
                         }
@@ -604,11 +622,13 @@ impl Book {
         }
         let mut out: Vec<DepthLevel> = levels
             .into_iter()
-            .map(|((side, price, grade, grade_rule), (quantity, orders))| DepthLevel {
+            .map(|((side, price, grade, grade_rule, (durability, max_durability)), (quantity, orders))| DepthLevel {
                 side,
                 price,
                 grade: grade.to_string(),
                 grade_rule,
+                durability,
+                max_durability,
                 quantity,
                 orders,
             })
@@ -658,6 +678,9 @@ pub(crate) mod tests {
                 remaining: quantity,
                 units: Units::new(),
                 grade: None,
+                min_durability: None,
+                durability: None,
+                max_durability: None,
                 created_at,
                 expires_at: created_at + Duration::days(7),
             }
@@ -809,6 +832,32 @@ pub(crate) mod tests {
         book.insert(o.buy(4, 10, 1, "F", GradeRule::Average));
         let fills = run(&mut book, now());
         assert_eq!(fills.iter().map(|f| f.sell).collect::<Vec<_>>(), vec![cheap_low.id]);
+    }
+
+    /// A tool's sell, `uses` of `most` left (#547)
+    fn tool(o: &mut Orders, player: u128, price: i64, uses: i32, most: i32) -> BookOrder {
+        BookOrder { durability: Some(uses), max_durability: Some(most), ..o.sell(player, price, Units::uniform(1, 50)) }
+    }
+
+    #[test]
+    fn a_buy_asking_for_uses_walks_past_a_worn_tool_and_the_ladder_shows_each() {
+        let mut o = Orders::new();
+        let mut book = Book::new();
+        let worn = tool(&mut o, 1, 30, 2, 60);
+        let fresh = tool(&mut o, 2, 30, 58, 60);
+        book.insert(worn.clone());
+        book.insert(fresh.clone());
+        let asks: Vec<_> = book.depth("rope").iter().map(|l| (l.price, l.durability, l.max_durability, l.quantity)).collect();
+        assert_eq!(asks, vec![(30, Some(58), Some(60), 1), (30, Some(2), Some(60), 1)], "a level each, the freshest first");
+
+        let picky = BookOrder { min_durability: Some(30), ..o.buy(3, 30, 1, "F", GradeRule::Average) };
+        book.insert(picky.clone());
+        assert_eq!(book.depth("rope")[0].durability, Some(30), "the bid shows the uses it asks for");
+        let fills = run(&mut book, now());
+        assert_eq!(fills.iter().map(|f| (f.buy, f.sell)).collect::<Vec<_>>(), vec![(picky.id, fresh.id)]);
+        // The worn one keeps its place for a buyer who'll take any
+        book.insert(o.buy(4, 30, 1, "F", GradeRule::Average));
+        assert_eq!(run(&mut book, now()).iter().map(|f| f.sell).collect::<Vec<_>>(), vec![worn.id]);
     }
 
     #[test]

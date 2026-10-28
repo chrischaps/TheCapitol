@@ -13,9 +13,14 @@
 //!   (D2), so one lot of blended units shows at several grades. A buy on
 //!   **every unit** wears its grade filled in; one on **average**, outlined.
 //!   Click a level to take it: an ask fills the form as a buy at its price,
-//!   a bid as a sell.
+//!   a bid as a sell. A tool's wear splits its levels (#547): each ask
+//!   shows its uses left, of its uses new, with the slots' wear bar under
+//!   its price, and a bid the fewest uses it takes ("≥ 30").
 //! - **The form**: side, quantity, price, and on a buy the lowest grade and
-//!   how it reads. The preview is `capitol_core::market::quote`: the fee is
+//!   how it reads, and of a tool the fewest uses left it takes (0 for any;
+//!   taking a tool's ask sets it to that tool's, so the buy gets it or a
+//!   fresher one, never a worn one at the same price). A tool's stack to
+//!   sell shows its uses left. The preview is `capitol_core::market::quote`: the fee is
 //!   `rules::market::listing_fee`, the one the server charges, and "fills
 //!   now" walks the visible book less your own orders, as the matcher would.
 //!   A stack dragged onto the panel from your inventory starts a sell of it
@@ -30,7 +35,8 @@
 //!
 //! - **New** (#493), the third tab, across the panel: every sell still on
 //!   the book, newest first (`GET /market/listings`), with its item, grade,
-//!   mean and lowest quality, quantity and price, yours marked. A click opens
+//!   mean and lowest quality, a tool's uses left (#547), quantity and price,
+//!   yours marked. A click opens
 //!   its item's book with the form filled as a buy at its price, as taking
 //!   its ask on the ladder would. The search narrows it by item.
 //! - **The bazaar** (E3.11), the fourth tab: the directory of the bazaar's
@@ -85,6 +91,8 @@ const GRADES: [&str; 5] = ["A", "B", "C", "D", "F"];
 /// Where the New tab's columns stand, from a row's left.
 const LISTING_NAME: f32 = 34.0;
 const LISTING_GRADE: f32 = 250.0;
+/// A tool's wear bar and uses left (#547)
+const LISTING_WEAR: f32 = 360.0;
 const LISTING_QTY: f32 = 500.0;
 const LISTING_PRICE: f32 = 580.0;
 
@@ -148,6 +156,8 @@ pub struct Form {
     pub picks: Vec<(i32, i32)>,
     /// The stack `picks` are for
     picks_of: Option<Uuid>,
+    /// A buy of a tool: the fewest uses left it takes, 0 for any (#547)
+    pub min_uses: i32,
 }
 
 impl Default for Form {
@@ -161,6 +171,7 @@ impl Default for Form {
             stack: None,
             picks: Vec::new(),
             picks_of: None,
+            min_uses: 0,
         }
     }
 }
@@ -240,6 +251,7 @@ impl MarketPanel {
         if self.selected.as_deref() != Some(item_type) {
             self.selected = Some(item_type.to_owned());
             self.form.stack = None;
+            self.form.min_uses = 0;
         }
     }
 
@@ -555,6 +567,8 @@ impl MarketPanel {
                 price: listing.price,
                 grade: listing.grade,
                 grade_rule: None,
+                durability: listing.durability,
+                max_durability: listing.max_durability,
                 quantity: listing.quantity as i64,
                 orders: 1,
             });
@@ -622,6 +636,19 @@ impl MarketPanel {
             theme::body(size::SMALL),
             DIM,
         );
+        // A tool's wear, as its slot would show it (#547)
+        if let (Some(left), Some(most)) = (listing.durability, listing.max_durability) {
+            let x = rect.left() + LISTING_WEAR;
+            wear(ui.painter(), egui::Rect::from_min_max(egui::pos2(x - 6.0, y - 8.0), egui::pos2(x + 50.0, y + 9.0)), left, most);
+            ui.painter().text(
+                egui::pos2(x + 52.0, y),
+                Align2::LEFT_CENTER,
+                format!("{left}/{most} uses"),
+                theme::body(size::SMALL),
+                uses_colour(left, most),
+            );
+        }
+        let painter = ui.painter();
         painter.text(
             egui::pos2(rect.left() + LISTING_QTY, y),
             Align2::RIGHT_CENTER,
@@ -1039,8 +1066,11 @@ impl MarketPanel {
                     OrderSide::Buy => {
                         o.min_grade.as_deref() == Some(l.grade.as_str())
                             && o.grade_rule == l.grade_rule
+                            && o.min_durability == l.durability
                     }
-                    OrderSide::Sell => units_by_grade(&o.units).iter().any(|(g, _)| *g == l.grade),
+                    OrderSide::Sell => {
+                        units_by_grade(&o.units).iter().any(|(g, _)| *g == l.grade) && o.durability == l.durability
+                    }
                 }
             })
         };
@@ -1131,6 +1161,31 @@ impl MarketPanel {
             &level.grade,
             level.grade_rule,
         );
+        // A tool's wear (#547): an ask's uses left, with the slots' wear bar
+        // along the foot of its price and grade; a bid's fewest uses
+        match (level.side, level.durability, level.max_durability) {
+            (OrderSide::Sell, Some(left), Some(most)) => {
+                let under = egui::Rect::from_min_max(egui::pos2(rect.left() + 14.0, rect.top()), egui::pos2(rect.left() + 110.0, rect.bottom() + 6.0));
+                wear(painter, under, left, most);
+                painter.text(
+                    egui::pos2(rect.left() + 140.0, y),
+                    Align2::RIGHT_CENTER,
+                    format!("{left}/{most}"),
+                    theme::body(size::SMALL),
+                    uses_colour(left, most),
+                );
+            }
+            (OrderSide::Buy, Some(fewest), _) => {
+                painter.text(
+                    egui::pos2(rect.left() + 140.0, y),
+                    Align2::RIGHT_CENTER,
+                    format!("≥ {fewest}"),
+                    theme::body(size::SMALL),
+                    DIM,
+                );
+            }
+            _ => {}
+        }
         painter.text(
             egui::pos2(rect.left() + 160.0, y),
             Align2::RIGHT_CENTER,
@@ -1146,14 +1201,20 @@ impl MarketPanel {
             DIM,
         );
         let hover = match (level.side, level.grade_rule) {
-            (OrderSide::Sell, _) => format!(
-                "{} at {} each, grade {}. Click to buy at this price",
-                grouped(level.quantity),
-                grouped(level.price),
-                level.grade
-            ),
+            (OrderSide::Sell, _) => {
+                let uses = match (level.durability, level.max_durability) {
+                    (Some(left), Some(most)) => format!(", {left} of its {most} uses left"),
+                    _ => String::new(),
+                };
+                format!(
+                    "{} at {} each, grade {}{uses}. Click to buy at this price",
+                    grouped(level.quantity),
+                    grouped(level.price),
+                    level.grade
+                )
+            }
             (OrderSide::Buy, rule) => format!(
-                "Wanted: {} at {} each, {} {} or better. Click to sell at this price",
+                "Wanted: {} at {} each, {} {} or better{}. Click to sell at this price",
                 grouped(level.quantity),
                 grouped(level.price),
                 if rule == Some(GradeRule::EveryUnit) {
@@ -1161,7 +1222,8 @@ impl MarketPanel {
                 } else {
                     "on average"
                 },
-                level.grade
+                level.grade,
+                level.durability.map(|d| format!(", with {d} uses left or more")).unwrap_or_default()
             ),
         };
         let response = response
@@ -1231,6 +1293,11 @@ impl MarketPanel {
         };
         if level.side == OrderSide::Sell && self.form.quantity.is_empty() {
             self.form.quantity = level.quantity.min(1000).to_string();
+        }
+        // A tool's ask: that tool or a fresher one, never a worn one at the
+        // same price (#547)
+        if level.side == OrderSide::Sell {
+            self.form.min_uses = level.durability.unwrap_or(0);
         }
     }
 
@@ -1305,6 +1372,28 @@ impl MarketPanel {
                         "Avg: a blend whose mean meets the grade will do. Each: every unit must meet it.",
                     );
                 });
+                // A tool: the fewest uses left it takes (#547)
+                if let Some(tool) = view.catalog.item_type(&item).and_then(|t| t.tool.as_ref()) {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.add_sized([64.0, 22.0], egui::Label::new(theme::dim("Uses left").size(size::SMALL)));
+                        // A Q100 tool lasts half again as long as a Q50 one
+                        let most = tool.max_durability * 3 / 2;
+                        ui.add(
+                            egui::DragValue::new(&mut self.form.min_uses)
+                                .range(0..=most)
+                                .speed(0.5)
+                                .custom_formatter(|n, _| if n < 1.0 { "any".to_owned() } else { format!("≥ {n:.0}") }),
+                        )
+                        .on_hover_text(format!(
+                            "The fewest uses a tool you buy must have left. New at Q50 it has {}.",
+                            tool.max_durability
+                        ));
+                        if self.form.min_uses > 0 && chip(ui, "Any").on_hover_text("Take a tool however worn").clicked() {
+                            self.form.min_uses = 0;
+                        }
+                    });
+                }
             }
             OrderSide::Sell => {
                 ui.add_space(2.0);
@@ -1322,7 +1411,11 @@ impl MarketPanel {
                     }
                     for s in &stacks {
                         let on = self.form.stack == Some(s.item_id);
-                        let text = format!("×{} · {} {}", s.quantity, s.quality, s.quality_grade);
+                        let mut text = format!("×{} · {} {}", s.quantity, s.quality, s.quality_grade);
+                        // A tool: its uses left, which the book shows (#547)
+                        if let (Some(left), Some(most)) = (s.durability, s.max_durability) {
+                            text.push_str(&format!(" · {left}/{most} uses"));
+                        }
                         let r = ui
                             .add(
                                 egui::Button::new(RichText::new(text).size(size::SMALL).color(
@@ -1380,6 +1473,8 @@ impl MarketPanel {
             quantity: amount(&self.form.quantity).min(i32::MAX as i64) as i32,
             min_grade: self.form.min_grade.to_owned(),
             grade_rule: self.form.grade_rule,
+            min_durability: (self.form.side == OrderSide::Buy && self.form.min_uses > 0).then_some(self.form.min_uses),
+            durability: stack.filter(|_| self.form.side == OrderSide::Sell).and_then(|s| s.durability),
             qualities,
         };
         let quote = market::quote(
@@ -1843,6 +1938,20 @@ fn grade_pill(
     }
 }
 
+/// A tool's wear bar along the foot of `under`, as a slot draws it (#547).
+fn wear(painter: &egui::Painter, under: egui::Rect, left: i32, most: i32) {
+    slots::wear_bar(painter, under, left, most, 1.0);
+}
+
+/// The colour a tool's uses left are written in: plain while it works at
+/// full quality, ember once its work suffers (`rules::tools::retention`).
+fn uses_colour(left: i32, most: i32) -> Color32 {
+    match slots::Wear::of(left, most) {
+        slots::Wear::Sound => DIM,
+        _ => theme::EMBER,
+    }
+}
+
 /// The lowest grade a buy takes: five pips, each in its grade's colour.
 fn grade_picker(ui: &mut egui::Ui, value: &mut &'static str) {
     ui.spacing_mut().item_spacing.x = 3.0;
@@ -2018,6 +2127,8 @@ pub struct Sample {
     /// The newest sells across the items, two of them yours
     pub listings: Vec<MarketListing>,
     pub book: Book,
+    /// The stone pickaxe's book: tools, each ask at its own wear (#547)
+    pub tool_book: Book,
     pub orders: Vec<MarketOrder>,
     pub inventory: Container,
     pub market_box: Container,
@@ -2045,6 +2156,8 @@ impl Sample {
             price,
             grade: grade.into(),
             grade_rule: rule,
+            durability: None,
+            max_durability: None,
             quantity,
             orders,
         };
@@ -2067,6 +2180,22 @@ impl Sample {
             level(Buy, 33, "F", Some(Average), 120, 3),
         ];
         capitol_core::protocol::rules::market::sort_levels(&mut levels);
+        // Stone pickaxes (60 uses new at Q50): one new, one half worn, one
+        // nearly spent at the same price, and a bid for 30 uses or more
+        let tool = |side, price, grade: &str, rule, uses: i32, most: Option<i32>, quantity| DepthLevel {
+            durability: Some(uses),
+            max_durability: most,
+            ..level(side, price, grade, rule, quantity, quantity as i32)
+        };
+        let mut tool_levels = vec![
+            tool(Sell, 46, "C", None, 64, Some(64), 1),
+            tool(Sell, 46, "C", None, 4, Some(66), 1),
+            tool(Sell, 34, "B", None, 31, Some(75), 1),
+            tool(Sell, 58, "A", None, 84, Some(84), 1),
+            tool(Buy, 40, "F", Some(Average), 30, None, 2),
+            level(Buy, 22, "F", Some(Average), 1, 1),
+        ];
+        capitol_core::protocol::rules::market::sort_levels(&mut tool_levels);
         let at = capitol_core::chrono::DateTime::<capitol_core::chrono::Utc>::UNIX_EPOCH;
         let order =
             |n: u128, side, item: &str, price, total, left, grade: Option<&str>, rule, units| {
@@ -2081,6 +2210,9 @@ impl Sample {
                     status: OrderStatus::Open,
                     min_grade: grade.map(Into::into),
                     grade_rule: rule,
+                    durability: None,
+                    max_durability: None,
+                    min_durability: None,
                     units,
                     escrow_strands: 0,
                     fee: 1,
@@ -2103,6 +2235,8 @@ impl Sample {
                     0,
                 ),
                 SlotItem::new(Uuid::from_u128(102), "rope".into(), "Rope".into(), 58, 6, 1),
+                SlotItem::new(Uuid::from_u128(103), "stone_pickaxe".into(), "Stone Pickaxe".into(), 62, 1, 2)
+                    .with_durability(19, 67),
             ],
         );
         let market_box = Container::new(
@@ -2120,7 +2254,7 @@ impl Sample {
             )],
         );
         let (trades, mine) = sample_trades(capitol_core::chrono::Utc::now());
-        let listed = |n: u128, item: &str, grade: &str, quality, min_quality, price, quantity, mins: i64| {
+        let listed = |n: u128, item: &str, grade: &str, quality, min_quality, price, quantity, mins: i64| -> MarketListing {
             let listed_at = capitol_core::chrono::Utc::now() - capitol_core::chrono::Duration::minutes(mins);
             MarketListing {
                 order_id: Uuid::from_u128(n),
@@ -2132,12 +2266,22 @@ impl Sample {
                 quantity,
                 listed_at,
                 expires_at: listed_at + capitol_core::chrono::Duration::days(7),
+                durability: None,
+                max_durability: None,
             }
+        };
+        // A tool listed with its wear (#547)
+        let worn = |listing: MarketListing, uses, most| MarketListing {
+            durability: Some(uses),
+            max_durability: Some(most),
+            ..listing
         };
         // Orders 2 and 3 are yours
         let listings = vec![
             listed(10, "plank", "B", 74, 61, 41, 12, 2),
+            worn(listed(17, "stone_pickaxe", "C", 64, 64, 46, 1, 5), 4, 66),
             listed(11, "iron_ingot", "A", 88, 88, 121, 3, 9),
+            worn(listed(18, "stone_axe", "B", 77, 77, 52, 1, 20), 71, 77),
             listed(2, "rope", "C", 58, 48, 14, 4, 26),
             listed(12, "log", "D", 37, 30, 6, 80, 47),
             listed(3, "plank", "A", 80, 80, 44, 6, 95),
@@ -2154,9 +2298,11 @@ impl Sample {
                 summary("iron_ingot", 118, 9, 31),
                 summary("log", 6, 0, 240),
                 summary("brick", 9, -2, 60),
+                summary("stone_pickaxe", 46, 2, 5),
             ],
             listings,
             book: Book { seq: 1, levels },
+            tool_book: Book { seq: 1, levels: tool_levels },
             orders: vec![
                 order(
                     1,
@@ -2230,13 +2376,18 @@ impl Sample {
         self.view_with(selected, None)
     }
 
-    /// The panel's view, with a chart's history.
+    /// The panel's view, with a chart's history. Plank and the stone
+    /// pickaxe have books.
     pub fn view_with<'a>(&'a self, selected: Option<&str>, history: Option<&'a History>) -> View<'a> {
         View {
             catalog: &self.catalog,
             summary: Some(&self.summary),
             listings: Some(&self.listings),
-            book: (selected == Some("plank")).then_some(&self.book),
+            book: match selected {
+                Some("plank") => Some(&self.book),
+                Some("stone_pickaxe") => Some(&self.tool_book),
+                _ => None,
+            },
             history,
             orders: self.orders.iter().collect(),
             inventory: Some(&self.inventory),
@@ -2636,7 +2787,7 @@ mod tests {
         let rect = panel.rect.unwrap();
         assert!(rect.width() < 1280.0 - 32.0 && rect.bottom() < 720.0, "{rect:?}");
         let rows: Vec<Uuid> = panel.listing_rows.iter().map(|(id, _)| *id).collect();
-        assert_eq!(rows[..3], [Uuid::from_u128(10), Uuid::from_u128(11), Uuid::from_u128(2)], "newest first");
+        assert_eq!(rows[..3], [Uuid::from_u128(10), Uuid::from_u128(17), Uuid::from_u128(11)], "newest first");
 
         // The search narrows it to one item
         panel.search = "rope".into();
@@ -2646,11 +2797,45 @@ mod tests {
 
         // A click on the iron opens its book, a buy at its price in the form
         run(&mut panel, &sample.view(None), None);
-        let (_, at) = panel.listing_rows[1];
+        let (_, at) = panel.listing_rows[2];
         run(&mut panel, &sample.view(None), Some(at.center()));
         assert_eq!(panel.selected.as_deref(), Some("iron_ingot"));
         assert_eq!((panel.tab, panel.pane, panel.form.side), (Tab::Items, Pane::Book, OrderSide::Buy));
         assert_eq!((panel.form.price.as_str(), panel.form.quantity.as_str()), ("121", "3"));
+        assert_eq!(panel.form.min_uses, 0, "not a tool");
+    }
+
+    #[test]
+    fn a_tools_wear_is_on_its_ask_and_taking_it_asks_for_its_uses() {
+        let sample = Sample::new();
+        let mut panel = open();
+        // The New tab: a click on the worn pickaxe asks for its 4 uses or more
+        panel.preset("new");
+        run(&mut panel, &sample.view(None), None);
+        let (id, at) = panel.listing_rows[1];
+        assert_eq!(id, Uuid::from_u128(17));
+        run(&mut panel, &sample.view(None), Some(at.center()));
+        assert_eq!(panel.selected.as_deref(), Some("stone_pickaxe"));
+        assert_eq!((panel.form.price.as_str(), panel.form.min_uses), ("46", 4));
+
+        // The ladder: a level for each wear, the freshest first at a price
+        run(&mut panel, &sample.view(Some("stone_pickaxe")), None);
+        let asks: Vec<_> = panel.level_rows.iter().filter(|(l, _)| l.side == OrderSide::Sell).map(|(l, _)| (l.price, l.durability)).collect();
+        assert!(asks.contains(&(46, Some(64))) && asks.contains(&(46, Some(4))), "{asks:?}");
+        // Taking the new one asks for its 64 uses, and the buy sends them
+        let (_, at) = *panel.level_rows.iter().find(|(l, _)| l.durability == Some(64)).unwrap();
+        run(&mut panel, &sample.view(Some("stone_pickaxe")), Some(at.center()));
+        assert_eq!(panel.form.min_uses, 64);
+        panel.form.quantity = "1".into();
+        let place = panel.place.unwrap();
+        let action = run(&mut panel, &sample.view(Some("stone_pickaxe")), Some(place.center()));
+        match action {
+            Some(Action::Place(order)) => assert_eq!((order.price, order.min_durability), (46, Some(64))),
+            other => panic!("{other:?}"),
+        }
+        // Another item clears it
+        panel.select("plank");
+        assert_eq!(panel.form.min_uses, 0);
     }
 
     #[test]

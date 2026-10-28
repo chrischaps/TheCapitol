@@ -198,6 +198,8 @@ impl Market {
                     min_quality: o.units.min()?,
                     price: o.price,
                     quantity: o.remaining,
+                    durability: o.durability,
+                    max_durability: o.max_durability,
                     listed_at: o.created_at,
                     expires_at: o.expires_at,
                 })
@@ -243,27 +245,12 @@ impl Market {
     }
 }
 
-/// Every open order, as the book holds it, in one query for the orders and
-/// one for the sells' units.
+/// Every open order, as the book holds it, in one query for the orders (with
+/// a sell's wear, #547) and one for the sells' units.
 async fn open_orders(db: &PgPool) -> Result<Vec<BookOrder>, sqlx::Error> {
-    type Row = (
-        Uuid,
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        i32,
-        Option<Uuid>,
-        DateTime<Utc>,
-        DateTime<Utc>,
-    );
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, player_id, side, item_type, min_grade, grade_rule, price, quantity_remaining,
-                escrow_item_id, created_at, expires_at
-         FROM market_orders WHERE status = 'open' AND quantity_remaining > 0",
-    )
+    let rows: Vec<OrderRow> = sqlx::query_as(&format!(
+        "SELECT {ORDER_COLUMNS} FROM market_orders WHERE status = 'open' AND quantity_remaining > 0"
+    ))
     .fetch_all(db)
     .await?;
     let unit_rows: Vec<(Uuid, i16, i32)> = sqlx::query_as(
@@ -278,34 +265,16 @@ async fn open_orders(db: &PgPool) -> Result<Vec<BookOrder>, sqlx::Error> {
     }
 
     let mut orders = Vec::with_capacity(rows.len());
-    for (id, player_id, side, item_type, min_grade, grade_rule, price, remaining, escrow_item, created_at, expires_at) in
-        rows
-    {
-        let Some(side) = OrderSide::parse(&side) else {
-            tracing::warn!("Market order {id} has side {side:?}; left off the book");
-            continue;
-        };
-        let grade = match (side, min_grade, grade_rule.as_deref().and_then(GradeRule::parse)) {
-            (OrderSide::Buy, Some(grade), Some(rule)) => Some((grade, rule)),
-            (OrderSide::Buy, ..) => {
-                tracing::warn!("Buy order {id} has no grade; left off the book");
-                continue;
-            }
-            (OrderSide::Sell, ..) => None,
-        };
-        let units = escrow_item.and_then(|item| held.remove(&item)).unwrap_or_default();
-        orders.push(BookOrder {
-            id,
-            player_id,
-            side,
-            item_type,
-            price,
-            remaining,
-            units,
-            grade,
-            created_at,
-            expires_at,
-        });
+    for row in rows {
+        let id = row.id;
+        let units = row.escrow_item_id.and_then(|item| held.remove(&item)).unwrap_or_default();
+        match order_from_row(row, units) {
+            Ok(order) => match BookOrder::from_order(&order) {
+                Some(on_book) => orders.push(on_book),
+                None => tracing::warn!("Buy order {id} has no grade; left off the book"),
+            },
+            Err(e) => tracing::warn!("Market order {id} can't be read ({e}); left off the book"),
+        }
     }
     Ok(orders)
 }
@@ -615,7 +584,7 @@ async fn prepare_fill<'c>(
     .await?;
     let (mut buy_now, mut sell_now) = (None, None);
     for row in rows {
-        if row.0 == fill.buy {
+        if row.id == fill.buy {
             buy_now = Some(order_from_row(row, Units::new())?);
         } else {
             sell_now = Some(order_from_row(row, left.clone())?);
@@ -904,6 +873,7 @@ mod tests {
     use super::*;
     use crate::engine::market::tests::{balance, box_of, buy, player, sell};
     use crate::engine::market::cancel;
+    use capitol_protocol::rules::market::OrderError;
     use crate::engine::market::tests::place;
     use crate::engine::units::test_units::{all_in, stack_of};
     use capitol_protocol::rest::PlaceOrder;
@@ -932,6 +902,63 @@ mod tests {
 
     fn every_unit_buy(item_type: &str, price: i64, quantity: i32, grade: &str) -> PlaceOrder {
         PlaceOrder { grade_rule: Some(GradeRule::EveryUnit), ..buy(item_type, price, quantity, Some(grade)) }
+    }
+
+    /// A tool's sell carries its wear onto the book, the listings and the
+    /// order, and a buy that asks for uses takes only a tool with them (#547)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_tools_wear_is_on_the_book_and_a_buy_can_ask_for_uses(db: PgPool) {
+        crate::content::sync(&db, &crate::content::load().unwrap()).await.unwrap();
+        let (events, _heard) = broadcast::channel(64);
+        let market = Market::default();
+        let ada = player(&db, "ada", 100).await;
+        let bea = player(&db, "bea", 1000).await;
+        let axe = |slot, uses: i32| {
+            let db = db.clone();
+            async move {
+                let id = stack_of(&db, ada.id, ada.inventory, slot, "stone_axe", &Units::uniform(1, 60)).await;
+                sqlx::query("UPDATE items SET durability = $2 WHERE id = $1").bind(id).bind(uses).execute(&db).await.unwrap();
+                id
+            }
+        };
+        let (worn, fresh) = (axe(0, 3).await, axe(1, 60).await);
+        let worn_ask = placed(&db, &market, ada.id, &sell("stone_axe", worn, 30, 1, None)).await;
+        let fresh_ask = placed(&db, &market, ada.id, &sell("stone_axe", fresh, 30, 1, None)).await;
+        // Q60 on a base of 60: 66 uses new
+        assert_eq!((worn_ask.durability, worn_ask.max_durability), (Some(3), Some(66)));
+        assert_eq!(order(&db, fresh_ask.id).await.durability, Some(60));
+        let listed: Vec<_> = market.listings(10).iter().map(|l| (l.order_id, l.durability, l.max_durability)).collect();
+        assert!(listed.contains(&(worn_ask.id, Some(3), Some(66))));
+        let ladder: Vec<_> = market.with_book(|b| b.depth("stone_axe")).iter().map(|l| l.durability).collect();
+        assert_eq!(ladder, vec![Some(60), Some(3)]);
+
+        // Asking for uses: only a buy of a tool, and at least 1
+        let picky = |min| PlaceOrder { min_durability: Some(min), ..buy("stone_axe", 30, 1, None) };
+        for refused in [picky(0), PlaceOrder { min_durability: Some(5), ..buy("rope", 3, 1, None) }] {
+            assert!(matches!(place(&db, bea.id, &refused).await, Err(MarketError::Order(OrderError::BadWear))));
+        }
+        let mut wrong_side = sell("stone_axe", worn, 30, 1, None);
+        wrong_side.min_durability = Some(5);
+        assert!(matches!(place(&db, ada.id, &wrong_side).await, Err(MarketError::Order(OrderError::BadWear))));
+
+        // The worn axe is first on the book (placed first), but the buy asks for 30 uses
+        let bid = placed(&db, &market, bea.id, &picky(30)).await;
+        assert_eq!(bid.min_durability, Some(30));
+        assert_eq!(run_cycle(&market, &db, &events, Utc::now()).await.fills, 1);
+        assert_eq!(order(&db, fresh_ask.id).await.status, OrderStatus::Filled);
+        assert_eq!(order(&db, worn_ask.id).await.status, OrderStatus::Open);
+        let bought: Vec<Option<i32>> = sqlx::query_scalar("SELECT durability FROM items WHERE container_id = $1")
+            .bind(box_of(&db, bea.id).await)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(bought, vec![Some(60)], "it kept its wear through escrow");
+
+        // A restart's book has the wear too
+        let reloaded = Market::load(&db).await.unwrap();
+        let ask = reloaded.with_book(|b| b.get(worn_ask.id).cloned()).unwrap();
+        assert_eq!((ask.durability, ask.max_durability), (Some(3), Some(66)));
     }
 
     /// A fill hands on whose work the units were (#231), and records the
@@ -1523,6 +1550,9 @@ mod depth_tests {
             status: OrderStatus::Open,
             min_grade: Some("C".into()),
             grade_rule: Some(GradeRule::Average),
+            durability: None,
+            max_durability: None,
+            min_durability: None,
             units: Units::new(),
             escrow_strands: 18,
             fee: 1,

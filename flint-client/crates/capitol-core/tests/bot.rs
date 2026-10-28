@@ -335,6 +335,7 @@ fn bots_place_watch_fill_and_cancel_orders() {
             qualities: None,
             min_grade: None,
             grade_rule: None,
+            min_durability: None,
         })
         .expect("placed the sell");
     assert_eq!(ask.status, OrderStatus::Open);
@@ -357,6 +358,7 @@ fn bots_place_watch_fill_and_cancel_orders() {
             qualities: None,
             min_grade: Some("F".into()),
             grade_rule: Some(GradeRule::Average),
+            min_durability: None,
         })
         .expect("placed the buy");
     let seen = buyer
@@ -401,6 +403,7 @@ fn bots_place_watch_fill_and_cancel_orders() {
             qualities: None,
             min_grade: Some("A".into()),
             grade_rule: Some(GradeRule::EveryUnit),
+            min_durability: None,
         })
         .expect("placed a resting buy");
     buyer
@@ -796,6 +799,7 @@ fn a_citizen_counters_a_short_offer_declines_a_lowball_and_takes_a_fair_one() {
                 qualities: None,
                 min_grade: None,
                 grade_rule: None,
+                min_durability: None,
             })
             .expect("a bid to price logs by");
         citizen.until("the bid", Duration::from_secs(5), |s, _| meet::worth(s, "log").is_some()).expect("a worth");
@@ -908,6 +912,7 @@ fn two_citizens_trade_when_one_asks_the_other() {
             qualities: None,
             min_grade: None,
             grade_rule: None,
+            min_durability: None,
         })
         .expect("a bid to price logs by");
     }
@@ -1016,6 +1021,7 @@ fn a_persons_sell_order_fills_in_a_town_within_a_game_hour() {
             qualities: None,
             min_grade: None,
             grade_rule: None,
+            min_durability: None,
         })
         .expect("the sell order");
     let hour = Duration::from_secs_f64(3600.0 / scale);

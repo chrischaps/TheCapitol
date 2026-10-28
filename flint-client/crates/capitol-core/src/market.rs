@@ -28,7 +28,7 @@ use capitol_protocol::rest::{
     MyFill, PlaceOrder,
 };
 use capitol_protocol::rules::market::{
-    apply_depth_diff, fill_units, grade_floor, order_value, validate, GradeRule, OrderError,
+    apply_depth_diff, fill_units, grade_floor, meets_wear, order_value, validate, GradeRule, OrderError,
     OrderSide, OrderStatus,
 };
 use capitol_protocol::tunables::Fees;
@@ -218,6 +218,18 @@ impl Book {
     /// The lowest ask's price.
     pub fn best_ask(&self) -> Option<i64> {
         self.side(OrderSide::Sell).next().map(|l| l.price)
+    }
+
+    /// Of a tool's asks at no more than `at_most` each, the one that's the
+    /// cheapest a use left (#547), as its price and uses left. An ask with
+    /// no wear on it (an older server's) counts at `life`, its uses new.
+    /// Ties go to the cheaper.
+    pub fn cheapest_use(&self, life: i32, at_most: Option<i64>) -> Option<(i64, i32)> {
+        let per_use = |price: i64, uses: i32| price as f64 / f64::from(uses.max(1));
+        self.side(OrderSide::Sell)
+            .filter(|l| at_most.is_none_or(|most| l.price <= most))
+            .map(|l| (l.price, l.durability.unwrap_or(life)))
+            .min_by(|a, b| per_use(a.0, a.1).total_cmp(&per_use(b.0, b.1)).then(a.0.cmp(&b.0)))
     }
 }
 
@@ -542,6 +554,13 @@ pub struct Draft {
     /// Sell: which units of the stack, adding up to `quantity` ("my six
     /// 92s", #492). `None` takes the lowest.
     pub qualities: Option<Units>,
+    /// Buy, of a tool: the fewest uses left it takes (#547). Taking a
+    /// tool's ask on the ladder sets it to that tool's, so the buy gets it
+    /// or a fresher one, never a worn one at the same price.
+    pub min_durability: Option<i32>,
+    /// Sell, of a tool: the stack's uses left, so the preview walks past a
+    /// bid asking for more (#547). Not sent: the server reads the stack.
+    pub durability: Option<i32>,
 }
 
 impl Draft {
@@ -559,6 +578,7 @@ impl Draft {
             qualities: if buy { None } else { self.qualities.clone() },
             min_grade: buy.then(|| self.min_grade.clone()),
             grade_rule: buy.then_some(self.grade_rule),
+            min_durability: self.min_durability.filter(|_| buy),
         }
     }
 }
@@ -693,11 +713,11 @@ fn short_of(debit: i64, strands: Option<i64>) -> Result<(), FormRefusal> {
 fn others_levels(item_type: &str, book: &Book, mine: &[&MarketOrder]) -> Vec<DepthLevel> {
     let mut levels = book.levels.clone();
     for order in mine.iter().filter(|o| o.item_type == item_type && o.status == OrderStatus::Open) {
-        let mut less = |side: OrderSide, grade: &str, rule: Option<GradeRule>, n: i64| {
-            if let Some(l) = levels
-                .iter_mut()
-                .find(|l| l.side == side && l.price == order.price && l.grade == grade && l.grade_rule == rule)
-            {
+        // A tool's levels are split by its wear too (#547)
+        let mut less = |side: OrderSide, grade: &str, rule: Option<GradeRule>, wear: Option<i32>, n: i64| {
+            if let Some(l) = levels.iter_mut().find(|l| {
+                l.side == side && l.price == order.price && l.grade == grade && l.grade_rule == rule && l.durability == wear
+            }) {
                 l.quantity -= n;
             }
         };
@@ -706,11 +726,12 @@ fn others_levels(item_type: &str, book: &Book, mine: &[&MarketOrder]) -> Vec<Dep
                 OrderSide::Buy,
                 order.min_grade.as_deref().unwrap_or("F"),
                 Some(order.grade_rule.unwrap_or_default()),
+                order.min_durability,
                 order.quantity_remaining as i64,
             ),
             OrderSide::Sell => {
                 for (q, c) in order.units.pairs() {
-                    less(OrderSide::Sell, quality_grade(q), None, c as i64);
+                    less(OrderSide::Sell, quality_grade(q), None, order.durability, c as i64);
                 }
             }
         }
@@ -720,12 +741,14 @@ fn others_levels(item_type: &str, book: &Book, mine: &[&MarketOrder]) -> Vec<Dep
 }
 
 /// A buy walks the asks at or under its price, cheapest first, taking the
-/// units whose grade meets its own.
+/// units whose grade meets its own, and of a tool those with the uses it
+/// asks for (#547).
 fn buy_fills(draft: &Draft, levels: &[DepthLevel]) -> Fills {
     let floor = grade_floor(&draft.min_grade).unwrap_or(0);
     let mut fills = Fills::default();
     let mut left = draft.quantity as i64;
-    for level in levels.iter().filter(|l| l.side == OrderSide::Sell && l.price <= draft.price) {
+    let crosses = |l: &&DepthLevel| l.side == OrderSide::Sell && l.price <= draft.price;
+    for level in levels.iter().filter(crosses).filter(|l| meets_wear(l.durability, draft.min_durability)) {
         if grade_floor(&level.grade).unwrap_or(0) < floor {
             fills.maybe_more |= draft.grade_rule == GradeRule::Average;
             continue;
@@ -745,11 +768,13 @@ fn buy_fills(draft: &Draft, levels: &[DepthLevel]) -> Fills {
 }
 
 /// A sell walks the bids at or over its price, best first; each takes what
-/// of the units meets its grade, as the matcher's [`fill_units`] does.
+/// of the units meets its grade, as the matcher's [`fill_units`] does, and
+/// of a tool only if it has the uses the bid asks for (#547).
 fn sell_fills(draft: &Draft, units: &Units, levels: &[DepthLevel]) -> Fills {
     let mut fills = Fills::default();
     let mut left = units.clone();
-    for level in levels.iter().filter(|l| l.side == OrderSide::Buy && l.price >= draft.price) {
+    let crosses = |l: &&DepthLevel| l.side == OrderSide::Buy && l.price >= draft.price;
+    for level in levels.iter().filter(crosses).filter(|l| meets_wear(draft.durability, l.durability)) {
         let want = level.quantity.min(i32::MAX as i64) as i32;
         let rule = level.grade_rule.unwrap_or_default();
         let Some(taken) = fill_units(&left, want, &level.grade, rule) else {
@@ -776,6 +801,8 @@ mod tests {
             price,
             grade: grade.into(),
             grade_rule: (side == OrderSide::Buy).then_some(GradeRule::Average),
+            durability: None,
+            max_durability: None,
             quantity,
             orders: 1,
         }
@@ -852,6 +879,8 @@ mod tests {
             quantity,
             min_grade: min_grade.into(),
             grade_rule: rule,
+            durability: None,
+            min_durability: None,
             qualities: None,
         }
     }
@@ -869,6 +898,9 @@ mod tests {
             status: OrderStatus::Open,
             min_grade: (side == OrderSide::Buy).then(|| "F".into()),
             grade_rule: (side == OrderSide::Buy).then_some(GradeRule::Average),
+            durability: None,
+            max_durability: None,
+            min_durability: None,
             units,
             escrow_strands: 0,
             fee: 1,
@@ -904,6 +936,47 @@ mod tests {
         let dear = Fees { listing_fee_percent: 2.5, ..Fees::default() };
         let q = quote(&poor, None, None, &[], Some(500), &dear).unwrap();
         assert_eq!((q.fee, q.debit, q.balance_after), (11, 421, Some(79)));
+    }
+
+    /// A tool's level: `uses` left (of 60 on an ask), or asked for on a bid (#547)
+    fn tool_level(side: OrderSide, price: i64, uses: i32) -> DepthLevel {
+        DepthLevel {
+            durability: Some(uses),
+            max_durability: (side == OrderSide::Sell).then_some(60),
+            grade_rule: (side == OrderSide::Buy).then_some(GradeRule::Average),
+            ..level(side, price, if side == OrderSide::Buy { "F" } else { "C" }, 1)
+        }
+    }
+
+    #[test]
+    fn a_tools_wear_picks_the_buy_and_what_fills() {
+        let tools = book(vec![
+            tool_level(OrderSide::Buy, 40, 30),
+            tool_level(OrderSide::Sell, 30, 3),
+            tool_level(OrderSide::Sell, 45, 60),
+            tool_level(OrderSide::Sell, 50, 58),
+        ]);
+        // 45 for 60 uses is cheaper a use than 30 for 3
+        assert_eq!(tools.cheapest_use(60, None), Some((45, 60)));
+        assert_eq!(tools.cheapest_use(60, Some(40)), Some((30, 3)));
+        assert_eq!(tools.cheapest_use(60, Some(20)), None);
+        // An ask with no wear on it counts as new
+        assert_eq!(book(vec![level(OrderSide::Sell, 50, "C", 1)]).cheapest_use(60, None), Some((50, 60)));
+
+        // A buy at 50 asking for 30 uses walks past the worn one
+        let picky = Draft { min_durability: Some(30), ..draft(OrderSide::Buy, 50, 1, "F", GradeRule::Average) };
+        let q = quote(&picky, None, Some(&tools), &[], None, &Fees::default()).unwrap();
+        assert_eq!((q.fills.quantity, q.fills.value), (1, 45));
+        assert_eq!(picky.to_place(None).min_durability, Some(30));
+        let any = draft(OrderSide::Buy, 50, 1, "F", GradeRule::Average);
+        assert_eq!(quote(&any, None, Some(&tools), &[], None, &Fees::default()).unwrap().fills.value, 30);
+        // A sell of a tool with 10 uses left doesn't meet the bid for 30
+        let worn = Draft { durability: Some(10), ..draft(OrderSide::Sell, 40, 1, "F", GradeRule::Average) };
+        let stack = Units::uniform(1, 60);
+        assert_eq!(quote(&worn, Some(&stack), Some(&tools), &[], None, &Fees::default()).unwrap().fills.quantity, 0);
+        let fresh = Draft { durability: Some(55), ..worn.clone() };
+        assert_eq!(quote(&fresh, Some(&stack), Some(&tools), &[], None, &Fees::default()).unwrap().fills.quantity, 1);
+        assert_eq!(fresh.to_place(None).min_durability, None, "a sell asks for nothing");
     }
 
     #[test]

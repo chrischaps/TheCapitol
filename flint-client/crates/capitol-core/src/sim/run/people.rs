@@ -336,6 +336,8 @@ impl SimBot {
             qualities: None,
             min_grade: None,
             grade_rule: None,
+            // A tool: at least half its uses (#547)
+            min_durability: super::super::fewest_uses(self.bot.state().catalog(), item),
         })?;
         self.mind.placed(order.id);
         self.board.bid(item, price);
@@ -398,9 +400,10 @@ impl SimBot {
 }
 
 /// What a stack is priced at, at `price` new (Callings K2.1): a tool by the
-/// share of its uses it has left, which the stall shows, at least a Strand.
+/// share of its uses it has left, which the stall and (since #547) the
+/// hall's book show, at least a Strand.
 /// Anything else, `price`.
-fn worn_price(price: i64, stack: &SlotItem) -> i64 {
+pub(super) fn worn_price(price: i64, stack: &SlotItem) -> i64 {
     match (stack.durability, stack.max_durability) {
         (Some(left), Some(most)) if most > 0 && left < most => (price * i64::from(left) / i64::from(most)).max(1),
         _ => price,

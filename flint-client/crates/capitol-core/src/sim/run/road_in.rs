@@ -642,6 +642,7 @@ fn order(side: OrderSide, item: &str, price: i64, item_id: Option<uuid::Uuid>) -
         qualities: None,
         min_grade: None,
         grade_rule: None,
+        min_durability: None,
     }
 }
 

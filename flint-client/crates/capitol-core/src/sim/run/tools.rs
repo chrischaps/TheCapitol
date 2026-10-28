@@ -6,9 +6,11 @@
 //! a person with a broken pickaxe would.
 //!
 //! Where it looks, in order:
-//! - **the hall**, for the best buy anyone asks for: the cheapest a use at
-//!   its full life ([`tool_offer`]), so an iron axe beats a stone one at
-//!   their targets;
+//! - **the hall**, for the best buy anyone asks for: the cheapest a use
+//!   left ([`tool_offer`]), since the book shows each tool's wear (#547),
+//!   so an iron axe beats a stone one at their targets and a new stone one
+//!   beats a worn iron one. Its buy asks for that tool's uses left, so it
+//!   gets that one or a fresher one at the price (`SimBot::uses_wanted`);
 //! - **a stall** whose sign lists a tool of the type, at most once a game
 //!   hour ([`LOOK_AGAIN`]). There it sees each tool's wear before it buys,
 //!   and takes the one cheapest a use left, at no more a use than the
@@ -16,14 +18,16 @@
 //! - **a standing bid** at the hall when nobody sells one, so whoever makes
 //!   them has someone to sell to: for the cheapest of the type at its
 //!   worth, the one it would otherwise make, and what a tool crafter makes
-//!   first for sale. It climbs on meanwhile.
+//!   first for sale, taking one with at least half its uses
+//!   ([`fewest_uses`](super::super::fewest_uses)). It climbs on meanwhile.
 //!
 //! A tool a standing bid bought waits in the market box. With one there of
 //! the type, it goes and collects it rather than buy another: in the soak,
 //! citizens bought two or three axes that way and sold the rest on.
 //!
-//! The hall's book doesn't show a tool's wear (#547), so what a citizen
-//! sells there is its freshest spare and it keeps its most worn to use up.
+//! A citizen sells its freshest spare, at the hall or a stall, and keeps
+//! its most worn to use up; either way it's priced by the share of its uses
+//! left (`people::worn_price`), which both show (#547).
 //!
 //! A tool crafter makes its own: it's its trade.
 
@@ -51,7 +55,8 @@ impl SimBot {
         let (tool_type, at_the_hall, boxed) = {
             let catalog = self.bot.state().catalog();
             let tool_type = plan::tool_wanted(catalog, holdings, errand.goal.as_ref()?)?;
-            let ask = tool_offer(catalog, &tool_type, |item| self.best(item).1);
+            let market = self.bot.state().market();
+            let ask = tool_offer(catalog, &tool_type, |item, life| market.book(item)?.cheapest_use(life, None));
             let boxed = self
                 .boxed_tools
                 .iter()
@@ -61,7 +66,7 @@ impl SimBot {
         if boxed {
             return Some(Trade::Collect);
         }
-        if let Some((item, ask)) = at_the_hall {
+        if let Some((item, ask, _)) = at_the_hall {
             let menu = tool_menu(holdings, item, ask, thrift, false)?;
             return match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {
                 (d, Choice::Buy { item, .. }) => Some(Trade::Buy {
@@ -128,9 +133,9 @@ impl SimBot {
             .filter(|(_, sign)| Some(sign.owner_id) != me)
             .collect();
         let listed = |item: &str| signs.iter().any(|(_, sign)| sign.item_types.iter().any(|t| t == item));
-        let (item, _) = {
+        let (item, ..) = {
             let catalog = self.bot.state().catalog();
-            tool_offer(catalog, tool_type, |item| if listed(item) { self.worth(item) } else { None })?
+            tool_offer(catalog, tool_type, |item, life| if listed(item) { Some((self.worth(item)?, life)) } else { None })?
         };
         let (stall, _) = signs.into_iter().find(|(_, sign)| sign.item_types.iter().any(|t| t == item))?;
         Some((stall, item))

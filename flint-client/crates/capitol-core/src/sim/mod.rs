@@ -329,24 +329,40 @@ pub fn per_use(price: i64, uses: i32) -> f64 {
     price as f64 / f64::from(uses.max(1))
 }
 
-/// The best buy among the tools of `tool_type` someone asks `price` for
-/// (Callings K2.1): the cheapest a use at its full life, ties in [`TOOLS`]'
-/// order. An iron axe at 130 for 200 uses is a better buy than a stone one
-/// at 50 for 60.
-pub fn tool_offer(catalog: &Catalog, tool_type: &str, price: impl Fn(&str) -> Option<i64>) -> Option<(&'static str, i64)> {
-    let mut best: Option<(&'static str, i64, f64)> = None;
+/// The best buy among the tools of `tool_type` on offer (Callings K2.1):
+/// the cheapest a use left, ties in [`TOOLS`]' order. `offer` says, of a
+/// tool and its uses new (at Q50), the price someone asks and the uses left
+/// on what they sell: at a stall or a target, its uses new; at the hall,
+/// what its book shows (#547). An iron axe at 130 for 200 uses is a better
+/// buy than a stone one at 50 for 60, and a stone one at 50 with 3 uses
+/// left a worse one than either. Returns the tool, its price and its uses.
+pub fn tool_offer(
+    catalog: &Catalog,
+    tool_type: &str,
+    offer: impl Fn(&str, i32) -> Option<(i64, i32)>,
+) -> Option<(&'static str, i64, i32)> {
+    let mut best: Option<(&'static str, i64, i32, f64)> = None;
     for item in TOOLS {
         let Some(tool) = catalog.item_type(item).and_then(|t| t.tool.as_ref()) else { continue };
         if tool.tool_type != tool_type {
             continue;
         }
-        let Some(p) = price(item) else { continue };
-        let cost = per_use(p, tool.max_durability);
-        if best.is_none_or(|(_, _, c)| cost < c) {
-            best = Some((item, p, cost));
+        let Some((p, uses)) = offer(item, tool.max_durability) else { continue };
+        let cost = per_use(p, uses);
+        if best.is_none_or(|(.., c)| cost < c) {
+            best = Some((item, p, uses, cost));
         }
     }
-    best.map(|(item, p, _)| (item, p))
+    best.map(|(item, p, uses, _)| (item, p, uses))
+}
+
+/// The fewest uses left a citizen's bid for the tool `item` takes (#547):
+/// half its uses new at Q50, so a bid at a new tool's worth never buys one
+/// nearly spent, while a new tool of poor quality (Q20 lasts 70% as long)
+/// still meets it. `None` for anything but a tool.
+pub fn fewest_uses(catalog: &Catalog, item: &str) -> Option<i32> {
+    let tool = catalog.item_type(item)?.tool.as_ref()?;
+    Some((tool.max_durability / 2).max(1))
 }
 
 /// What `item` is worth when the books can't say (K2.1): a tool's target
@@ -1702,18 +1718,25 @@ mod tests {
     #[test]
     fn a_buyer_weighs_tools_by_what_a_use_costs() {
         let catalog = Catalog::fallback();
-        let targets = |item: &str| catalog.item_type(item).and_then(|t| t.target_price);
+        let targets = |item: &str, life: i32| Some((catalog.item_type(item)?.target_price?, life));
         // At their targets an iron axe (130 for 200 uses) beats a stone one
         // (50 for 60)
-        assert_eq!(tool_offer(&catalog, "axe", targets), Some(("iron_axe", 130)));
+        assert_eq!(tool_offer(&catalog, "axe", targets), Some(("iron_axe", 130, 200)));
         // Dear iron, and the stone one is the better buy
-        let dear = |item: &str| if item == "iron_axe" { Some(500) } else { targets(item) };
-        assert_eq!(tool_offer(&catalog, "axe", dear), Some(("stone_axe", 50)));
+        let dear = |item: &str, life| if item == "iron_axe" { Some((500, life)) } else { targets(item, life) };
+        assert_eq!(tool_offer(&catalog, "axe", dear), Some(("stone_axe", 50, 60)));
         // Only what someone offers, of the type
-        let stone_only = |item: &str| (item == "stone_pickaxe").then_some(70);
-        assert_eq!(tool_offer(&catalog, "pickaxe", stone_only), Some(("stone_pickaxe", 70)));
+        let stone_only = |item: &str, life| (item == "stone_pickaxe").then_some((70, life));
+        assert_eq!(tool_offer(&catalog, "pickaxe", stone_only), Some(("stone_pickaxe", 70, 60)));
         assert_eq!(tool_offer(&catalog, "axe", stone_only), None);
         assert_eq!(tool_offer(&catalog, "saw", targets), None);
+        // The hall shows wear (#547): an iron axe at its target with 20
+        // uses left is a worse buy than a new stone one
+        let worn_iron = |item: &str, life| if item == "iron_axe" { Some((130, 20)) } else { targets(item, life) };
+        assert_eq!(tool_offer(&catalog, "axe", worn_iron), Some(("stone_axe", 50, 60)));
+        // A bid takes at least half a tool's uses; a good has none
+        assert_eq!(fewest_uses(&catalog, "stone_axe"), Some(30));
+        assert_eq!(fewest_uses(&catalog, "log"), None);
         // A worn tool costs more a use
         assert!(per_use(50, 10) > per_use(130, 200));
         assert_eq!(per_use(60, 0), 60.0);

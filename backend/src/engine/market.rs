@@ -22,6 +22,7 @@ use capitol_protocol::tunables::Fees;
 use capitol_protocol::rest::{MarketOrder, PlaceOrder};
 use capitol_protocol::rules::market::{self, GradeRule, OrderError, OrderSide, OrderStatus};
 use capitol_protocol::rules::stacking::{Pick, Units};
+use capitol_protocol::rules::tools;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -96,12 +97,19 @@ impl From<OrderError> for MarketError {
 /// unless all of it does.
 pub async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder, fees: &Fees) -> Result<MarketOrder, MarketError> {
     market::validate(order.price, order.quantity)?;
-    let known: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM item_types WHERE id = $1)")
+    // The item type's uses new, at Q50: `Some` for a tool
+    let kind: Option<Option<i32>> = sqlx::query_scalar("SELECT max_durability FROM item_types WHERE id = $1")
         .bind(&order.item_type)
-        .fetch_one(db)
+        .fetch_optional(db)
         .await?;
-    if !known {
+    let Some(base_durability) = kind else {
         return Err(MarketError::UnknownItemType);
+    };
+    // Only a buy of a tool asks for uses left (#547)
+    if let Some(min) = order.min_durability {
+        if order.side != OrderSide::Buy || base_durability.is_none() || min < 1 {
+            return Err(OrderError::BadWear.into());
+        }
     }
 
     let id = Uuid::new_v4();
@@ -149,8 +157,9 @@ pub async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder, fees: &Fees
     sqlx::query(
         "INSERT INTO market_orders
              (id, player_id, side, item_type, min_grade, grade_rule, price, quantity_total,
-              quantity_remaining, status, escrow_item_id, escrow_strands, fee, created_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, 'open', $9, $10, $11, $12, $13)",
+              quantity_remaining, status, escrow_item_id, escrow_strands, fee, created_at, expires_at,
+              min_durability)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, 'open', $9, $10, $11, $12, $13, $14)",
     )
     .bind(id)
     .bind(player_id)
@@ -165,6 +174,7 @@ pub async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder, fees: &Fees
     .bind(fee)
     .bind(created_at)
     .bind(expires_at)
+    .bind(order.min_durability.filter(|_| order.side == OrderSide::Buy))
     .execute(&mut *tx)
     .await?;
 
@@ -403,27 +413,37 @@ pub async fn market_box(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid
 }
 
 /// A `market_orders` row as [`ORDER_COLUMNS`] selects it
-pub(super) type OrderRow = (
-    Uuid,
-    Uuid,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    i64,
-    i32,
-    i32,
-    String,
-    Option<Uuid>,
-    i64,
-    i64,
-    DateTime<Utc>,
-    DateTime<Utc>,
-);
+#[derive(sqlx::FromRow)]
+pub(super) struct OrderRow {
+    pub id: Uuid,
+    player_id: Uuid,
+    side: String,
+    item_type: String,
+    min_grade: Option<String>,
+    grade_rule: Option<String>,
+    price: i64,
+    quantity_total: i32,
+    quantity_remaining: i32,
+    status: String,
+    pub escrow_item_id: Option<Uuid>,
+    escrow_strands: i64,
+    fee: i64,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    min_durability: Option<i32>,
+    /// The escrow stack's uses left: a tool's sell (#547)
+    durability: Option<i32>,
+    /// The item type's uses new at Q50, for a tool
+    base_durability: Option<i32>,
+}
 
-/// The columns of an [`OrderRow`], in order
+/// The columns of an [`OrderRow`]. They read `market_orders` by its name, so
+/// they serve a `SELECT … FROM market_orders` and an `UPDATE market_orders …
+/// RETURNING` alike. A sell's wear is its escrow stack's (#547).
 pub(super) const ORDER_COLUMNS: &str = "id, player_id, side, item_type, min_grade, grade_rule, price, quantity_total,
-     quantity_remaining, status, escrow_item_id, escrow_strands, fee, created_at, expires_at";
+     quantity_remaining, status, escrow_item_id, escrow_strands, fee, created_at, expires_at, min_durability,
+     (SELECT i.durability FROM items i WHERE i.id = market_orders.escrow_item_id) AS durability,
+     (SELECT t.max_durability FROM item_types t WHERE t.id = market_orders.item_type) AS base_durability";
 
 /// The order `order_id`, with the units still in its escrow.
 pub async fn load(conn: &mut PgConnection, order_id: Uuid) -> Result<Option<MarketOrder>, sqlx::Error> {
@@ -434,7 +454,7 @@ pub async fn load(conn: &mut PgConnection, order_id: Uuid) -> Result<Option<Mark
     let Some(row) = row else {
         return Ok(None);
     };
-    let units = match row.10 {
+    let units = match row.escrow_item_id {
         Some(stack) => units::units_of(conn, stack).await?,
         None => Units::new(),
     };
@@ -443,7 +463,7 @@ pub async fn load(conn: &mut PgConnection, order_id: Uuid) -> Result<Option<Mark
 
 /// The order `row` holds, with `units` in its escrow.
 pub(super) fn order_from_row(row: OrderRow, units: Units) -> Result<MarketOrder, sqlx::Error> {
-    let (
+    let OrderRow {
         id,
         player_id,
         side,
@@ -454,12 +474,18 @@ pub(super) fn order_from_row(row: OrderRow, units: Units) -> Result<MarketOrder,
         quantity_total,
         quantity_remaining,
         status,
-        _escrow_item_id,
+        escrow_item_id: _,
         escrow_strands,
         fee,
         created_at,
         expires_at,
-    ) = row;
+        min_durability,
+        durability,
+        base_durability,
+    } = row;
+    // A tool's uses new are its type's, scaled by its quality (E1.4)
+    let durability = durability.filter(|_| !units.is_empty());
+    let max_durability = durability.and(base_durability).zip(units.mean()).map(|(base, q)| tools::max_durability(base, q));
     let bad = |what: &str, value: &str| sqlx::Error::Decode(format!("market_orders.{what} is {value:?}").into());
     Ok(MarketOrder {
         id,
@@ -472,6 +498,9 @@ pub(super) fn order_from_row(row: OrderRow, units: Units) -> Result<MarketOrder,
         status: OrderStatus::parse(&status).ok_or_else(|| bad("status", &status))?,
         min_grade,
         grade_rule: grade_rule.as_deref().map(|r| GradeRule::parse(r).ok_or_else(|| bad("grade_rule", r))).transpose()?,
+        min_durability,
+        durability,
+        max_durability,
         units,
         escrow_strands,
         fee,
@@ -553,6 +582,7 @@ pub(crate) mod tests {
             qualities,
             min_grade: None,
             grade_rule: None,
+            min_durability: None,
         }
     }
 
@@ -566,6 +596,7 @@ pub(crate) mod tests {
             qualities: None,
             min_grade: min_grade.map(Into::into),
             grade_rule: None,
+            min_durability: None,
         }
     }
 
