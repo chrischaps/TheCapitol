@@ -1978,13 +1978,7 @@ impl SimBot {
 
     /// Where the stations it knows of stand, each on its storey (#478).
     fn stations_placed(&self) -> Vec<lot::Spot> {
-        self.bot
-            .state()
-            .stations()
-            .values()
-            .chain(self.stations.values())
-            .map(|s| ((s.x, s.y), s.floor))
-            .collect()
+        known_stations(self.bot.state().stations(), self.stations.values())
     }
 
     /// Builds its lot's next floor (Plots v2 §5.8, #478), for a station its
@@ -2344,6 +2338,19 @@ fn lot_kept(calling: &Calling, owned: impl Fn(&str) -> bool, room: Option<i32>) 
     (kept, spare)
 }
 
+/// Where the stations a citizen knows of stand, each on its storey: those
+/// the store has `seen`, and those of its `own` the store hasn't heard of
+/// (one placed this round, say), each once (#549). Its own are in the store
+/// too once seen, and counted twice they filled an urban lot's 4 indoors
+/// with 2, since a place's room is counted by station (V3.1): no urban
+/// builder got past its kiln and forge.
+fn known_stations<'a>(seen: &'a HashMap<Uuid, StationInfo>, own: impl IntoIterator<Item = &'a StationInfo>) -> Vec<lot::Spot> {
+    seen.values()
+        .chain(own.into_iter().filter(|s| !seen.contains_key(&s.id)))
+        .map(|s| ((s.x, s.y), s.floor))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2424,6 +2431,26 @@ mod tests {
 
     fn wanted(calling: &Calling, h: &Holdings) -> i32 {
         still_wanted(calling, |k| h.stations.contains(k))
+    }
+
+    /// An urban builder's kiln and forge, known to the store and as its
+    /// own, are two stations, not four: its lot has room for the sawbench
+    /// and the anvil (#549). Counted twice, the building was full.
+    #[test]
+    fn its_own_stations_count_once_on_its_lot() {
+        let mut plot = lot::tests::home("urban", 90.0, 93.0, 4, 0);
+        let spots = lot::spots(&plot, &[]);
+        let (kiln, forge) = (station("kiln", spots[0].0, spots[0].1), station("forge", spots[1].0, spots[1].1));
+        plot.station_count = 2;
+        let seen: HashMap<Uuid, StationInfo> = [&kiln, &forge].map(|(_, s)| (s.id, s.clone())).into_iter().collect();
+        let own: HashMap<String, StationInfo> = [kiln.clone(), forge.clone()].into_iter().collect();
+        let known = known_stations(&seen, own.values());
+        assert_eq!(known.len(), 2);
+        let ground: Vec<_> = known.iter().map(|s| s.0).collect();
+        assert_eq!(lot::room(&plot, &ground), 2);
+        // One placed this round, not yet in the store, still counts
+        let known = known_stations(&HashMap::new(), own.values());
+        assert_eq!(known.len(), 2);
     }
 
     /// K1.3's Verify: a citizen's stints, played out on the planner against

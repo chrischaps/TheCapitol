@@ -335,7 +335,7 @@ K0.1 ──────────► K3.3 ◄───┘
 ## 9. Risks
 
 - **Thrash.** Citizens switching so often they only ever make kits. D5's setup cost, momentum, a minimum stint and the "runs on until it lands" rule are the guard. K4.1 checks setup time stays within baseline + 10 points.
-- **Lots too small.** An urban lot takes one station, and a deed can't be given up (#519). D6 leaves such jobs off the menu (K1.3: `Role::fits`). A wage in that trade, or a floor (#478), is the way in.
+- **Lots too small.** An urban lot takes four stations (one before Plots v2), and a deed can't be given up (#519). D6 leaves such jobs off the menu (K1.3: `Role::fits`). A wage in that trade, or a floor (#478), is the way in.
 - **Short sessions.** A casual citizen on for half an hour would always pick its favourite. The side file's `lately` keeps the shares across sessions.
 - **The faucet.** If more citizens bank fiber on fiber stints or when broke, the faucet could grow. §10 holds it within ±25% per citizen-hour.
 - **Replay.** A stint score that reads anything outside the `Situation` would break replay. K1.1's tests replay a logged stint to the bit.

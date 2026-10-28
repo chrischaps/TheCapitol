@@ -377,7 +377,7 @@ pub fn layout_in(corners: [P; 4], zone: Zone, most: usize) -> (Option<[P; 4]>, V
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use capitol_protocol::rest::Bounds;
     use uuid::Uuid;
@@ -418,7 +418,7 @@ mod tests {
 
     /// A `zone` lot `w` wide along its street (y = 1000) and `h` deep, with
     /// its building's room as the server would send it
-    fn home(zone: &str, w: f64, h: f64, indoor: i32, yard: i32) -> PlotInfo {
+    pub(crate) fn home(zone: &str, w: f64, h: f64, indoor: i32, yard: i32) -> PlotInfo {
         let corners = [(1000.0, 1000.0), (1000.0 + w, 1000.0), (1000.0 + w, 1000.0 + h), (1000.0, 1000.0 + h)];
         PlotInfo {
             zone_id: zone.into(),

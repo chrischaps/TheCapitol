@@ -124,17 +124,19 @@ pub const HOME_ZONES: [Zone; 3] = [Zone::Rural, Zone::Suburban, Zone::Urban];
 
 impl Home {
     fn seeded(rng: &mut Rng, role: Role) -> Home {
-        // Gatherers live out by the land they work, builders where a lot
-        // takes their four stations, and crafters and merchants nearer town:
-        // merchants mostly in it, by the hall and the bazaar. An urban lot
-        // takes one station (#417), so no gatherer or builder lives there.
-        // The shares as (rural, suburban), the rest urban. One draw, as
-        // before urban, so a role that never lives there keeps its home.
+        // Gatherers live out by the land they work, and crafters and
+        // merchants nearer town: merchants mostly in it, by the hall and the
+        // bazaar. Builders live wherever a lot takes their four stations,
+        // which since Plots v2 (#459) is every zone's: a quarter of them in
+        // the city, where the building holds all four and a chest goes
+        // upstairs (#478, #549). No gatherer lives in town. The shares as
+        // (rural, suburban), the rest urban, from one draw, so a roster's
+        // homes change only for the roles whose shares did.
         let (rural, suburban) = match role {
             Role::Gatherer(_) => (0.7, 0.3),
             Role::Crafter(_) => (0.3, 0.45),
             Role::Merchant => (0.1, 0.3),
-            Role::Builder => (0.5, 0.5),
+            Role::Builder => (0.4, 0.35),
         };
         let u = rng.unit();
         let zone = if u < rural {
@@ -359,8 +361,8 @@ mod tests {
         };
         assert!(rural(|r| matches!(r, Role::Gatherer(_))) > 0.55);
         assert!(rural(|r| matches!(r, Role::Crafter(_))) < 0.45);
-        // Merchants mostly in town, by the market; gatherers and builders
-        // never, where their stations wouldn't fit (#416)
+        // Merchants mostly in town, by the market; gatherers never (#416);
+        // builders a quarter, since an urban lot takes their four (#549)
         let urban = |want: fn(&Role) -> bool| {
             let of: Vec<_> = town.iter().filter(|(r, _)| want(r)).collect();
             of.iter().filter(|(_, p)| p.home.zone == Zone::Urban).count() as f64 / of.len() as f64
@@ -368,7 +370,9 @@ mod tests {
         let merchants = (0..200u64).filter(|n| Persona::seeded(Role::Merchant, n * 7919).home.zone == Zone::Urban).count();
         assert!(merchants > 90, "{merchants} of 200 merchants in town");
         assert!((0.1..0.4).contains(&urban(|r| matches!(r, Role::Crafter(_)))));
-        assert_eq!(urban(|r| matches!(r, Role::Gatherer(_) | Role::Builder)), 0.0);
+        assert_eq!(urban(|r| matches!(r, Role::Gatherer(_))), 0.0);
+        let builders = urban(|r| matches!(r, Role::Builder));
+        assert!((0.1..0.4).contains(&builders), "{builders} of builders in town");
         let bazaar = share(&|(_, p)| p.market == Market::Bazaar);
         assert!((0.15..0.5).contains(&bazaar), "some keep the bazaar, most the hall: {bazaar}");
         // Traits lean to the middle but reach the ends
