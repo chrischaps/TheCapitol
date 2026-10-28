@@ -84,6 +84,19 @@ fn at(c: &[(f64, f64); 4], u: f64, v: f64) -> (f64, f64) {
     lerp(lerp(c[0], c[1], u), lerp(c[3], c[2], u), v)
 }
 
+/// How far in from each side a station stands: [`EDGE`], or less across a
+/// lot too narrow for it, 0.4 of its extent across that side. Each axis
+/// keeps its own, so a lot's room along it grows as the lot widens (#563):
+/// with one edge for all four, from the shorter axis, a 22 × 127 strip took
+/// fewer than a 19 × 127 one.
+fn edges(c: &[P; 4]) -> [f64; 4] {
+    let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
+    let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
+    // Sides 0 and 2 run along u, so a station keeps from them across v
+    let (across_v, across_u) = (EDGE.min(0.4 * len_v), EDGE.min(0.4 * len_u));
+    [across_v, across_u, across_v, across_u]
+}
+
 /// Offsets in [0, 1] across a side `len` long: `n` points `step` apart,
 /// centred, as many as fit with `edge` kept at each end.
 fn lattice(len: f64, step: f64, edge: f64) -> Vec<f64> {
@@ -206,20 +219,22 @@ fn ordered(
 ) -> Vec<(f64, f64)> {
     let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
     let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
-    let edge = EDGE.min(0.4 * len_u.min(len_v));
+    let edges = edges(&c);
+    // Off the building's walls by the narrower
+    let edge = edges[0].min(edges[1]);
     let middle = at(&c, 0.5, 0.5);
     let fits = |p: (f64, f64)| {
         quad_contains(&c, p.0, p.1)
-            // Give or take rounding: a row of `staggered`'s stands exactly `edge` in
-            && (0..4).all(|i| to_segment(p, c[i], c[(i + 1) % 4]) >= edge - 1e-6)
+            // Give or take rounding: a row of `staggered`'s stands exactly its edge in
+            && (0..4).all(|i| to_segment(p, c[i], c[(i + 1) % 4]) >= edges[i] - 1e-6)
             && without.is_none_or(|f| {
                 !quad_contains(f, p.0, p.1) && (0..4).all(|i| to_segment(p, f[i], f[(i + 1) % 4]) >= edge - 1e-6)
             })
             && taken.iter().all(|s| clear(*s, p))
     };
     let grid = |step: f64| -> Vec<(f64, f64)> {
-        let vs = lattice(len_v, step, edge);
-        lattice(len_u, step, edge)
+        let vs = lattice(len_v, step, edges[0]);
+        lattice(len_u, step, edges[1])
             .into_iter()
             .flat_map(|u| vs.iter().map(move |&v| (u, v)))
             .map(|(u, v)| at(&c, u, v))
@@ -256,7 +271,7 @@ fn ordered(
         }
     }
     // Then the staggered rows, where the greedy orders fall short (#467)
-    staggered(&c, edge, &fits, best.0, &mut |rows| {
+    staggered(&c, &edges, &fits, best.0, &mut |rows| {
         let n = pack(&rows, taken, enough).len();
         if n > best.0 {
             best = (n, rows);
@@ -266,27 +281,39 @@ fn ordered(
     best.1
 }
 
-/// Rows of stations along each side of the lot, of two kinds. Even rows are
-/// spread over the lot's depth, each shifted from the last as far as its
+/// Rows of stations along each side of the lot, of three kinds. Even rows
+/// are spread over the lot's depth, each shifted from the last as far as its
 /// spacing needs (a square grid once they're [`SPOT_SPACING`] apart),
-/// started at a few phases along the side. Or a full row is `across`
-/// stations spread over the lot's width, and a shifted row stands between
-/// them, one fewer, as close to the rows either side as the spacing lets it
-/// (a hex packing at the closest). Each shifted row has full rows either
-/// side, and there are as many changes and full rows after full ones as the
-/// depth takes, the full ones first or last. They're spaced by
-/// construction, so each is a packing as it stands. `visit` is given those
-/// that might beat `best`, kept to the points that `fits`, and stops them by
-/// returning true.
+/// started at a few phases along the side. Or full rows mixed with shifted
+/// ones, each shifted row as close to the full rows either side as the
+/// spacing lets it: full rows spread over the width with the shifted ones
+/// between their stations (a hex packing at the closest), or full rows the
+/// spacing apart from the end with the shifted ones set a few offsets along
+/// them, with a column down the far end. Each is spaced by construction.
+/// `visit` is given those that might beat `best`, kept to the points that `fits`, and stops them by
+/// returning true. `edges` is how far in from each side ([`edges`]).
 ///
 /// On a box, the rows along its first two sides (at phase 0) pack no fewer
-/// on a box at least as large each way, so what a lot takes never falls as it grows
-/// (#467): the greedy orders alone left cliffs, a 150 × 120 box taking 6
-/// where a 140 × 127 one takes 8. The backend's copy is
+/// on a box at least as large each way, so what a lot takes never falls as
+/// it grows (#467): the greedy orders alone left cliffs, a 150 × 120 box
+/// taking 6 where a 140 × 127 one takes 8. The rows set from the end, with
+/// their column, take the odd packings the greedy orders found by luck, as 10
+/// in 127 × 180 (#563). The backend's copy is
 /// `models::station_room::staggered`: keep the two in step.
-fn staggered(c: &[P; 4], edge: f64, fits: &dyn Fn(P) -> bool, best: usize, visit: &mut dyn FnMut(Vec<P>) -> bool) {
+fn staggered(
+    c: &[P; 4],
+    edges: &[f64; 4],
+    fits: &dyn Fn(P) -> bool,
+    best: usize,
+    visit: &mut dyn FnMut(Vec<P>) -> bool,
+) {
     let d = SPOT_SPACING;
+    let best = std::cell::Cell::new(best);
     let middle = ((c[0].0 + c[1].0 + c[2].0 + c[3].0) / 4.0, (c[0].1 + c[1].1 + c[2].1 + c[3].1) / 4.0);
+    let mut offer = |points: Vec<P>| -> bool {
+        best.set(best.get().max(points.len()));
+        visit(points)
+    };
     for i in 0..4 {
         let (a, b) = (c[i], c[(i + 1) % 4]);
         let len = dist(a, b);
@@ -303,8 +330,11 @@ fn staggered(c: &[P; 4], edge: f64, fits: &dyn Fn(P) -> bool, best: usize, visit
         let y = |p: P| (p.0 - a.0) * n.0 + (p.1 - a.1) * n.1;
         let (x0, x1) = c.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &p| (lo.min(x(p)), hi.max(x(p))));
         let (y0, y1) = c.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &p| (lo.min(y(p)), hi.max(y(p))));
-        let (wide, deep) = ((x1 - x0 - 2.0 * edge).max(0.0), (y1 - y0 - 2.0 * edge).max(0.0));
-        let at = |u: f64, v: f64| (a.0 + dir.0 * (x0 + edge + u) + n.0 * (y0 + edge + v), a.1 + dir.1 * (x0 + edge + u) + n.1 * (y0 + edge + v));
+        // In from the ends by the sides either side of this one, and from
+        // this side and the one across by its own
+        let (ex, ey) = (edges[(i + 1) % 4], edges[i]);
+        let (wide, deep) = ((x1 - x0 - 2.0 * ex).max(0.0), (y1 - y0 - 2.0 * ey).max(0.0));
+        let at = |u: f64, v: f64| (a.0 + dir.0 * (x0 + ex + u) + n.0 * (y0 + ey + v), a.1 + dir.1 * (x0 + ex + u) + n.1 * (y0 + ey + v));
         // Even rows spread over the depth, each shifted from the last as far
         // as its spacing needs: a square grid once they're the spacing apart
         let most_rows = (2.0 * deep / d + 1e-9).floor() as usize + 1;
@@ -313,7 +343,7 @@ fn staggered(c: &[P; 4], edge: f64, fits: &dyn Fn(P) -> bool, best: usize, visit
             let shift = if rows > 1 && step_y < d { (d * d - step_y * step_y).sqrt() } else { 0.0 };
             let step_x = d.max(2.0 * shift);
             // No phase of these rows packs more than a full row each
-            if rows * ((wide / step_x + 1e-9).floor() as usize + 1) <= best {
+            if rows * ((wide / step_x + 1e-9).floor() as usize + 1) + 2 <= best.get() {
                 continue;
             }
             for parity in 0..if shift > 0.0 { 2 } else { 1 } {
@@ -330,30 +360,22 @@ fn staggered(c: &[P; 4], edge: f64, fits: &dyn Fn(P) -> bool, best: usize, visit
                             u += step_x;
                         }
                     }
-                    if visit(points) {
+                    if offer(points) {
                         return;
                     }
                     phase += 2.0 * FINE;
                 }
             }
         }
-        for across in 1..=(wide / d + 1e-9).floor() as usize + 1 {
-            // A full row spread over the width, and a shifted row between its
-            // stations: with one across, the shifted row is at the far side
-            let (full, between, step, shift) = match across {
-                1 => (1, 1, 0.0, wide),
-                k => (k, k - 1, wide / (k - 1) as f64, wide / (k - 1) as f64 / 2.0),
-            };
-            // Rows apart: the spacing between two rows alike, less between a
-            // full one and a shifted one, but never so little that the rows
-            // either side of a shifted one come too close
-            let near = (d * d - shift * shift).max(0.0).sqrt().max(d / 2.0);
-            if most_rows * full <= best {
-                continue;
+        // Full rows and shifted rows: `full` across, and `between` in a
+        // shifted row, `near` from the full rows either side of it. Each
+        // shifted row has full rows either side, and there are as many
+        // changes and full rows after full ones as the depth takes, the full
+        // ones first or last.
+        let mut mixed = |full: &[f64], between: &[f64], near: f64, column: bool| -> bool {
+            if most_rows * full.len().max(between.len()) + 2 <= best.get() {
+                return false;
             }
-            // `switches` changes between full and shifted rows, each shifted
-            // row alone between full ones, and `alike` full rows after full
-            // ones, all of it within the depth
             for switches in 0..=(deep / near + 1e-9).floor() as usize {
                 let alike = ((deep - switches as f64 * near) / d + 1e-9).floor() as usize;
                 for alike_first in [true, false] {
@@ -371,18 +393,58 @@ fn staggered(c: &[P; 4], edge: f64, fits: &dyn Fn(P) -> bool, best: usize, visit
                             v += gaps[k - 1];
                             shifted = gaps[k - 1] < d && !shifted;
                         }
-                        let (count, start) = if shifted { (between, shift) } else { (full, 0.0) };
-                        for j in 0..count {
-                            let p = at(start + j as f64 * step, v);
+                        for &u in if shifted { between } else { full } {
+                            let p = at(u, v);
                             if fits(p) {
                                 points.push(p);
                             }
                         }
                     }
-                    if visit(points) {
-                        return;
+                    // A column down the far end, where rows set from the
+                    // near one leave room: the most a line there takes,
+                    // packed from this side (#563)
+                    if column {
+                        let mut v = 0.0;
+                        while v <= deep + 1e-6 {
+                            let p = at(wide, v);
+                            if fits(p) && points.iter().all(|s| dist(*s, p) >= d - 1e-6) {
+                                points.push(p);
+                            }
+                            v += FINE;
+                        }
+                    }
+                    if offer(points) {
+                        return true;
                     }
                 }
+            }
+            false
+        };
+        let near = |shift: f64| (d * d - shift * shift).max(0.0).sqrt().max(d / 2.0);
+        // Full rows spread over the width, the shifted ones between their
+        // stations; with one across, the shifted row is at the far side
+        for across in 1..=(wide / d + 1e-9).floor() as usize + 1 {
+            let (full, between, shift): (Vec<f64>, Vec<f64>, f64) = match across {
+                1 => (vec![0.0], vec![wide], wide),
+                k => {
+                    let step = wide / (k - 1) as f64;
+                    ((0..k).map(|j| j as f64 * step).collect(), (0..k - 1).map(|j| (j as f64 + 0.5) * step).collect(), step / 2.0)
+                }
+            };
+            if mixed(&full, &between, near(shift), false) {
+                return;
+            }
+        }
+        // Full rows the spacing apart from the near end, and shifted rows
+        // set `shift` along them, as many as fit, and a column at the far end
+        let full: Vec<f64> = (0..(wide / d + 1e-9).floor() as usize + 1).map(|j| j as f64 * d).collect();
+        for shift in [27.5, 25.0, 20.0, 15.0, 10.0, 5.0] {
+            if shift > wide {
+                continue;
+            }
+            let between: Vec<f64> = (0..((wide - shift) / d + 1e-9).floor() as usize + 1).map(|j| shift + j as f64 * d).collect();
+            if mixed(&full, &between, near(shift), true) {
+                return;
             }
         }
     }
@@ -560,13 +622,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// A box at least as large each way never takes fewer (#467), from 25
-    /// each way, where the edge is the full 10 (not quite everywhere, #563), as the backend's
+    /// A box at least as large each way never takes fewer (#467, #563),
+    /// from 20 each way, as the backend's
     /// `station_room` finds; and the cliffs the issue found are gone.
     #[test]
     fn a_larger_box_never_takes_fewer() {
         let boxed = |w: f64, h: f64| [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
-        let sizes: Vec<f64> = (0..44).map(|k| 25.0 + 4.0 * k as f64).collect();
+        let sizes: Vec<f64> = (0..46).map(|k| 20.0 + 4.0 * k as f64).collect();
         let most: Vec<Vec<usize>> = sizes.iter().map(|&w| sizes.iter().map(|&h| layout(boxed(w, h), 40).len()).collect()).collect();
         for (i, row) in most.iter().enumerate() {
             for (j, &n) in row.iter().enumerate() {
@@ -701,11 +763,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_suburban_strip_takes_three_along_its_length() {
-        // The soak's builders: 19 by 127, at an angle (#305)
+    fn a_suburban_strip_takes_two_along_its_length() {
+        // The soak's builders: 19 by 127, at an angle (#305). It took 3 while
+        // its ends kept in only as far as its sides, which a wider strip
+        // couldn't match (#563).
         let plot = lot(turned(19.0, 127.0, 0.6), 0);
-        assert_eq!(room(&plot, &[]), 3);
-        let best: Vec<_> = spots(&plot, &[]).into_iter().take(3).collect();
+        assert_eq!(room(&plot, &[]), 2);
+        let best: Vec<_> = spots(&plot, &[]).into_iter().take(2).collect();
         assert!(spaced(&best));
         assert!(best.iter().all(|p| plot.contains(p.0, p.1)));
     }
@@ -760,8 +824,8 @@ pub(crate) mod tests {
     fn a_strip_doesnt_take_a_builders_four() {
         let strip = lot(turned(19.0, 127.0, 0.6), 0);
         assert!(strip.station_capacity >= 4);
-        assert!(takes(&strip, 3));
-        assert!(!takes(&strip, 4));
+        assert!(takes(&strip, 2));
+        assert!(!takes(&strip, 3));
         assert!(takes(&lot(turned(200.0, 145.0, 0.3), 0), 4));
     }
 
