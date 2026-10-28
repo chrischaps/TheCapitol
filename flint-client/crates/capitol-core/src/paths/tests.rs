@@ -339,7 +339,8 @@ fn the_walks_the_server_stopped_go_there_and_back() {
     // the way back. The last two had no trail node in sight within 800.
     // Since Plots v2's flip (#459) each stands 1500 further out on its
     // bearing, the same depth into the wilds, but the land there is new:
-    // two had no way in, and moved to the nearest spot that has one.
+    // two had no way in, and moved to the nearest spot that has one. The
+    // last four the server slid on, there or back (#520).
     let (_, graph) = world();
     let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
     for node in [
@@ -351,6 +352,13 @@ fn the_walks_the_server_stopped_go_there_and_back() {
         (14857.7, 3444.5),
         (2491.5, 6216.8),
         (6243.9, 14511.1),
+        // #520: a grid leg from gentle ground over a valley's floor and up
+        // the face past it, whose slope climbs past the cliff in under a
+        // unit, between two of the line's tests
+        (9628.1, 278.9),
+        (10419.0, 578.1),
+        (4940.4, 1146.8),
+        (5010.8, 1187.6),
     ] {
         walk(graph, hall, node);
         walk(graph, node, hall);
@@ -532,18 +540,35 @@ fn print_click_times() {
 /// fixture must be the world the plan is of:
 /// `cargo test -p capitol-core --release --lib print_wild_node_reach -- --ignored --nocapture`.
 /// At #347, 4439 of 4511, all but 4 of the rest given up on by the grid
-/// (#521), and 4 a leg the server slides on (#520).
+/// (#521), and 4 a leg the server slides on (#520). Since #520, 4443: the
+/// 68 left are all given up on by the grid.
 #[test]
 #[ignore]
 fn print_wild_node_reach() {
-    let sql = std::env::var("NODES_SQL").unwrap_or_else(|_| {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../backend/migrations/post-content");
-        dir.join("20261224_001_wilds_reached_nodes.sql").to_string_lossy().into_owned()
-    });
+    let sql = std::env::var("NODES_SQL").ok().map(std::path::PathBuf::from).unwrap_or_else(wilds_sql);
     let every: usize = std::env::var("WILD_EVERY").ok().and_then(|n| n.parse().ok()).unwrap_or(3);
     let (_, graph) = world();
-    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
-    let nodes: Vec<(String, Point)> = std::fs::read_to_string(&sql)
+    let nodes = wild_nodes(&sql, every);
+    let start = Instant::now();
+    let outcomes = there_and_back(graph, &nodes);
+    let mut failed: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
+    // A route the server stopped first, then the ones with no way (#521)
+    failed.sort_by_key(|e| e.ends_with("Unreachable") || e.ends_with("Stranded"));
+    for f in failed.iter().take(30) {
+        eprintln!("{f}");
+    }
+    eprintln!("{} of {} wild nodes there and back, {} not, in {:?}", nodes.len() - failed.len(), nodes.len(), failed.len(), start.elapsed());
+}
+
+/// The wilds' last re-plan (#347), the migration [`wild_nodes`] reads by default.
+fn wilds_sql() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../backend/migrations/post-content/20261224_001_wilds_reached_nodes.sql")
+}
+
+/// Every `every`th node a migration inserts, by kind, but the reeds, which
+/// are gathered from a bank.
+fn wild_nodes(sql: &Path, every: usize) -> Vec<(String, Point)> {
+    std::fs::read_to_string(sql)
         .unwrap()
         .lines()
         .filter_map(|line| {
@@ -553,10 +578,15 @@ fn print_wild_node_reach() {
         })
         .filter(|(kind, _)| kind != "reed_bed")
         .step_by(every)
-        .collect();
-    let start = Instant::now();
+        .collect()
+}
+
+/// Each node walked to from the Exchange hall and back, planned on the graph
+/// and walked by the server's own step, on every core: what stopped each.
+fn there_and_back(graph: &WalkGraph, nodes: &[(String, Point)]) -> Vec<Result<(), String>> {
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let outcomes: Vec<Result<(), String>> = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let parts: Vec<_> = nodes
             .chunks(nodes.len().div_ceil(cores).max(1))
             .map(|part| {
@@ -574,10 +604,26 @@ fn print_wild_node_reach() {
             })
             .collect();
         parts.into_iter().flat_map(|p| p.join().unwrap()).collect()
-    });
-    let failed: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
-    for f in failed.iter().take(30) {
-        eprintln!("{f}");
-    }
-    eprintln!("{} of {} wild nodes there and back, {} not, in {:?}", nodes.len() - failed.len(), nodes.len(), failed.len(), start.elapsed());
+    })
+}
+
+/// How sparsely [`the_server_walks_every_leg_to_the_wild_nodes`] samples the
+/// wild nodes: about 100 of 13,500.
+const WILD_SAMPLE: usize = 131;
+
+/// Of the wild nodes the backend planted, a sample walked there and back
+/// (#520): every leg of every route the graph plans, the server walks
+/// straight, with no slide. A route the grid gives up on (#521) has no legs,
+/// so it's left to `print_wild_node_reach`.
+#[test]
+fn the_server_walks_every_leg_to_the_wild_nodes() {
+    let (_, graph) = world();
+    let nodes = wild_nodes(&wilds_sql(), WILD_SAMPLE);
+    let outcomes = there_and_back(graph, &nodes);
+    let no_way = |e: &&String| e.ends_with("Unreachable") || e.ends_with("Stranded");
+    let stopped: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).filter(|e| !no_way(e)).collect();
+    let reached = outcomes.iter().filter(|o| o.is_ok()).count();
+    eprintln!("{reached} of {} wild nodes there and back", nodes.len());
+    assert!(stopped.is_empty(), "{} routes the server stopped: {stopped:#?}", stopped.len());
+    assert!(reached * 10 >= nodes.len() * 9, "only {reached} of {} wild nodes reached", nodes.len());
 }

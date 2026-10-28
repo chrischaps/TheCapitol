@@ -67,6 +67,13 @@ const STEEP: f64 = 0.8;
 /// crest that peaks between two tests can't slip through. Over 20,000 lines
 /// in the ranges, these let none through that a test every 0.05 stops.
 const STEEP_MARGIN: f64 = 0.03;
+/// A stride whose slope changes by more than this is tested again every
+/// [`KINK_SAMPLE`] along it. At a valley's floor the slope has a kink, and
+/// on the far side it can climb from 0.7 past the cliff within a unit, so a
+/// stride of [`SLOPE_SAMPLE`] from the gentle side stepped over a face the
+/// server's step stops on (#520). It costs about 5% more samples.
+const KINK: f64 = 0.15;
+const KINK_SAMPLE: f64 = 0.25;
 
 /// Whether the slope lets a straight walk from `a` to `b` through, given the
 /// land's slope at a point (`land::slope_at`, or `land::Relief::slope`, the
@@ -74,19 +81,48 @@ const STEEP_MARGIN: f64 = 0.03;
 /// steeper than [`CLIFF_SLOPE`] and steeper than where it starts, so a line
 /// stops where the slope rises past a little under it: the server's steps
 /// fall between the samples, wherever on the line its walk began. A walk
-/// that starts on a crag may climb down off it.
+/// that starts on a crag may climb down off it. A stride whose slope jumps by
+/// more than [`KINK`] is tested again more finely, for the face past a
+/// valley's floor (#520).
 ///
-/// The Flint client's walk graph tests its lines with it (#280), and the
-/// backend plants wild nodes only where its lines reach (#347).
+/// The Flint client's walk graph tests its lines with it (#280).
 pub fn slope_lets_through(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64, f64) -> f64) -> bool {
+    slope_strides_let_through(a, b, slope_at, true)
+}
+
+/// [`slope_lets_through`] without the second look at a kink: the rule the
+/// backend plants wild nodes by (#347). The stricter rule re-deals the whole
+/// wilds plan, so the flood keeps this one until the wild nodes are
+/// re-planned ([#567](https://github.com/chrischaps/TheCapitol/issues/567)).
+pub fn slope_lets_through_by_strides(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64, f64) -> f64) -> bool {
+    slope_strides_let_through(a, b, slope_at, false)
+}
+
+fn slope_strides_let_through(a: (f64, f64), b: (f64, f64), slope_at: impl Fn(f64, f64) -> f64, kinks: bool) -> bool {
     let length = (b.0 - a.0).stable_hypot(b.1 - a.1);
+    let at = |along: f64| {
+        let t = along / length;
+        slope_at(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+    };
+    let rises = |here: f64, before: f64| here > CLIFF_SLOPE - STEEP_MARGIN && here > before;
     let mut slope = slope_at(a.0, a.1);
     let mut along = 0.0;
     while along < length {
+        let from = along;
         along = (along + if slope > STEEP { STEEP_SAMPLE } else { SLOPE_SAMPLE }).min(length);
-        let t = along / length;
-        let here = slope_at(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
-        if here > CLIFF_SLOPE - STEEP_MARGIN && here > slope {
+        let here = at(along);
+        let mut last = slope;
+        if kinks && (here - slope).abs() > KINK {
+            let n = ((along - from) / KINK_SAMPLE).ceil() as usize;
+            for k in 1..n {
+                let between = at(from + (along - from) * k as f64 / n as f64);
+                if rises(between, last) {
+                    return false;
+                }
+                last = between;
+            }
+        }
+        if rises(here, last) {
             return false;
         }
         slope = here;
@@ -714,6 +750,27 @@ mod tests {
         assert!(slope_lets_through((10.0, 0.0), (40.0, 0.0), crest));
         assert!(slope_lets_through((50.0, 0.0), (90.0, 0.0), crest));
         assert!(slope_lets_through((10.0, 0.0), (90.0, 0.0), |_, _| 0.3));
+    }
+
+    #[test]
+    fn the_face_past_a_valley_floor_stops_a_line() {
+        // As at the four walks of #520: 0.75 down to a kink at x = 51, then
+        // past the cliff within half a unit, and back under 1.17 a unit on.
+        let floor = |x: f64, _: f64| {
+            if x < 51.0 {
+                0.75
+            } else if x < 51.5 {
+                0.7 + (x - 51.0)
+            } else {
+                (1.21 - 0.04 * (x - 51.5)).max(0.75)
+            }
+        };
+        // Strides of 2 from 10.5 land either side of the face, at 50.5 and 52.5
+        assert!(!slope_lets_through((10.5, 0.0), (90.0, 0.0), floor));
+        assert!(slope_lets_through_by_strides((10.5, 0.0), (90.0, 0.0), floor), "as the wild nodes were planted (#567)");
+        // Up to the floor is walkable, and so is off the face, down its slope
+        assert!(slope_lets_through((10.5, 0.0), (51.0, 0.0), floor));
+        assert!(slope_lets_through((51.5, 0.0), (90.0, 0.0), floor));
     }
 
     #[test]

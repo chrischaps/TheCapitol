@@ -21,8 +21,10 @@
 //! world's edge, [`MIN_GAP`] past the rural edge ([`Land::from`]), on ground no steeper than `ground::CLIFF_SLOPE`, and on
 //! ground a walker can reach from the rural edge ([`Land::reached`]): by
 //! straight lines the server walks, tested as the Flint client's walk graph
-//! tests them (`ground::slope_lets_through`), so no node stands in a pocket
-//! walled by crests (#347).
+//! tested them before #520 (`ground::slope_lets_through_by_strides`), so no
+//! node stands in a pocket walled by crests (#347). The graph's own test
+//! looks again where the slope kinks, which would re-deal this plan
+//! ([#567](https://github.com/chrischaps/TheCapitol/issues/567)).
 //!
 //! **Quality.** A wild node's base quality is drawn from its spawn row's floor
 //! up to a ceiling that rises with depth and height, by `wilds.toml`'s
@@ -236,9 +238,10 @@ impl<'a> Land<'a> {
     }
 
     /// Whether the slope lets a walker through on the straight line from `a`
-    /// to `b`, as the server's steps would ([`ground::slope_lets_through`]).
+    /// to `b`, as the server's steps would ([`ground::slope_lets_through_by_strides`],
+    /// until the wild nodes are re-planned by the walk graph's test, #567).
     fn climbs(&self, a: (f64, f64), b: (f64, f64)) -> bool {
-        ground::slope_lets_through(a, b, |x, y| self.relief.slope(x, y))
+        ground::slope_lets_through_by_strides(a, b, |x, y| self.relief.slope(x, y))
     }
 
     /// Whether a walker can stand at cell `k`'s centre, for the flood.
