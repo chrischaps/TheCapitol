@@ -964,9 +964,16 @@ pub struct GuildHall {
     /// The `/terrain` lot, `None` for a plot with none
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terrain_id: Option<String>,
+    /// What people call where it stands, "14 Guild Ring by Pilgrims' Road" (#483, #582), as
+    /// `FreeLot.address`; `None` for a plot with no lot
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     pub x: f64,
     pub y: f64,
     pub claimed_at: DateTime<Utc>,
+    /// The tax its treasury pays a week, at the rate now (#582)
+    #[serde(default)]
+    pub weekly_tax: i64,
     /// Tax the treasury couldn't pay. The plot (`GET /plots/{id}`) says
     /// what debt forecloses it.
     #[serde(default, skip_serializing_if = "is_zero_i64")]

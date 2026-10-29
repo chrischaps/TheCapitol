@@ -69,8 +69,9 @@ impl SimBot {
         if let Some((item, ask, _)) = at_the_hall {
             let menu = tool_menu(holdings, item, ask, thrift, false)?;
             return match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {
-                (d, Choice::Buy { item, .. }) => Some(Trade::Buy {
+                (d, Choice::Buy { item, grade, .. }) => Some(Trade::Buy {
                     item,
+                    grade,
                     quantity: 1,
                     price: d.price?,
                 }),
@@ -105,8 +106,9 @@ impl SimBot {
         };
         let menu = tool_menu(holdings, item, worth, thrift, true)?;
         match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {
-            (d, Choice::Bid { item, .. }) => Some(Trade::Bid {
+            (d, Choice::Bid { item, grade, .. }) => Some(Trade::Bid {
                 item,
+                grade,
                 quantity: 1,
                 price: d.price?,
             }),

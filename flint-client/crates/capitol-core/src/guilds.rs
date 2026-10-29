@@ -33,7 +33,7 @@
 use std::collections::VecDeque;
 
 use capitol_protocol::rest::{
-    FoundGuild, GuildDetail, GuildEntry, GuildEntryKind, GuildInvite, GuildInviteKind, GuildMember, GuildSummary,
+    FoundGuild, GuildDetail, GuildEntry, GuildEntryKind, GuildHall, GuildInvite, GuildInviteKind, GuildMember, GuildSummary,
     GuildTreasury, MyGuild, PlayerCard, PlotInfo,
 };
 use capitol_protocol::rules::guild::{self, GuildRole};
@@ -473,13 +473,35 @@ pub fn thousands(n: i64) -> String {
 
 /// How the week's dues are made up: "50, and 5 for each of 6 members,
 /// charged by the hour".
-pub fn dues_words(members: usize) -> String {
-    format!(
+pub fn dues_words(members: usize, hall: Option<&GuildHall>) -> String {
+    let dues = format!(
         "{}, and {} for each of {}, charged by the hour",
         guild::DUES_BASE,
         guild::DUES_PER_MEMBER,
         members_words(members),
-    )
+    );
+    match hall {
+        Some(hall) if hall.weekly_tax > 0 => format!("{dues}, and the hall's {} a week", thousands(hall.weekly_tax)),
+        _ => dues,
+    }
+}
+
+/// Where a guild's hall stands, for the line over its door: its address,
+/// or the district for a plot with none (#582).
+pub fn hall_where(hall: &GuildHall) -> String {
+    match &hall.address {
+        Some(address) => format!("over the door at {address}"),
+        None => "over the door, in the guild district".into(),
+    }
+}
+
+/// A guild's hall's tax, as its members plan for it (#582).
+pub fn hall_tax_words(hall: &GuildHall) -> String {
+    if hall.weekly_tax > 0 {
+        format!("Its tax is {} a week, from the treasury by the hour.", strands_words(hall.weekly_tax))
+    } else {
+        "Its tax comes from the treasury by the hour.".into()
+    }
 }
 
 /// How far the debt has gone toward dissolving the guild, 0 to 1.
@@ -1205,9 +1227,11 @@ mod tests {
         housed.guild.as_mut().unwrap().hall = Some(capitol_protocol::rest::GuildHall {
             plot_id: Uuid::from_u128(40),
             terrain_id: None,
+            address: None,
             x: 0.0,
             y: 0.0,
             claimed_at: when(),
+            weekly_tax: 0,
             tax_owed: 0,
         });
         assert_eq!(hall_offer(&free, Some(&housed), true), Some(HallOffer::HasAHall { guild: name }));
@@ -1309,7 +1333,24 @@ mod tests {
         assert_eq!(possessive("Oak & Iron"), "Oak & Iron's");
         let mut t = treasury(0, 200, 0);
         assert_eq!(t.weekly_dues, 80);
-        assert_eq!(dues_words(6), "50, and 5 for each of 6 members, charged by the hour");
+        assert_eq!(dues_words(6, None), "50, and 5 for each of 6 members, charged by the hour");
+        let mut hall = capitol_protocol::rest::GuildHall {
+            plot_id: Uuid::from_u128(40),
+            terrain_id: Some("guild_3_12".into()),
+            address: Some("3 Guild Ring".into()),
+            x: 0.0,
+            y: 0.0,
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
+            weekly_tax: 1_200,
+            tax_owed: 0,
+        };
+        assert_eq!(dues_words(6, Some(&hall)), "50, and 5 for each of 6 members, charged by the hour, and the hall's 1,200 a week");
+        assert_eq!(hall_where(&hall), "over the door at 3 Guild Ring");
+        assert_eq!(hall_tax_words(&hall), "Its tax is 1,200 Strands a week, from the treasury by the hour.");
+        hall.address = None;
+        hall.weekly_tax = 0;
+        assert_eq!(dues_words(1, Some(&hall)), "50, and 5 for each of 1 member, charged by the hour");
+        assert_eq!(hall_where(&hall), "over the door, in the guild district");
         assert_eq!(debt_words(&t), None);
         t.owed = 80;
         assert!((debt_share(&t) - 0.25).abs() < 1e-6, "a week's dues of four");

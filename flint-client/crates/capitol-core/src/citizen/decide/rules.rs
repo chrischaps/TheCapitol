@@ -18,7 +18,12 @@
 //!   buys smaller lots. A middling citizen ignores the last trade, as C1.1's
 //!   did: the sim showed that weighing it at all sent wood gatherers to the
 //!   hall half as often again, on bids a Strand over a 1-Strand trade;
-//! - **risk** asks above the bid, up to halfway to the ask;
+//! - **risk** asks above the bid, up to halfway to the ask, at the grade
+//!   it sells (#579): a lot of a grade into the bid that takes it, or up
+//!   from its premium toward the ask at that grade;
+//! - **thrift**, again, picks the grade a crafter bids for or buys of its
+//!   main ingredient (#579, [`bid_grade`]): B for the least thrifty, then C,
+//!   then D, and any for the thriftiest;
 //! - **sociability** passes free time at the hall rather than resting;
 //! - **patience**, again, earns a bigger float before a merchant makes a
 //!   market (C1.6): `MERCHANT_FLOAT` times 0.5 to 1.5. One already making a
@@ -114,6 +119,21 @@ const GOAL_STEP: f64 = 0.15;
 const CLEAR: f64 = 0.2;
 /// How far a price's fairness can raise or lower a utility.
 const FAIRNESS: (f64, f64) = (0.0, 1.2);
+/// The best bid for any grade: by grade, F's (#579), since a bid for B
+/// takes none of the loose units a sale for any grade sells; the book's
+/// best, in a log from before.
+fn any_bid(q: &Quote) -> Option<i64> {
+    if q.grades.is_empty() {
+        q.bid
+    } else {
+        q.at("F").and_then(|g| g.bid)
+    }
+}
+
+/// What the grade a citizen asks of its main ingredient is worth over the
+/// other grades its menu offers (#579): enough to choose among them, never
+/// to tip a bid or a buy over gathering it.
+const GRADE_FIT: f64 = 0.01;
 /// How far a whim moves a place's appeal (C2.1).
 const WHIM: f64 = 0.12;
 /// What the road in's next step is worth (#450).
@@ -192,9 +212,14 @@ impl Decider for RulesDecider {
                     let fiber = s.holdings.count(crate::exchange::FIBER);
                     (SURE * fiber as f64 / lot(BANK_FIBER_AT, t.patience), Decision::plain(i))
                 }
-                Choice::Sell { item, price, quantity } => {
+                Choice::Sell {
+                    item,
+                    grade: None,
+                    price,
+                    quantity,
+                } => {
                     let book = quote(s, item);
-                    let bid = book.and_then(|q| q.bid).unwrap_or(price.min);
+                    let bid = book.and_then(any_bid).unwrap_or(price.min);
                     let fair = book.and_then(|q| q.last).map_or(1.0, |last| fairness(bid, last, t.thrift));
                     let held = s.holdings.count(item);
                     // In lots of SELL_AT, or of one tool (K2.1)
@@ -210,26 +235,47 @@ impl Decider for RulesDecider {
                     };
                     (u, d)
                 }
+                Choice::Sell {
+                    item,
+                    grade: Some(grade),
+                    price,
+                    quantity,
+                } => graded_sale(s, i, item, grade, price, quantity),
                 Choice::Keep => (SURE, Decision::plain(i)),
-                Choice::Buy { item, price, quantity } => {
+                Choice::Buy { item, grade, price, quantity } => {
                     let book = quote(s, item);
-                    let ask = book.and_then(|q| q.ask).unwrap_or(price.max);
-                    // Paying over the last trade is unfair to the buyer
-                    let fair = book.and_then(|q| q.last).map_or(1.0, |last| fairness(last, ask, t.thrift));
+                    // A grade's buy pays up to the cheapest ask that meets it,
+                    // its span's top (#579)
+                    let ask = match grade {
+                        Some(_) => price.max,
+                        None => book.and_then(|q| q.ask).unwrap_or(price.max),
+                    };
+                    // Paying over the last trade, or the grade's worth, is
+                    // unfair to the buyer
+                    let paid = match grade {
+                        Some(g) => book.and_then(|q| q.at(g)).and_then(|g| g.worth),
+                        None => book.and_then(|q| q.last),
+                    };
+                    let fair = paid.map_or(1.0, |paid| fairness(paid, ask, t.thrift));
                     let want = (LOT as f64 * (1.5 - t.thrift as f64)).round() as i32;
                     let d = Decision {
                         pick: i,
                         price: Some(price.clamp(ask)),
                         quantity: Some(quantity.clamp(want)),
                     };
-                    (SURE * fair, d)
+                    (SURE * fair + by_grade(s, i, grade.as_deref(), t), d)
                 }
-                Choice::Bid { item, price, quantity } => {
+                Choice::Bid { item, grade, price, quantity } => {
                     // A standing bid at the books' price, a little under it
                     // for the thrifty; they'd sooner gather it themselves.
                     // With no books, the worth the menu was offered at: a
-                    // tool's target before one has traded (K2.1)
-                    let w = worth(s, item).unwrap_or(price.min * 2) as f64;
+                    // tool's target before one has traded (K2.1). A grade's,
+                    // at the grade's worth (#579)
+                    let w = match grade {
+                        Some(g) => quote(s, item).and_then(|q| q.at(g)).and_then(|g| g.worth),
+                        None => worth(s, item),
+                    };
+                    let w = w.unwrap_or(price.min * 2) as f64;
                     let p = (w * (1.15 - 0.3 * t.thrift as f64)).round() as i64;
                     let want = (LOT as f64 * (1.5 - t.thrift as f64)).round() as i32;
                     let d = Decision {
@@ -237,7 +283,7 @@ impl Decider for RulesDecider {
                         price: Some(price.clamp(p.max(1))),
                         quantity: Some(quantity.clamp(want)),
                     };
-                    (0.95 - 0.2 * t.thrift as f64, d)
+                    (0.95 - 0.2 * t.thrift as f64 + by_grade(s, i, grade.as_deref(), t), d)
                 }
                 Choice::Stock { item, price, quantity } => {
                     // A stall's price is the books' and a little more, more
@@ -470,6 +516,65 @@ fn lot(base: i32, patience: f32) -> f64 {
 
 fn quote<'a>(s: &'a Situation, item: &str) -> Option<&'a Quote> {
     s.market.iter().find(|q| q.item == item)
+}
+
+/// A sale of a lot of `grade` (#579): into the bid that takes the grade if
+/// the span holds it, else an ask from the span's floor, the grade's
+/// premium, to stand. A taker of risks asks up toward the cheapest ask at
+/// the grade, or with none, toward the span's top. It's worth what the lot
+/// fetches over a sale for any grade, so a good grade weighs against a
+/// bigger heap of loose units; the thrifty mind selling under the grade's
+/// worth.
+fn graded_sale(s: &Situation, i: usize, item: &str, grade: &str, price: &Span<i64>, quantity: &Span<i32>) -> (f64, Decision) {
+    let t = &s.who.temperament;
+    let book = quote(s, item);
+    let at = book.and_then(|q| q.at(grade));
+    let bid = at.and_then(|g| g.bid).filter(|&b| price.holds(b)).unwrap_or(price.min);
+    let fair = at.and_then(|g| g.worth).map_or(1.0, |w| fairness(bid, w, t.thrift));
+    let any = book.and_then(any_bid).or_else(|| worth(s, item)).unwrap_or(bid).max(1);
+    let value = (bid as f64 / any as f64).max(1.0);
+    let held = quantity.max;
+    let u = SURE * held as f64 / lot(sell_at(item), t.patience) * fair * value;
+    let reach = (t.risk as f64 - 0.5).max(0.0);
+    let ask = at.and_then(|g| g.ask).unwrap_or(price.max).max(bid);
+    let p = bid + ((ask - bid) as f64 * reach) as i64;
+    let d = Decision {
+        pick: i,
+        price: Some(price.clamp(p)),
+        quantity: Some(quantity.clamp(held)),
+    };
+    (u, d)
+}
+
+/// What the grade a citizen asks of its main ingredient is worth over the
+/// other grades on the menu, among its bids or buys of one item by grade
+/// (#579): [`GRADE_FIT`] for [`bid_grade`]'s, nothing for the rest, and
+/// nothing on a menu that offers the item at one grade.
+fn by_grade(s: &Situation, i: usize, grade: Option<&str>, t: &super::Temperament) -> f64 {
+    let kind = |c: &Choice| match c {
+        Choice::Bid { item, .. } => Some((true, item.clone())),
+        Choice::Buy { item, .. } => Some((false, item.clone())),
+        _ => None,
+    };
+    let me = kind(&s.menu[i]);
+    let graded = s.menu.iter().filter(|c| kind(c) == me).count() > 1;
+    if graded && grade == bid_grade(t.thrift) {
+        GRADE_FIT
+    } else {
+        0.0
+    }
+}
+
+/// The grade a citizen asks of its main ingredient (#429, #579), by its
+/// thrift: the least thrifty pay for B, then C, then D; the thriftiest take
+/// any (`None`).
+pub(crate) fn bid_grade(thrift: f32) -> Option<&'static str> {
+    match thrift {
+        t if t < 0.25 => Some("B"),
+        t if t < 0.5 => Some("C"),
+        t if t < 0.75 => Some("D"),
+        _ => None,
+    }
 }
 
 /// How a price looks beside the last trade, as thrift sees it: `got` over
@@ -727,7 +832,7 @@ fn guild(s: &Situation, i: usize, name: &str) -> (f64, Decision) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Held, Place, Span, Temperament, When, Who};
+    use super::super::{GradeQuote, Held, Place, Span, Temperament, When, Who};
     use super::*;
     use crate::sim::{SELL_AT, STALL_AT};
 
@@ -833,6 +938,7 @@ mod tests {
         let menu = vec![
             Choice::Sell {
                 item: "log".into(),
+                grade: None,
                 price: Span::new(bid / 2, bid * 2),
                 quantity: Span::new(1, held),
             },
@@ -845,6 +951,7 @@ mod tests {
             bid: Some(bid),
             ask,
             last,
+            grades: Vec::new(),
         });
         s
     }
@@ -857,6 +964,7 @@ mod tests {
             let menu = vec![
                 Choice::Sell {
                     item: "plank".into(),
+                    grade: None,
                     price: Span::new(5, 10),
                     quantity: Span::new(1, SELL_AT),
                 },
@@ -901,6 +1009,7 @@ mod tests {
         let menu = vec![
             Choice::Buy {
                 item: "log".into(),
+                grade: None,
                 price: Span::new((ask / 2).max(1), ask),
                 quantity: Span::new(1, afford),
             },
@@ -912,6 +1021,7 @@ mod tests {
             bid: None,
             ask: Some(ask),
             last,
+            grades: Vec::new(),
         });
         s
     }
@@ -1044,6 +1154,7 @@ mod tests {
             bid: Some(9),
             ask: Some(11),
             last: Some(10),
+            grades: Vec::new(),
         });
         s
     }
@@ -1105,6 +1216,7 @@ mod tests {
             bid: Some(9),
             ask: Some(11),
             last: Some(10),
+            grades: Vec::new(),
         });
         s
     }
@@ -1129,6 +1241,7 @@ mod tests {
             let menu = vec![
                 Choice::Bid {
                     item: "log".into(),
+                    grade: None,
                     price: Span::new(1, 40),
                     quantity: Span::new(1, 30),
                 },
@@ -1140,6 +1253,7 @@ mod tests {
                 bid: None,
                 ask: None,
                 last: Some(10),
+                grades: Vec::new(),
             });
             s
         };
@@ -1166,6 +1280,7 @@ mod tests {
                 bid: None,
                 ask: None,
                 last: Some(10),
+                grades: Vec::new(),
             });
             s
         };
@@ -1204,6 +1319,7 @@ mod tests {
                 bid: None,
                 ask: None,
                 last: Some(10),
+                grades: Vec::new(),
             });
             s
         };
@@ -1236,6 +1352,7 @@ mod tests {
                 bid: None,
                 ask: None,
                 last: Some(last),
+                grades: Vec::new(),
             });
         }
         s
@@ -1886,5 +2003,112 @@ mod tests {
         let s = buy(9, Some(8), 2 * LOT, with(|t| t.thrift = 0.7));
         let (_, conf) = decide(&s);
         assert!(conf < super::super::RULES_THRESHOLD, "{conf}");
+    }
+
+    /// Ore's book by grade (#579): any ore bid 10 and asked 30, B bid for
+    /// at 18 (which takes A too) and asked 30, and what each grade's worth.
+    fn ore() -> Quote {
+        let g = |grade: &str, bid: i64, ask: Option<i64>, worth: i64| GradeQuote {
+            grade: grade.into(),
+            bid: Some(bid),
+            ask,
+            worth: Some(worth),
+        };
+        Quote {
+            item: "iron_ore".into(),
+            bid: Some(10),
+            ask: Some(30),
+            last: Some(10),
+            grades: vec![
+                g("A", 18, None, 15),
+                g("B", 18, Some(30), 14),
+                g("C", 10, None, 12),
+                g("D", 10, None, 10),
+                g("F", 10, None, 7),
+            ],
+        }
+    }
+
+    fn ore_sale(grade: Option<&str>, price: Span<i64>, most: i32) -> Choice {
+        Choice::Sell {
+            item: "iron_ore".into(),
+            grade: grade.map(String::from),
+            price,
+            quantity: Span::new(1, most),
+        }
+    }
+
+    fn ore_situation(question: Question, menu: Vec<Choice>, t: Temperament) -> Situation {
+        let mut s = situation(question, menu, t);
+        s.holdings.items.insert("iron_ore".into(), 63);
+        s.market.push(ore());
+        s
+    }
+
+    #[test]
+    fn a_grade_sells_at_its_own_price_and_a_taker_of_risks_asks_up_at_it() {
+        // #579: before, the mind chose one price for the item, and a taker
+        // of risks reached above the bid on the bid's grade alone
+        let b = ore_sale(Some("B"), Span::new(9, 36), 30);
+        let a = ore_sale(Some("A"), Span::new(20, 40), 30);
+        let sell_ore = |choice: &Choice, t: Temperament| {
+            let question = Question::Sell { item: "iron_ore".into() };
+            decide(&ore_situation(question, vec![choice.clone(), Choice::Keep], t)).0
+        };
+        let bold = with(|t| t.risk = 1.0);
+        // Into the bid for B, and the bold halfway on to B's ask
+        assert_eq!(sell_ore(&b, Temperament::default()), Decision { pick: 0, price: Some(18), quantity: Some(30) });
+        assert_eq!(sell_ore(&b, bold).price, Some(24));
+        // No bid takes A at its premium: it stands there, and the bold ask
+        // halfway on to the span's top
+        assert_eq!(sell_ore(&a, Temperament::default()).price, Some(20));
+        assert_eq!(sell_ore(&a, bold).price, Some(30));
+        // A lot of B at 18 is worth more than a few A, and than keeping
+        let question = Question::Sell { item: "iron_ore".into() };
+        let few = ore_sale(Some("A"), Span::new(20, 40), 3);
+        let s = ore_situation(question.clone(), vec![few, b, Choice::Keep], Temperament::default());
+        assert_eq!(decide(&s).0.pick, 1);
+        // The thrifty are put off selling a grade under its worth
+        let c = ore_sale(Some("C"), Span::new(5, 24), 20);
+        let mut s = ore_situation(question, vec![c, Choice::Keep], with(|t| t.thrift = 1.0));
+        s.market[0].grades[2].worth = Some(20);
+        assert_eq!(decide(&s).0.pick, 1, "C at 10 against a worth of 20");
+    }
+
+    #[test]
+    fn thrift_picks_the_grade_a_crafter_bids_for_and_buys() {
+        // #429 chose it after the decision, by a fixed rule; #579 made it
+        // the mind's
+        let bid = |grade: Option<&str>| Choice::Bid {
+            item: "iron_ore".into(),
+            grade: grade.map(String::from),
+            price: Span::new(4, 30),
+            quantity: Span::new(1, 10),
+        };
+        let gather = Choice::Gather { item: "iron_ore".into() };
+        let menu = vec![bid(None), bid(Some("B")), bid(Some("C")), bid(Some("D")), gather.clone()];
+        let question = Question::Buy { item: "iron_ore".into() };
+        let thrifty = |thrift: f32| with(|t| t.thrift = thrift);
+        for (thrift, pick) in [(0.1, 1), (0.4, 2), (0.6, 3), (0.74, 3)] {
+            let (d, _) = decide(&ore_situation(question.clone(), menu.clone(), thrifty(thrift)));
+            assert_eq!(d.pick, pick, "thrift {thrift}");
+        }
+        // At the grade's worth, a little over it for the free with money
+        assert_eq!(decide(&ore_situation(question.clone(), menu.clone(), thrifty(0.1))).0.price, Some(16), "B's worth 14, times 1.12");
+        // The thriftiest gather it, as they did
+        assert_eq!(decide(&ore_situation(question.clone(), menu, thrifty(0.9))).0.pick, 4);
+        // A buy of a grade pays the cheapest ask that meets it
+        let buy = |grade: Option<&str>, ask: i64| Choice::Buy {
+            item: "iron_ore".into(),
+            grade: grade.map(String::from),
+            price: Span::new(ask / 2, ask),
+            quantity: Span::new(1, 10),
+        };
+        let menu = vec![buy(None, 30), buy(Some("B"), 30), buy(Some("C"), 22), gather];
+        let (d, _) = decide(&ore_situation(question, menu, thrifty(0.4)));
+        assert_eq!((d.pick, d.price), (2, Some(22)));
+        // A bid alone on its menu is weighed as it always was
+        let alone = situation(Question::Work, vec![bid(Some("B"))], Temperament::default());
+        assert_eq!(by_grade(&alone, 0, Some("B"), &thrifty(0.1)), 0.0);
     }
 }

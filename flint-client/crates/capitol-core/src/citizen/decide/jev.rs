@@ -308,11 +308,13 @@ mod tests {
                 bid: Some(9),
                 ask: Some(14),
                 last: Some(11),
+                grades: Vec::new(),
             }],
             question: Question::Sell { item: "plank".into() },
             menu: vec![
                 Choice::Sell {
                     item: "plank".into(),
+                    grade: None,
                     price: Span::new(9, 40),
                     quantity: Span::new(1, 6),
                 },
@@ -404,6 +406,7 @@ mod tests {
         let mut s = situation();
         s.menu[0] = Choice::Sell {
             item: "plank".into(),
+            grade: None,
             price: Span::new(3, 3),
             quantity: Span::new(1, 6),
         };

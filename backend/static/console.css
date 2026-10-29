@@ -477,6 +477,8 @@ input {
   text-wrap: balance;
 }
 .dek { margin: 0; color: var(--ink-dim); font-size: 14px; }
+.headline.sub { margin-top: 20px; font-size: 15px; font-weight: 600; color: var(--ink-dim); }
+.headline.sub:empty { display: none; }
 .dek:empty { display: none; }
 .chart { margin-top: 14px; min-height: 260px; position: relative; }
 .chart-short { min-height: 160px; }
@@ -637,6 +639,10 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
 .ledger .dim { color: var(--ink-dim); }
 .ledger .up { color: var(--up); }
 .ledger .down { color: var(--down); }
+/* Against headcount (#559): a group at twice its share, or half, stands out */
+.ledger td.against { font-weight: 600; }
+.ledger td.against.far.over { color: var(--down); }
+.ledger td.against.far.under { color: var(--ink-dim); font-style: italic; }
 .ledger tr.off .now { color: var(--accent); font-weight: 600; }
 .ledger tr.off .now::before { content: "◆ "; font-size: 9px; vertical-align: 2px; }
 .ledger code { font: 12px ui-monospace, Consolas, monospace; color: var(--ink-dim); }
@@ -651,6 +657,18 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
 .prices .spark .area { fill: currentColor; opacity: 0.1; stroke: none; }
 @media (max-width: 640px) {
   .prices th:nth-child(n+6), .prices td:nth-child(n+6) { display: none; }
+}
+/* What an hour earns (#560): fiber's row is the peg the rest are read
+   against, each trend in its job's ink */
+#earns td.trend { width: 120px; padding-right: 0; vertical-align: middle; }
+#earns .spark { display: block; width: 120px; height: 22px; }
+#earns .spark .line { fill: none; stroke: currentColor; stroke-width: 1.25; }
+#earns .spark .area { fill: currentColor; opacity: 0.12; stroke: none; }
+#earns tr.peg td { font-weight: 600; }
+#earns td.against.underpaid { color: var(--down); }
+#earns tr.peg td.against { color: var(--ink-dim); font-style: italic; font-weight: 400; }
+@media (max-width: 640px) {
+  #earns th:nth-child(5), #earns td:nth-child(5) { display: none; }
 }
 
 /* The tick's work (D3.1): phases, then the loops beside the tick, each with

@@ -23,6 +23,8 @@
 //! Since D2.2 each sample says how people's and citizens' Strands are spread
 //! ([`Distribution`]): the Gini, the richest tenth's share, and the Strands
 //! each trade holds.
+//! Since #559 each trade's holding counts its escrow, and the same is told
+//! by calling style ([`Distribution::styles`]).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -30,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::annotation::Annotation;
-use crate::ledger::{Crafts, DeedGrants, Ledger, LoadWindow};
+use crate::ledger::{AccountBooks, AccountEscrow, Crafts, DeedGrants, Ledger, LoadWindow};
 use crate::rest::MarketTrade;
 use crate::watch::Watch;
 
@@ -325,8 +327,19 @@ pub const ROLE_CITIZEN: &str = "citizen";
 /// all-rounder. Every other citizen's is its favourite's slug.
 pub const ROLE_ALL_ROUNDER: &str = "all-rounder";
 
+/// A citizen's buckets in a [`Distribution`], from the town's report: its
+/// role (its favourite job's slug, or [`ROLE_ALL_ROUNDER`]) and its calling's
+/// style (`specialist`, `leaner`, `all-rounder`), if the report has one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Buckets {
+    pub role: String,
+    pub style: Option<String>,
+}
+
 /// How the Strands people and citizens hold are spread (D2.2). Admins'
-/// aren't counted, as the Gini watch doesn't count them, nor is escrow.
+/// aren't counted, as the Gini watch doesn't count them. The Gini and the
+/// richest tenth count no escrow; each role's and style's [`Holding`] counts
+/// it beside its balances (#559).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct Distribution {
@@ -344,34 +357,70 @@ pub struct Distribution {
     /// slug, which reads the same), [`ROLE_CITIZEN`] for one it doesn't
     /// name, and [`ROLE_PERSON`] for people
     pub roles: BTreeMap<String, Holding>,
+    /// The same accounts by their calling's style (#559): `specialist`,
+    /// `leaner`, `all-rounder` as the town's report has it, [`ROLE_CITIZEN`]
+    /// for a citizen it names no style for, and [`ROLE_PERSON`] for people.
+    /// A sample stored before it reads with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub styles: BTreeMap<String, Holding>,
 }
 
-/// What the accounts in one role hold.
+/// What the accounts in one role (or style) hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct Holding {
     pub accounts: u64,
+    /// Their balances, without escrow
     pub strands: i64,
+    /// Their Strands in escrow (#559), each account's as the ledger counts
+    /// it (`AccountBooks::escrow`, #553): open bids, commissions and wage
+    /// offers. A sample stored before it reads as none.
+    #[serde(default, skip_serializing_if = "AccountEscrow::is_empty")]
+    pub escrow: AccountEscrow,
+}
+
+impl Holding {
+    /// One more account in it
+    pub fn add(&mut self, account: &AccountBooks) {
+        self.accounts += 1;
+        self.strands += account.strands;
+        self.escrow.add(&account.escrow);
+    }
+
+    /// Its balances with their escrow: what it holds, all told
+    pub fn holding(&self) -> i64 {
+        self.strands + self.escrow.total()
+    }
 }
 
 impl Distribution {
     /// The spread of `ledger`'s Strands over its accounts but `admins`'.
-    /// `role` names a citizen's trade from its name, when the town says.
-    pub fn of<'a>(ledger: &Ledger, admins: &HashSet<Uuid>, role: impl Fn(&str) -> Option<&'a str>) -> Distribution {
+    /// `buckets` names a citizen's trade and style from its name, when the
+    /// town says.
+    pub fn of<'a>(ledger: &Ledger, admins: &HashSet<Uuid>, buckets: impl Fn(&str) -> Option<&'a Buckets>) -> Distribution {
         let mut balances = Vec::with_capacity(ledger.accounts.len());
         let mut roles: BTreeMap<String, Holding> = BTreeMap::new();
+        let mut styles: BTreeMap<String, Holding> = BTreeMap::new();
         for account in ledger.accounts.iter().filter(|a| !admins.contains(&a.player_id)) {
             balances.push(account.strands);
-            let name = if account.citizen { role(&account.name).unwrap_or(ROLE_CITIZEN) } else { ROLE_PERSON };
-            let holding = roles.entry(name.to_string()).or_default();
-            holding.accounts += 1;
-            holding.strands += account.strands;
+            let (role, style) = if account.citizen {
+                let named = buckets(&account.name);
+                (
+                    named.map_or(ROLE_CITIZEN, |b| b.role.as_str()),
+                    named.and_then(|b| b.style.as_deref()).unwrap_or(ROLE_CITIZEN),
+                )
+            } else {
+                (ROLE_PERSON, ROLE_PERSON)
+            };
+            roles.entry(role.to_string()).or_default().add(account);
+            styles.entry(style.to_string()).or_default().add(account);
         }
         Distribution {
             accounts: balances.len() as u64,
             gini: gini(&balances),
             top_tenth: top_tenth_share(&balances),
             roles,
+            styles,
         }
     }
 }
@@ -643,6 +692,12 @@ pub struct CitizenReport {
     /// `detour`, `road_in`, and `free` for time with nothing to do
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub time: BTreeMap<String, f64>,
+    /// Strands its work brought in on each activity since the town started,
+    /// less the inputs bought for it (#560), by the activity's slug as
+    /// `time` keys it: sales of the job's goods, wages and commissions
+    /// delivered in it, and for fiber, deposits
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub earned: BTreeMap<String, i64>,
 }
 
 /// A citizen's calling, briefly (Callings K3.3): what the console's roster
@@ -849,6 +904,40 @@ pub struct TownSummary {
     pub layers: BTreeMap<String, LayerReport>,
     /// Failures over the window
     pub failed: u64,
+    /// Each activity's work time and earnings, every citizen's together,
+    /// since the town started, as the newest report has them (#560): by
+    /// the activity's slug. Totals, so a range's are its ends' difference,
+    /// while the run's [`started_ms`](Self::started_ms) holds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub earning: BTreeMap<String, Earning>,
+}
+
+/// One activity's time and earnings, every citizen's together (#560).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Earning {
+    /// Game hours on it
+    pub hours: f64,
+    /// Strands it brought in, less the inputs bought for it
+    pub strands: i64,
+}
+
+impl TownReport {
+    /// Its citizens' time and earnings by activity, all together (#560):
+    /// an activity with neither is left out.
+    pub fn earning(&self) -> BTreeMap<String, Earning> {
+        let mut by: BTreeMap<String, Earning> = BTreeMap::new();
+        for c in &self.citizens {
+            for (activity, hours) in &c.time {
+                by.entry(activity.clone()).or_default().hours += hours;
+            }
+            for (activity, strands) in &c.earned {
+                by.entry(activity.clone()).or_default().strands += strands;
+            }
+        }
+        by.retain(|_, e| e.hours > 0.0 || e.strands != 0);
+        by
+    }
 }
 
 impl TownSummary {
@@ -858,6 +947,7 @@ impl TownSummary {
         self.started_ms = report.started_ms;
         self.reports += 1;
         self.standing = report.standing();
+        self.earning = report.earning();
         for (by, n) in &report.rulings {
             *self.rulings.entry(by.clone()).or_insert(0) += n;
         }
@@ -873,6 +963,7 @@ impl TownSummary {
         self.started_ms = later.started_ms;
         self.reports += later.reports;
         self.standing = later.standing.clone();
+        self.earning = later.earning.clone();
         for (by, n) in &later.rulings {
             *self.rulings.entry(by.clone()).or_insert(0) += n;
         }
@@ -1072,18 +1163,74 @@ mod tests {
         accounts[1].name = "Bram".into();
         let books = ledger(10_000, accounts, 500, &[], &[]);
         let admins = HashSet::from([Uuid::from_u128(5)]);
-        let trades = BTreeMap::from([("Ada", "merchant"), ("Bram", "gatherer-wood")]);
-        let d = Distribution::of(&books, &admins, |name| trades.get(name).copied());
+        let trades = BTreeMap::from([("Ada", bucket("merchant", None)), ("Bram", bucket("gatherer-wood", None))]);
+        let d = Distribution::of(&books, &admins, |name| trades.get(name));
         assert_eq!(d.accounts, 4);
         assert_eq!(d.gini, gini(&[300, 100, 50, 20]));
         assert_eq!(d.top_tenth, Some(300.0 / 470.0));
         let held = |role: &str| d.roles[role];
-        assert_eq!(held("merchant"), Holding { accounts: 1, strands: 300 });
-        assert_eq!(held("gatherer-wood"), Holding { accounts: 1, strands: 100 });
+        assert_eq!(held("merchant"), Holding { accounts: 1, strands: 300, escrow: none() });
+        assert_eq!(held("gatherer-wood"), Holding { accounts: 1, strands: 100, escrow: none() });
         // A citizen the town doesn't name, and a person
-        assert_eq!(held(ROLE_CITIZEN), Holding { accounts: 1, strands: 50 });
-        assert_eq!(held(ROLE_PERSON), Holding { accounts: 1, strands: 20 });
+        assert_eq!(held(ROLE_CITIZEN), Holding { accounts: 1, strands: 50, escrow: none() });
+        assert_eq!(held(ROLE_PERSON), Holding { accounts: 1, strands: 20, escrow: none() });
         assert_eq!(d.roles.len(), 4, "admins have no role");
+    }
+
+    fn bucket(role: &str, style: Option<&str>) -> Buckets {
+        Buckets { role: role.into(), style: style.map(Into::into) }
+    }
+
+    fn none() -> AccountEscrow {
+        AccountEscrow::default()
+    }
+
+    /// #559: each role's and style's escrow is its own accounts' added up,
+    /// beside their balances, and the Gini still counts balances alone
+    #[test]
+    fn each_bucket_counts_its_own_escrow() {
+        let escrow = |bids, commissions, wages| AccountEscrow { bids, commissions, wages };
+        let mut accounts = vec![
+            account(1, true, 300, &[]),
+            account(2, true, 100, &[]),
+            account(3, true, 40, &[]),
+            account(4, true, 50, &[]),
+            account(5, false, 20, &[]),
+            account(6, false, 9000, &[]),
+        ];
+        for (a, name) in accounts.iter_mut().zip(["Ada", "Bram", "Cy", "Dot"]) {
+            a.name = name.into();
+        }
+        accounts[0].escrow = escrow(120, 0, 0);
+        accounts[1].escrow = escrow(30, 25, 0);
+        accounts[2].escrow = escrow(10, 0, 5);
+        accounts[4].escrow = escrow(0, 0, 8);
+        accounts[5].escrow = escrow(500, 0, 0);
+        let books = ledger(10_000, accounts, 698, &[], &[]);
+        let admins = HashSet::from([Uuid::from_u128(6)]);
+        let named = BTreeMap::from([
+            ("Ada", bucket("merchant", Some("specialist"))),
+            ("Bram", bucket("gatherer-wood", Some("leaner"))),
+            // A town before callings names a trade and no style
+            ("Cy", bucket("gatherer-wood", None)),
+        ]);
+        let d = Distribution::of(&books, &admins, |name| named.get(name));
+        assert_eq!(d.gini, gini(&[300, 100, 40, 50, 20]), "escrow isn't in the Gini");
+        assert_eq!(d.roles["merchant"], Holding { accounts: 1, strands: 300, escrow: escrow(120, 0, 0) });
+        assert_eq!(d.roles["gatherer-wood"], Holding { accounts: 2, strands: 140, escrow: escrow(40, 25, 5) });
+        assert_eq!(d.roles["gatherer-wood"].holding(), 210);
+        assert_eq!(d.roles[ROLE_CITIZEN], Holding { accounts: 1, strands: 50, escrow: none() });
+        assert_eq!(d.roles[ROLE_PERSON], Holding { accounts: 1, strands: 20, escrow: escrow(0, 0, 8) });
+        assert_eq!(d.styles["specialist"], Holding { accounts: 1, strands: 300, escrow: escrow(120, 0, 0) });
+        assert_eq!(d.styles["leaner"], Holding { accounts: 1, strands: 100, escrow: escrow(30, 25, 0) });
+        // Cy has no style, Dot no name: both are citizens the town names no style for
+        assert_eq!(d.styles[ROLE_CITIZEN], Holding { accounts: 2, strands: 90, escrow: escrow(10, 0, 5) });
+        assert_eq!(d.styles[ROLE_PERSON], d.roles[ROLE_PERSON]);
+        // Both splits hold the same accounts, and the admin's escrow is in neither
+        for split in [&d.roles, &d.styles] {
+            assert_eq!(split.values().map(|h| h.accounts).sum::<u64>(), d.accounts);
+            assert_eq!(split.values().map(Holding::holding).sum::<i64>(), 510 + 198);
+        }
     }
 
     #[test]
@@ -1146,6 +1293,71 @@ mod tests {
         a.add(&first, 100);
         b.add(&second, 105);
         assert_eq!(a.then(&b), summary);
+    }
+
+    /// The summary keeps the newest report's earnings by job, every
+    /// citizen's added together: totals since the town started, so a range
+    /// is its ends' difference. An old sample without them reads as none.
+    #[test]
+    fn a_summary_keeps_the_towns_earnings_by_job() {
+        let citizen = |name: &str, time: &[(&str, f64)], earned: &[(&str, i64)]| CitizenReport {
+            name: name.into(),
+            time: time.iter().map(|(a, h)| (a.to_string(), *h)).collect(),
+            earned: earned.iter().map(|(a, s)| (a.to_string(), *s)).collect(),
+            ..CitizenReport::default()
+        };
+        let first = TownReport {
+            started_ms: 7,
+            citizens: vec![
+                citizen("Ada", &[("fiber", 2.0), ("free", 1.0)], &[("fiber", 300)]),
+                citizen("Bo", &[("planks", 1.5)], &[("planks", -40)]),
+            ],
+            ..TownReport::default()
+        };
+        let second = TownReport {
+            citizens: vec![
+                citizen("Ada", &[("fiber", 3.0), ("free", 1.0)], &[("fiber", 450)]),
+                citizen("Bo", &[("planks", 2.5), ("fiber", 0.5)], &[("planks", 60), ("fiber", 70)]),
+                // Earnings with no time yet: a stall's sale on its way in
+                citizen("Cy", &[], &[("tools", 25)]),
+            ],
+            ..first.clone()
+        };
+        let earning = |hours, strands| Earning { hours, strands };
+        assert_eq!(
+            first.earning(),
+            BTreeMap::from([
+                ("fiber".to_string(), earning(2.0, 300)),
+                ("free".to_string(), earning(1.0, 0)),
+                ("planks".to_string(), earning(1.5, -40)),
+            ])
+        );
+        let mut summary = TownSummary::default();
+        summary.add(&first, 100);
+        summary.add(&second, 105);
+        assert_eq!(
+            summary.earning,
+            BTreeMap::from([
+                ("fiber".to_string(), earning(3.5, 520)),
+                ("free".to_string(), earning(1.0, 0)),
+                ("planks".to_string(), earning(2.5, 60)),
+                ("tools".to_string(), earning(0.0, 25)),
+            ]),
+            "the newest report's, not the two added"
+        );
+        let (mut a, mut b) = (TownSummary::default(), TownSummary::default());
+        a.add(&first, 100);
+        b.add(&second, 105);
+        assert_eq!(a.then(&b).earning, summary.earning);
+
+        // On the wire it's beside the rest, and an old sample has none
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["earning"]["fiber"], serde_json::json!({"hours": 3.5, "strands": 520}));
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("earning");
+        assert!(serde_json::from_value::<TownSummary>(old).unwrap().earning.is_empty());
+        let old_citizen = serde_json::json!({"name": "Ada", "role": "all-rounder", "standing": "away", "activity": "", "restarts": 0});
+        assert!(serde_json::from_value::<CitizenReport>(old_citizen).unwrap().earned.is_empty());
     }
 
     #[test]

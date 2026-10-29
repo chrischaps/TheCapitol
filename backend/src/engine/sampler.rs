@@ -17,7 +17,9 @@
 //!
 //! Since D2.2 each sample says how people's and citizens' Strands are spread
 //! (`Distribution`), by the trades the town's newest report names: since
-//! Callings K3.3, each citizen's favourite job, or `all-rounder`.
+//! Callings K3.3, each citizen's favourite job, or `all-rounder`. Since #559
+//! by its calling's style too, and each bucket counts its accounts' escrow,
+//! as the ledger has it per account (#553).
 //!
 //! Since D2.3 each sample carries the market's books as it was taken: the
 //! units resting on each side of each item and the best price either side.
@@ -188,8 +190,8 @@ async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSe
         capacity: super::tick::GameState::EVENT_CAPACITY as u64,
     };
     drop(game);
-    let roles = state.town.roles();
-    sample.distribution = Some(Distribution::of(&now, &admins, |name| roles.get(name).map(String::as_str)));
+    let buckets = state.town.buckets();
+    sample.distribution = Some(Distribution::of(&now, &admins, |name| buckets.get(name)));
     // Last, once nothing can fail: a missed sample leaves the town's reports
     // for the next
     sample.town = state.town.take_sample();

@@ -890,6 +890,7 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
     });
     if let Some(mut run) = Balance::of(&report, &label, knobs, &targets(&catalog)) {
         run.day_offset_ms = day_offset(&server);
+        run.earning = town.earning();
         let path = md.with_extension("balance.json");
         let json = capitol_core::serde_json::to_string_pretty(&run).map_err(|e| format!("writing the balance: {e}"))?;
         std::fs::write(&path, json).map_err(|e| format!("writing {}: {e}", path.display()))?;

@@ -88,7 +88,7 @@ pub async fn get_guild(
     Extension(auth_user): Extension<AuthUser>,
 ) -> Result<Json<MyGuild>, AppError> {
     let player = super::players::player_of(&state.db, auth_user.account_id).await?;
-    crate::engine::guilds::mine(&state.db, player)
+    crate::engine::guilds::mine(&state.db, player, &super::guilds::lots(&state).await)
         .await
         .map(Json)
         .map_err(|e| AppError::Internal(e.message()))

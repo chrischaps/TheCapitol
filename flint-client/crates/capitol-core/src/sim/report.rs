@@ -61,6 +61,8 @@ pub enum Entry {
     },
     /// An order's listing fee.
     Fee { strands: i64 },
+    /// Someone bought `quantity` of `item` at its stall, for `paid` (#560).
+    StallSold { item: String, quantity: i64, paid: i64 },
     /// A trade in a trade window went through (C1.5, #295): with a citizen
     /// or a person, whether this bot asked for it, and the Strands that
     /// came in (less than nothing when it paid).
@@ -173,9 +175,8 @@ impl BotRun {
     /// What the hourly tax took: whatever the balance lost that the bot's own
     /// deposits, deeds and trades don't explain. A sim bot ends with no order
     /// open, so no Strands sit in escrow. A citizen doesn't: its standing
-    /// orders rest in escrow, their fills and its stall's sales reach the
-    /// balance with no [`Entry::Traded`], and bazaar rent has no entry at
-    /// all. So a town reads its tax from the server's books instead (#334).
+    /// orders rest in escrow, and bazaar rent has no entry at all. So a town
+    /// reads its tax from the server's books instead (#334).
     pub fn tax(&self) -> i64 {
         let mut expected = self.strands_start;
         for entry in &self.entries {
@@ -189,6 +190,7 @@ impl BotRun {
                     expected += if *sold { value } else { -value };
                 }
                 Entry::Fee { strands } => expected -= strands,
+                Entry::StallSold { paid, .. } => expected += paid,
                 Entry::Dealt { strands, .. } => expected += strands,
                 Entry::Posted {
                     quantity, price, fee, ..
@@ -462,6 +464,48 @@ pub fn days(entries: &[Entry]) -> BTreeMap<i64, DayTime> {
     days
 }
 
+/// The Strands `entries` brought in to each job, less the inputs bought for
+/// it (#560): what an hour of the job added, for the console's *What an
+/// hour earns*.
+///
+/// - A deposit is fiber's.
+/// - A sale, at the market or a stall, a commission's pay and a wage are
+///   the job of the item that went (`of_item`), or `job`'s when it's no
+///   job's product. On a trading stint a sale and a delivery are trading's:
+///   it's selling what it bought.
+/// - A buy, and a trade in a trade window, are `job`'s: the job of the
+///   moment, which they were inputs for.
+///
+/// Fees, rent, deeds, dues, commissions posted and wages paid are left out:
+/// they aren't the work's inputs, so a job's earnings leave them to the
+/// books. A standing order's fill lands on the job of the moment, not the
+/// one it was placed for, and a hire's wages aren't an input yet (#599).
+pub fn earned(entries: &[Entry], of_item: impl Fn(&str) -> Option<Activity>, job: Activity) -> BTreeMap<Activity, i64> {
+    let made = |item: &str| if job == Activity::Trading { job } else { of_item(item).unwrap_or(job) };
+    let mut earned: BTreeMap<Activity, i64> = BTreeMap::new();
+    for entry in entries {
+        let (activity, strands) = match entry {
+            Entry::Deposited { strands, .. } => (Activity::Fiber, *strands),
+            Entry::Traded {
+                item,
+                sold: true,
+                quantity,
+                price,
+                ..
+            } => (made(item), price * *quantity as i64),
+            Entry::Traded {
+                sold: false, quantity, price, ..
+            } => (job, -(price * *quantity as i64)),
+            Entry::StallSold { item, paid, .. } | Entry::Delivered { item, paid, .. } => (made(item), *paid),
+            Entry::Earned { item, paid, .. } => (of_item(item).unwrap_or(job), *paid),
+            Entry::Dealt { strands, .. } => (job, *strands),
+            _ => continue,
+        };
+        *earned.entry(activity).or_insert(0) += strands;
+    }
+    earned
+}
+
 /// How many things a bot did on one day it worked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DayCount {
@@ -723,8 +767,9 @@ impl Report {
                     Entry::Traded { .. } => {}
                     Entry::Fee { strands } => fees += strands,
                     // The swarm trades only at the hall; a town's report
-                    // counts trades in person
-                    Entry::Dealt { .. } | Entry::Asking { .. } => {}
+                    // counts trades in person, and the bazaar's are the
+                    // server's books'
+                    Entry::Dealt { .. } | Entry::Asking { .. } | Entry::StallSold { .. } => {}
                     // The board's, counted by the court
                     Entry::Posted { .. }
                     | Entry::Promised { .. }
@@ -1542,6 +1587,83 @@ mod tests {
         assert!(md.contains("126 put in by these posters, 72 paid out"), "{md}");
         // A run with nothing on the board says nothing of it
         assert!(!Report::build(&[], 1.0, 1.0, 60.0).sections().contains("hall's board"));
+    }
+
+    /// #560: what each job brought in, less the inputs bought for it.
+    /// Deposits are fiber's; a sale, a stall's, a delivery and a wage go to
+    /// the item's job; a buy and a deal to the job of the moment; on a
+    /// trading stint the sales are trading's too. Fees and the like are
+    /// left to the books.
+    #[test]
+    fn earnings_go_to_the_job_that_made_them() {
+        let of_item = |item: &str| match item {
+            "plank" => Some(Activity::Planks),
+            "log" => Some(Activity::Wood),
+            "stone_axe" => Some(Activity::Tools),
+            _ => None,
+        };
+        let traded = |item: &str, sold, quantity, price| Entry::Traded {
+            item: item.into(),
+            sold,
+            quantity,
+            price,
+            at: 0.0,
+        };
+        let entries = vec![
+            Entry::Deposited { fiber: 40, strands: 40 },
+            traded("plank", true, 3, 12),
+            traded("log", false, 5, 4),
+            traded("stone", true, 2, 3),
+            Entry::StallSold {
+                item: "stone_axe".into(),
+                quantity: 1,
+                paid: 30,
+            },
+            Entry::Delivered {
+                item: "log".into(),
+                quantity: 2,
+                paid: 14,
+                filled: false,
+            },
+            Entry::Earned {
+                item: "plank".into(),
+                units: 2,
+                paid: 6,
+            },
+            Entry::Dealt {
+                citizen: true,
+                asked: false,
+                strands: -9,
+                at: 0.0,
+            },
+            Entry::Fee { strands: 2 },
+            Entry::Claimed { cost: 250 },
+            Entry::PaidIn {
+                guild: "Sawyers".into(),
+                strands: 10,
+            },
+        ];
+        let planks = earned(&entries, of_item, Activity::Planks);
+        assert_eq!(
+            planks,
+            BTreeMap::from([
+                (Activity::Fiber, 40),
+                // 36 for planks sold, 6 in wages, less 20 of logs bought, 9 dealt away and 6 of stone sold
+                (Activity::Planks, 36 + 6 - 20 - 9 + 6),
+                (Activity::Wood, 14),
+                (Activity::Tools, 30),
+            ])
+        );
+        // On a trading stint, what it sells is trading's; a wage is still the work's
+        let trading = earned(&entries, of_item, Activity::Trading);
+        assert_eq!(
+            trading,
+            BTreeMap::from([(Activity::Fiber, 40), (Activity::Trading, 36 - 20 + 6 + 30 + 14 - 9), (Activity::Planks, 6)])
+        );
+        // Every Strand that came or went on the work is in one job or another
+        let total = |e: &BTreeMap<Activity, i64>| e.values().sum::<i64>();
+        assert_eq!(total(&planks), total(&trading));
+        assert!(earned(&[Entry::Fee { strands: 5 }], of_item, Activity::Wood).is_empty());
     }
 
     #[test]

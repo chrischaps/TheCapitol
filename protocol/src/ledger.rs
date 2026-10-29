@@ -179,6 +179,13 @@ impl AccountEscrow {
     pub fn is_empty(&self) -> bool {
         *self == AccountEscrow::default()
     }
+
+    /// `other`'s added to it, each by what holds it
+    pub fn add(&mut self, other: &AccountEscrow) {
+        self.bids += other.bids;
+        self.commissions += other.commissions;
+        self.wages += other.wages;
+    }
 }
 
 /// How hard the server is working, as running totals since it started:

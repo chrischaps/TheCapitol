@@ -22,14 +22,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use capitol_protocol::ledger::{Ledger, StrandFlow, TRANSACTION_TYPES};
-use capitol_protocol::metrics::{gini, top_tenth_share};
+use capitol_protocol::metrics::{gini, top_tenth_share, Earning};
 use capitol_protocol::tunables::{Knob, TunableError, TunablesResponse, TunablesUpdate, Unit};
 use serde::{Deserialize, Serialize};
 
 use super::measures::{self, CitizenCalling};
 use super::report::TownReport;
 use crate::sim::report::ActivityTime;
-use crate::sim::ROLES;
+use crate::sim::{Activity, ROLES};
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -174,6 +174,11 @@ pub struct Balance {
     /// a file from before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callings: Vec<CitizenCalling>,
+    /// Each job's work time and what it earned, every citizen's together,
+    /// by the activity's slug (#560): for what an hour of each earns
+    /// against fiber's. Empty in a file from before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub earning: BTreeMap<String, Earning>,
 }
 
 /// A trade's Strands, all its citizens together.
@@ -302,6 +307,7 @@ impl Balance {
             commissions_paid: Some(report.sim.court.paid),
             wages_paid: Some(report.sim.wages.earned),
             callings: if report.citizens.iter().any(|c| c.calling.is_some()) { report.callings() } else { Vec::new() },
+            earning: BTreeMap::new(),
         })
     }
 
@@ -470,12 +476,58 @@ pub fn compare(a: &Balance, b: &Balance) -> String {
     trades_md(&mut md, a, b);
     spread_md(&mut md, a, b);
     money_md(&mut md, a, b);
+    earning_md(&mut md, a, b);
     flows_md(&mut md, a, b);
     prices_md(&mut md, a, b);
     time_md(&mut md, a, b);
     steps_md(&mut md, a, b);
     measures::callings_md(&mut md, &[("A", &a.callings), ("B", &b.callings)]);
     md
+}
+
+/// A job under this share of fiber's Strands a work-hour is underpaid
+/// against the peg (#560), as the console's *What an hour earns* has it
+pub const UNDERPAID: f64 = 0.6;
+
+/// Under three game minutes is too little time to judge a rate by.
+const FEW_HOURS: f64 = 0.05;
+
+/// What an hour earns (#560): each job's Strands a work-hour in each run,
+/// less the inputs bought for it, against fiber's at its peg.
+fn earning_md(md: &mut String, a: &Balance, b: &Balance) {
+    let _ = writeln!(md, "## What an hour earns\n");
+    if a.earning.is_empty() && b.earning.is_empty() {
+        let _ = writeln!(md, "Neither run kept what each job earned: both are from before it was kept (#560).\n");
+        return;
+    }
+    let rate = |run: &Balance, job: Activity| run.earning.get(job.slug()).filter(|e| e.hours >= FEW_HOURS).map(|e| e.strands as f64 / e.hours);
+    let cell = |run: &Balance, job: Activity| {
+        let Some(r) = rate(run, job) else {
+            return ("—".to_string(), "—".to_string());
+        };
+        let against = match rate(run, Activity::Fiber) {
+            _ if job == Activity::Fiber => "the peg".to_string(),
+            Some(f) if f > 0.0 => format!("{:.0}%{}", r / f * 100.0, if r < UNDERPAID * f { " ⚠" } else { "" }),
+            _ => "—".to_string(),
+        };
+        (format!("{r:.1}"), against)
+    };
+    let _ = writeln!(
+        md,
+        "Strands each job's work brought in a game hour of it, less the inputs bought for it: sales of its goods, wages and commissions delivered in it, and for fiber, deposits. Against fiber is its share of fiber's rate; ⚠ marks one under {:.0}%, underpaid against the peg. Citizens only.\n",
+        UNDERPAID * 100.0
+    );
+    let _ = writeln!(md, "| Job | A a work-hour | A against fiber | A hours | B a work-hour | B against fiber | B hours |");
+    let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|");
+    let hours = |run: &Balance, job: Activity| run.earning.get(job.slug()).map_or("—".to_string(), |e| format!("{:.1}", e.hours));
+    for job in Activity::JOBS {
+        if !a.earning.contains_key(job.slug()) && !b.earning.contains_key(job.slug()) {
+            continue;
+        }
+        let ((ra, fa), (rb, fb)) = (cell(a, job), cell(b, job));
+        let _ = writeln!(md, "| {} | {ra} | {fa} | {} | {rb} | {fb} | {} |", job.title(), hours(a, job), hours(b, job));
+    }
+    md.push('\n');
 }
 
 /// The money moving (Callings §10): the faucet a citizen-hour, what changed
@@ -921,6 +973,7 @@ mod tests {
             commissions_paid: None,
             wages_paid: None,
             callings: Vec::new(),
+            earning: BTreeMap::new(),
         }
     }
 
@@ -1051,9 +1104,35 @@ mod tests {
 
     #[test]
     fn a_balance_round_trips_as_json() {
-        let a = run("a", 0.2, 10);
+        let mut a = run("a", 0.2, 10);
+        a.earning.insert("fiber".into(), Earning { hours: 4.0, strands: 160 });
         let json = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Balance>(&json).unwrap(), a);
+    }
+
+    /// #560: each job's Strands a work-hour in each run against fiber's,
+    /// one under 60% of it marked; a run from before has none.
+    #[test]
+    fn a_comparison_says_what_an_hour_of_each_job_earns() {
+        let earning = |hours, strands| Earning { hours, strands };
+        let a = run("before.toml", 0.02, 1);
+        let mut b = run("after.toml", 0.02, 1);
+        assert!(compare(&a, &b).contains("Neither run kept what each job earned"));
+        b.earning = BTreeMap::from([
+            ("fiber".to_string(), earning(4.0, 160)),
+            ("planks".to_string(), earning(2.0, 60)),
+            ("tools".to_string(), earning(1.0, 10)),
+            // Too little time to judge
+            ("building".to_string(), earning(0.01, 5)),
+            ("free".to_string(), earning(3.0, 0)),
+        ]);
+        let md = compare(&a, &b);
+        assert!(md.contains("## What an hour earns"), "{md}");
+        assert!(md.contains("| Fiber | — | — | — | 40.0 | the peg | 4.0 |"), "{md}");
+        assert!(md.contains("| Planks | — | — | — | 30.0 | 75% | 2.0 |"), "{md}");
+        assert!(md.contains("| Tools | — | — | — | 10.0 | 25% ⚠ | 1.0 |"), "under 60%: {md}");
+        assert!(md.contains("| Building | — | — | — | — | — | 0.0 |"), "{md}");
+        assert!(!md.contains("| Free |"), "only the jobs: {md}");
     }
 
     /// Before Callings K3.3 a balance named its trades as `gatherer
