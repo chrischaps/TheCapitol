@@ -348,8 +348,9 @@ fn a_load_from_before_the_phases_still_reads() {
     let gathers = &window.phases["gathers"];
     assert_eq!(gathers.runs, 1180);
     assert!((gathers.mean_ms - 5.0).abs() < 1e-9);
-    assert_eq!(gathers.p95_ms, Some(20.0));
-    assert_eq!(window.loops["market"].p95_ms, Some(20.0));
+    // The 1121st of 1180 is the 1st of the 50 in 19 to 20 ms (#409)
+    assert_eq!(gathers.p95_ms, Some(19.02));
+    assert_eq!(window.loops["market"].p95_ms, Some(19.8));
 }
 
 #[test]

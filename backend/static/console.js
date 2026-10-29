@@ -2698,7 +2698,7 @@
 
   /** Events every reader of the bus missed over a sample's window */
   const missed = (l) => Object.values(l.events_lagged ?? {}).reduce((a, n) => a + n, 0);
-  /** A percentile's bucket bound: null is past the last of them */
+  /** A percentile, read inside its bucket (#409): null is past the last of them */
   const bound = (v) => (v == null || v === Infinity ? `over ${ms(1000)}` : ms(v));
   const say = (name, words = WORK) => words[name]?.say ?? item(name);
 

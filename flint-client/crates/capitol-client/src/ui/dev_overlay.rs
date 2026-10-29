@@ -270,7 +270,7 @@ fn server_parts(ui: &mut egui::Ui, server: &Server) {
                 .map(|(name, p)| format!("{name} · {:.2} ms", p.secs * 1000.0 / load.ticks.max(1) as f64));
             let p95 = load
                 .tick_p95_ms
-                .map_or_else(|| "past the last bucket".to_owned(), |ms| format!("under {ms} ms"));
+                .map_or_else(|| "past the last bucket".to_owned(), |ms| format!("{ms:.2} ms"));
             let mut rows = vec![("p95", p95)];
             if let Some(busiest) = busiest {
                 rows.push(("Busiest phase", busiest));
