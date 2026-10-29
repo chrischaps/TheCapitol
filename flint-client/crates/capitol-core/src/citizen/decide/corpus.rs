@@ -83,6 +83,7 @@ fn round(r: u32) -> Vec<Situation> {
                 bid: last.map(|l: i64| l - 1),
                 ask: last.map(|l: i64| l + 2),
                 last,
+                grades: Vec::new(),
             };
             let market: Vec<Quote> = ["log", "plank", "iron_ore", "iron_ingot", "brick", "stone"].iter().map(|i| quote(i)).collect();
             let s = |question, menu: Vec<Choice>, carry_on| Situation {

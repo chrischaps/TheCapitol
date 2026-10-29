@@ -193,6 +193,37 @@ pub struct Quote {
     pub ask: Option<i64>,
     /// The last trade's price.
     pub last: Option<i64>,
+    /// The book split by grade (#579), best first: a good's, never a
+    /// tool's, which the book prices by its wear. Empty in a log from
+    /// before #579.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grades: Vec<GradeQuote>,
+}
+
+impl Quote {
+    /// Its quote at `grade`, if it has one.
+    pub fn at(&self, grade: &str) -> Option<&GradeQuote> {
+        self.grades.iter().find(|g| g.grade == grade)
+    }
+}
+
+/// One grade of a good's book as the citizen sees it (#579).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradeQuote {
+    /// `A` to `F`
+    pub grade: String,
+    /// The best bid that takes a lot of the grade: one for it, or for a
+    /// lower grade or any ([`grade::taker`](crate::sim::grade::taker)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bid: Option<i64>,
+    /// The cheapest ask at the grade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<i64>,
+    /// What a unit of the grade is worth by the books: the good's worth
+    /// carried to the grade's middle by what quality makes
+    /// ([`grade::carried`](crate::sim::grade::carried)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worth: Option<i64>,
 }
 
 /// Units of one item, in a P2P offer.
@@ -412,22 +443,32 @@ pub enum Choice {
     /// Take the fiber to the exchange for Strands.
     Bank,
     /// Put `item` up for sale at the hall. Needs a price and a quantity.
+    /// `grade` names the units (#579): a lot of that grade alone, its best
+    /// first, which stands as an ask if no bid takes it at the price; `None`,
+    /// the lowest it holds, whatever their grade, into a bid for any.
     Sell {
         item: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grade: Option<String>,
         price: Span<i64>,
         quantity: Span<i32>,
     },
-    /// Bid for `item` at the hall. Needs a price and a quantity.
+    /// Bid for `item` at the hall. Needs a price and a quantity. `grade` is
+    /// the least it takes (#579); `None`, any.
     Buy {
         item: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grade: Option<String>,
         price: Span<i64>,
         quantity: Span<i32>,
     },
     /// Leave a standing bid for `item` at the hall, which anyone may sell
     /// into while the citizen works (C1.5's demand). Needs a price and a
-    /// quantity.
+    /// quantity. `grade` is the least it takes (#579); `None`, any.
     Bid {
         item: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grade: Option<String>,
         price: Span<i64>,
         quantity: Span<i32>,
     },
@@ -1522,6 +1563,7 @@ mod tests {
         let mut s = situation(1);
         s.menu.push(Choice::Sell {
             item: "log".into(),
+            grade: None,
             price: Span::new(5, 20),
             quantity: Span::new(1, 30),
         });
@@ -1729,6 +1771,7 @@ mod tests {
         s.question = Question::Sell { item: "log".into() };
         s.menu.push(Choice::Sell {
             item: "log".into(),
+            grade: None,
             price: Span::new(5, 20),
             quantity: Span::new(1, 30),
         });

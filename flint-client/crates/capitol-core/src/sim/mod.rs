@@ -57,10 +57,12 @@ pub use activity::Activity;
 use plan::{Goal, Holdings, Step, FLOAT, FLOOR};
 
 use capitol_protocol::rules::court;
+use capitol_protocol::rules::stacking::Units;
 
 use crate::catalog::Catalog;
 use crate::citizen::calling::Calling;
 use crate::citizen::decide::{Choice, Span};
+use crate::market::Book;
 use wage::{Hire, Job};
 
 /// An entry on a citizen's work menu: the goal it's for (none for banking)
@@ -218,13 +220,17 @@ pub struct Behind {
 /// A trade a bot makes instead of the planner's step, as its mind decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trade {
-    /// An ask at the hall. Into a bid, it waits a moment for the fill and
-    /// takes down what's left; one that `stands` opens an empty book (#501)
-    /// and is left there until it fills or stands a game hour.
-    Sell { item: String, quantity: i32, price: i64, stands: bool },
-    Buy { item: String, quantity: i32, price: i64 },
-    /// A standing bid, left at the hall (C1.5).
-    Bid { item: String, quantity: i32, price: i64 },
+    /// An ask at the hall, of a lot of `grade` or, for `None`, the loose
+    /// units ([`grade::loose`]), as the mind chose (#579). Into a bid, it
+    /// waits a moment for the fill and takes down what's left; one that
+    /// `stands` (no bid takes it, #429, or it opens an empty book, #501) is
+    /// left there until it fills or stands a game hour.
+    Sell { item: String, grade: Option<String>, quantity: i32, price: i64, stands: bool },
+    /// A buy from the asks, of `grade` or better, or any (#579).
+    Buy { item: String, grade: Option<String>, quantity: i32, price: i64 },
+    /// A standing bid, left at the hall (C1.5), for `grade` or better, or
+    /// any (#579).
+    Bid { item: String, grade: Option<String>, quantity: i32, price: i64 },
     /// Units for its stall at the bazaar, renting one if need be (C1.5).
     Stock { item: String, quantity: i32, price: i64 },
     /// A merchant's spell of making a market in its goods (C1.6).
@@ -683,6 +689,7 @@ impl Role {
             vec![
                 Choice::Buy {
                     item: item.clone(),
+                    grade: None,
                     price: Span::new((ask / 2).max(1), ask),
                     quantity: Span::new(1, afford),
                 },
@@ -936,6 +943,7 @@ pub fn sell_menu(holdings: &Holdings, item: &str, spare: i32, bid: Option<i64>, 
         vec![
             Choice::Sell {
                 item: item.to_string(),
+                grade: None,
                 price,
                 quantity: Span::new(1, most),
             },
@@ -969,6 +977,7 @@ pub fn open_menu(holdings: &Holdings, item: &str, spare: i32, worth: Option<i64>
         vec![
             Choice::Sell {
                 item: item.to_string(),
+                grade: None,
                 price,
                 quantity: Span::new(1, most),
             },
@@ -1026,12 +1035,157 @@ pub fn bid_menu(holdings: &Holdings, item: &str, wants: &[&str], worth: Option<i
         vec![
             Choice::Bid {
                 item: item.to_string(),
+                grade: None,
                 price: Span::new((worth / 2).max(1), top),
                 quantity: Span::new(1, afford),
             },
             Choice::Gather { item: item.to_string() },
         ]
     })
+}
+
+/// The menu for selling `spare` of a good, `item`, by grade (#579), if
+/// there's a question to ask: it has half of [`sell_at`] or more spare,
+/// there's a price to start from (the best bid, else its `worth`, for units
+/// at quality `at`), and it can pay the listing fee on some. `held` is the
+/// stack it sells from, `book` the item's book. Its entries:
+///
+/// - **Sell for any grade** into the best bid for any grade, as
+///   [`sell_menu`] offers: the [`loose`](grade::loose) units, lowest
+///   first, so no grade worth more is thrown in with them.
+/// - **Sell a grade**, for each grade it holds that's
+///   [`apart`](grade::apart) from them: into the best bid that takes it, if
+///   someone bids for the grade itself or that bid pays its
+///   [`premium`](grade::premium); else, if it `may_stand` (no ask of its up,
+///   nothing of it promised), an ask from the premium to twice it, for up to
+///   a lot, to stand. A citizen that `keeps_best` for its own crafts sells
+///   a grade only into a bid for it, never its best, and with no bid at all
+///   stands its lowest, to open the book (#501).
+///
+/// Or keep. The mind picks one, so a visit places one order, where #429
+/// placed a sale and a stand beside it; what that does to the goods
+/// traded is to be soaked (#590).
+#[allow(clippy::too_many_arguments)]
+pub fn graded_sell_menu(
+    holdings: &Holdings,
+    item: &str,
+    spare: i32,
+    held: &Units,
+    book: Option<&Book>,
+    worth: Option<i64>,
+    at: i32,
+    keeps_best: bool,
+    may_stand: bool,
+) -> Option<Vec<Choice>> {
+    let lot = sell_at(item);
+    if spare < (lot / 2).max(1) {
+        return None;
+    }
+    // A sale for any grade goes into a bid for any: one for B takes no F
+    let bid = grade::taker(book, "F");
+    let base = bid.or(worth)?.max(1);
+    // A sell's fee is paid when it's placed (#294)
+    let most = |mut n: i32, top: i64| {
+        while n > 0 && holdings.fees.listing_fee(top * n as i64) > holdings.strands {
+            n -= 1;
+        }
+        n
+    };
+    let mut menu = Vec::new();
+    let mut sell = |grade: Option<&str>, price: Span<i64>, n: i32| {
+        let n = most(n, price.max);
+        if n > 0 {
+            menu.push(Choice::Sell {
+                item: item.to_string(),
+                grade: grade.map(String::from),
+                price,
+                quantity: Span::new(1, n),
+            });
+        }
+    };
+    if let Some(bid) = bid {
+        let ask = book.and_then(Book::best_ask).unwrap_or(0);
+        let loose = grade::loose(held, bid, at, book, keeps_best).count() as i32;
+        sell(None, Span::new((bid / 2).max(1), (bid * 2).max(ask)), spare.min(loose));
+    }
+    let grades = grade::grades_held(held);
+    for &g in &grades {
+        let offered = match (keeps_best, bid) {
+            (false, Some(bid)) => grade::apart(held, g, bid, at, book, false),
+            (false, None) => true,
+            (true, Some(_)) => grade::bid_for(book, g) && (grades.len() == 1 || grades.first() != Some(&g)),
+            (true, None) => grades.last() == Some(&g),
+        };
+        if !offered {
+            continue;
+        }
+        let n = spare.min(grade::at_grade(held, g).count() as i32);
+        let premium = grade::premium(base, at, g, book);
+        match grade::taker(book, g) {
+            Some(taker) if grade::bid_for(book, g) || taker >= premium => {
+                let top = (taker * 2).max(grade::ask_at(book, g).unwrap_or(premium));
+                sell(Some(g), Span::new((taker / 2).max(1), top), n);
+            }
+            _ if may_stand => sell(Some(g), Span::new(premium, premium * 2), n.min(lot)),
+            _ => {}
+        }
+    }
+    if menu.is_empty() {
+        return None;
+    }
+    menu.push(Choice::Keep);
+    Some(menu)
+}
+
+/// Bids for `item` by grade (#579), put on a [`bid_menu`] before its last
+/// entry: a grade of [`BID_GRADES`](grade::BID_GRADES) each, its span the
+/// bid menu's carried from `worth` (for units at quality `at`) to the
+/// grade's middle. Offered for a crafter's main ingredient
+/// ([`main_ingredient`](grade::main_ingredient)); the mind chooses which
+/// grade, by its thrift.
+pub fn graded_bids(menu: &mut Vec<Choice>, holdings: &Holdings, item: &str, worth: Option<i64>, at: i32) {
+    let (Some(worth), Some(last)) = (worth, menu.pop()) else {
+        return;
+    };
+    let short = surplus::STOCK - holdings.count(item);
+    for g in grade::BID_GRADES {
+        let Some(mid) = grade::grade_mid(g) else { continue };
+        let worth = grade::carried(worth.max(1), at, mid);
+        let top = worth + (worth / 2).max(1);
+        let afford = affordable(holdings, top).min(short);
+        if afford > 0 {
+            menu.push(Choice::Bid {
+                item: item.to_string(),
+                grade: Some(g.to_string()),
+                price: Span::new((worth / 2).max(1), top),
+                quantity: Span::new(1, afford),
+            });
+        }
+    }
+    menu.push(last);
+}
+
+/// Buys of `item` by grade (#579), put on a [`Role::buy_menu`] before its
+/// last entry: a grade of [`BID_GRADES`](grade::BID_GRADES) each that
+/// someone asks for at it or better, up to the cheapest such ask. Offered
+/// for a crafter's main ingredient, as [`graded_bids`] are.
+pub fn graded_buys(menu: &mut Vec<Choice>, holdings: &Holdings, item: &str, book: Option<&Book>) {
+    let Some(last) = menu.pop() else {
+        return;
+    };
+    for g in grade::BID_GRADES {
+        let Some(ask) = grade::ask_meeting(book, g) else { continue };
+        let afford = affordable(holdings, ask);
+        if afford > 0 {
+            menu.push(Choice::Buy {
+                item: item.to_string(),
+                grade: Some(g.to_string()),
+                price: Span::new((ask / 2).max(1), ask),
+                quantity: Span::new(1, afford),
+            });
+        }
+    }
+    menu.push(last);
 }
 
 /// The menu for posting a commission for `item` (S2.5), if there's a
@@ -1097,12 +1251,14 @@ pub fn tool_menu(holdings: &Holdings, item: &str, price: i64, thrift: f32, stand
     let take = if standing {
         Choice::Bid {
             item: item.to_string(),
+            grade: None,
             price: Span::new((price / 2).max(1), price + (price / 2).max(1)),
             quantity: one,
         }
     } else {
         Choice::Buy {
             item: item.to_string(),
+            grade: None,
             price: Span::new((price / 2).max(1), price),
             quantity: one,
         }
@@ -1282,7 +1438,7 @@ mod tests {
             at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
             when: When { time_of_day: None, hours: 0.0 },
             holdings: h.into(),
-            market: vec![Quote { item, bid, ask, last: None }],
+            market: vec![Quote { item, bid, ask, last: None, grades: Vec::new() }],
             question,
             menu,
             carry_on: Some(1),
@@ -1304,6 +1460,7 @@ mod tests {
     fn sold(item: &str, quantity: i32, price: i64) -> Option<Choice> {
         Some(Choice::Sell {
             item: item.into(),
+            grade: None,
             price: Span::new(price, price),
             quantity: Span::new(quantity, quantity),
         })
@@ -1312,6 +1469,7 @@ mod tests {
     fn bought(item: &str, quantity: i32, price: i64) -> Option<Choice> {
         Some(Choice::Buy {
             item: item.into(),
+            grade: None,
             price: Span::new(price, price),
             quantity: Span::new(quantity, quantity),
         })
@@ -1406,6 +1564,7 @@ mod tests {
             menu[0],
             Choice::Sell {
                 item: "log".into(),
+                grade: None,
                 price: Span::new(3, 14),
                 quantity: Span::new(1, 7),
             }
@@ -1434,6 +1593,7 @@ mod tests {
             vec![
                 Choice::Sell {
                     item: "plank".into(),
+                    grade: None,
                     price: Span::new(w, w * 2),
                     quantity: Span::new(1, SELL_AT),
                 },
@@ -1465,6 +1625,7 @@ mod tests {
             menu[0],
             Choice::Bid {
                 item: "log".into(),
+                grade: None,
                 price: Span::new(4, 12),
                 quantity: Span::new(1, 2 * LOT),
             }
@@ -1924,6 +2085,7 @@ mod tests {
             vec![
                 Choice::Buy {
                     item: "stone_axe".into(),
+                    grade: None,
                     price: Span::new(25, 50),
                     quantity: Span::new(1, 1),
                 },
@@ -1999,5 +2161,106 @@ mod tests {
         // With an axe, its step isn't toward one
         broke.tools.insert("axe".into());
         assert_eq!(plan::tool_wanted(&catalog, &broke, &goal), None);
+    }
+
+    /// A sell menu's entries: grade, price and quantity.
+    fn sales(menu: &[Choice]) -> Vec<(Option<&str>, Span<i64>, Span<i32>)> {
+        menu.iter()
+            .filter_map(|c| match c {
+                Choice::Sell { grade, price, quantity, .. } => Some((grade.as_deref(), *price, *quantity)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_good_is_offered_grade_by_grade_and_the_mind_chooses() {
+        use capitol_protocol::rules::market::OrderSide::Buy;
+        use grade::tests::{book, level, wild_ore};
+        // #579: ore bid 10 for any grade, typically Q44. Before, the menu
+        // offered one sale at one price, and the grades came after
+        let h = Holdings {
+            strands: 10_000,
+            plot_room: Some(4),
+            ..Holdings::default()
+        };
+        let held = wild_ore();
+        let b = book(vec![level(Buy, 10, "F", 40)]);
+        let menu = graded_sell_menu(&h, "iron_ore", 63, &held, Some(&b), Some(10), 44, false, true).unwrap();
+        let premium = |g| grade::premium(10, 44, g, Some(&b));
+        let stand = |g, n| (Some(g), Span::new(premium(g), 2 * premium(g)), Span::new(1, n));
+        assert_eq!(
+            sales(&menu),
+            vec![
+                // For any grade, the F and D units alone, into the bid
+                (None, Span::new(5, 20), Span::new(1, 10)),
+                // Each better grade to stand at its premium, a lot at most
+                stand("A", 3),
+                stand("B", SELL_AT),
+                stand("C", SELL_AT),
+            ]
+        );
+        assert_eq!(menu.last(), Some(&Choice::Keep));
+        // With an ask of its up already, nothing more to stand
+        let menu = graded_sell_menu(&h, "iron_ore", 63, &held, Some(&b), Some(10), 44, false, false).unwrap();
+        assert_eq!(sales(&menu), vec![(None, Span::new(5, 20), Span::new(1, 10))]);
+        // A bid for B itself: B sells into it, all of it
+        let b = book(vec![level(Buy, 18, "B", 10), level(Buy, 10, "F", 40)]);
+        let menu = graded_sell_menu(&h, "iron_ore", 63, &held, Some(&b), Some(10), 44, false, false).unwrap();
+        assert!(sales(&menu).contains(&(Some("B"), Span::new(9, 36), Span::new(1, 30))));
+        // A crafter that keeps its best sells everything else for any
+        // grade, and B into the bid for it, but never its A
+        let menu = graded_sell_menu(&h, "iron_ore", 63, &held, Some(&b), Some(10), 44, true, true).unwrap();
+        assert_eq!(
+            sales(&menu),
+            vec![(None, Span::new(5, 20), Span::new(1, 60)), (Some("B"), Span::new(9, 36), Span::new(1, 30))]
+        );
+        // An empty book: every grade stands at its worth's premium, or for
+        // one that keeps its best, its lowest (#501)
+        let menu = graded_sell_menu(&h, "iron_ore", 63, &held, None, Some(10), 44, false, true).unwrap();
+        assert_eq!(sales(&menu).iter().map(|s| s.0).collect::<Vec<_>>(), [Some("A"), Some("B"), Some("C"), Some("D"), Some("F")]);
+        let menu = graded_sell_menu(&h, "iron_ore", 63, &held, None, Some(10), 44, true, true).unwrap();
+        assert_eq!(sales(&menu), vec![(Some("F"), Span::new(7, 14), Span::new(1, 4))]);
+        // Nothing to start a price from, or too little spare: no question
+        assert_eq!(graded_sell_menu(&h, "iron_ore", 63, &held, None, None, 44, false, true), None);
+        assert_eq!(graded_sell_menu(&h, "iron_ore", SELL_AT / 2 - 1, &held, Some(&b), Some(10), 44, false, true), None);
+    }
+
+    #[test]
+    fn a_crafter_is_offered_its_main_ingredient_by_grade() {
+        use capitol_protocol::rules::market::OrderSide::Sell;
+        use grade::tests::{book, level};
+        let h = Holdings {
+            strands: 10_000,
+            plot_room: Some(4),
+            ..Holdings::default()
+        };
+        // Bids for any, B, C and D, each at its grade's worth
+        let mut menu = bid_menu(&h, "log", &["log"], Some(8), false).unwrap();
+        graded_bids(&mut menu, &h, "log", Some(8), 50);
+        let grades: Vec<_> = menu
+            .iter()
+            .filter_map(|c| match c {
+                Choice::Bid { grade, price, .. } => Some((grade.as_deref(), *price)),
+                _ => None,
+            })
+            .collect();
+        let b = grade::carried(8, 50, 82);
+        assert_eq!(grades[0], (None, Span::new(4, 12)));
+        assert_eq!(grades[1], (Some("B"), Span::new(b / 2, b + b / 2)));
+        assert_eq!(grades.len(), 4);
+        assert_eq!(menu.last(), Some(&Choice::Gather { item: "log".into() }));
+        // Buys of each grade someone asks for at it or better
+        let asks = book(vec![level(Sell, 8, "D", 5), level(Sell, 16, "B", 5)]);
+        let mut menu = Role::Crafter(Craft::Planks).buy_menu(&h, &gather("log"), Some(8)).unwrap();
+        graded_buys(&mut menu, &h, "log", Some(&asks));
+        let buys: Vec<_> = menu
+            .iter()
+            .filter_map(|c| match c {
+                Choice::Buy { grade, price, .. } => Some((grade.as_deref(), price.max)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(buys, [(None, 8), (Some("B"), 16), (Some("C"), 16), (Some("D"), 8)]);
     }
 }
