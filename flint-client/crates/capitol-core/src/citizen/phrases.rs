@@ -493,6 +493,55 @@ enum Coming {
     Asked(Ticket, String),
 }
 
+/// What a voice said (#433), for the town's report: the lines found, by the
+/// speaker that found the words, why the phrasebook spoke in a model's
+/// place, and what the model's lines cost.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Talk {
+    /// Lines found, by the speaker that found the words: [`PHRASEBOOK`]
+    /// whenever the phrasebook did, for whatever reason.
+    pub by: BTreeMap<String, u64>,
+    /// Of the phrasebook's, those it said because the model was late: past
+    /// [`TALK_WAIT`], or [`LETTER_WAIT`] for a letter.
+    pub late: u64,
+    /// And those it said because the model had nothing: no key, its budget
+    /// spent, a refusal or a ramble.
+    pub nothing: u64,
+    /// And those it said where a model is never asked, such as a guild's
+    /// channel ([`Voice::from_the_book`]).
+    pub book_only: u64,
+    /// What the model's lines cost, in US cents.
+    pub cents: f64,
+    /// The most one life spent on its words, in US cents, against
+    /// [`TALK_SPEND`](super::voice::TALK_SPEND).
+    pub most_a_life: f64,
+}
+
+impl Talk {
+    /// Adds `other` to these.
+    pub fn add(&mut self, other: &Talk) {
+        for (by, n) in &other.by {
+            *self.by.entry(by.clone()).or_insert(0) += n;
+        }
+        self.late += other.late;
+        self.nothing += other.nothing;
+        self.book_only += other.book_only;
+        self.cents += other.cents;
+        self.most_a_life = self.most_a_life.max(other.most_a_life);
+    }
+
+    /// Every line found.
+    pub fn lines(&self) -> u64 {
+        self.by.values().sum()
+    }
+
+    /// Lines a model was asked for: those it found, and those the phrasebook
+    /// said for it because it was late or had nothing.
+    pub fn asked_of_a_model(&self) -> u64 {
+        self.by.iter().filter(|(by, _)| *by != PHRASEBOOK).map(|(_, n)| n).sum::<u64>() + self.late + self.nothing
+    }
+}
+
 /// A citizen's voice: its [`Speaker`] over its phrasebook, and the limits
 /// on how often it may use them. Pure: every call is given the time.
 pub struct Voice {
@@ -512,6 +561,11 @@ pub struct Voice {
     spoken: VecDeque<Instant>,
     /// Lines found, by the speaker that found the words.
     tally: BTreeMap<String, usize>,
+    /// What it said since its town last took it ([`take_talk`](Self::take_talk)),
+    /// but for the cents.
+    talk: Talk,
+    /// What its speaker had spent when its town last took it.
+    cents_taken: f64,
     rng: u64,
 }
 
@@ -527,6 +581,8 @@ impl Voice {
             due: Vec::new(),
             spoken: VecDeque::new(),
             tally: BTreeMap::new(),
+            talk: Talk::default(),
+            cents_taken: 0.0,
             rng: mix(seed, 0x5eed) | 1,
         }
     }
@@ -600,6 +656,7 @@ impl Voice {
         }
         self.spoken.push_back(now);
         self.count(PHRASEBOOK);
+        self.talk.book_only += 1;
         Some(self.book.say(occasion, moment))
     }
 
@@ -672,14 +729,26 @@ impl Voice {
     }
 
     /// The lines it has found, by the speaker that found the words:
-    /// [`PHRASEBOOK`] when a model had nothing in time. Nothing reports it
-    /// yet ([#433](https://github.com/chrischaps/TheCapitol/issues/433)).
+    /// [`PHRASEBOOK`] when a model had nothing in time.
     pub fn tally(&self) -> &BTreeMap<String, usize> {
         &self.tally
     }
 
+    /// What it has said since this was last taken, and what that cost, for
+    /// its town's report (#433). A voice lives a life, so its spend so far
+    /// is the life's.
+    pub fn take_talk(&mut self) -> Talk {
+        let spent = self.spent();
+        let mut talk = std::mem::take(&mut self.talk);
+        talk.cents = spent - self.cents_taken;
+        talk.most_a_life = spent;
+        self.cents_taken = spent;
+        talk
+    }
+
     fn count(&mut self, by: &str) {
         *self.tally.entry(by.to_string()).or_default() += 1;
+        *self.talk.by.entry(by.to_string()).or_default() += 1;
     }
 
     /// The speaker's words for `occasion`, or what's coming of them.
@@ -693,6 +762,7 @@ impl Voice {
             Words::Pending(ticket) => Coming::Asked(ticket, self.book.say(occasion, moment)),
             Words::Nothing => {
                 self.count(PHRASEBOOK);
+                self.talk.nothing += 1;
                 Coming::Ready(self.book.say(occasion, moment))
             }
         }
@@ -708,16 +778,26 @@ impl Voice {
                 continue;
             };
             let (by, line) = match self.speaker.poll(*ticket) {
-                Some(Words::Line(line)) => (name.as_str(), line),
-                Some(_) => (PHRASEBOOK, std::mem::take(fallback)),
-                None if now >= d.until => (PHRASEBOOK, std::mem::take(fallback)),
+                Some(Words::Line(line)) => (Found::Model, line),
+                Some(_) => (Found::Nothing, std::mem::take(fallback)),
+                None if now >= d.until => (Found::Late, std::mem::take(fallback)),
                 None => continue,
             };
-            found.push(by.to_string());
+            found.push(by);
             d.words = Coming::Ready(line);
         }
         for by in found {
-            self.count(&by);
+            match by {
+                Found::Model => self.count(&name),
+                Found::Late => {
+                    self.count(PHRASEBOOK);
+                    self.talk.late += 1;
+                }
+                Found::Nothing => {
+                    self.count(PHRASEBOOK);
+                    self.talk.nothing += 1;
+                }
+            }
         }
     }
 
@@ -736,6 +816,15 @@ impl Voice {
         self.rng ^= self.rng >> 27;
         (self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
     }
+}
+
+/// Who found a pending line's words, as [`Voice::settle`] takes them in.
+enum Found {
+    Model,
+    /// The phrasebook, the model being late
+    Late,
+    /// The phrasebook, the model having nothing
+    Nothing,
 }
 
 /// SplitMix64's finaliser over `a` and `b`.
@@ -992,6 +1081,30 @@ mod tests {
         answer(&asked, 1, Words::Nothing);
         assert_eq!(voice.due(later), [book.say(Occasion::Declining, &ada)]);
         assert_eq!(voice.tally().get(PHRASEBOOK), Some(&2));
+        // The town's report hears why (#433)
+        let talk = voice.take_talk();
+        assert_eq!((talk.by.get(PHRASEBOOK), talk.late, talk.nothing, talk.book_only), (Some(&2), 1, 1, 0));
+        assert_eq!(talk.asked_of_a_model(), 2);
+    }
+
+    #[test]
+    fn talk_is_taken_once_and_adds_up() {
+        let (mut voice, asked) = slow();
+        let now = Instant::now();
+        let ada = moment("Ada", ADA, NOON);
+        assert_eq!(voice.greet(ADA, &ada, NOON, now), None);
+        answer(&asked, 0, Words::Line("Well met.".into()));
+        assert_eq!(voice.due(now), ["Well met."]);
+        assert!(voice.from_the_book(Occasion::Joined, &ada, now).is_some());
+        let first = voice.take_talk();
+        assert_eq!(first.by, BTreeMap::from([("slow".to_string(), 1), (PHRASEBOOK.to_string(), 1)]));
+        assert_eq!((first.late, first.nothing, first.book_only), (0, 0, 1));
+        assert_eq!(first.asked_of_a_model(), 1, "the guild's line was never the model's to find");
+        assert_eq!(voice.take_talk(), Talk::default(), "taken once");
+        let mut town = Talk::default();
+        town.add(&first);
+        town.add(&first);
+        assert_eq!((town.lines(), town.book_only), (4, 2));
     }
 
     #[test]

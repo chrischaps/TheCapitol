@@ -784,7 +784,7 @@ fn run(options: &Options) -> Result<(), String> {
     let server = server(options, &roster);
     let (town, wall) = live(options, &roster, &server, None, || {})?;
     if options.report {
-        let report = TownReport::build(&town.runs(), wall.as_secs_f64(), tick_scale(&server), None);
+        let report = TownReport::build(&town.runs(), wall.as_secs_f64(), tick_scale(&server), None).with_talk(town.talk());
         let path = beside(&roster.path, "report", "md");
         std::fs::write(&path, report.to_markdown()).map_err(|e| format!("writing {}: {e}", path.display()))?;
         let csv = path.with_extension("activity.csv");
@@ -869,7 +869,8 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
     let cards = cards(&admin, &config, &end, &catalog);
     let report = TownReport::build(&town.runs(), wall.as_secs_f64(), scale, Some(Soak { start, end, samples }))
         .with_callings(&town.callings())
-        .with_cards(&cards);
+        .with_cards(&cards)
+        .with_talk(town.talk());
     std::fs::write(&md, report.to_markdown()).map_err(|e| format!("writing {}: {e}", md.display()))?;
     if let Some(csv) = report.load_csv() {
         let path = md.with_extension("csv");

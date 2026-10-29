@@ -2642,6 +2642,12 @@ impl Bot {
         self.voice = Some(voice);
     }
 
+    /// What its voice has said since this was last taken, and what that
+    /// cost ([`Voice::take_talk`], #433): nothing without a voice.
+    pub fn take_talk(&mut self) -> phrases::Talk {
+        self.voice.as_mut().map(Voice::take_talk).unwrap_or_default()
+    }
+
     /// Says the voice's line for `occasion` to `to`, out loud, if the bot has
     /// a voice, plays its avatar here, and someone stands near enough to
     /// hear; a greeting only once a game hour per person. True if it spoke.

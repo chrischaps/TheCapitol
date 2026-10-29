@@ -15,6 +15,9 @@
 //!   ([`measures`](super::measures)).
 //! - **How questions were settled**: how often each layer of the cascade
 //!   answered (D4).
+//! - **What citizens said** (#433): their lines by speaker, how often the
+//!   phrasebook spoke for a model that was late or had nothing, and what
+//!   their words cost, against [`TALK_SPEND`].
 //! - **Conservation**, in a soak: the world's Strands and units at each end,
 //!   held up against each other (`capitol_protocol::ledger::reconcile`).
 //!   Drift fails it.
@@ -33,6 +36,8 @@ use capitol_protocol::ledger::{reconcile, AccountBooks, Ledger, LoadWindow, Reco
 use capitol_protocol::metrics::CallingReport;
 
 use super::measures::{self, Asks, CitizenCalling};
+use super::phrases::{Talk, PHRASEBOOK, TALK_WAIT};
+use super::voice::TALK_SPEND;
 use crate::sim::report::{days, ActivityTime, AskFate, BotRun, DayTime, Entry, Report};
 use crate::sim::Activity;
 
@@ -266,6 +271,8 @@ pub struct TownReport {
     pub trades: Vec<TradeLine>,
     /// How often questions were settled each way, every citizen together
     pub rulings: BTreeMap<String, u64>,
+    /// What they said, and what their words cost (#433)
+    pub talk: Talk,
     /// The sim's report over every citizen
     pub sim: Report,
     pub soak: Option<Soak>,
@@ -375,6 +382,7 @@ impl TownReport {
             citizens,
             trades,
             rulings,
+            talk: Talk::default(),
             sim,
             soak,
             day_hours: wall_secs / capitol_protocol::rules::DAY_LENGTH_SECS as f64 * 24.0,
@@ -388,6 +396,13 @@ impl TownReport {
         for c in &mut self.citizens {
             c.calling = callings.get(&c.name).cloned();
         }
+        self
+    }
+
+    /// What its citizens said, every one together
+    /// ([`Town::talk`](super::town::Town::talk)): a run doesn't carry it.
+    pub fn with_talk(mut self, talk: Talk) -> TownReport {
+        self.talk = talk;
         self
     }
 
@@ -444,6 +459,8 @@ impl TownReport {
             measures::callings_md(&mut md, &[("The town", &self.callings())]);
         }
         self.rulings_md(&mut md);
+        md.push('\n');
+        self.talk_md(&mut md);
         md.push('\n');
         md.push_str(&self.sim.sections());
         md
@@ -573,6 +590,50 @@ impl TownReport {
         for (label, n) in by {
             let _ = writeln!(md, "| {label} | {n} | {:.1}% |", 100.0 * *n as f64 / total as f64);
         }
+    }
+
+    fn talk_md(&self, md: &mut String) {
+        let _ = writeln!(md, "## What citizens said\n");
+        let talk = &self.talk;
+        let total = talk.lines();
+        if total == 0 {
+            let _ = writeln!(md, "Nobody said anything.");
+            return;
+        }
+        let _ = writeln!(md, "| Found by | Lines | Share |");
+        let _ = writeln!(md, "|---|---:|---:|");
+        let mut by: Vec<(&String, &u64)> = talk.by.iter().collect();
+        by.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (speaker, n) in by {
+            let _ = writeln!(md, "| {speaker} | {n} | {:.1}% |", 100.0 * *n as f64 / total as f64);
+        }
+        md.push('\n');
+        let asked = talk.asked_of_a_model();
+        if asked == 0 {
+            let _ = writeln!(md, "No model was asked for a line: every word was the {PHRASEBOOK}'s.");
+        } else {
+            let fell = talk.late + talk.nothing;
+            let _ = writeln!(
+                md,
+                "A model was asked for {asked} lines, and the {PHRASEBOOK} spoke in its place for {fell} of them ({:.1}%): {} because it was late (past {} s out loud, or a letter's wait), {} because it had nothing (no key, its budget spent, a refusal or a ramble).",
+                100.0 * fell as f64 / asked as f64,
+                talk.late,
+                TALK_WAIT.as_secs(),
+                talk.nothing,
+            );
+        }
+        if talk.book_only > 0 {
+            let _ = writeln!(md, "\n{} lines were the {PHRASEBOOK}'s by rule, where a model is never asked (a guild's channel).", talk.book_only);
+        }
+        let citizens = self.citizens.len().max(1) as f64;
+        let _ = writeln!(
+            md,
+            "\nTheir words cost {:.3}¢, {:.4}¢ a citizen. The most one citizen's life spent was {:.3}¢, {:.1}% of its {TALK_SPEND}¢ a life.",
+            talk.cents,
+            talk.cents / citizens,
+            talk.most_a_life,
+            100.0 * talk.most_a_life / TALK_SPEND,
+        );
     }
 
     /// The load between each reading, a row a window, for a spreadsheet.
@@ -786,6 +847,34 @@ mod tests {
                 90,
             ),
         ]
+    }
+
+    #[test]
+    fn what_citizens_said_reads_by_speaker_with_the_fallbacks_and_cents() {
+        let quiet = TownReport::build(&runs(), 3600.0, 10.0, None).to_markdown();
+        assert!(quiet.contains("## What citizens said\n\nNobody said anything."), "{quiet}");
+        let book = Talk {
+            by: BTreeMap::from([(PHRASEBOOK.to_string(), 12)]),
+            book_only: 2,
+            ..Talk::default()
+        };
+        let md = TownReport::build(&runs(), 3600.0, 10.0, None).with_talk(book).to_markdown();
+        assert!(md.contains("| phrasebook | 12 | 100.0% |"), "{md}");
+        assert!(md.contains("No model was asked for a line"), "{md}");
+        assert!(md.contains("2 lines were the phrasebook's by rule"), "{md}");
+        let haiku = Talk {
+            by: BTreeMap::from([("claude-haiku".to_string(), 30), (PHRASEBOOK.to_string(), 10)]),
+            late: 6,
+            nothing: 2,
+            book_only: 2,
+            cents: 0.25,
+            most_a_life: 0.15,
+        };
+        let md = TownReport::build(&runs(), 3600.0, 10.0, None).with_talk(haiku).to_markdown();
+        assert!(md.contains("| claude-haiku | 30 | 75.0% |\n| phrasebook | 10 | 25.0% |"), "{md}");
+        assert!(md.contains("asked for 38 lines, and the phrasebook spoke in its place for 8 of them (21.1%): 6 because it was late (past 2 s"), "{md}");
+        assert!(md.contains("2 because it had nothing"), "{md}");
+        assert!(md.contains("cost 0.250¢, 0.1250¢ a citizen. The most one citizen's life spent was 0.150¢, 3.0% of its 5¢ a life."), "{md}");
     }
 
     #[test]
