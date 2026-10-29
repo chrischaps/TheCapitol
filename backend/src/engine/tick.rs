@@ -167,6 +167,7 @@ impl GameState {
                 resource_types: Vec::new(),
                 container_types: Vec::new(),
                 recipes: Vec::new(),
+                habitats: Vec::new(),
             }),
             crafting_operations: HashMap::new(),
             guild_tags: HashMap::new(),

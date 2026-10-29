@@ -7,8 +7,10 @@
 //              it, the square it sends you players from: yours bright, the
 //              others faint, each named at its middle.
 //   nodes      every node near you on a stalk, with its kind and the ground
-//              it stands on (height, slope, massif), which is what the
-//              habitats in wilds.toml ask of it. Spent ones are grey.
+//              it stands on (height, slope, massif), and in the wilds what
+//              its habitat in wilds.toml makes of that ground (#413): green
+//              with a ring at its foot where it suits, rose where it
+//              doesn't, and why. Unjudged ones are pale, spent ones grey.
 //   walks      the walk graph round you, that every click and every citizen
 //              walks on.
 //   walkers    where the server is walking each player near you: a line to
@@ -20,6 +22,8 @@
 
 fn cell_blue() { [0.36, 0.78, 0.95] }
 fn node_green() { [0.45, 0.86, 0.48] }
+fn wrong_rose() { [1.0, 0.45, 0.47] }
+fn unjudged_pale() { [0.84, 0.86, 0.78] }
 fn spent_grey() { [0.6, 0.6, 0.6] }
 fn graph_violet() { [0.72, 0.52, 1.0] }
 fn citizen_blue() { [0.80, 0.88, 1.0] }
@@ -37,7 +41,7 @@ fn on_draw_ui() {
     let y = cap_mark_y();
     for c in d.cells { draw_cell(c, y); }
     for e in d.edges { draw_edge(e, y); }
-    for n in d.nodes { draw_node(n); }
+    for n in d.nodes { draw_node(n, y); }
     for w in d.walkers { draw_walker(w, y); }
 }
 
@@ -84,13 +88,35 @@ fn draw_edge(e, y) {
     ground_run(e[0], e[1], e[2], e[3], y + 0.03, graph_violet(), 0.6, 1.5);
 }
 
-fn draw_node(n) {
-    let c = if n.available { node_green() } else { spent_grey() };
+fn draw_node(n, y) {
+    // A node on the wrong ground is rose even spent: that's what to find
+    let c = if n.suits == false { wrong_rose() }
+            else if !n.available { spent_grey() }
+            else if n.suits == true { node_green() }
+            else { unjudged_pale() };
     let g = cap_ground_at(n.x, n.z);
     draw_world_line(n.x, g, n.z, n.x, g + stalk(), n.z, c[0], c[1], c[2], 0.85, 2.0);
-    // One line, so the two never overlap however far the camera stands
+    if n.suits != () { ring(n.x, n.z, 0.7, y + 0.04, c, 0.8); }
+    // One line, so the parts never overlap however far the camera stands
     let text = if n.ground == "" { n.kind } else { `${n.kind} · ${n.ground}` };
+    if n.fit != "" { text += ` · ${n.fit}`; }
     label(n.x, n.z, stalk() + 0.3, text, 12.0, c, 0.95);
+}
+
+// A ring of radius r on the ground round (x, z).
+fn ring(x, z, r, y, c, alpha) {
+    let steps = 20;
+    let px = x + r;
+    let pz = z;
+    for i in 1..=steps {
+        let a = 2.0 * PI() * i.to_float() / steps.to_float();
+        let qx = x + r * a.cos();
+        let qz = z + r * a.sin();
+        draw_world_line(px, y + cap_rise(px, pz), pz, qx, y + cap_rise(qx, qz), qz,
+                        c[0], c[1], c[2], alpha, 2.0);
+        px = qx;
+        pz = qz;
+    }
 }
 
 fn draw_walker(w, y) {
@@ -99,18 +125,7 @@ fn draw_walker(w, y) {
         let dx = w.dest[0];
         let dz = w.dest[1];
         ground_run(w.x, w.z, dx, dz, y + 0.05, c, 0.75, 2.0);
-        let steps = 20;
-        let px = dx + 0.9;
-        let pz = dz;
-        for i in 1..=steps {
-            let a = 2.0 * PI() * i.to_float() / steps.to_float();
-            let qx = dx + 0.9 * a.cos();
-            let qz = dz + 0.9 * a.sin();
-            draw_world_line(px, y + 0.05 + cap_rise(px, pz), pz, qx, y + 0.05 + cap_rise(qx, qz), qz,
-                            c[0], c[1], c[2], 0.9, 2.0);
-            px = qx;
-            pz = qz;
-        }
+        ring(dx, dz, 0.9, y + 0.05, c, 0.9);
         label(dx, dz, 1.8, `${w.name}'s leg`, 12.0, c, 0.85);
     }
     if w.doing != "" {

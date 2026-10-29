@@ -1519,6 +1519,21 @@ pub struct CatalogResponse {
     pub container_types: Vec<CatalogContainerType>,
     /// Every recipe, hand and station alike.
     pub recipes: Vec<RecipeInfo>,
+    /// Where the wilds' resources grow (`wilds.toml`, W6), sorted by
+    /// resource, so a client judges a node's ground by the planner's own
+    /// rule (`rules::habitat`, #413).
+    #[serde(default)]
+    pub habitats: Vec<CatalogHabitat>,
+}
+
+/// One resource's habitat in the wilds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CatalogHabitat {
+    /// The resource type that grows there
+    pub resource: String,
+    #[serde(flatten)]
+    pub habitat: rules::habitat::Habitat,
 }
 
 /// An item type (`item_types`).

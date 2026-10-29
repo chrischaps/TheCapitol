@@ -4,9 +4,11 @@
 //! - **interest**: your cell of the server's interest grid (C0.4) and the
 //!   eight round it, the square the server sends you players from;
 //! - **nodes**: every node near you, standing on its ground, with the
-//!   ground's height, slope and massif, which is what `wilds.toml`'s habitats
-//!   ask of it. The habitats themselves aren't on the wire, so it can't say
-//!   whether the ground suits ([#413](https://github.com/chrischaps/TheCapitol/issues/413));
+//!   ground's height, slope and massif, and for a node in the wilds whether
+//!   that ground suits its habitat: `wilds.toml`'s, off `/catalog`, judged by
+//!   the planner's own rule (`rules::habitat`, #413), so a vein on the wrong
+//!   ground shows at a glance. It doesn't yet shade the ground that would
+//!   suit ([#607](https://github.com/chrischaps/TheCapitol/issues/607));
 //! - **walks**: the walk graph round you (#267) that every click and every
 //!   citizen walks on;
 //! - **walkers**: where the server is walking each player near you, from
@@ -22,6 +24,7 @@ use capitol_core::motion::Pose;
 use capitol_core::paths::WalkGraph;
 use capitol_core::protocol::land;
 use capitol_core::protocol::rest::{Doing, Walker};
+use capitol_core::protocol::rules::habitat::{Massifs, Verdict};
 use capitol_core::protocol::rules::{interest_cell, INTEREST_CELL};
 use capitol_core::state::GameState;
 
@@ -110,6 +113,18 @@ pub struct NodeMark {
     /// `h 412 · slope 0.81 · massif 3`
     pub ground: String,
     pub available: bool,
+    /// Whether its ground suits its habitat; `None` for a node off the
+    /// wilds, one with no habitat, or before the land is known.
+    pub fit: Option<Fit>,
+}
+
+/// What a node's habitat makes of the ground it stands on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fit {
+    pub suits: bool,
+    /// `suits`, `wrong ground: h 120, wants 380 to 900`, or `wrong massif:
+    /// keeps to the odd`
+    pub words: String,
 }
 
 /// A player the server is moving.
@@ -159,6 +174,7 @@ pub fn gather(
                 kind: n.resource_type.clone(),
                 ground: params.map_or_else(String::new, |p| ground_words(n.x, n.y, p)),
                 available: n.state == "available",
+                fit: params.and_then(|p| fit(&n.resource_type, n.x, n.y, state, p)),
             })
             .collect();
     }
@@ -226,6 +242,42 @@ pub fn ground_words(x: f64, y: f64, params: &land::LandParams) -> String {
         Some(m) => format!("h {h:.0} · slope {slope:.2} · massif {m}"),
         None => format!("h {h:.0} · slope {slope:.2}"),
     }
+}
+
+/// What `resource`'s habitat makes of the ground at (x, y): judged only in
+/// the wilds, where the habitats rule (W6), and only for a resource that
+/// has one.
+pub fn fit(resource: &str, x: f64, y: f64, state: &GameState, params: &land::LandParams) -> Option<Fit> {
+    let frame = &params.frame;
+    let r = (x - frame.center.0).hypot(y - frame.center.1) - frame.rural_edge();
+    if r < 0.0 {
+        return None;
+    }
+    let habitat = state.catalog().habitat(resource)?;
+    let words = match habitat.verdict_at(x, y, params) {
+        Verdict::Suits => "suits".to_owned(),
+        Verdict::WrongMassif => match habitat.massifs {
+            Some(Massifs::Even) => "wrong massif: keeps to the even".to_owned(),
+            _ => "wrong massif: keeps to the odd".to_owned(),
+        },
+        Verdict::WrongGround => {
+            let measures = [
+                ("h", land::height_at(x, y, params), habitat.height, 0),
+                ("slope", land::slope_at(x, y, params), habitat.slope, 2),
+                ("depth", r, habitat.depth, 0),
+            ];
+            let out: Vec<String> = measures
+                .into_iter()
+                .filter_map(|(name, v, b, places)| {
+                    let [lo, hi] = b?;
+                    (!(lo..=hi).contains(&v))
+                        .then(|| format!("{name} {v:.places$}, wants {lo:.places$} to {hi:.places$}"))
+                })
+                .collect();
+            format!("wrong ground: {}", out.join(", "))
+        }
+    };
+    Some(Fit { suits: words == "suits", words })
 }
 
 /// What a walker is doing, in a few words; empty when idle.
@@ -329,5 +381,34 @@ mod tests {
             .map(|(x, y)| ground_words(x, y, &params))
             .find(|w| w.contains("massif"));
         assert!(high.as_ref().is_some_and(|w| w.starts_with("h ") && w.contains("slope")), "{high:?}");
+    }
+
+    /// #413: the layer judges a node's ground by its habitat off the
+    /// catalog, in the wilds only, and says what's wrong.
+    #[test]
+    fn a_node_is_judged_by_its_habitat() {
+        let state = GameState::new();
+        let params = land::LandParams::default();
+        let (cx, cy) = params.frame.center;
+        // Inside the rural edge nothing is judged; grass has no habitat
+        assert_eq!(fit("iron_vein", cx, cy + 100.0, &state, &params), None);
+        let wild = (cx, cy + params.frame.rural_edge() + 50.0);
+        assert_eq!(fit("grass", wild.0, wild.1, &state, &params), None);
+        // Just past the rural edge is flat: no place for a vein, fine for branches
+        let vein = fit("iron_vein", wild.0, wild.1, &state, &params).unwrap();
+        assert!(!vein.suits && vein.words.starts_with("wrong ground: h 0, wants 380 to 900"), "{}", vein.words);
+        assert_eq!(fit("fallen_branches", wild.0, wild.1, &state, &params).map(|f| f.suits), Some(true));
+        // Somewhere in the ranges each of copper and tin is on its own massif
+        let ring = (0..720).map(|d| {
+            let a = (d as f64 / 2.0).to_radians();
+            (cx + 7600.0 * a.cos(), cy + 7600.0 * a.sin())
+        });
+        let massif_words: Vec<_> = ring
+            .filter_map(|(x, y)| fit("copper_vein", x, y, &state, &params))
+            .map(|f| f.words)
+            .filter(|w| w.starts_with("wrong massif") || w == "suits")
+            .collect();
+        assert!(massif_words.iter().any(|w| w == "suits"), "copper suits somewhere on the ring");
+        assert!(massif_words.iter().any(|w| w == "wrong massif: keeps to the even"), "{massif_words:?}");
     }
 }

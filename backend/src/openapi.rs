@@ -4,7 +4,7 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use capitol_protocol::rest::{
-    AccountInfo, AccountKind, ApiKeyInfo, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey, AuthResponse, Bounds, CatalogContainerType, CatalogItemType, CatalogTool, CatalogResourceType,
+    AccountInfo, AccountKind, ApiKeyInfo, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey, AuthResponse, Bounds, CatalogContainerType, CatalogHabitat, CatalogItemType, CatalogTool, CatalogResourceType,
     CatalogResponse, CatalogStationType, ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
     CurrencyResponse, DeedPrice, DeedPricesResponse, ZoneFacts, ZoneFactsResponse, ZoneGrowth, DepositRequest, DepositResponse,
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
@@ -334,6 +334,9 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         CatalogStationType,
         CatalogResourceType,
         CatalogContainerType,
+        CatalogHabitat,
+        capitol_protocol::rules::habitat::Habitat,
+        capitol_protocol::rules::habitat::Massifs,
         RecipeInfo,
         RecipeInputInfo,
         RecipeOutputInfo,

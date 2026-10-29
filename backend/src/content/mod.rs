@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
+use capitol_protocol::rules::habitat::Habitat;
 use capitol_protocol::rules::resources::{self, Cluster, ResourceYield, Spawn};
 use capitol_protocol::rules::{tools, Zone};
 pub use crate::models::CraftingRequirements;
@@ -364,30 +365,25 @@ pub struct HabitatDef {
     pub massifs: Option<Massifs>,
 }
 
-/// Which of the ranges' massifs a habitat keeps to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Massifs {
-    Even,
-    Odd,
-}
+pub use capitol_protocol::rules::habitat::Massifs;
 
 impl HabitatDef {
+    /// The bounds the planner and the clients judge ground by
+    /// (`rules::habitat`, #413): this, less the woods' own keys.
+    pub fn habitat(&self) -> Habitat {
+        Habitat { height: self.height, slope: self.slope, depth: self.depth, massifs: self.massifs }
+    }
+
     /// Whether the land `r` past the rural edge, at height `h` and slope
     /// `s`, suits it.
     pub fn suits(&self, r: f64, h: f64, s: f64) -> bool {
-        let within = |b: Option<[f64; 2]>, v: f64| b.is_none_or(|[lo, hi]| (lo..=hi).contains(&v));
-        within(self.depth, r) && within(self.height, h) && within(self.slope, s)
+        self.habitat().suits(r, h, s)
     }
 
     /// Whether massif `massif` (`land::massif_at`) is one it keeps to. With
     /// no massifs on the land, any is.
     pub fn on_massif(&self, massif: Option<u32>) -> bool {
-        match (self.massifs, massif) {
-            (Some(Massifs::Even), Some(m)) => m % 2 == 0,
-            (Some(Massifs::Odd), Some(m)) => m % 2 == 1,
-            _ => true,
-        }
+        self.habitat().on_massif(massif)
     }
 }
 
