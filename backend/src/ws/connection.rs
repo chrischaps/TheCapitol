@@ -1122,7 +1122,7 @@ impl Socket {
                 let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > self.heard_capitol;
                 if fresh && crate::engine::talk::hears(&line, player_id, self.holds_avatar, self.seen.as_deref(), self.my_cell, &self.muted, self.my_guild) {
                     self.heard_capitol = self.heard_capitol.max(seq);
-                    out.push(Outgoing::Message(line.message()));
+                    out.push(Outgoing::Message(line.message(seq)));
                 }
             }
             // They muted or unmuted someone, here or on another device (S1.4)

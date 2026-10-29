@@ -493,6 +493,7 @@ pub fn sample(now: Instant, clock: f64) -> (Log, Chat, Uuid) {
             x: 0.0,
             y: 0.0,
             at: clock - 20.0 + 2.0 * i as f64,
+            seq: (*channel == Channel::Capitol).then_some(i as u64 + 1),
         });
     }
     // One said too soon after the last, back in the input with the reason

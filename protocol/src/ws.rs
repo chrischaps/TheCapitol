@@ -701,6 +701,13 @@ pub enum ServerMessage {
         text: String,
         x: f64,
         y: f64,
+        /// A Capitol line's number (#430), rising for as long as the
+        /// server's clock does, across restarts: a client that has heard a
+        /// line numbered `seq` has heard every one at or below it, so the
+        /// backlog a new socket is sent repeats nothing past its highest.
+        /// Absent on local and guild lines, which have no backlog.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     // Commons S1.5: letters
     /// A letter came for you from `name` (Commons D4): read it with

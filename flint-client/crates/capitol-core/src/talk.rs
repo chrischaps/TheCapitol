@@ -10,12 +10,11 @@
 //! game time, so a bench is deterministic.
 //!
 //! A reconnect is sent the Capitol backlog again (the last 40 lines), so
-//! [`Log::rejoined`] remembers what was already heard and drops those lines
-//! when they come back, for a few seconds after. It matches by speaker and
-//! text, since `said` carries no number; that goes once it does
-//! ([#430](https://github.com/chrischaps/TheCapitol/issues/430)).
+//! [`Log::heard`] keeps the highest Capitol number heard and drops a line
+//! numbered at or below it: that's the backlog repeating what you heard
+//! before the connection went (#430). The server numbers on from its clock,
+//! so a restarted one's lines are all news.
 
-use crate::protocol::rules::talk::CAPITOL_BACKLOG;
 use crate::protocol::ws::Channel;
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
@@ -31,8 +30,6 @@ pub const SHOWN_MAX: f64 = 12.0;
 pub const FADE_OUT: f64 = 0.6;
 /// And comes in over this long, so it opens rather than pops.
 pub const FADE_IN: f64 = 0.15;
-/// How long after a reconnect the backlog's repeats are looked for.
-pub const REJOIN_WINDOW: f64 = 5.0;
 
 /// One line heard.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +46,8 @@ pub struct Line {
     pub y: f64,
     /// When it was heard, on the caller's clock.
     pub at: f64,
+    /// A Capitol line's number from the server (#430); `None` on the others.
+    pub seq: Option<u64>,
 }
 
 /// How long a line shows over its speaker before it fades.
@@ -89,9 +88,8 @@ pub struct Log {
     guild: Book,
     /// Each speaker's latest local line while it shows.
     latest: HashMap<Uuid, Spoken>,
-    /// After a reconnect: the Capitol lines already heard that the backlog
-    /// will send again, and until when to look for them.
-    rejoin: Option<(f64, Vec<(Uuid, String)>)>,
+    /// The highest Capitol line's number heard (#430).
+    capitol_seq: Option<u64>,
 }
 
 impl Log {
@@ -99,11 +97,15 @@ impl Log {
         Self::default()
     }
 
-    /// A line was heard. Returns false for a repeat of the backlog after a
-    /// reconnect, which isn't kept.
+    /// A line was heard. Returns false for a Capitol line numbered at or
+    /// below one already heard: the backlog repeating it after a reconnect,
+    /// which isn't kept.
     pub fn heard(&mut self, line: Line) -> bool {
-        if line.channel == Channel::Capitol && self.repeat(&line) {
-            return false;
+        if let (Channel::Capitol, Some(seq)) = (line.channel, line.seq) {
+            if self.capitol_seq.is_some_and(|heard| seq <= heard) {
+                return false;
+            }
+            self.capitol_seq = Some(seq);
         }
         if line.channel == Channel::Local {
             let at = line.at;
@@ -123,40 +125,6 @@ impl Log {
         }
         book.unread = (book.unread + 1).min(KEPT);
         true
-    }
-
-    /// The connection is back (or up for the first time): the backlog is on
-    /// its way, and what of it was already heard isn't news.
-    pub fn rejoined(&mut self, now: f64) {
-        let held: Vec<_> = self
-            .capitol
-            .lines
-            .iter()
-            .rev()
-            .take(CAPITOL_BACKLOG)
-            .map(|l| (l.from, l.text.clone()))
-            .collect();
-        self.rejoin = (!held.is_empty()).then_some((now + REJOIN_WINDOW, held));
-    }
-
-    fn repeat(&mut self, line: &Line) -> bool {
-        let Some((until, held)) = &mut self.rejoin else {
-            return false;
-        };
-        if line.at > *until {
-            self.rejoin = None;
-            return false;
-        }
-        match held
-            .iter()
-            .position(|(from, text)| *from == line.from && *text == line.text)
-        {
-            Some(i) => {
-                held.swap_remove(i);
-                true
-            }
-            None => false,
-        }
     }
 
     /// The lines on `channel`, oldest first.
@@ -236,6 +204,15 @@ mod tests {
             x: 0.0,
             y: 0.0,
             at,
+            seq: None,
+        }
+    }
+
+    /// A Capitol line numbered `seq`
+    fn numbered(from: u128, text: &str, at: f64, seq: u64) -> Line {
+        Line {
+            seq: Some(seq),
+            ..line(from, Channel::Capitol, text, at)
         }
     }
 
@@ -348,27 +325,27 @@ mod tests {
     #[test]
     fn a_reconnect_drops_the_backlogs_repeats_but_keeps_what_was_missed() {
         let mut log = Log::new();
-        log.heard(line(1, Channel::Capitol, "one", 0.0));
-        log.heard(line(2, Channel::Capitol, "two", 1.0));
+        log.heard(numbered(1, "one", 0.0, 101));
+        log.heard(numbered(2, "two", 1.0, 102));
         log.read(Channel::Capitol);
-        log.rejoined(10.0);
-        // The backlog: the two already heard, then one said while away.
-        assert!(!log.heard(line(1, Channel::Capitol, "one", 10.1)));
-        assert!(!log.heard(line(2, Channel::Capitol, "two", 10.1)));
-        assert!(log.heard(line(3, Channel::Capitol, "three", 10.1)));
-        // Saying "one" again is news, once the repeat is used up.
-        assert!(log.heard(line(1, Channel::Capitol, "one", 11.0)));
+        // The backlog: the two already heard, then two said while away,
+        // one of them the same words from the same speaker (#430).
+        assert!(!log.heard(numbered(1, "one", 10.1, 101)));
+        assert!(!log.heard(numbered(2, "two", 10.1, 102)));
+        assert!(log.heard(numbered(3, "three", 10.1, 103)));
+        assert!(log.heard(numbered(1, "one", 10.1, 104)));
         let texts: Vec<_> = log
             .lines(Channel::Capitol)
             .map(|l| l.text.as_str())
             .collect();
         assert_eq!(texts, ["one", "two", "three", "one"]);
         assert_eq!(log.unread(Channel::Capitol), 2);
-        // Past the window, a repeat is a new line.
-        log.rejoined(20.0);
-        assert!(log.heard(line(2, Channel::Capitol, "two", 26.0)));
-        // A local line is never a backlog's.
-        log.rejoined(30.0);
-        assert!(log.heard(line(3, Channel::Local, "three", 30.1)));
+        // However long after: the number alone decides.
+        assert!(!log.heard(numbered(3, "three", 500.0, 103)));
+        // A restarted server numbers on from its clock, past them all.
+        assert!(log.heard(numbered(2, "back", 600.0, 9_000_001)));
+        // A local or guild line has no number and is never a backlog's.
+        assert!(log.heard(line(3, Channel::Local, "three", 600.1)));
+        assert!(log.heard(line(3, Channel::Guild, "three", 600.1)));
     }
 }

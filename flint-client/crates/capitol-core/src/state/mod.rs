@@ -260,6 +260,9 @@ pub enum StateEvent {
         text: String,
         x: f64,
         y: f64,
+        /// A Capitol line's number (#430): one at or below the highest
+        /// heard is the backlog repeating it after a reconnect
+        seq: Option<u64>,
     },
     /// A letter came for you (`letter_arrived`, Commons S1.5): live, or as
     /// you come back. The mailbox (`crate::mail`) counts it unread.
@@ -1032,7 +1035,7 @@ impl GameState {
                 headline: headline.clone(),
             }),
             // Commons S1.1: the server sends only what you hear
-            M::Said { from, name, citizen, channel, text, x, y } => out.push(StateEvent::Said {
+            M::Said { from, name, citizen, channel, text, x, y, seq } => out.push(StateEvent::Said {
                 from: *from,
                 name: name.clone(),
                 citizen: *citizen,
@@ -1040,6 +1043,7 @@ impl GameState {
                 text: text.clone(),
                 x: *x,
                 y: *y,
+                seq: *seq,
             }),
             M::LetterArrived { id, from, name, citizen, office, first_line } => out.push(StateEvent::LetterArrived {
                 id: *id,

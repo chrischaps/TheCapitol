@@ -47,7 +47,8 @@ pub struct Line {
 }
 
 impl Line {
-    pub fn message(&self) -> ServerMessage {
+    /// The line as it's sent, numbered `seq` if it's the Capitol's (#430)
+    pub fn message(&self, seq: u64) -> ServerMessage {
         ServerMessage::Said {
             from: self.from,
             name: self.name.clone(),
@@ -56,6 +57,7 @@ impl Line {
             text: self.text.clone(),
             x: self.x,
             y: self.y,
+            seq: (self.channel == Channel::Capitol).then_some(seq),
         }
     }
 }
@@ -77,10 +79,12 @@ pub struct Speaker {
 }
 
 /// The Capitol channel's last lines, each numbered, so a socket that took
-/// the backlog can skip the copy of a line still on its way to it
+/// the backlog can skip the copy of a line still on its way to it, and a
+/// client the lines it heard before it reconnected (#430)
 #[derive(Debug, Default)]
 struct Backlog {
-    /// The newest line's number; the first is 1
+    /// The newest line's number. The first is one past where the count
+    /// starts: 0 under [`Talk::new`], the clock under [`Talk::from_clock`].
     seq: u64,
     lines: VecDeque<(u64, Line)>,
 }
@@ -92,8 +96,23 @@ pub struct Talk {
 }
 
 impl Talk {
+    /// Talk whose first Capitol line is numbered 1, for tests
     pub fn new() -> Talk {
         Talk::default()
+    }
+
+    /// Talk whose Capitol lines are numbered on from the microseconds since
+    /// 1970 as the server starts (#430), so a restarted server's lines come
+    /// after the last one's and a client never takes one for a line it has
+    /// heard. Only a line a microsecond for as long as the server ran would
+    /// catch the clock up, and talk's rate limit is far below that. The
+    /// numbers stay under 2^53 until the year 2255, so JSON carries them
+    /// whole to any client.
+    pub fn from_clock() -> Talk {
+        let micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as u64);
+        Talk { capitol: Mutex::new(Backlog { seq: micros, lines: VecDeque::new() }) }
     }
 
     /// `speaker` says `text` on `channel`: cleaned
@@ -154,7 +173,7 @@ impl Talk {
     pub fn backlog(&self, muted: &HashSet<Uuid>) -> (u64, Vec<ServerMessage>) {
         let backlog = self.capitol.lock().expect("talk's backlog lock");
         let heard = backlog.lines.iter().filter(|(_, line)| !muted.contains(&line.from));
-        (backlog.seq, heard.map(|(_, line)| line.message()).collect())
+        (backlog.seq, heard.map(|(seq, line)| line.message(*seq)).collect())
     }
 }
 
@@ -318,6 +337,43 @@ mod tests {
             .collect();
         let want: Vec<String> = (6..=45).map(|n| format!("line {n}")).collect();
         assert_eq!(texts, want);
+        // Each carries its own number on the wire (#430)
+        let seqs: Vec<Option<u64>> = lines
+            .iter()
+            .map(|m| match m {
+                ServerMessage::Said { seq, .. } => *seq,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seqs, (6..=45).map(Some).collect::<Vec<_>>());
+    }
+
+    /// #430: a local line has no number, a Capitol line does, and a server
+    /// started later numbers its lines past an earlier one's, so a client
+    /// that reconnects to a restarted server takes them all as news
+    #[test]
+    fn capitol_lines_are_numbered_on_the_wire_past_a_restart() {
+        let ada = player("Ada", AT.0, AT.1);
+        let (events, mut rx) = broadcast::channel(16);
+        let before = Talk::from_clock();
+        for _ in 0..3 {
+            before.say(&events, &unlimited(), speaker(&ada), Channel::Capitol, "Planks").unwrap();
+        }
+        before.say(&events, &unlimited(), speaker(&ada), Channel::Local, "Over here").unwrap();
+        let sent: Vec<Option<u64>> = said(&mut rx)
+            .iter()
+            .map(|(seq, line)| match line.message(*seq) {
+                ServerMessage::Said { seq, .. } => seq,
+                _ => unreachable!(),
+            })
+            .collect();
+        let [Some(a), Some(b), Some(c), None] = sent[..] else { panic!("{sent:?}") };
+        assert_eq!((b, c), (a + 1, a + 2));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let after = Talk::from_clock();
+        after.say(&events, &unlimited(), speaker(&ada), Channel::Capitol, "Back again").unwrap();
+        let [(first, _)] = said(&mut rx).try_into().unwrap();
+        assert!(first > c, "the restarted server's first line, {first}, comes after the last, {c}");
     }
 
     /// S1.4: neither channel reaches the muter, nor the backlog, and both
@@ -397,12 +453,12 @@ mod tests {
         Talk::new().say(&events, &unlimited(), speaker(&brin), Channel::Capitol, "Planks, fair price").unwrap();
         let [(_, line)] = said(&mut rx).try_into().unwrap();
         assert!(line.citizen);
-        let json = serde_json::to_string(&line.message()).unwrap();
+        let json = serde_json::to_string(&line.message(1)).unwrap();
         assert!(json.contains(r#""citizen":true"#), "{json}");
         let ada = player("Ada", AT.0, AT.1);
         Talk::new().say(&events, &unlimited(), speaker(&ada), Channel::Capitol, "Thanks").unwrap();
         let [(_, line)] = said(&mut rx).try_into().unwrap();
-        assert!(!serde_json::to_string(&line.message()).unwrap().contains("citizen"), "a person's line leaves it out");
+        assert!(!serde_json::to_string(&line.message(1)).unwrap().contains("citizen"), "a person's line leaves it out");
     }
 
     #[test]
@@ -431,7 +487,7 @@ mod tests {
         muted.insert(ada.id);
         assert!(!hears(&line, far_member.id, true, Some(&positions), None, &muted, weavers), "nor one who muted them");
         assert!(talk.backlog(&HashSet::new()).1.is_empty(), "the Capitol's backlog doesn't keep it");
-        let json = serde_json::to_string(&line.message()).unwrap();
+        let json = serde_json::to_string(&line.message(1)).unwrap();
         assert!(json.contains(r#""channel":"guild""#) && !json.contains(&weavers_id.to_string()), "{json}");
     }
 
