@@ -323,6 +323,11 @@ pub(crate) fn live(
         if let Err(e) = citizen.release_on_leaving() {
             town.health(|h| h.failed(format!("releasing a claim: {e}")));
         }
+        // An empty stall it won't be back to stock before its rent runs
+        // out, for someone who will (#523)
+        if let Err(e) = citizen.close_stall_on_leaving() {
+            town.health(|h| h.failed(format!("giving its stall up: {e}")));
+        }
     }
     // What the day's last steps did: its walk home, and its deed
     citizen.journal();
@@ -517,6 +522,10 @@ struct SimBot {
     /// own, in the run's game hours (#551): it isn't asked to stock until
     /// it looks again.
     stalls_full: Option<f64>,
+    /// When it last stocked its stall, on the server's clock, or first saw
+    /// it this session (#523): a stall it hasn't stocked in a day, with
+    /// nothing on its shelf, it gives up.
+    stall_stocked: Option<chrono::DateTime<chrono::Utc>>,
     /// Tools its standing bids bought since it last collected its market
     /// box (K2.1): they wait there, not in its pack.
     boxed_tools: std::collections::HashSet<String>,
@@ -598,6 +607,7 @@ impl SimBot {
             last_detour: None,
             tools_looked: None,
             stalls_full: None,
+            stall_stocked: None,
             boxed_tools: Default::default(),
             refused_repairs: HashMap::new(),
         }
@@ -705,6 +715,17 @@ impl SimBot {
                 Err(e) => {
                     if let Some(town) = town {
                         town.health(|h| h.failed(format!("repacking its lot: {e}")));
+                    }
+                }
+            }
+            // A stall it has stopped using, with nothing on its shelf,
+            // goes back to the bazaar for someone else (#523)
+            match self.give_up_idle_stall(&holdings) {
+                Ok(()) => {}
+                Err(e) if e.is_final() => return Err(e),
+                Err(e) => {
+                    if let Some(town) = town {
+                        town.health(|h| h.failed(format!("giving its stall up: {e}")));
                     }
                 }
             }

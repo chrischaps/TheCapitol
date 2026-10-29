@@ -589,7 +589,7 @@ impl SimBot {
     }
 
     /// The seconds it's on between `from` and `to` (#505).
-    fn on_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
+    pub(super) fn on_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
         hours_on(self.hours.as_ref(), from, to)
     }
 

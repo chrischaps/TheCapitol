@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::super::plan::Holdings;
 use super::super::report::{AskFate, Entry};
-use super::super::{bid_menu, grade, is_tool, stall_menu, surplus, worth_unbooked, Trade, STALL_DAYS};
+use super::super::{bid_menu, grade, is_tool, stall_at, stall_menu, surplus, worth_unbooked, Trade, STALL_DAYS};
 use super::{Action, SimBot};
 use crate::bazaar;
 use crate::bot::BotError;
@@ -32,6 +32,10 @@ const BID_LIFE: f64 = 3600.0;
 /// the bazaar taken, before it reads the directory for a free one again
 /// (#551).
 const STALLS_AGAIN: f64 = 1.0;
+/// Seconds of its hours a citizen signing off with an empty stall must be
+/// on before the rent runs out to keep it (#523): less than an hour on,
+/// and it couldn't stock it to any purpose.
+const STALL_BACK_SECS: f64 = 3600.0;
 /// How far from its spot a lingering citizen looks for a citizen to ask
 /// (#295): about fifteen metres, across the hall's steps.
 const ASK_REACH: f64 = 150.0;
@@ -404,6 +408,63 @@ impl SimBot {
         free
     }
 
+    /// Gives its stall up when it has stopped using it (#523): with
+    /// nothing on the shelf and nothing spare enough to stock it with
+    /// ([`stall_at`]), once the rent has less than a day to run or it hasn't
+    /// stocked it for a day ([`gives_up`]). The days paid aren't refunded,
+    /// so a shelf with goods on it is kept to its lapse.
+    pub(super) fn give_up_idle_stall(&mut self, holdings: &Holdings) -> Result<(), BotError> {
+        if !self.people {
+            return Ok(());
+        }
+        let Some(shop) = self.bot.state().bazaar().my_shop() else {
+            self.stall_stocked = None;
+            return Ok(());
+        };
+        let (empty, paid_until) = (shop.listings.is_empty(), shop.paid_until);
+        let now = self.bot.state().utc_now();
+        let stocked = *self.stall_stocked.get_or_insert(now);
+        if !empty {
+            return Ok(());
+        }
+        let stocking = self
+            .spare(holdings, None)
+            .iter()
+            .any(|&(item, n)| n >= (stall_at(item) / 2).max(1));
+        let left = (paid_until - now).num_seconds();
+        let idle = (now - stocked).num_seconds();
+        if gives_up(left, idle, stocking).is_none() {
+            return Ok(());
+        }
+        self.give_stall_up()
+    }
+
+    /// As its session ends, gives up an empty stall it won't be on to stock
+    /// for [`STALL_BACK_SECS`] before the rent runs out (#523): its habit's
+    /// hours (#276) say when it's back, and a citizen on always keeps it.
+    /// A citizen dropped from the roster never signs in to do this, so its
+    /// stall lapses by the bazaar's sweep (#585).
+    pub(super) fn close_stall_on_leaving(&mut self) -> Result<(), BotError> {
+        if !self.people {
+            return Ok(());
+        }
+        let Some(shop) = self.bot.state().bazaar().my_shop() else {
+            return Ok(());
+        };
+        let (empty, paid_until) = (shop.listings.is_empty(), shop.paid_until);
+        let now = self.bot.state().utc_now();
+        if !leaves(empty, (paid_until - now).num_seconds(), self.on_between(now, paid_until)) {
+            return Ok(());
+        }
+        self.give_stall_up()
+    }
+
+    fn give_stall_up(&mut self) -> Result<(), BotError> {
+        self.bot.close_stall()?;
+        self.stall_stocked = None;
+        Ok(())
+    }
+
     /// Stocks the citizen's stall with `quantity` of `item` at `price`,
     /// renting the first free stall for [`STALL_DAYS`] if it keeps none,
     /// and paying for more days when its rent has less than one to run.
@@ -458,6 +519,7 @@ impl SimBot {
             left -= n;
         }
         self.mind.stocked(item);
+        self.stall_stocked = Some(now);
         // Give the stall a moment to show on the bazaar's signs
         self.bot.idle(Duration::from_millis(100))?;
         Ok(())
@@ -473,6 +535,32 @@ pub(super) fn worn_price(price: i64, stack: &SlotItem) -> i64 {
         (Some(left), Some(most)) if most > 0 && left < most => (price * i64::from(left) / i64::from(most)).max(1),
         _ => price,
     }
+}
+
+/// Why a citizen gives up a stall with an empty shelf, if it does (#523),
+/// with `left` seconds of rent to run and `idle` since it last stocked it:
+/// `short`, with less than a day to run, when it would have to pay more to
+/// stock it again anyway, or `idle`, when it hasn't stocked it in a day.
+/// Never while it has something spare to stock it with (`stocking`), and
+/// not once the rent has run out: the bazaar's sweep has it then.
+fn gives_up(left: i64, idle: i64, stocking: bool) -> Option<&'static str> {
+    if stocking || left <= 0 {
+        return None;
+    }
+    if left < RENT_DAY_SECS {
+        Some("short")
+    } else if idle >= RENT_DAY_SECS {
+        Some("idle")
+    } else {
+        None
+    }
+}
+
+/// Whether a citizen signing off gives its stall up (#523): its shelf is
+/// `empty` and it's `on` less than [`STALL_BACK_SECS`] of the `left`
+/// seconds before the rent runs out, so the days left would go unused.
+fn leaves(empty: bool, left: i64, on: f64) -> bool {
+    empty && left > 0 && on < STALL_BACK_SECS
 }
 
 /// The first stall the directory shows free to rent, if any.
@@ -556,5 +644,40 @@ mod tests {
         assert!(looks_again(None, 0.0), "it looks the first time");
         assert!(!looks_again(Some(2.0), 2.5), "not within the hour");
         assert!(looks_again(Some(2.0), 3.0), "and again after it");
+    }
+
+    /// #523: a citizen gives up an empty stall it has stopped using, once
+    /// the rent is short or it hasn't stocked it in a day, and never one it
+    /// has goods to stock it with.
+    #[test]
+    fn an_empty_stall_it_has_stopped_using_is_given_up() {
+        let day = RENT_DAY_SECS;
+        let hour = 3600;
+        // Freshly rented and sold out: it may stock again soon
+        assert_eq!(gives_up(2 * day - hour, hour, false), None);
+        // Less than a day to run: stocking again would mean paying more
+        assert_eq!(gives_up(day - hour, hour, false), Some("short"));
+        // A day without stocking, on a stall paid ahead
+        assert_eq!(gives_up(day + hour, day, false), Some("idle"));
+        assert_eq!(gives_up(day + hour, day - 1, false), None);
+        // Something spare to stock it with: it keeps it, however short
+        assert_eq!(gives_up(hour, 2 * day, true), None);
+        // Run out already: the sweep closes it
+        assert_eq!(gives_up(0, 2 * day, false), None);
+        assert_eq!(gives_up(-hour, 2 * day, false), None);
+    }
+
+    /// #523: signing off, a citizen gives up an empty stall it won't be on
+    /// to stock before the rent runs out, and keeps one with goods on it.
+    #[test]
+    fn a_citizen_leaving_gives_up_an_empty_stall_it_wont_be_back_for() {
+        let day = RENT_DAY_SECS;
+        assert!(leaves(true, day, 0.0), "not on again before it lapses");
+        assert!(leaves(true, day, STALL_BACK_SECS - 1.0), "on too little to stock it");
+        assert!(!leaves(true, day, STALL_BACK_SECS), "back in time");
+        assert!(!leaves(false, day, 0.0), "goods on the shelf sell while it's away");
+        assert!(!leaves(true, 0, 0.0), "lapsed already");
+        // A citizen on always is on the whole span
+        assert!(!leaves(true, day, day as f64));
     }
 }
