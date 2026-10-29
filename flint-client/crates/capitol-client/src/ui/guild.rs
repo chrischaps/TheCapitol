@@ -20,9 +20,11 @@
 //!     in red, and the treasury after.
 //!   - **The hall** (S4.3): where it stands, when it was taken and
 //!     any tax it owes, with the walk there; or, with none, how one is
-//!     bought. The leader alt-clicks a free lot in the guild district, and
-//!     its plot panel claims it for the guild at the Exchange hall
-//!     (`capitol_core::guilds::hall_offer`).
+//!     bought. The leader chooses from the guild district's free lots,
+//!     nearest the Exchange hall first (#581, `/bureaucracy/free-lots`),
+//!     each with "Show me" as the Deeds Office has, and claims one for the
+//!     guild at the Exchange hall (`capitol_core::guilds::hall_choice`). A
+//!     free lot's plot panel offers the same (`hall_offer`).
 //! - **Browse**: invitations to you, then every guild, the largest first. A
 //!   guild opens on its charter and roster, with *Apply*.
 //! - **Found**, outside a guild: the form, the tag previewed after your
@@ -35,12 +37,13 @@
 //! an [`Action`]: a name that opens a card, the walk to the hall, the ×.
 
 use capitol_core::chrono::{DateTime, Utc};
-use capitol_core::guilds::{self, Ask, Draft, Guilds, Purse, RosterAct, WaitAct};
+use capitol_core::guilds::{self, Ask, Draft, Guilds, HallChoice, Purse, RosterAct, WaitAct};
 use capitol_core::protocol::rest::{
-    GuildDetail, GuildEntry, GuildEntryKind, GuildHall, GuildInvite, GuildInviteKind, GuildMember, GuildSummary,
-    GuildTreasury,
+    FreeLot, FreeLotsResponse, GuildDetail, GuildEntry, GuildEntryKind, GuildHall, GuildInvite, GuildInviteKind, GuildMember,
+    GuildSummary, GuildTreasury,
 };
 use capitol_core::protocol::rules::guild::{self as rules, GuildRole};
+use capitol_core::protocol::rules::Zone;
 use egui::{Align, Align2, Color32, Id, Layout, Margin, RichText, Sense, Stroke};
 use uuid::Uuid;
 
@@ -59,6 +62,8 @@ const BANNER: f32 = 22.0;
 const HOLDS: f32 = 26.0;
 /// How many of the books' entries are shown.
 const BOOK_LINES: usize = 6;
+/// How many free halls are listed before "all of them".
+const HALL_LOTS: usize = 5;
 
 /// What the panel asks of the rest of the game.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +74,11 @@ pub enum Action {
     ToHall,
     /// Walk to your guild's hall, at its middle (server units)
     ToGuildHall { x: f64, y: f64 },
+    /// List the guild district's free lots, for a hall: ask the server (#581)
+    ListHallLots,
+    /// Mark a free hall's lot on the ground, as the Deeds Office does
+    ShowMe(super::deeds::Shown),
+    StopShowing,
     Close,
 }
 
@@ -88,6 +98,10 @@ pub struct View {
     pub online: bool,
     /// The server's clock, for how long someone's been in
     pub now: DateTime<Utc>,
+    /// The guild district's free lots, last listed, for a hall (#581)
+    pub hall_lots: Option<FreeLotsResponse>,
+    /// The lot shown on the ground, if any (its terrain id)
+    pub shown: Option<String>,
 }
 
 /// Which page is open.
@@ -117,18 +131,28 @@ pub struct GuildPanel {
     pub purse: Purse,
     /// *Leave* was pressed once: it asks again
     leaving: bool,
+    /// The free halls have been asked for since it opened: which are free
+    /// is live, so each opening asks again
+    halls_asked: bool,
+    /// Every free hall is listed, not the nearest few
+    halls_all: bool,
+    /// A hall's claim asked for once, waiting for "Yes"
+    hall_confirm: Option<Uuid>,
 }
 
 impl GuildPanel {
     pub fn toggle(&mut self) {
         self.open = !self.open;
         self.leaving = false;
+        self.halls_asked = false;
+        self.hall_confirm = None;
     }
 
     /// Open it on `page`.
     pub fn open_on(&mut self, page: Page) {
         self.open = true;
         self.page = page;
+        self.halls_asked = false;
     }
 
     pub fn show(&mut self, ctx: &egui::Context, guilds: &mut Guilds, view: &View) -> Option<Action> {
@@ -332,8 +356,198 @@ impl GuildPanel {
                 }
             }
             ui.add_space(12.0);
-            action = hall(ui, &guild, role, view);
+            action = self.hall(ui, guilds, &guild, role, view);
         });
+        action
+    }
+
+    /// The hall: where it stands, when it was taken and any tax it owes, and
+    /// the walk there; or with none, how one's bought, and by whom.
+    fn hall(&mut self, ui: &mut egui::Ui, guilds: &mut Guilds, guild: &GuildDetail, role: Option<GuildRole>, view: &View) -> Option<Action> {
+        let mut action = None;
+        ui.label(theme::label("Hall"));
+        ui.add_space(4.0);
+        egui::Frame::none()
+            .fill(theme::WELL)
+            .stroke(Stroke::new(1.0_f32, GUILD.gamma_multiply(0.35)))
+            .rounding(6.0)
+            .inner_margin(Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                match &guild.hall {
+                    Some(hall) => action = standing_hall(ui, guild, hall, view),
+                    None => action = self.no_hall(ui, guilds, guild, role, view),
+                }
+            });
+        action
+    }
+
+    /// No hall yet: the leader chooses one from the guild district's free
+    /// lots (#581), nearest the Exchange hall first; everyone else learns
+    /// who buys it.
+    fn no_hall(&mut self, ui: &mut egui::Ui, guilds: &mut Guilds, guild: &GuildDetail, role: Option<GuildRole>, view: &View) -> Option<Action> {
+        if role != Some(GuildRole::Leader) {
+            ui.label(theme::dim("No hall yet. The leader buys one in the guild district, from the treasury."));
+            return None;
+        }
+        let mut action = None;
+        if !self.halls_asked && view.online {
+            self.halls_asked = true;
+            action = Some(Action::ListHallLots);
+        }
+        ui.label(RichText::new("No hall yet.").font(theme::strong(size::BODY)).color(TEXT));
+        ui.label(theme::dim(
+            "The treasury buys a lot in the guild district at its deed's price, and pays its tax after. \
+             Choose one here, and claim it for the guild at the Exchange hall.",
+        ));
+        if !view.at_hall {
+            ui.add_space(6.0);
+            if theme::accent_button(ui, "Walk to the Exchange hall", GUILD, view.online).clicked() {
+                action = Some(Action::ToHall);
+            }
+        }
+        ui.add_space(8.0);
+        let listed = view.hall_lots.as_ref().filter(|l| Zone::from_str(&l.zone_id) == Some(Zone::GuildDistrict));
+        match listed {
+            None => {
+                ui.label(theme::dim(if view.online { "Reading the guild district's register…" } else { "The register is shut offline." }).italics());
+            }
+            Some(listed) if listed.lots.is_empty() => {
+                ui.label(theme::dim("Every lot in the guild district is taken.").italics());
+            }
+            Some(listed) => {
+                if let Some(a) = self.hall_lots(ui, guilds, guild, listed, view) {
+                    action = Some(a);
+                }
+            }
+        }
+        action
+    }
+
+    /// The free halls, the nearest few or all of them, with what the
+    /// treasury can do about each.
+    fn hall_lots(&mut self, ui: &mut egui::Ui, guilds: &mut Guilds, guild: &GuildDetail, listed: &FreeLotsResponse, view: &View) -> Option<Action> {
+        let mut action = None;
+        let held = guild.treasury.as_ref().map_or(0, |t| t.strands);
+        let cost = listed.deed_cost.map(i64::from);
+        let summary = match cost {
+            Some(cost) => format!(
+                "{} free, nearest the Exchange first. Each is {} from the treasury, which holds {}.",
+                listed.lots.len(),
+                guilds::strands_words(cost),
+                guilds::strands_words(held)
+            ),
+            None => format!("{} free, nearest the Exchange first.", listed.lots.len()),
+        };
+        ui.label(theme::dim(summary).size(size::SMALL));
+        let choice = cost.map(|cost| guilds::hall_choice(held, cost, view.at_hall));
+        if let Some(HallChoice::Short(short)) = choice {
+            ui.label(
+                RichText::new(format!("The treasury is {} short of a deed.", guilds::strands_words(short)))
+                    .size(size::SMALL)
+                    .color(theme::SHORT),
+            );
+        }
+        ui.add_space(4.0);
+        let shown = if self.halls_all { listed.lots.len() } else { HALL_LOTS.min(listed.lots.len()) };
+        for lot in &listed.lots[..shown] {
+            if let Some(a) = self.hall_row(ui, guilds, guild, lot, choice, view) {
+                action = Some(a);
+            }
+        }
+        if listed.lots.len() > HALL_LOTS {
+            ui.add_space(4.0);
+            let text = if self.halls_all { "The nearest few".to_owned() } else { format!("All {} free lots", listed.lots.len()) };
+            if theme::link(ui, &text, size::SMALL).clicked() {
+                self.halls_all = !self.halls_all;
+            }
+        }
+        action
+    }
+
+    /// One free hall: where it stands and what it holds, "Show me", and the
+    /// claim, asked twice, when the treasury can pay and you're at the hall.
+    fn hall_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        guilds: &mut Guilds,
+        guild: &GuildDetail,
+        lot: &FreeLot,
+        choice: Option<HallChoice>,
+        view: &View,
+    ) -> Option<Action> {
+        use super::deeds::small;
+        let mut action = None;
+        let shown = view.shown.as_deref() == Some(lot.terrain_id.as_str());
+        let asking = self.hall_confirm == Some(lot.plot_id);
+        egui::Frame::none()
+            .fill(if shown { theme::GOLD_WASH } else { Color32::TRANSPARENT })
+            .rounding(4.0)
+            .inner_margin(Margin::symmetric(6.0, 5.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (band, _) = ui.allocate_exact_size(egui::vec2(3.0, 32.0), Sense::hover());
+                    ui.painter().rect_filled(band, 1.5, if shown { GOLD } else { GUILD });
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(guilds::hall_lot_words(&lot.terrain_id, lot.x, lot.y))
+                                .font(theme::strong(size::BODY))
+                                .color(TEXT),
+                        );
+                        ui.label(
+                            theme::dim(format!(
+                                "{} stations  ·  {} sq  ·  {} to the Exchange",
+                                lot.fits,
+                                guilds::thousands(lot.area.round() as i64),
+                                capitol_core::zone_card::walk(lot.walk_secs)
+                            ))
+                            .size(size::SMALL),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if asking {
+                            if small(ui, "Not yet", DIM, true).clicked() {
+                                self.hall_confirm = None;
+                            }
+                            if small(ui, "Yes, buy it", GOLD, view.online && !guilds.busy()).clicked() {
+                                self.hall_confirm = None;
+                                guilds.queue(Ask::ClaimHall { guild_id: guild.id, plot_id: lot.plot_id });
+                            }
+                            return;
+                        }
+                        if choice == Some(HallChoice::Claim) && small(ui, "Claim", GOLD, view.online && !guilds.busy()).clicked() {
+                            self.hall_confirm = Some(lot.plot_id);
+                        }
+                        let (text, ink) = if shown { ("Shown ✓", theme::GOLD_LIGHT) } else { ("Show me", TEXT) };
+                        let show = small(ui, text, ink, true).on_hover_text(if shown {
+                            "Ringed in gold on the ground. Click to stop showing it"
+                        } else {
+                            "Mark it on the ground and point the way, to walk out and look first"
+                        });
+                        if show.clicked() {
+                            action = Some(if shown {
+                                Action::StopShowing
+                            } else {
+                                Action::ShowMe(super::deeds::Shown {
+                                    terrain_id: lot.terrain_id.clone(),
+                                    plot_id: lot.plot_id,
+                                    zone: Zone::GuildDistrict,
+                                    x: lot.x,
+                                    y: lot.y,
+                                })
+                            });
+                        }
+                    });
+                });
+                if asking {
+                    ui.label(
+                        RichText::new(format!("Buy this hall from {} treasury?", guilds::possessive(&guild.name)))
+                            .size(size::SMALL)
+                            .color(theme::GOLD_LIGHT),
+                    );
+                }
+            });
         action
     }
 
@@ -765,27 +979,6 @@ fn books(ui: &mut egui::Ui, entries: Option<&[GuildEntry]>, view: &View) {
         });
 }
 
-/// The hall: where it stands, when it was taken and any tax it owes, and
-/// the walk there; or with none, how one's bought, and by whom.
-fn hall(ui: &mut egui::Ui, guild: &GuildDetail, role: Option<GuildRole>, view: &View) -> Option<Action> {
-    let mut action = None;
-    ui.label(theme::label("Hall"));
-    ui.add_space(4.0);
-    egui::Frame::none()
-        .fill(theme::WELL)
-        .stroke(Stroke::new(1.0_f32, GUILD.gamma_multiply(0.35)))
-        .rounding(6.0)
-        .inner_margin(Margin::symmetric(14.0, 10.0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            match &guild.hall {
-                Some(hall) => action = standing_hall(ui, guild, hall, view),
-                None => action = no_hall(ui, role, view),
-            }
-        });
-    action
-}
-
 /// A hall that stands: its sign's words and its address, when it was
 /// taken, and its tax a week and any it owes (#582).
 fn standing_hall(ui: &mut egui::Ui, guild: &GuildDetail, hall: &GuildHall, view: &View) -> Option<Action> {
@@ -813,25 +1006,6 @@ fn standing_hall(ui: &mut egui::Ui, guild: &GuildDetail, hall: &GuildHall, view:
         action = Some(Action::ToGuildHall { x: hall.x, y: hall.y });
     }
     action
-}
-
-/// No hall yet: the leader learns how to buy one, everyone else who does.
-/// Nothing lists the free lots, so it's by alt-click (#581).
-fn no_hall(ui: &mut egui::Ui, role: Option<GuildRole>, view: &View) -> Option<Action> {
-    if role != Some(GuildRole::Leader) {
-        ui.label(theme::dim("No hall yet. The leader buys one in the guild district, from the treasury."));
-        return None;
-    }
-    ui.label(RichText::new("No hall yet.").font(theme::strong(size::BODY)).color(TEXT));
-    ui.label(theme::dim(
-        "The treasury buys a lot in the guild district at its deed's price, and pays its tax after. \
-         Alt-click a free one, and claim it for the guild from its panel at the Exchange hall.",
-    ));
-    if view.at_hall {
-        return None;
-    }
-    ui.add_space(6.0);
-    theme::accent_button(ui, "Walk to the Exchange hall", GUILD, view.online).clicked().then_some(Action::ToHall)
 }
 
 /// The guild's name large in its verdigris, its tag beside it, and who
@@ -1052,12 +1226,13 @@ fn name_link(ui: &mut egui::Ui, id: Uuid, name: &str, citizen: bool, yours: bool
     r.clicked().then(|| Action::Card { id, name: name.to_owned(), citizen })
 }
 
-/// `--guild-sample [browse|yours|found|officer|treasury|debt|nohall]`: the
-/// panel on a sample. `yours` is the leader's view of a guild of six with
-/// two waiting, `officer` the same as an officer; `treasury` is the
+/// `--guild-sample [browse|yours|found|officer|treasury|debt|nohall|halls]`:
+/// the panel on a sample. `yours` is the leader's view of a guild of six
+/// with two waiting, `officer` the same as an officer; `treasury` is the
 /// leader's Treasury page, its books and its hall; `debt` an officer's,
 /// the treasury in debt and most of the week's limit taken; `nohall` the
-/// leader's, with no hall yet, away from the Exchange; `browse` the
+/// leader's, with no hall yet, away from the Exchange, and `halls` the
+/// same at the Exchange, each with the free halls to choose from; `browse` the
 /// registry with an invitation; `found` the form half filled at the hall.
 pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
     use capitol_core::protocol::rest::{Correspondent, MyGuild};
@@ -1075,6 +1250,8 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
     };
     let rope = Uuid::from_u128(100);
     let officer = matches!(which, "officer" | "debt");
+    // A leader with no hall, away from the Exchange or at it (#581)
+    let homeless = matches!(which, "nohall" | "halls");
     let my_role = if officer { GuildRole::Officer } else { GuildRole::Leader };
     let (lead_id, lead_name) = if which == "officer" { (2, "Ada Reeder") } else { (1, "Wren Hollis") };
     let mut members = vec![
@@ -1120,7 +1297,7 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
             withdrawal_limit: 200,
             withdrawn_this_week: if officer { 150 } else { 0 },
         }),
-        hall: (which != "nohall").then(|| GuildHall {
+        hall: (!homeless).then(|| GuildHall {
             plot_id: Uuid::from_u128(400),
             terrain_id: Some("guild_3_12".into()),
             address: Some("14 Guild Ring by Pilgrims' Road".into()),
@@ -1156,7 +1333,7 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
     held += 1;
     books.push(entry(70, GuildEntryKind::Deposit, 1_200, held, Some(who(5, "Wen Calder", true)), ""));
     held -= 1_200;
-    if which != "nohall" {
+    if !homeless {
         books.push(entry(19 * 24, GuildEntryKind::Hall, -5_000, held, Some(who(1, "Wren Hollis", false)), "A hall in the guild district"));
     }
     let mut guilds = Guilds::default();
@@ -1205,7 +1382,7 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
     let page = match which {
         "browse" => Page::Browse,
         "found" => Page::Found,
-        "treasury" | "debt" | "nohall" => Page::Treasury,
+        "treasury" | "debt" | "nohall" | "halls" => Page::Treasury,
         _ => Page::Yours,
     };
     let draft = if which == "found" {
@@ -1221,8 +1398,36 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
         at_hall: which != "nohall",
         online: false,
         now,
+        hall_lots: homeless.then(sample_halls),
+        shown: None,
     };
     (guilds, view, page, draft)
+}
+
+/// The guild district's free lots for `--guild-sample nohall|halls`, as
+/// `/bureaucracy/free-lots?zone=guild_district` lists them (#581): either
+/// side of the guild ring, nearest the Exchange first. The numbers are
+/// made up, near the default world's.
+pub fn sample_halls() -> FreeLotsResponse {
+    use capitol_core::protocol::rules::{CENTER_X, CENTER_Y};
+    let lots = (0..12)
+        .map(|k| {
+            let (band, r) = if k % 3 == 2 { ("out", 860.0) } else { ("in", 740.0) };
+            let a = 0.35 + k as f64 * 0.52;
+            FreeLot {
+                plot_id: Uuid::from_u128(5810 + k as u128),
+                terrain_id: format!("guild_plot_{band}_{}_{}", k / 2, k % 4),
+                x: CENTER_X + r * a.cos(),
+                y: CENTER_Y + r * a.sin(),
+                address: None,
+                area: 14_200.0 + 900.0 * ((k * 5) % 4) as f64,
+                fits: 18 + (k * 7) % 5,
+                capacity: 25,
+                walk_secs: 24.0 + 3.5 * k as f64,
+            }
+        })
+        .collect();
+    FreeLotsResponse { zone_id: Zone::GuildDistrict.as_str().to_owned(), lots, deed_cost: Some(5_000) }
 }
 
 #[cfg(test)]
@@ -1247,14 +1452,35 @@ mod tests {
         purse: &Purse,
         click_at: Option<egui::Pos2>,
     ) -> (Option<Action>, Option<egui::Rect>, Option<Ask>) {
+        run_prepped(guilds, view, page, draft, purse, &Prep::default(), click_at)
+    }
+
+    /// The screen, and a hall's claim already asked for once, for the free
+    /// halls (#581), which sit low on the Treasury page.
+    #[derive(Clone, Default)]
+    struct Prep {
+        screen: Option<egui::Vec2>,
+        confirm: Option<Uuid>,
+    }
+
+    fn run_prepped(
+        guilds: &Guilds,
+        view: &View,
+        page: Page,
+        draft: &Draft,
+        purse: &Purse,
+        prep: &Prep,
+        click_at: Option<egui::Pos2>,
+    ) -> (Option<Action>, Option<egui::Rect>, Option<Ask>) {
         let ctx = theme::test_context();
         let mut guilds = guilds.clone();
         let mut panel = GuildPanel { draft: draft.clone(), purse: purse.clone(), ..Default::default() };
         panel.open_on(page);
+        panel.hall_confirm = prep.confirm;
         let (mut action, mut rect) = (None, None);
         for frame in 0..8 {
             let mut raw = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, prep.screen.unwrap_or(SCREEN))),
                 ..Default::default()
             };
             if let (Some(p), 5) = (click_at, frame) {
@@ -1288,14 +1514,18 @@ mod tests {
     }
 
     fn clicks_with(guilds: &Guilds, view: &View, page: Page, draft: &Draft, purse: &Purse) -> (Vec<Action>, Vec<Ask>) {
-        let (_, rect, _) = run_with(guilds, view, page, draft, purse, None);
+        clicks_prepped(guilds, view, page, draft, purse, &Prep::default())
+    }
+
+    fn clicks_prepped(guilds: &Guilds, view: &View, page: Page, draft: &Draft, purse: &Purse, prep: &Prep) -> (Vec<Action>, Vec<Ask>) {
+        let (_, rect, _) = run_prepped(guilds, view, page, draft, purse, prep, None);
         let rect = rect.expect("drawn");
         let (mut actions, mut asks) = (Vec::new(), Vec::new());
         let mut y = rect.top() + 4.0;
         while y < rect.bottom() {
             let mut x = rect.left() + 20.0;
             while x < rect.right() {
-                let (action, _, ask) = run_with(guilds, view, page, draft, purse, Some(egui::pos2(x, y)));
+                let (action, _, ask) = run_prepped(guilds, view, page, draft, purse, prep, Some(egui::pos2(x, y)));
                 if let Some(a) = action.filter(|a| !actions.contains(a)) {
                     actions.push(a);
                 }
@@ -1426,9 +1656,51 @@ mod tests {
         assert!(actions.contains(&Action::ToHall), "{actions:?}");
     }
 
+    /// The free halls (#581): the leader asks for them as the page opens,
+    /// shows any on the ground, and at the Exchange buys one, asked twice
+    #[test]
+    fn a_leader_chooses_a_hall_from_the_free_lots_and_claims_it_at_the_exchange() {
+        let tall = Prep { screen: Some(egui::vec2(1280.0, 1600.0)), ..Default::default() };
+        let (guilds, view, page, draft) = sample("halls");
+        let view = online(view);
+        let lots = view.hall_lots.clone().unwrap().lots;
+        let (action, _, _) = run(&guilds, &view, page, &draft, None);
+        assert_eq!(action, Some(Action::ListHallLots), "the page asks for the free halls");
+        let (actions, asks) = clicks_prepped(&guilds, &view, page, &draft, &Purse::default(), &tall);
+        let shown: Vec<Uuid> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::ShowMe(s) => Some(s.plot_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, lots[..HALL_LOTS].iter().map(|l| l.plot_id).collect::<Vec<_>>(), "the nearest few, each to show");
+        assert!(!actions.contains(&Action::ToHall), "at the Exchange already: {actions:?}");
+        assert!(!asks.iter().any(|a| matches!(a, Ask::ClaimHall { .. })), "one click only asks: {asks:?}");
+        let asked = Prep { confirm: Some(lots[1].plot_id), ..tall.clone() };
+        let (_, asks) = clicks_prepped(&guilds, &view, page, &draft, &Purse::default(), &asked);
+        assert!(asks.contains(&Ask::ClaimHall { guild_id: ROPE, plot_id: lots[1].plot_id }), "{asks:?}");
+        // Shown, its row's button stops showing it
+        let showing = View { shown: Some(lots[0].terrain_id.clone()), ..view };
+        let (actions, _) = clicks_prepped(&guilds, &showing, page, &draft, &Purse::default(), &tall);
+        assert!(actions.contains(&Action::StopShowing), "{actions:?}");
+    }
+
+    /// Away from the Exchange the leader still sees the free halls, and is
+    /// walked there to buy one
+    #[test]
+    fn away_from_the_exchange_the_free_halls_are_shown_and_not_claimed() {
+        let tall = Prep { screen: Some(egui::vec2(1280.0, 1600.0)), ..Default::default() };
+        let (guilds, view, page, draft) = sample("nohall");
+        let (actions, asks) = clicks_prepped(&guilds, &online(view), page, &draft, &Purse::default(), &tall);
+        assert!(actions.contains(&Action::ToHall), "{actions:?}");
+        assert!(actions.iter().any(|a| matches!(a, Action::ShowMe(_))), "{actions:?}");
+        assert!(!asks.iter().any(|a| matches!(a, Ask::ClaimHall { .. })), "{asks:?}");
+    }
+
     #[test]
     fn every_sample_draws_inside_the_screen() {
-        for which in ["browse", "yours", "found", "officer", "treasury", "debt", "nohall"] {
+        for which in ["browse", "yours", "found", "officer", "treasury", "debt", "nohall", "halls"] {
             let (guilds, view, page, draft) = sample(which);
             let (_, rect, _) = run(&guilds, &view, page, &draft, None);
             let rect = rect.expect("drawn");

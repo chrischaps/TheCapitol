@@ -417,7 +417,7 @@ fn short_name(zone: Zone) -> &'static str {
 }
 
 /// A row's small button, in `ink`.
-fn small(ui: &mut egui::Ui, text: &str, ink: egui::Color32, enabled: bool) -> egui::Response {
+pub(super) fn small(ui: &mut egui::Ui, text: &str, ink: egui::Color32, enabled: bool) -> egui::Response {
     let button = egui::Button::new(RichText::new(text).size(size::SMALL).color(ink))
         .fill(if ink == GOLD { theme::GOLD_WASH } else { theme::FIELD })
         .stroke(Stroke::new(1.0_f32, if ink == GOLD { GOLD } else { theme::BORDER }))
@@ -529,7 +529,7 @@ pub fn sample_lots(zone: Zone) -> FreeLotsResponse {
             }
         })
         .collect();
-    FreeLotsResponse { zone_id: zone.as_str().to_owned(), lots }
+    FreeLotsResponse { zone_id: zone.as_str().to_owned(), lots, deed_cost: None }
 }
 
 #[cfg(test)]
