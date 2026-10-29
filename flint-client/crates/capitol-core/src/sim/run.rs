@@ -1752,7 +1752,7 @@ impl SimBot {
         match trade {
             Trade::Sell { item, quantity, price, stands } => {
                 // Its work keeps the best of what it uses for its own crafts
-                let keeps_best = self.job().uses().contains(&item.as_str()) || self.wants().contains(&item.as_str());
+                let keeps_best = self.keeps_best(item);
                 // What its claims want stays in hand
                 let free = !self.board.promised().iter().any(|(i, _)| i == item);
                 let holdings = self.holdings();
