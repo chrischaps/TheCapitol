@@ -20,6 +20,7 @@ pub mod player;
 pub mod players;
 pub mod plots;
 pub mod recipes;
+pub mod relief;
 pub mod stations;
 pub mod terrain;
 pub mod world;

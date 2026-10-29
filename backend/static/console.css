@@ -104,6 +104,15 @@
   --m-heat-mode: multiply;
   --m-station: #2b4c7e;
   --m-label: rgba(35, 30, 23, 0.45);
+  /* the wilds by height, lit from the north-west, with contours (#415) */
+  --m-relief-low: #e2dbbb;
+  --m-relief-mid: #cbbd92;
+  --m-relief-high: #a99a7c;
+  --m-relief-peak: #f3eee3;
+  --m-relief-lit: #fcf7ea;
+  --m-relief-shadow: #5f4f3b;
+  --m-contour: #6b5232;
+  --m-contour-alpha: 0.16;
   /* nodes by what grows there: plants, wood, stone, clay, the three metals */
   --n-grass: #6f9a4a;
   --n-reed_bed: #8fae5a;
@@ -216,6 +225,14 @@
     --m-heat-mode: lighter;
     --m-station: #60a5fa;
     --m-label: rgba(201, 162, 39, 0.5);
+    --m-relief-low: #161924;
+    --m-relief-mid: #20253a;
+    --m-relief-high: #303751;
+    --m-relief-peak: #747b9c;
+    --m-relief-lit: #a7b0d6;
+    --m-relief-shadow: #040407;
+    --m-contour: #c9a227;
+    --m-contour-alpha: 0.14;
     --n-grass: #7dbb55;
     --n-reed_bed: #a6c96a;
     --n-tree: #4f9a45;
@@ -299,6 +316,14 @@
   --m-heat-mode: lighter;
   --m-station: #60a5fa;
   --m-label: rgba(201, 162, 39, 0.5);
+  --m-relief-low: #161924;
+  --m-relief-mid: #20253a;
+  --m-relief-high: #303751;
+  --m-relief-peak: #747b9c;
+  --m-relief-lit: #a7b0d6;
+  --m-relief-shadow: #040407;
+  --m-contour: #c9a227;
+  --m-contour-alpha: 0.14;
   --n-grass: #7dbb55;
   --n-reed_bed: #a6c96a;
   --n-tree: #4f9a45;

@@ -60,6 +60,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/walkers", get(get_walkers))
         .route("/positions", get(get_positions).layer(CompressionLayer::new()))
         .route("/map", get(get_map).layer(CompressionLayer::new()))
+        // The wilds' relief under the map (#415), a PNG deflated already
+        .route("/relief", get(super::relief::get_relief))
         .route("/player", get(get_player).layer(CompressionLayer::new()))
         .route("/books", get(get_books))
         .route("/accounts/{id}/subscription", post(subscribe_account))

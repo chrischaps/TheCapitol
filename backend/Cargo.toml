@@ -46,6 +46,8 @@ tracy-client = { version = "0.18", optional = true }
 thiserror = "2"
 rand = "0.8"
 sha2 = "0.10"
+# Deflates the console map's relief PNG (#415)
+flate2 = "1"
 futures = "0.3"
 
 # API Documentation

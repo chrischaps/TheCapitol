@@ -4353,10 +4353,14 @@
   // The map (D1.3): `/terrain` turned once into paths in world units, the
   // walkers from `/admin/positions` every two seconds, eased between reads,
   // and the slower layers from `/admin/map` and `/world/nodes`. It takes over
-  // from the React client's F1 debug camera for watching the world. The wilds are
-// drawn flat: the height field is Rust only (#415).
+  // from the React client's F1 debug camera for watching the world. The wilds'
+  // relief comes from `/admin/relief` (#415): the height field is Rust only, so
+  // the server samples it, and the page tints it to the theme.
 
   const POSITIONS_MS = 2_000;
+  const RELIEF_SIZE = 1024;
+  // A contour every this many units of height, and every fifth one darker
+  const CONTOUR = 100;
   const MAP_LAYERS_MS = 30_000;
   const NODES_MS = 60_000;
   const LAYERS = ["people", "nodes", "plots", "stations", "heat"];
@@ -4366,6 +4370,11 @@
   const map = {
     terrain: null,
     loading: null,
+    // The wilds' height and shade, a byte a pixel each, and their tint for the theme
+    relief: null,
+    reliefLoading: false,
+    // The ground's height under the cursor, over the open wilds
+    ground: null,
     layers: null,
     nodes: null,
     // By player id: the walker, where it's drawn from and where it's going
@@ -4407,8 +4416,114 @@
       heat: t("heat"), heatMode: t("heat-mode") || "multiply",
       station: t("station"), label: t("label"), ink: token("--ink"), dim: token("--ink-dim"),
       nodes, otherNode: token("--n-other"),
+      relief: {
+        ramp: ["low", "mid", "high", "peak"].map((n) => rgbOf(t(`relief-${n}`))),
+        lit: rgbOf(t("relief-lit")), shadow: rgbOf(t("relief-shadow")),
+        contour: rgbOf(t("contour")), contourAlpha: Number(t("contour-alpha")) || 0.2,
+      },
     };
     return map.palette;
+  }
+
+  /** A CSS colour as [r, g, b], by letting a canvas read it */
+  function rgbOf(css) {
+    const ctx = (rgbOf.ctx ??= document.createElement("canvas").getContext("2d"));
+    ctx.fillStyle = "#000";
+    ctx.fillStyle = css;
+    const s = ctx.fillStyle;
+    if (s.startsWith("#")) return [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+    return s.match(/[\d.]+/g).slice(0, 3).map(Number);
+  }
+
+  // ---- the wilds' relief (#415)
+
+  async function readRelief() {
+    if (map.relief || map.reliefLoading) return;
+    map.reliefLoading = true;
+    try {
+      const res = await api(`/admin/relief?size=${RELIEF_SIZE}`);
+      if (!res.ok) throw new Error(`/admin/relief: ${res.status}`);
+      const peak = Number(res.headers.get("X-Relief-Peak")) || 1;
+      // Green on level ground: brighter faces the light, darker faces away
+      const flat = Number(res.headers.get("X-Relief-Flat")) || 191;
+      // Numbers, not colours: no colour management on the way in
+      const bitmap = await createImageBitmap(await res.blob(), { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+      const size = bitmap.width;
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const px = ctx.getImageData(0, 0, size, size).data;
+      const height = new Uint8Array(size * size);
+      const shade = new Uint8Array(size * size);
+      for (let i = 0; i < size * size; i++) { height[i] = px[i * 4]; shade[i] = px[i * 4 + 1]; }
+      map.relief = { size, peak, flat, height, shade, canvas, inks: null };
+      drawSoon();
+    } catch (e) {
+      if (!(e instanceof SignedOut)) console.warn(e);
+    } finally {
+      map.reliefLoading = false;
+    }
+  }
+
+  /** The relief tinted for the theme: a ramp by height, lit from the
+   *  north-west, with contours. Made again only when the inks change */
+  function reliefImage(p) {
+    const r = map.relief;
+    if (r.inks === p) return r.canvas;
+    const { size, height, shade, peak, flat } = r;
+    const { ramp, lit, shadow, contour, contourAlpha } = p.relief;
+    const ctx = r.canvas.getContext("2d", { willReadFrequently: true });
+    const img = ctx.createImageData(size, size);
+    const out = img.data;
+    // The height a red byte stands for, and the contour band it's in
+    const units = (v) => ((v - 1) / 254) * peak;
+    const band = new Int16Array(256);
+    for (let v = 1; v < 256; v++) band[v] = Math.floor(units(v) / CONTOUR);
+    for (let i = 0; i < size * size; i++) {
+      const h = height[i];
+      if (!h) continue;
+      // Low to mid to high to peak, by height over the peak, eased so the
+      // foothills, where most of the wilds are, take colour too
+      const t = Math.sqrt((h - 1) / 254) * (ramp.length - 1);
+      const k = Math.min(ramp.length - 2, Math.floor(t));
+      const f = t - k;
+      const [a, b] = [ramp[k], ramp[k + 1]];
+      // Lit faces lean to the light's ink, the far faces to the shadow's
+      const s = shade[i] / flat - 1;
+      const toward = s > 0 ? lit : shadow;
+      const w = Math.min(1, Math.abs(s) * (s > 0 ? 1.6 : 1.1));
+      // A contour where the band changes to the right or below
+      const right = (i + 1) % size ? height[i + 1] : 0;
+      const below = i + size < size * size ? height[i + size] : 0;
+      const c = band[h];
+      const line = (right && band[right] !== c) || (below && band[below] !== c);
+      const index = line && Math.max(c, band[right], band[below]) % 5 === 0;
+      const ink = line ? contourAlpha * (index ? 2 : 1) : 0;
+      const j = i * 4;
+      for (let n = 0; n < 3; n++) {
+        let v = a[n] + f * (b[n] - a[n]);
+        v += w * (toward[n] - v);
+        out[j + n] = v + ink * (contour[n] - v);
+      }
+      out[j + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    r.inks = p;
+    return r.canvas;
+  }
+
+  /** The height of the wilds at a world point, or null off them */
+  function reliefAt(x, y) {
+    const r = map.relief;
+    const t = map.terrain;
+    if (!r || !t) return null;
+    const px = Math.floor((x / t.size) * r.size);
+    const py = Math.floor((y / t.size) * r.size);
+    if (px < 0 || py < 0 || px >= r.size || py >= r.size) return null;
+    const h = r.height[py * r.size + px];
+    return h ? ((h - 1) / 254) * r.peak : null;
   }
 
   function buildTerrain(t) {
@@ -4557,6 +4672,12 @@
       disc(zones[i].outer);
       ctx.fillStyle = i % 2 ? p.zoneB : p.zoneA;
       ctx.fill();
+    }
+    // The wilds' relief over their wash, the water and trails over it
+    if (map.relief) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(reliefImage(p), 0, 0, t.size, t.size);
     }
     disc(t.size / 2);
     ctx.strokeStyle = p.edge;
@@ -4835,6 +4956,7 @@
         );
       }
     }
+    if (!h && map.ground != null) return void (note.textContent = `The wilds, the ground ${nf.format(map.ground)} high here.`);
     if (!h) return void (note.textContent = "Point at anyone to see what they're doing; click to follow them.");
     switch (h.kind) {
       case "walker": note.textContent = `${h.thing.citizen ? "◇ " : ""}${h.thing.name}${h.thing.citizen ? ", a citizen," : ""} ${doing(h.thing)}. Click to follow.`; break;
@@ -4952,6 +5074,7 @@
       if (!map.on.has("people")) setLayer("people", true);
       map.view.scale = Math.max(map.view.scale, Math.min(map.size.w, map.size.h) / FOLLOW_SPAN);
     }
+    readRelief();
     if (!map.timers.length) {
       readPositions();
       readLayers();
@@ -5029,6 +5152,10 @@
         if (map.view && e.pointerType === "mouse") {
           const hit = hitAt(...at);
           if (hit?.id !== map.hover?.id) { map.hover = hit; mapNote(); drawSoon(); }
+          // Over open wilds, the note says how high the ground stands (#415)
+          const h = hit ? null : reliefAt(...toWorld(...at));
+          const ground = h == null ? null : Math.round(h / 10) * 10;
+          if (ground !== map.ground) { map.ground = ground; mapNote(); }
           canvas.style.cursor = hit?.kind === "walker" ? "pointer" : "grab";
         }
         return;
@@ -5068,7 +5195,9 @@
     };
     canvas.addEventListener("pointerup", up);
     canvas.addEventListener("pointercancel", up);
-    canvas.addEventListener("pointerleave", () => { if (map.hover && !pointers.size) { map.hover = null; mapNote(); drawSoon(); } });
+    canvas.addEventListener("pointerleave", () => {
+      if ((map.hover || map.ground != null) && !pointers.size) { map.hover = map.ground = null; mapNote(); drawSoon(); }
+    });
     canvas.addEventListener("wheel", (e) => {
       if (!map.view) return;
       e.preventDefault();
