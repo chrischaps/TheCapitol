@@ -244,7 +244,16 @@
 
   function addSample(sample) {
     const had = state.samples.get(sample.at_ms);
-    state.samples.set(sample.at_ms, had ? merge(had, sample) : sample);
+    if (had && sample.since_ms !== had.since_ms) {
+      // Not the same window: a stored minute where a ten-second sample of the
+      // ring is held, which a resync after a server restart brings (#600).
+      // The wider window counts the narrower's, so it takes the place of
+      // every sample held inside it, or the summed stories count it twice
+      if (sample.since_ms > had.since_ms) return;
+      for (const at of state.samples.keys()) if (at > sample.since_ms && at <= sample.at_ms) state.samples.delete(at);
+    }
+    const into = state.samples.get(sample.at_ms);
+    state.samples.set(sample.at_ms, into ? merge(into, sample) : sample);
     state.sorted = null;
     // Keep a day, the ring's length
     const old = Date.now() - DAY_MS - SAMPLE_MS;
@@ -320,9 +329,8 @@
         const res = await api("/admin/stream", { signal: abort.signal });
         if (!res.ok || !res.body) throw new Error(`stream: ${res.status}`);
         // After a gap, the samples missed are in the series. After a server
-        // restart they're its stored minutes, which merge into the ten-second
-        // samples held and count most minutes twice in every summed story
-        // until a reload (#600)
+        // restart they're its stored minutes, which take the place of the
+        // ten-second samples held inside them (`addSample`, #600)
         if (state.lastSampleAt) {
           state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity };
           await Promise.all([
