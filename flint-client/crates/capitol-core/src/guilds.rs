@@ -399,6 +399,43 @@ impl HallOffer {
     }
 }
 
+/// Where a free lot in the guild district stands, for the leader choosing a
+/// hall (#581): its side of the guild ring, by its terrain id
+/// (`guild_plot_in_*`, `guild_plot_out_*`), and its bearing from the tower.
+/// "Inside the guild ring, to the north-east".
+pub fn hall_lot_words(terrain_id: &str, x: f64, y: f64) -> String {
+    let side = if terrain_id.starts_with("guild_plot_in_") {
+        "Inside the guild ring"
+    } else if terrain_id.starts_with("guild_plot_out_") {
+        "Outside the guild ring"
+    } else {
+        "In the guild district"
+    };
+    format!("{side}, to the {}", crate::deeds::bearing(x, y))
+}
+
+/// What the leader can do with a free hall's lot in the list, with
+/// `treasury` Strands against a deed of `cost`, standing `at_hall` or not:
+/// the plot panel's [`hall_offer`], for every lot at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HallChoice {
+    Claim,
+    /// The treasury is this short of the deed
+    Short(i64),
+    /// It's bought at the Exchange hall
+    AwayFromHall,
+}
+
+pub fn hall_choice(treasury: i64, cost: i64, at_hall: bool) -> HallChoice {
+    if treasury < cost {
+        HallChoice::Short(cost - treasury)
+    } else if !at_hall {
+        HallChoice::AwayFromHall
+    } else {
+        HallChoice::Claim
+    }
+}
+
 /// "The Kiln Yard's", "The Rope Walkers'".
 pub fn possessive(name: &str) -> String {
     if name.ends_with('s') {
@@ -1174,6 +1211,18 @@ mod tests {
             tax_owed: 0,
         });
         assert_eq!(hall_offer(&free, Some(&housed), true), Some(HallOffer::HasAHall { guild: name }));
+    }
+
+    /// The list of free halls (#581) offers what the plot panel would
+    #[test]
+    fn a_free_hall_is_placed_and_claimed_as_the_plot_panel_would() {
+        use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+        assert_eq!(hall_lot_words("guild_plot_in_1_2", CENTER_X + 500.0, CENTER_Y - 500.0), "Inside the guild ring, to the north-east");
+        assert_eq!(hall_lot_words("guild_plot_out_4_0", CENTER_X, CENTER_Y + 800.0), "Outside the guild ring, to the south");
+        assert_eq!(hall_lot_words("guild_hall_x", CENTER_X - 800.0, CENTER_Y), "In the guild district, to the west");
+        assert_eq!(hall_choice(6240, 5000, true), HallChoice::Claim);
+        assert_eq!(hall_choice(6240, 5000, false), HallChoice::AwayFromHall);
+        assert_eq!(hall_choice(1200, 5000, true), HallChoice::Short(3800), "short, wherever you stand");
     }
 
     #[test]

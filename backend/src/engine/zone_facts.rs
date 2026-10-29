@@ -13,6 +13,9 @@
 //! ([`rooms`]), on a blocking thread: warmed at startup, and again on the
 //! first ask after a terrain commit, keyed by the terrain's version.
 //! The price, the tax and the free lots are read live on every ask.
+//!
+//! The guild district's lots are packed with them, for a leader choosing a
+//! hall (#581): no building stands on one, so it's all yard.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -30,6 +33,12 @@ use crate::state::AppState;
 
 /// The zones a player can make a home in, from the city out (D6).
 pub const HOME_ZONES: [Zone; 3] = [Zone::Urban, Zone::Suburban, Zone::Rural];
+
+/// The zones whose free lots are listed: the homes, and the guild district
+/// for a guild's hall (#581).
+pub fn lists(zone: Zone) -> bool {
+    HOME_ZONES.contains(&zone) || zone == Zone::GuildDistrict
+}
 
 /// What living in each zone is like, in one line: the plots plan's §1.
 pub fn style(zone: Zone) -> &'static str {
@@ -82,7 +91,7 @@ pub async fn rooms(state: &AppState) -> Result<Arc<Rooms>, sqlx::Error> {
         let plots: Vec<TerrainPlot> = terrain
             .terrain_plots
             .iter()
-            .filter(|p| Zone::from_str(&p.zone).is_some_and(|z| HOME_ZONES.contains(&z)))
+            .filter(|p| Zone::from_str(&p.zone).is_some_and(lists))
             .cloned()
             .collect();
         let hall = terrain
@@ -104,7 +113,12 @@ fn pack(version: String, plots: &[TerrainPlot], hall: (f64, f64), addresses: &Ha
         .iter()
         .filter_map(|p| {
             let zone = Zone::from_str(&p.zone)?;
-            let fits = station_room::room(&p.corners, zone)?.capacity(0) as i32;
+            let fits = match station_room::room(&p.corners, zone) {
+                Some(room) => room.capacity(0),
+                // A hall's lot has no building (#581)
+                None if zone == Zone::GuildDistrict => station_room::open_ground(&p.corners),
+                None => return None,
+            } as i32;
             let capacity = fits;
             let (mx, my) = middle(&p.corners);
             let walk = (mx - hall.0).stable_hypot(my - hall.1) / PLAYER_SPEED;
@@ -212,40 +226,57 @@ pub async fn facts(state: &AppState) -> Result<Vec<ZoneFacts>, sqlx::Error> {
 }
 
 /// Every lot free in `zone` now, nearest the hall first, with the stations
-/// each fits and its walk (the Deeds Office, #448). The room and the walk
-/// come from [`rooms`]; which lots are free is read live.
+/// each fits and its walk (the Deeds Office, #448; a guild's hall, #581).
+/// The room and the walk come from [`rooms`]; which lots are free is read
+/// live.
 pub async fn free_lots(state: &AppState, zone: Zone) -> Result<Vec<FreeLot>, sqlx::Error> {
     let rooms = rooms(state).await?;
-    let free: HashMap<String, uuid::Uuid> = sqlx::query_as::<_, (String, uuid::Uuid)>(
-        "SELECT terrain_id, id FROM plots
-         WHERE owner_id IS NULL AND terrain_id IS NOT NULL AND zone_id = $1",
+    let free: HashMap<String, Free> = sqlx::query_as::<_, (String, uuid::Uuid, Option<i32>)>(
+        "SELECT p.terrain_id, p.id, psc.station_capacity FROM plots p
+         LEFT JOIN plot_size_categories psc ON psc.id = p.size_category
+         WHERE p.owner_id IS NULL AND p.terrain_id IS NOT NULL AND p.zone_id = $1",
     )
     .bind(zone.as_str())
     .fetch_all(&state.db)
     .await?
     .into_iter()
+    .map(|(terrain_id, plot_id, size_capacity)| (terrain_id, Free { plot_id, size_capacity }))
     .collect();
     Ok(listed(&rooms, zone, &free))
 }
 
-/// `zone`'s lots of `rooms` that are in `free` (terrain id to plot id),
-/// nearest the hall first
-fn listed(rooms: &Rooms, zone: Zone, free: &HashMap<String, uuid::Uuid>) -> Vec<FreeLot> {
+/// A free lot's plot, as the database has it.
+#[derive(Debug, Clone, Copy)]
+struct Free {
+    plot_id: uuid::Uuid,
+    /// Its size category's capacity, which is what a lot with no building
+    /// (a guild hall's) holds (`plot::STATION_CAPACITY`)
+    size_capacity: Option<i32>,
+}
+
+/// `zone`'s lots of `rooms` that are in `free` (by terrain id), nearest the
+/// hall first
+fn listed(rooms: &Rooms, zone: Zone, free: &HashMap<String, Free>) -> Vec<FreeLot> {
+    let housed = capitol_protocol::rules::building::shape(zone).is_some();
     let mut lots: Vec<FreeLot> = rooms
         .lots
         .iter()
         .filter(|l| l.zone == zone)
         .filter_map(|l| {
-            let plot_id = *free.get(&l.id)?;
+            let free = free.get(&l.id)?;
             let (x, y) = middle(&l.corners);
+            let capacity = match free.size_capacity {
+                Some(capacity) if !housed => capacity,
+                _ => l.capacity,
+            };
             Some(FreeLot {
-                plot_id,
+                plot_id: free.plot_id,
                 terrain_id: l.id.clone(),
                 x,
                 y,
                 area: l.area,
-                fits: l.fits,
-                capacity: l.capacity,
+                fits: l.fits.min(capacity),
+                capacity,
                 walk_secs: l.walk,
                 address: l.address.clone(),
             })
@@ -373,10 +404,10 @@ mod tests {
                 lot("yard", Zone::Urban, 20.0),
             ],
         };
-        let free: HashMap<String, uuid::Uuid> = ["far", "near", "yard"]
+        let free: HashMap<String, Free> = ["far", "near", "yard"]
             .into_iter()
             .enumerate()
-            .map(|(i, id)| (id.to_owned(), uuid::Uuid::from_u128(i as u128 + 1)))
+            .map(|(i, id)| (id.to_owned(), Free { plot_id: uuid::Uuid::from_u128(i as u128 + 1), size_capacity: Some(9) }))
             .collect();
         let listed = listed(&rooms, Zone::Rural, &free);
         let ids: Vec<&str> = listed.iter().map(|l| l.terrain_id.as_str()).collect();
@@ -384,6 +415,33 @@ mod tests {
         assert_eq!(listed[0].plot_id, uuid::Uuid::from_u128(2));
         assert_eq!((listed[0].x, listed[0].y, listed[0].fits, listed[0].walk_secs), (5.0, 5.0, 4, 70.0));
         assert_eq!(listed[0].address.as_deref(), Some("3 near Lane"));
+        assert_eq!(listed[0].capacity, 16, "a home lot holds its building's room, not its size category's");
+    }
+
+    /// A hall's lot (#581) has no building, so it holds its size category's
+    /// capacity, and fits no more than that
+    #[test]
+    fn a_halls_lot_holds_its_size_categorys_capacity() {
+        let corners = [(0.0, 0.0), (300.0, 0.0), (300.0, 200.0), (0.0, 200.0)];
+        let lot = |id: &str, fits| Lot {
+            id: id.to_owned(),
+            zone: Zone::GuildDistrict,
+            corners,
+            area: 60_000.0,
+            fits,
+            capacity: fits,
+            walk: 30.0,
+            address: None,
+        };
+        assert!(station_room::open_ground(&corners) > 20, "a hall's lot is all yard");
+        let rooms = Rooms { version: "v".into(), lots: vec![lot("roomy", 40), lot("snug", 6)] };
+        let free: HashMap<String, Free> = [("roomy", 1), ("snug", 2)]
+            .into_iter()
+            .map(|(id, n)| (id.to_owned(), Free { plot_id: uuid::Uuid::from_u128(n), size_capacity: Some(25) }))
+            .collect();
+        let listed = listed(&rooms, Zone::GuildDistrict, &free);
+        let held: Vec<(i32, i32)> = listed.iter().map(|l| (l.fits, l.capacity)).collect();
+        assert_eq!(held, [(25, 25), (6, 25)]);
     }
 
     /// On the default world every free lot is listed, and a claimed one isn't
@@ -404,5 +462,13 @@ mod tests {
         assert_eq!(after.len(), before.len() - 1);
         assert!(after.iter().all(|l| l.plot_id != before[0].plot_id));
         assert!(after.iter().all(|l| l.fits <= l.capacity));
+        // The guild district's are listed for a hall (#581), with no card of
+        // their own: every one of its lots, holding its size category's
+        let halls = free_lots(&state, Zone::GuildDistrict).await.unwrap();
+        let district = lots.iter().filter(|l| l.zone == Zone::GuildDistrict.as_str()).count();
+        println!("{} free halls, the nearest {:.0} s from the hall, fitting {:?}", halls.len(), halls[0].walk_secs, halls.iter().map(|l| l.fits).collect::<Vec<_>>());
+        assert_eq!(halls.len(), district);
+        assert!(halls.iter().all(|l| l.fits > 0 && l.fits <= l.capacity), "{halls:?}");
+        assert!(facts.iter().all(|f| f.zone_id != "guild_district"), "the zone card is the homes'");
     }
 }

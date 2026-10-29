@@ -3095,6 +3095,13 @@ impl PlayerExtension for CapitolExtension {
                         },
                         online: true,
                         now: state.utc_now(),
+                        // The guild district's free lots, for a hall (#581),
+                        // only while the panel's open: the list is copied
+                        hall_lots: state
+                            .free_lots()
+                            .filter(|l| self.guild.open && l.zone_id == rules::Zone::GuildDistrict.as_str())
+                            .cloned(),
+                        shown: self.shown_lot.as_ref().map(|s| s.terrain_id.clone()),
                     }
                 };
                 match self.guild.show(ctx, session.guilds_mut(), &view) {
@@ -3107,7 +3114,15 @@ impl PlayerExtension for CapitolExtension {
                         }
                     }
                     Some(ui::guild::Action::ToGuildHall { x, y }) => session.walk_to_guild_hall(now, x, y),
+                    Some(ui::guild::Action::ListHallLots) => session.ask_free_lots(rules::Zone::GuildDistrict.as_str()),
+                    Some(ui::guild::Action::ShowMe(shown)) => self.shown_lot = Some(shown),
+                    Some(ui::guild::Action::StopShowing) => self.shown_lot = None,
                     Some(ui::guild::Action::Close) | None => {}
+                }
+                // A hall taken, the guild district's lot it showed is let go
+                let housed = session.guilds().guild().is_some_and(|g| g.hall.is_some());
+                if housed && self.shown_lot.as_ref().is_some_and(|s| s.zone == rules::Zone::GuildDistrict) {
+                    self.shown_lot = None;
                 }
                 // A person's card (S0.3), over the Gazette when it's opened from it
                 let today = rules::day_number(
@@ -3653,7 +3668,13 @@ impl PlayerExtension for CapitolExtension {
             let _ = self.mail.show(ctx, mail, view);
         }
         if let Some((guilds, view)) = &mut self.guild_sample {
-            let _ = self.guild.show(ctx, guilds, view);
+            // Offline, a free hall shown is ringed as the Deeds Office's is (#581)
+            view.shown = self.shown_lot.as_ref().map(|s| s.terrain_id.clone());
+            match self.guild.show(ctx, guilds, view) {
+                Some(ui::guild::Action::ShowMe(shown)) => self.shown_lot = Some(shown),
+                Some(ui::guild::Action::StopShowing) => self.shown_lot = None,
+                _ => {}
+            }
         }
         if let Some((cards, today, catalog)) = &mut self.card_sample {
             // Trade is drawn as it would be signed in; offline it asks no one

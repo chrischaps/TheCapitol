@@ -3504,22 +3504,27 @@ pub struct ZoneGrowth {
     pub density: f64,
 }
 
-/// `GET /bureaucracy/free-lots?zone=`: the Deeds Office's list (#448)
+/// `GET /bureaucracy/free-lots?zone=`: the Deeds Office's list (#448), and
+/// the guild district's for a guild's hall (#581)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema, utoipa::IntoParams))]
 pub struct FreeLotsQuery {
-    /// `urban`, `suburban` or `rural`
+    /// `urban`, `suburban`, `rural` or `guild_district`
     pub zone: String,
 }
 
-/// Every lot free in one home zone, now, with what the zone card says of
-/// each: the stations it fits and its walk to the hall (#448)
+/// Every lot free in one zone, now, with what the zone card says of each:
+/// the stations it fits and its walk to the hall (#448)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct FreeLotsResponse {
     pub zone_id: String,
     /// Nearest the hall first
     pub lots: Vec<FreeLot>,
+    /// The zone's deed at its live price, the same for each of its lots:
+    /// what a guild's treasury pays for a hall (#581)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deed_cost: Option<i32>,
 }
 
 /// One free lot, as the Deeds Office lists it

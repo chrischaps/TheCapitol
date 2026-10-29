@@ -104,19 +104,21 @@ pub async fn get_zone_facts(State(state): State<AppState>) -> Result<Json<ZoneFa
     Ok(Json(ZoneFactsResponse { zones: crate::engine::zone_facts::facts(&state).await? }))
 }
 
-/// The lots free in one home zone (the Deeds Office, #448)
+/// The lots free in one home zone or the guild district (the Deeds Office,
+/// #448; a guild's hall, #581)
 ///
 /// Every unclaimed lot in `zone`, nearest the Exchange hall first, with the
 /// stations it fits (capped by its capacity, as the zone card counts them)
-/// and its straight walk to the hall's door. Which lots are free is read
-/// live; the room and the walk are worked out once for each world.
+/// and its straight walk to the hall's door, and the zone's deed at its live
+/// price. Which lots are free is read live; the room and the walk are worked
+/// out once for each world.
 #[utoipa::path(
     get,
     path = "/bureaucracy/free-lots",
     params(FreeLotsQuery),
     responses(
         (status = 200, description = "The zone's free lots, nearest the hall first", body = FreeLotsResponse),
-        (status = 400, description = "Not a home zone")
+        (status = 400, description = "Not a home zone or the guild district")
     ),
     tag = "Bureaucracy"
 )]
@@ -124,9 +126,15 @@ pub async fn get_free_lots(
     State(state): State<AppState>,
     Query(query): Query<FreeLotsQuery>,
 ) -> Result<Json<FreeLotsResponse>, AppError> {
-    let zone = Zone::from_str(&query.zone)
-        .filter(|z| crate::engine::zone_facts::HOME_ZONES.contains(z))
-        .ok_or_else(|| AppError::BadRequest("Lots are listed for the urban, suburban and rural zones".into()))?;
+    let zone = Zone::from_str(&query.zone).filter(|z| crate::engine::zone_facts::lists(*z)).ok_or_else(|| {
+        AppError::BadRequest("Lots are listed for the urban, suburban and rural zones and the guild district".into())
+    })?;
     let lots = crate::engine::zone_facts::free_lots(&state, zone).await?;
-    Ok(Json(FreeLotsResponse { zone_id: zone.as_str().to_owned(), lots }))
+    let base: Option<i32> = sqlx::query_scalar("SELECT deed_cost FROM zones WHERE id = $1")
+        .bind(zone.as_str())
+        .fetch_optional(&state.db)
+        .await?
+        .flatten();
+    let deed_cost = base.map(|base| state.tunables.get().deed_cost(zone.as_str(), base));
+    Ok(Json(FreeLotsResponse { zone_id: zone.as_str().to_owned(), lots, deed_cost }))
 }

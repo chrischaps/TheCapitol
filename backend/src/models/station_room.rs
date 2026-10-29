@@ -155,6 +155,12 @@ fn bounded(c: &[P; 4], cap: usize) -> usize {
 /// More than any lot the world lays holds, so a room is never cut short.
 const ROOM_CAP: usize = 64;
 
+/// The stations a lot with no building on it (a guild hall's) fits: all of
+/// it yard, packed as [`room`] packs a yard (#581).
+pub fn open_ground(c: &[P; 4]) -> usize {
+    most(c, ROOM_CAP)
+}
+
 /// A lot's room for stations with its building on it (Plots v2 §5.6, V3.1,
 /// #473): how many stand indoors on each storey, and how many in the yard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
