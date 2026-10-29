@@ -692,6 +692,12 @@ pub struct CitizenReport {
     /// `detour`, `road_in`, and `free` for time with nothing to do
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub time: BTreeMap<String, f64>,
+    /// Strands its work brought in on each activity since the town started,
+    /// less the inputs bought for it (#560), by the activity's slug as
+    /// `time` keys it: sales of the job's goods, wages and commissions
+    /// delivered in it, and for fiber, deposits
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub earned: BTreeMap<String, i64>,
 }
 
 /// A citizen's calling, briefly (Callings K3.3): what the console's roster
@@ -898,6 +904,40 @@ pub struct TownSummary {
     pub layers: BTreeMap<String, LayerReport>,
     /// Failures over the window
     pub failed: u64,
+    /// Each activity's work time and earnings, every citizen's together,
+    /// since the town started, as the newest report has them (#560): by
+    /// the activity's slug. Totals, so a range's are its ends' difference,
+    /// while the run's [`started_ms`](Self::started_ms) holds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub earning: BTreeMap<String, Earning>,
+}
+
+/// One activity's time and earnings, every citizen's together (#560).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Earning {
+    /// Game hours on it
+    pub hours: f64,
+    /// Strands it brought in, less the inputs bought for it
+    pub strands: i64,
+}
+
+impl TownReport {
+    /// Its citizens' time and earnings by activity, all together (#560):
+    /// an activity with neither is left out.
+    pub fn earning(&self) -> BTreeMap<String, Earning> {
+        let mut by: BTreeMap<String, Earning> = BTreeMap::new();
+        for c in &self.citizens {
+            for (activity, hours) in &c.time {
+                by.entry(activity.clone()).or_default().hours += hours;
+            }
+            for (activity, strands) in &c.earned {
+                by.entry(activity.clone()).or_default().strands += strands;
+            }
+        }
+        by.retain(|_, e| e.hours > 0.0 || e.strands != 0);
+        by
+    }
 }
 
 impl TownSummary {
@@ -907,6 +947,7 @@ impl TownSummary {
         self.started_ms = report.started_ms;
         self.reports += 1;
         self.standing = report.standing();
+        self.earning = report.earning();
         for (by, n) in &report.rulings {
             *self.rulings.entry(by.clone()).or_insert(0) += n;
         }
@@ -922,6 +963,7 @@ impl TownSummary {
         self.started_ms = later.started_ms;
         self.reports += later.reports;
         self.standing = later.standing.clone();
+        self.earning = later.earning.clone();
         for (by, n) in &later.rulings {
             *self.rulings.entry(by.clone()).or_insert(0) += n;
         }
@@ -1251,6 +1293,71 @@ mod tests {
         a.add(&first, 100);
         b.add(&second, 105);
         assert_eq!(a.then(&b), summary);
+    }
+
+    /// The summary keeps the newest report's earnings by job, every
+    /// citizen's added together: totals since the town started, so a range
+    /// is its ends' difference. An old sample without them reads as none.
+    #[test]
+    fn a_summary_keeps_the_towns_earnings_by_job() {
+        let citizen = |name: &str, time: &[(&str, f64)], earned: &[(&str, i64)]| CitizenReport {
+            name: name.into(),
+            time: time.iter().map(|(a, h)| (a.to_string(), *h)).collect(),
+            earned: earned.iter().map(|(a, s)| (a.to_string(), *s)).collect(),
+            ..CitizenReport::default()
+        };
+        let first = TownReport {
+            started_ms: 7,
+            citizens: vec![
+                citizen("Ada", &[("fiber", 2.0), ("free", 1.0)], &[("fiber", 300)]),
+                citizen("Bo", &[("planks", 1.5)], &[("planks", -40)]),
+            ],
+            ..TownReport::default()
+        };
+        let second = TownReport {
+            citizens: vec![
+                citizen("Ada", &[("fiber", 3.0), ("free", 1.0)], &[("fiber", 450)]),
+                citizen("Bo", &[("planks", 2.5), ("fiber", 0.5)], &[("planks", 60), ("fiber", 70)]),
+                // Earnings with no time yet: a stall's sale on its way in
+                citizen("Cy", &[], &[("tools", 25)]),
+            ],
+            ..first.clone()
+        };
+        let earning = |hours, strands| Earning { hours, strands };
+        assert_eq!(
+            first.earning(),
+            BTreeMap::from([
+                ("fiber".to_string(), earning(2.0, 300)),
+                ("free".to_string(), earning(1.0, 0)),
+                ("planks".to_string(), earning(1.5, -40)),
+            ])
+        );
+        let mut summary = TownSummary::default();
+        summary.add(&first, 100);
+        summary.add(&second, 105);
+        assert_eq!(
+            summary.earning,
+            BTreeMap::from([
+                ("fiber".to_string(), earning(3.5, 520)),
+                ("free".to_string(), earning(1.0, 0)),
+                ("planks".to_string(), earning(2.5, 60)),
+                ("tools".to_string(), earning(0.0, 25)),
+            ]),
+            "the newest report's, not the two added"
+        );
+        let (mut a, mut b) = (TownSummary::default(), TownSummary::default());
+        a.add(&first, 100);
+        b.add(&second, 105);
+        assert_eq!(a.then(&b).earning, summary.earning);
+
+        // On the wire it's beside the rest, and an old sample has none
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["earning"]["fiber"], serde_json::json!({"hours": 3.5, "strands": 520}));
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("earning");
+        assert!(serde_json::from_value::<TownSummary>(old).unwrap().earning.is_empty());
+        let old_citizen = serde_json::json!({"name": "Ada", "role": "all-rounder", "standing": "away", "activity": "", "restarts": 0});
+        assert!(serde_json::from_value::<CitizenReport>(old_citizen).unwrap().earned.is_empty());
     }
 
     #[test]

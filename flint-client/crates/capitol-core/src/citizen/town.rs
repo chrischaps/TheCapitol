@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    CallingReport, CitizenReport, DecisionBrief, RoadInReport, StintReport, TownFailure, TownReport, TOWN_FAILURES,
+    CallingReport, CitizenReport, DecisionBrief, Earning, RoadInReport, StintReport, TownFailure, TownReport, TOWN_FAILURES,
 };
 use capitol_protocol::rest::{ClockResponse, CreateCitizenRequest, LoginRequest, SetClockRequest};
 use capitol_protocol::rules::lately::Lately;
@@ -857,6 +857,9 @@ pub struct Health {
     /// Game hours on each activity since the town started (K0.1), free
     /// time among them, for the report to the server (K3.3).
     pub time: BTreeMap<Activity, f64>,
+    /// Strands its work brought in on each job since the town started, less
+    /// the inputs bought for it (#560, [`earned`](crate::sim::report::earned)).
+    pub earned: BTreeMap<Activity, i64>,
     pub standing: Standing,
     /// Where in its day it is, by the clock (C1.2).
     pub phase: Option<Phase>,
@@ -882,6 +885,7 @@ impl Health {
             stint: None,
             stint_hours: 0.0,
             time: BTreeMap::new(),
+            earned: BTreeMap::new(),
             standing: Standing::Starting,
             phase: None,
             strands: None,
@@ -922,6 +926,13 @@ impl Health {
         }
     }
 
+    /// Adds what a batch of entries earned each job to its earnings.
+    fn earned(&mut self, earned: &BTreeMap<Activity, i64>) {
+        for (activity, strands) in earned {
+            *self.earned.entry(*activity).or_insert(0) += strands;
+        }
+    }
+
     /// What the town's report to the server says of it (D4.1): its health
     /// line's parts, and since Callings K3.3 its calling, its stint and its
     /// time by activity.
@@ -949,6 +960,12 @@ impl Health {
                 .iter()
                 .filter(|(_, h)| **h > 0.0)
                 .map(|(a, h)| (a.slug().to_string(), two(*h)))
+                .collect(),
+            earned: self
+                .earned
+                .iter()
+                .filter(|(_, s)| **s != 0)
+                .map(|(a, s)| (a.slug().to_string(), *s))
                 .collect(),
         }
     }
@@ -1075,9 +1092,13 @@ impl Tether<'_> {
     }
 
     /// Writes down what the citizen did since it last did, for the report,
-    /// and its time for the report to the server.
-    pub(crate) fn record(&self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>) {
-        self.health.lock().unwrap_or_else(|e| e.into_inner()).spent(&entries);
+    /// and its time and what it `earned` each job for the report to the
+    /// server.
+    pub(crate) fn record(&self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>, earned: &BTreeMap<Activity, i64>) {
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        health.spent(&entries);
+        health.earned(earned);
+        drop(health);
         self.book.lock().unwrap_or_else(|e| e.into_inner()).record(entries, rulings);
     }
 
@@ -1237,6 +1258,24 @@ impl Town {
                 Some((h.name.clone(), h.calling.as_ref()?.report()))
             })
             .collect()
+    }
+
+    /// Each activity's time and earnings, every citizen's together, since
+    /// the town started (#560), by the activity's slug, as the server's
+    /// samples sum them.
+    pub fn earning(&self) -> BTreeMap<String, Earning> {
+        let mut by: BTreeMap<String, Earning> = BTreeMap::new();
+        for health in &self.health {
+            let h = health.lock().unwrap_or_else(|e| e.into_inner());
+            for (activity, hours) in &h.time {
+                by.entry(activity.slug().to_string()).or_default().hours += hours;
+            }
+            for (activity, strands) in &h.earned {
+                by.entry(activity.slug().to_string()).or_default().strands += strands;
+            }
+        }
+        by.retain(|_, e| e.hours > 0.0 || e.strands != 0);
+        by
     }
 
     /// Writes each citizen's stints beside the roster (Callings K1.2),
@@ -2122,6 +2161,10 @@ key = "j"
             let spent = |activity, hours| Entry::Spent { label: "x".into(), hours, ok: true, activity, setup: false, day: 0 };
             a.spent(&[spent(Activity::Wood, 1.5), Entry::Idle { hours: 0.5, day: 0 }, spent(Activity::Planks, 0.25), Entry::Stuck { reason: "no".into() }]);
             a.spent(&[spent(Activity::Wood, 0.5)]);
+            // What it earned adds up batch by batch (#560); a job that nets
+            // nothing is left out
+            a.earned(&BTreeMap::from([(Activity::Wood, 40), (Activity::Planks, -12)]));
+            a.earned(&BTreeMap::from([(Activity::Wood, 25), (Activity::Planks, 12)]));
         }
         cora.lock().unwrap().calling = Some(Calling {
             favourite: None,
@@ -2140,6 +2183,7 @@ key = "j"
         let doing = a.doing.as_ref().unwrap();
         assert_eq!((doing.job.as_str(), doing.hours), ("crafter-planks", 0.76));
         assert_eq!(a.time, BTreeMap::from([("free".to_string(), 0.5), ("planks".to_string(), 0.25), ("wood".to_string(), 2.0)]));
+        assert_eq!(a.earned, BTreeMap::from([("wood".to_string(), 65)]));
         let c = &report.citizens[1];
         assert_eq!(c.role, "all-rounder");
         let calling = c.calling.as_ref().unwrap();

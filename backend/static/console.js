@@ -327,7 +327,7 @@
             state.tab === "performance" ? readSeries("load") : null,
             state.tab === "economy" ? readSeries("money") : null,
             state.tab === "economy" ? readSeries("making") : null,
-            state.tab === "town" ? readSeries("town") : null,
+            state.tab === "town" || state.tab === "economy" ? readSeries("town") : null,
             state.tab === "tuning" ? Promise.all([readSeries("money"), readSeries("making")]) : null,
           ]);
         }
@@ -1246,6 +1246,7 @@
     distribution();
     if (books) productionStories();
     await prices();
+    await earns();
   }
 
   function strands() {
@@ -1538,6 +1539,164 @@
       state.charts.headcount?.rebuild();
       distribution();
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // What an hour earns (#560): each job's Strands a work-hour against
+  // fiber's, at its peg. The town's report carries each citizen's time and
+  // earnings by activity since the town started, and each sample keeps
+  // their sum (TownSummary::earning), so a stretch's are its ends'
+  // difference while the town's run holds
+
+  // The jobs a citizen leans over (D2), in the reports' order
+  const EARN_JOBS = ["fiber", "wood", "ore", "planks", "ingots", "tools", "building", "trading"];
+  // A job under this share of fiber's rate is named in the headline
+  const UNDERPAID = 0.6;
+  // Under three game minutes is too little time to judge a rate by
+  const FEW_HOURS = 0.05;
+  // A report's minute seldom holds a sale, so each point is the rate over
+  // the half hour up to it
+  const EARN_TRAIL_MS = 30 * 60_000;
+  // The jobs drawn, and each one's trailing rate by `at_ms`, worked out once
+  // a render by `earns`
+  let earnLines = [];
+  let earnTrail = new Map();
+
+  const hasEarning = (s) => s.town?.earning;
+  /** A job's hours and Strands in one sample's totals */
+  const earningOf = (s, job) => s.town.earning[job] ?? { hours: 0, strands: 0 };
+  /** What `job` earned from sample `a` to `b`, of one run; from nothing with no `a` */
+  function earnedBetween(a, b, job) {
+    const now = earningOf(b, job);
+    const was = a ? earningOf(a, job) : { hours: 0, strands: 0 };
+    return { hours: now.hours - was.hours, strands: now.strands - was.strands };
+  }
+  /** Strands a work-hour, or null with too little time to say */
+  const rateOf = (e) => (e.hours >= FEW_HOURS ? e.strands / e.hours : null);
+  /** A rate or a share in words, a loss with a minus: "566", "−40", "−7%" */
+  const minus = (v, say) => `${v < 0 ? "−" : ""}${say(Math.abs(v))}`;
+  const hourly = (v) => minus(v, (x) => (x < 10 ? Number(x.toFixed(1)).toString() : nf.format(Math.round(x))));
+  const share = (v) => minus(v, percent);
+
+  // Each job's earnings and hours over the range, run by run: a town that
+  // started again counts from nothing, and so does one that started in
+  // the range
+  function earningOver(list) {
+    const by = Object.fromEntries(EARN_JOBS.map((job) => [job, { hours: 0, strands: 0 }]));
+    let first = 0;
+    list.forEach((s, i) => {
+      const next = list[i + 1];
+      if (next && next.town.started_ms === s.town.started_ms) return;
+      const base = list[first].town.started_ms > rangeFrom() ? null : list[first];
+      for (const job of EARN_JOBS) {
+        const d = earnedBetween(base, s, job);
+        by[job].hours += d.hours;
+        by[job].strands += d.strands;
+      }
+      first = i + 1;
+    });
+    return by;
+  }
+
+  /** Each job's rate at each sample, over the trail up to it, within its run */
+  function earnTrails(list) {
+    const trails = new Map(EARN_JOBS.map((job) => [job, []]));
+    let lo = 0;
+    list.forEach((s, i) => {
+      while (lo < i && (list[lo].at_ms < s.at_ms - EARN_TRAIL_MS || list[lo].town.started_ms !== s.town.started_ms)) lo++;
+      for (const job of EARN_JOBS) trails.get(job).push(lo < i ? rateOf(earnedBetween(list[lo], s, job)) : null);
+    });
+    return trails;
+  }
+
+  CHARTS.earns = () => lineChart($("chart-earns"), {
+    has: hasEarning,
+    axis: short,
+    legend: (v) => `${hourly(v)} a work-hour`,
+    series: [
+      ...earnLines.map((job) => ({
+        label: ACTIVITY[job],
+        color: `--a-${job}`,
+        value: (s) => earnTrail.get(job)?.get(s.at_ms) ?? null,
+      })),
+      { label: "Fiber, the peg", color: "--a-fiber", width: 3, value: (s) => earnTrail.get("fiber")?.get(s.at_ms) ?? null },
+      {
+        label: `${percent(UNDERPAID)} of fiber`, color: "--budget", width: 1, dash: [5, 4],
+        value: (s) => { const f = earnTrail.get("fiber")?.get(s.at_ms); return f == null ? null : f * UNDERPAID; },
+      },
+    ],
+  });
+
+  async function earns() {
+    if (state.covered.town > rangeFrom()) {
+      try { await readSeries("town"); } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
+    }
+    const list = inRange(hasEarning);
+    const by = earningOver(list);
+    const trails = earnTrails(list);
+    const fiber = rateOf(by.fiber);
+    const rows = EARN_JOBS
+      .map((job) => ({ job, ...by[job], rate: rateOf(by[job]), trail: trails.get(job) }))
+      .filter((r) => r.hours > 0 || r.strands !== 0)
+      .map((r) => ({ ...r, share: r.rate == null || !(fiber > 0) || r.job === "fiber" ? null : r.rate / fiber }))
+      .sort((a, b) => (a.job === "fiber" ? -1 : b.job === "fiber" ? 1 : (b.rate ?? -Infinity) - (a.rate ?? -Infinity)));
+
+    // The chart: every job worked in the range but fiber, which is drawn last
+    // as the reference; rebuilt when they change
+    const lines = rows.filter((r) => r.job !== "fiber" && r.trail.some((v) => v != null)).map((r) => r.job);
+    earnTrail = new Map(EARN_JOBS.map((job) => [job, new Map(trails.get(job).map((v, k) => [list[k].at_ms, v]))]));
+    if (lines.join() !== earnLines.join()) {
+      earnLines = lines;
+      state.charts.earns?.rebuild();
+    }
+    chart("earns");
+
+    $("earns").tBodies[0].replaceChildren(...(rows.length ? rows.map(earnRow) : [emptyRow(6, list.length ? "No citizen worked a job in the range." : "No sample in the range carries the town's earnings.")]));
+    $("earns-headline").textContent = earnsHeadline(rows, fiber, list);
+  }
+
+  function earnRow(r) {
+    const tr = document.createElement("tr");
+    const under = r.share != null && r.share < UNDERPAID;
+    if (r.job === "fiber") tr.className = "peg";
+    const spark = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    spark.setAttribute("class", "spark");
+    spark.setAttribute("viewBox", "0 0 100 28");
+    spark.setAttribute("preserveAspectRatio", "none");
+    spark.setAttribute("aria-hidden", "true");
+    spark.style.color = `var(--a-${r.job})`;
+    drawSpark(spark, r.trail, true);
+    const against = r.job === "fiber" ? "the peg" : r.share == null ? "–" : share(r.share);
+    tr.append(
+      cell(ACTIVITY[r.job]),
+      cell(r.rate == null ? "–" : hourly(r.rate), "num now"),
+      cell(against, `num against ${r.share == null ? "dim" : under ? "underpaid" : ""}`),
+      cell(r.hours.toFixed(1), "num dim"),
+      cell(`${r.strands > 0 ? "+" : r.strands < 0 ? "−" : ""}${nf.format(Math.abs(r.strands))}`, `num ${r.strands > 0 ? "up" : r.strands < 0 ? "down" : "dim"}`),
+      cell(spark, "trend"),
+    );
+    if (r.rate == null && r.hours > 0) tr.title = "Worked too little in the range to judge a rate by.";
+    return tr;
+  }
+
+  // The jobs under 60% of fiber's rate, the lowest first; else that none is
+  function earnsHeadline(rows, fiber, list) {
+    if (!list.length) return "No sample in the range carries the town's earnings: the town reports them since #560.";
+    const when = since(list[0]);
+    if (fiber == null) return `No citizen cut fiber long enough ${when} to give the other jobs a peg to judge by.`;
+    const peg = `fiber's ${hourly(fiber)} Strands a work-hour`;
+    const judged = rows.filter((r) => r.share != null);
+    if (!judged.length) return `Fiber earned ${hourly(fiber)} Strands a work-hour ${when}, and no other job was worked long enough to judge.`;
+    const under = judged.filter((r) => r.share < UNDERPAID).sort((a, b) => a.share - b.share);
+    if (!under.length) {
+      const low = judged.reduce((a, b) => (b.share < a.share ? b : a));
+      return `Every job worked ${when} earned at least ${percent(UNDERPAID)} of ${peg}; the least, ${lc(ACTIVITY[low.job])}, ${share(low.share)}.`;
+    }
+    const named = under.map((r) => `${lc(ACTIVITY[r.job])} at ${share(r.share)}`);
+    const who = under.length === 1 ? `${ACTIVITY[under[0].job]} earns` : `${capital(["two", "three", "four", "five", "six", "seven"][under.length - 2])} jobs earn`;
+    return under.length === 1
+      ? `${who} ${share(under[0].share)} of ${peg} ${when}, under ${percent(UNDERPAID)}.`
+      : `${who} under ${percent(UNDERPAID)} of ${peg} ${when}: ${andList(named)}.`;
   }
 
   // ---------------------------------------------------------------------------

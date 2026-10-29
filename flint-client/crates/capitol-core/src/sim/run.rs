@@ -56,7 +56,7 @@ use super::activity::{self, Activity};
 use super::grade;
 use super::lot;
 use super::plan::{Goal, Holdings, Step, Upward, FLOAT};
-use super::report::{BotRun, Entry, Report, MAKER_ROLE};
+use super::report::{self, BotRun, Entry, Report, MAKER_ROLE};
 use super::{is_tool, watched, Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError, NO_WAY};
 use crate::catalog::Catalog;
@@ -332,7 +332,7 @@ pub(crate) fn live(
     }
     // What the day's last steps did: its walk home, and its deed
     citizen.journal();
-    town.record(std::mem::take(&mut citizen.entries), citizen.mind.take_rulings());
+    citizen.write_down(town);
     citizen.credit();
     town.keep(citizen.stints.kept(citizen.now()));
     ended
@@ -893,7 +893,7 @@ impl SimBot {
             if let Some(town) = town {
                 // A citizen's entries go to its town's ledger (C1.7)
                 self.journal();
-                town.record(std::mem::take(&mut self.entries), self.mind.take_rulings());
+                self.write_down(town);
                 let strands = self.bot.state().strands();
                 let road = self.road_progress().map(|p| RoadInReport::of(&p));
                 let now = self.now();
@@ -1360,6 +1360,17 @@ impl SimBot {
         }
     }
 
+    /// Writes its entries since it last did down to its town (C1.7), with
+    /// what they earned each job (#560): the job of the moment's, for its
+    /// buys.
+    fn write_down(&mut self, town: &Tether) {
+        let entries = std::mem::take(&mut self.entries);
+        let rulings = self.mind.take_rulings();
+        let catalog = self.bot.state().catalog();
+        let earned = report::earned(&entries, |item| Activity::of_item(catalog, item), Activity::of_role(self.job()));
+        town.record(entries, rulings, &earned);
+    }
+
     /// Turns what the bot saw into entries.
     fn journal(&mut self) {
         let at = self.now();
@@ -1477,6 +1488,13 @@ impl SimBot {
                 StateEvent::ToolBroke { item_type, .. } => {
                     self.entries.push(Entry::ToolBroke { item: item_type, at })
                 }
+                StateEvent::BazaarSale {
+                    item_type, quantity, paid, ..
+                } => self.entries.push(Entry::StallSold {
+                    item: item_type,
+                    quantity,
+                    paid,
+                }),
                 // Guilds (S4.5): read again, and a guild it's out of
                 StateEvent::GuildChanged { .. }
                 | StateEvent::GuildNotice { .. }
