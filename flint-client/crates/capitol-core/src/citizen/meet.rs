@@ -79,9 +79,9 @@ const EARSHOT: f64 = 15.0;
 
 /// The books a citizen watches, as it sees them: best bid and ask, and the
 /// last trade, of each of the hall's goods and the tools ([`watched`],
-/// Callings K2.1). A good's last trade is read at the quality its trades
-/// typically are ([`grade::typical_last`], #429), so a lot sold at a grade's
-/// premium doesn't raise its worth for any grade; a tool's is as it sold.
+/// Callings K2.1). A good's last trade is the median of its latest few
+/// ([`grade::typical_last`], #429), so a lot sold at a grade's premium
+/// doesn't raise its worth for any grade; a tool's is as it sold.
 pub fn quotes(state: &GameState) -> Vec<Quote> {
     watched()
         .map(|item| {

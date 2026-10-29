@@ -74,12 +74,14 @@ pub fn bid_grade_of(book: Option<&Book>) -> Option<&str> {
     book?.side(OrderSide::Buy).next().map(|l| l.grade.as_str())
 }
 
-/// The quality a bid's worth is for: the typical trade's ([`typical_last`]
-/// carries the last to it), else the best bid's grade, or Q50 for a target
-/// price.
+/// The quality a bid's worth is for: the typical trade's, else the best
+/// bid's grade, or Q50 for a target price.
 pub fn worth_quality(book: Option<&Book>, typical: Option<i32>) -> i32 {
     typical.or_else(|| bid_grade_of(book).and_then(grade_mid)).unwrap_or(50)
 }
+
+/// How many of the latest trades [`typical_last`] reads.
+pub const TYPICAL_OF: usize = 9;
 
 /// The quality the latest `trades` were, by the unit: what a price for any
 /// grade buys.
@@ -90,15 +92,17 @@ pub fn typical_quality<'a>(trades: impl IntoIterator<Item = &'a MarketTrade>) ->
     (units > 0).then(|| (total / units) as i32)
 }
 
-/// The last of `trades` (newest first), its price carried from its own
-/// quality to the [typical](typical_quality) one. A B lot sold at its
-/// premium doesn't make every price for any grade a B's: one at 39 for Q80,
-/// among trades of Q40, reads as 27. What the mind's quotes and a market
-/// maker take for the last trade of a good.
+/// The price of a good's latest trades (newest first), for any grade: the
+/// median of the last [`TYPICAL_OF`]. What the mind's quotes and a market
+/// maker take for its last trade, so a lot sold at a grade's premium doesn't
+/// make every price for any grade a B's, and good units sold at a bid for
+/// any grade don't sink it either. Soaks of #429 had each: the last trade
+/// alone ratcheted ore up to +52% of its target, and read at its quality
+/// down to 1 Strand.
 pub fn typical_last(trades: &[&MarketTrade]) -> Option<i64> {
-    let last = trades.first()?;
-    let typical = typical_quality(trades.iter().copied())?;
-    Some(carried(last.price, last.quality, typical))
+    let mut prices: Vec<i64> = trades.iter().take(TYPICAL_OF).map(|t| t.price).collect();
+    prices.sort_unstable();
+    prices.get(prices.len() / 2).copied()
 }
 
 fn levels(book: Option<&Book>, side: OrderSide) -> impl Iterator<Item = &DepthLevel> {
@@ -421,20 +425,22 @@ mod tests {
     }
 
     #[test]
-    fn a_premium_sale_reads_at_the_quality_trades_typically_are() {
-        // Seen in a soak (#429): one B lot at its premium, and every bid for
-        // any grade after it bid a B's price
+    fn the_price_for_any_grade_is_the_median_of_the_latest_trades() {
+        // One B lot at its premium among trades for any grade
         let b = trade(80, 39, 5);
-        let others = [trade(40, 20, 10), trade(38, 19, 15)];
+        let others = [trade(40, 20, 10), trade(38, 19, 15), trade(60, 21, 2)];
         let newest_first: Vec<&MarketTrade> = std::iter::once(&b).chain(others.iter()).collect();
-        let typical = typical_quality(newest_first.iter().copied()).unwrap();
-        assert_eq!(typical, 45, "by the unit: (400 + 570 + 400) / 30");
-        assert_eq!(typical_last(&newest_first), Some(carried(39, 80, 45)));
-        assert!(typical_last(&newest_first).unwrap() < 39);
+        assert_eq!(typical_last(&newest_first), Some(21), "not the B's 39");
+        assert_eq!(typical_quality(newest_first.iter().copied()), Some(46), "by the unit: 1490 / 32");
+        // Good units sold cheap don't sink it either
+        let cheap = trade(72, 2, 6);
+        let newest_first: Vec<&MarketTrade> = std::iter::once(&cheap).chain(others.iter()).collect();
+        assert_eq!(typical_last(&newest_first), Some(20));
         assert_eq!(typical_last(&[]), None);
-        // Trades all of a kind read as they sold
-        let plain = [trade(40, 20, 10)];
-        assert_eq!(typical_last(&plain.iter().collect::<Vec<_>>()), Some(20));
+        // Only the latest few count
+        let old: Vec<MarketTrade> = (0..20).map(|_| trade(40, 50, 1)).collect();
+        let newest_first: Vec<&MarketTrade> = others.iter().cycle().take(TYPICAL_OF).chain(old.iter()).collect();
+        assert_eq!(typical_last(&newest_first), Some(20));
     }
 
     #[test]
