@@ -254,10 +254,12 @@ pub enum Question {
     /// Whether to take piece-rate work someone offers (Commons S2.8):
     /// `work` (`craft plank at a sawbench`, `gather grass`) for `employer`,
     /// at `rate` Strands a unit, `left` units to its cap, its term ending in
-    /// `ends` game hours. `pays` is what the work pays a game hour at that
-    /// rate, and `earns` what the citizen's own trade earns a game hour at
-    /// the books, both at the bench or the node; `None` when the books
-    /// can't say.
+    /// `ends` game hours. `walk` is the game minutes' walk there, and `pays`
+    /// what the work pays a game hour at that rate with the walk spread
+    /// over the shift ([`wage::pays_walked`](crate::sim::wage::pays_walked),
+    /// #507); `earns` what the citizen's own trade earns a game hour at the
+    /// books, at the bench or the node, `None` when the books can't say. A
+    /// log from before #507 has no walk: 0, and `pays` at the bench.
     Wage {
         id: Uuid,
         employer: String,
@@ -265,6 +267,8 @@ pub enum Question {
         rate: i64,
         left: i32,
         ends: f64,
+        #[serde(default)]
+        walk: f64,
         pays: i64,
         earns: Option<i64>,
     },

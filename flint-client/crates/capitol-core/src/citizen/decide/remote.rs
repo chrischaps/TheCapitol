@@ -423,16 +423,22 @@ pub fn question(q: &Question) -> String {
             rate,
             left,
             ends,
+            walk,
             pays,
             earns,
             ..
         } => {
+            let there = if *walk >= 1.0 {
+                format!(" It's about {walk:.0} game minutes' walk there, and that's counted in it.")
+            } else {
+                String::new()
+            };
             let own = match earns {
                 Some(e) => format!("Your own trade earns about {e} Strands a game hour at today's prices."),
                 None => "Today's prices can't say what your own trade earns an hour.".into(),
             };
             format!(
-                "{employer} offers piece-rate work: {work}, at {rate} Strands a unit, up to {left} more, for the next {ends:.0} game hours. Working steadily it pays about {pays} Strands a game hour, paid for each unit as it's made, from escrow. {own} Take the work, or leave it?"
+                "{employer} offers piece-rate work: {work}, at {rate} Strands a unit, up to {left} more, for the next {ends:.0} game hours. Working steadily it pays about {pays} Strands a game hour, paid for each unit as it's made, from escrow.{there} {own} Take the work, or leave it?"
             )
         }
         Question::Hire { work, rate_for, fair, line } => {

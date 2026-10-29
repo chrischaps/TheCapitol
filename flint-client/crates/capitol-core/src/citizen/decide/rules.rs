@@ -1340,6 +1340,7 @@ mod tests {
             rate: 2,
             left: 40,
             ends: 20.0,
+            walk: 0.0,
             pays,
             earns,
         };

@@ -3,10 +3,13 @@
 //! it's tested without a server.
 //!
 //! Both hours are counted at the bench or the node: a craft's duration, a
-//! gather's, and what each makes. Walking is left out of both, since a
-//! shift and a citizen's own trade walk alike: to the bench, between nodes.
-//! The walk to the work isn't weighed, so far-off work looks as good as near
-//! ([#507](https://github.com/chrischaps/TheCapitol/issues/507)).
+//! gather's, and what each makes ([`pays`], [`earns`]). The walk between
+//! nodes is left out of both, since a shift and a citizen's own trade walk
+//! alike there. The walk *to* work offered isn't alike: its own trade is on
+//! its lot, and the work may be across the city. So an offer is weighed with
+//! that walk spread over the shift ([`pays_walked`], #507): far-off work
+//! pays less an hour than the same work next door, and a small offer far
+//! off least of all.
 //!
 //! **Hiring** (Callings K2.4) is the other side: the work a citizen could
 //! offer ([`openings`]), at a station of its own that the job of the moment
@@ -106,10 +109,10 @@ pub fn words(catalog: &Catalog, work: &Work) -> String {
     }
 }
 
-/// What `work` pays a game hour at `rate` a unit, worked steadily: units a
-/// craft or a gather makes on average, over its duration.
-pub fn pays(catalog: &Catalog, work: &Work, rate: i64) -> Option<i64> {
-    let per_hour = match work {
+/// Units of `work` made a game hour, worked steadily: what a craft or a
+/// gather makes on average, over its duration.
+pub fn units_an_hour(catalog: &Catalog, work: &Work) -> Option<f64> {
+    Some(match work {
         Work::Craft { recipe_id, .. } => {
             let r = recipe(catalog, recipe_id)?;
             crafts_an_hour(r) * made(r)
@@ -118,8 +121,38 @@ pub fn pays(catalog: &Catalog, work: &Work, rate: i64) -> Option<i64> {
             let r = catalog.resource_type(resource)?;
             gathers_an_hour(r) * gathered(r)
         }
-    };
-    Some((per_hour * rate as f64).round() as i64)
+    })
+}
+
+/// What `work` pays a game hour at `rate` a unit, worked steadily at the
+/// bench or the node: its [`units_an_hour`] at the rate.
+pub fn pays(catalog: &Catalog, work: &Work, rate: i64) -> Option<i64> {
+    Some((units_an_hour(catalog, work)? * rate as f64).round() as i64)
+}
+
+/// What `work` pays a game hour at `rate` a unit once the walk to it is
+/// counted (#507): [`pays`], with a walk of `walk` game seconds spread over
+/// the shift,
+///
+/// ```text
+/// pays × units / (units + walk × units_an_hour / 3600)
+/// ```
+///
+/// where `units` is the `left` to the offer's cap, as many as it makes in
+/// the `secs` it has to work in once it's there (the rest of its working
+/// day, or the offer's term; `None` for no end). So a walk counts for more
+/// the fewer units it's for. `None` when the catalog doesn't know the work,
+/// or no unit fits in the time after the walk.
+pub fn pays_walked(catalog: &Catalog, work: &Work, rate: i64, left: i32, walk: f64, secs: Option<f64>) -> Option<i64> {
+    let per_hour = units_an_hour(catalog, work)?;
+    let walk = walk.max(0.0);
+    let fits = secs.map_or(f64::INFINITY, |s| ((s - walk).max(0.0) * per_hour / 3600.0).floor());
+    let units = f64::from(left.max(0)).min(fits);
+    if units < 1.0 {
+        return None;
+    }
+    let at_work = per_hour * rate as f64;
+    Some((at_work * units / (units + walk * per_hour / 3600.0)).round() as i64)
 }
 
 /// What `role`'s own trade earns a game hour at the books (`worth`), worked
@@ -490,6 +523,41 @@ mod tests {
         // Grass, 1 to 3 every 3 s: 2400 an hour
         assert_eq!(pays(&catalog, &gather("grass"), 1), Some(2400));
         assert_eq!(pays(&catalog, &gather("no_such"), 1), None);
+    }
+
+    /// The walk to work is spread over the shift (#507): far-off work pays
+    /// less an hour than the same work near, a small offer far off least of
+    /// all, and a walk the day can't fit work after pays nothing.
+    #[test]
+    fn far_off_work_pays_less_an_hour_than_near() {
+        let catalog = Catalog::fallback();
+        let plank = craft("plank");
+        let at_bench = pays(&catalog, &plank, 2).unwrap();
+        let walked = |left, walk, secs| pays_walked(&catalog, &plank, 2, left, walk, secs).unwrap();
+        // No walk: what the bench pays
+        assert_eq!(walked(40, 0.0, None), at_bench);
+        // Planks at 1800 an hour: 40 of them are 80 s at the bench, so 80 s
+        // of walking halves the hour
+        assert_eq!(walked(40, 80.0, None), at_bench / 2);
+        // The farther, the less; and the same walk costs a small offer more
+        let (near, far) = (walked(40, 60.0, None), walked(40, 600.0, None));
+        assert!(at_bench > near && near > far, "{at_bench} {near} {far}");
+        assert!(walked(10, 600.0, None) < far);
+        // A small far offer at a better rate loses to a near one at less
+        let small_far = pays_walked(&catalog, &plank, 3, 20, 600.0, None).unwrap();
+        let near_cheap = pays_walked(&catalog, &plank, 2, 200, 30.0, None).unwrap();
+        assert!(small_far < near_cheap, "{small_far} {near_cheap}");
+        // A big offer counts only what the time left makes: an hour's
+        // work after a walk is an hour's, not the whole cap's
+        assert_eq!(walked(10_000, 600.0, Some(600.0 + 3600.0)), walked(1800, 600.0, None));
+        // No time to work once there, or nothing left: no pay to weigh
+        assert_eq!(pays_walked(&catalog, &plank, 2, 40, 600.0, Some(600.0)), None);
+        assert_eq!(pays_walked(&catalog, &plank, 2, 0, 0.0, None), None);
+        assert_eq!(pays_walked(&catalog, &gather("no_such"), 2, 40, 0.0, None), None);
+        // A gather the same: grass at 2400 an hour, 40 tufts a minute's
+        // work, and a minute's walk halves it
+        let grass = pays(&catalog, &gather("grass"), 1).unwrap();
+        assert_eq!(pays_walked(&catalog, &gather("grass"), 1, 40, 60.0, None), Some(grass / 2));
     }
 
     #[test]

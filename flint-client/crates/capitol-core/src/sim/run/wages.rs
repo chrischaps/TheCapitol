@@ -8,8 +8,9 @@
 //! - **Taking.** Work one of its willing jobs does ([`Role::wage_menu`](crate::sim::Role::wage_menu),
 //!   Callings K1.2: its favourite, the job it's at, and those its calling
 //!   leans to) is a question ([`Question::Wage`]): what the work pays a
-//!   game hour against what that job's own trade earns one at the books
-//!   ([`wage`]). Only in
+//!   game hour, with the walk there spread over the shift
+//!   ([`wage::pays_walked`], #507), against what that job's own trade earns
+//!   one at the books ([`wage`]). Only in
 //!   its working hours, owing nothing on the board, and once a day for any
 //!   one employer, so a single person doesn't take over a citizen's life.
 //!   One a round, the best paid first; one it passed isn't asked about
@@ -28,6 +29,8 @@ use std::time::Instant;
 
 use capitol_protocol::rest::{ResourceNodeInfo, WageOffer};
 use capitol_protocol::rules::wages::{OfferStatus, Work};
+use capitol_protocol::rules::{DAY_LENGTH_SECS, PLAYER_SPEED};
+use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
 use super::super::plan::Holdings;
@@ -194,22 +197,34 @@ impl SimBot {
             return None;
         }
         let me = self.bot.state().me()?;
+        // The walk to each, by the walk graph where it's to hand (#507): in
+        // a straight line, slowed by the slope and the streams, not yet round
+        // the water by the bridges (#586)
+        let walks = self.bot.walks().ok();
+        let from = self.bot.position();
         let state = self.bot.state();
         let today = state.server_time_ms().map_or(0, capitol_protocol::rules::day_number);
         let now = state.utc_now();
         let again = self.wall(ASK_AGAIN);
         self.wages.passed.retain(|_, at| at.elapsed() < again);
-        let mut open: Vec<(i64, WageOffer)> = self
+        // Best paid first, the walk there spread over the shift: so far-off
+        // work weighs less, and a small offer far off least of all
+        let mut open: Vec<(i64, f64, WageOffer)> = self
             .wages
             .offers
             .iter()
             .filter(|o| o.status == OfferStatus::Open && o.shift.is_none() && o.employer_id != me)
             .filter(|o| o.worker_id.is_none_or(|w| w == me))
             .filter(|o| !self.wages.passed.contains_key(&o.id) && self.wages.worked.get(&o.employer_id) != Some(&today))
-            .filter_map(|o| Some((wage::pays(&catalog, &o.work, o.rate)?, o.clone())))
+            .filter_map(|o| {
+                let to = to_work(o);
+                let walk = walks.as_ref().map_or_else(|| (to.0 - from.0).hypot(to.1 - from.1) / PLAYER_SPEED, |w| w.walk_secs(from, to));
+                let secs = self.shift_secs(now, o.ends_at);
+                Some((wage::pays_walked(&catalog, &o.work, o.rate, o.cap - o.made, walk, Some(secs))?, walk, o.clone()))
+            })
             .collect();
-        open.sort_by_key(|(pays, _)| std::cmp::Reverse(*pays));
-        for (pays, o) in open {
+        open.sort_by_key(|(pays, ..)| std::cmp::Reverse(*pays));
+        for (pays, walk, o) in open {
             let Some(job) = wage::job(&catalog, &o.work) else { continue };
             let tooled = wage::tool_needed(&catalog, &o.work).is_none_or(|t| holdings.tools.contains(t));
             let hire = Hire {
@@ -230,6 +245,7 @@ impl SimBot {
                 rate: o.rate,
                 left: hire.left,
                 ends: (o.ends_at - now).num_seconds().max(0) as f64 * self.scale / 3600.0,
+                walk: walk / 60.0,
                 pays,
                 earns,
             };
@@ -243,6 +259,22 @@ impl SimBot {
             };
         }
         None
+    }
+
+    /// The game seconds it would have to work a shift in from `now`: to
+    /// its walk home at the end of its working day ([`go_home`](SimBot::go_home)
+    /// ends a shift) or the offer's term `ends_at`, whichever is first, in
+    /// the hours its habit has it on (#505). A swarm bot has no day.
+    fn shift_secs(&self, now: DateTime<Utc>, ends_at: DateTime<Utc>) -> f64 {
+        let home = self.persona.as_ref().zip(self.bot.state().time_of_day()).map(|(p, t)| {
+            let secs = (p.schedule.home - t).rem_euclid(1.0) * DAY_LENGTH_SECS as f64;
+            now + TimeDelta::milliseconds((secs * 1000.0) as i64)
+        });
+        let until = home.map_or(ends_at, |h| h.min(ends_at));
+        if until <= now {
+            return 0.0;
+        }
+        self.on_between(now, until) * self.scale
     }
 
     /// Does what it chose about wages.

@@ -178,6 +178,8 @@ fn round(r: u32) -> Vec<Situation> {
                 let menu = role.wage_menu(&Hire { job, left: 40, tooled: true }).expect("its own trade's work");
                 let rate = last.map_or(2, |l| (l * (1 + (n % 3) as i64) / 2).max(1));
                 let books = |item: &str| super::rules::worth_in(&market, item);
+                // Next door, across the quarter, or across the city (#507)
+                let walk = [0.0, 60.0, 300.0][(n / 3 % 3) as usize];
                 let question = Question::Wage {
                     id: Uuid::from_u128(u128::from(n) << 8 | 0xff),
                     employer: "Ada Reeder".into(),
@@ -185,7 +187,8 @@ fn round(r: u32) -> Vec<Situation> {
                     rate,
                     left: 40,
                     ends: 24.0,
-                    pays: wage::pays(&catalog, &work, rate).unwrap_or(0),
+                    walk: walk / 60.0,
+                    pays: wage::pays_walked(&catalog, &work, rate, 40, walk, None).unwrap_or(0),
                     earns: wage::earns(role, &catalog, books),
                 };
                 out.push(s(question, menu, 1));
