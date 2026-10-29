@@ -1063,8 +1063,8 @@ pub fn bid_menu(holdings: &Holdings, item: &str, wants: &[&str], worth: Option<i
 ///   stands its lowest, to open the book (#501).
 ///
 /// Or keep. The mind picks one, so a visit places one order, where #429
-/// placed a sale and a stand beside it; what that does to the goods
-/// traded is to be soaked (#590).
+/// placed a sale and a stand beside it. Soaked against that, the goods
+/// traded held, at 93% and 95% (#590).
 #[allow(clippy::too_many_arguments)]
 pub fn graded_sell_menu(
     holdings: &Holdings,
