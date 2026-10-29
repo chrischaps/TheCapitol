@@ -102,7 +102,7 @@ use capitol_protocol::rest::{
     StationContainerResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
-use capitol_protocol::metrics::{Feed, Sample, TownReport, ROLE_ALL_ROUNDER, ROLE_PERSON};
+use capitol_protocol::metrics::{Feed, Holding, Sample, TownReport, ROLE_ALL_ROUNDER, ROLE_PERSON};
 use capitol_protocol::watch::{Watch, WatchKind};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
@@ -397,6 +397,12 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(spread.roles.values().map(|h| h.accounts).sum::<u64>(), spread.accounts);
     assert_eq!(spread.roles[ROLE_PERSON].accounts, sample.players.people);
     assert_eq!(spread.roles[ROLE_ALL_ROUNDER].accounts, 3, "all-rounders together (Callings K3.3)");
+    // #559: each bucket's escrow is a part of the sample's, here all of it,
+    // and the styles split the same accounts
+    let escrow = |split: &std::collections::BTreeMap<String, Holding>| split.values().map(|h| h.escrow.total()).sum::<i64>();
+    assert_eq!((escrow(&spread.roles), escrow(&spread.styles)), (sample.strands.escrow, sample.strands.escrow));
+    assert_eq!(spread.styles.values().map(|h| h.accounts).sum::<u64>(), spread.accounts);
+    assert_eq!(spread.styles.values().map(Holding::holding).sum::<i64>(), spread.roles.values().map(Holding::holding).sum::<i64>());
     assert_eq!(sample.grants.returned, 1);
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
 }
@@ -413,6 +419,16 @@ fn a_sample_from_before_the_town_reported_still_reads() {
     value.as_object_mut().unwrap().remove("distribution");
     let old: Sample = serde_json::from_value(value).unwrap();
     assert!(old.distribution.is_none());
+    // A distribution from before #559: no escrow, no styles
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let spread = value["distribution"].as_object_mut().unwrap();
+    spread.remove("styles");
+    for holding in spread["roles"].as_object_mut().unwrap().values_mut() {
+        holding.as_object_mut().unwrap().remove("escrow");
+    }
+    let old: Sample = serde_json::from_value(value).unwrap();
+    let spread = old.distribution.unwrap();
+    assert!(spread.styles.is_empty() && spread.roles.values().all(|h| h.escrow.is_empty()));
 }
 
 #[test]

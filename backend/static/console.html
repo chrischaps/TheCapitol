@@ -150,13 +150,19 @@
       <article class="story">
         <h2 class="head">Wealth by calling</h2>
         <p class="headline" id="roles-headline">Waiting for the first sample.</p>
-        <p class="dek">Each citizen is counted under its favourite job, as the town's report names it, and the all-rounders, who have none, together; people are counted together too. A sample from before callings counted each citizen under its trade, which is the same row. The change each is since the first sample in the range that has the row, as the soak report's table of trades has it.</p>
+        <p class="dek">Each citizen is counted under its favourite job, as the town's report names it, and the all-rounders, who have none, together; or, with the switch, under its calling's style. People are counted together too. Each group holds its balances and its Strands in escrow: its open bids, commissions and wage offers, still its own. <em>Each</em> and <em>Share</em> count both. <em>Against headcount</em> is its share of the Strands over its share of the accounts: 1× is even, and 2× holds twice its size's share. The change each is since the first sample in the range that has the row. A sample from before callings counted each citizen under its trade, which is the same row, and one from before #559 counted no escrow and no styles.</p>
+        <div class="filters" id="roles-by" role="group" aria-label="Group by">
+          <button type="button" data-by="roles" aria-pressed="true" title="Each citizen under its favourite job, the all-rounders together">By calling</button>
+          <button type="button" data-by="styles" aria-pressed="false" title="Each citizen under its calling's style: specialist, leaner or all-rounder">By style</button>
+        </div>
         <div class="table-wrap">
           <table class="ledger" id="roles">
-            <thead><tr><th>Calling</th><th class="num">Accounts</th><th class="num">Strands</th><th class="num">Each</th><th class="num">Change each</th><th class="num">Share</th></tr></thead>
+            <thead><tr><th id="roles-group">Calling</th><th class="num">Accounts</th><th class="num">Strands</th><th class="num">In escrow</th><th class="num">Each</th><th class="num">Change each</th><th class="num">Share</th><th class="num">Against headcount</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
+        <p class="headline sub" id="headcount-headline"></p>
+        <div class="chart chart-short" id="chart-headcount"></div>
       </article>
 
       <article class="story">

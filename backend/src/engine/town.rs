@@ -18,16 +18,17 @@
 //! sample ([`Town::quiet`]).
 //!
 //! Since D2.2 the newest report also names each citizen's trade
-//! ([`Town::roles`]), for the wealth by role in each sample's
+//! ([`Town::buckets`]), for the wealth by role in each sample's
 //! `Distribution`. Since Callings K3.3 that's its calling's bucket: its
 //! favourite job's slug, or `all-rounder`. A town from before callings
-//! names the trade's slug, which is the same key.
+//! names the trade's slug, which is the same key. Since #559 it names each
+//! citizen's calling style too, for the wealth by style.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use capitol_protocol::annotation::AnnotationKind;
-use capitol_protocol::metrics::{DecisionBrief, TownLatest, TownReport, TownSummary, TOWN_QUIET_MS};
+use capitol_protocol::metrics::{Buckets, DecisionBrief, TownLatest, TownReport, TownSummary, TOWN_QUIET_MS};
 
 /// A marker the town's comings and goings make, for `annotations::note`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,14 +136,22 @@ impl Town {
         Some(TownLatest { received_ms: *received_ms, up: inner.up, report })
     }
 
-    /// Each citizen's trade, by name, from the newest report: its
-    /// favourite job's slug or `all-rounder` (Callings K3.3). Empty until a
-    /// town reports. It holds after the town goes down, since callings
+    /// Each citizen's buckets, by name, from the newest report: its trade,
+    /// its favourite job's slug or `all-rounder` (Callings K3.3), and its
+    /// calling's style (#559), none from a town before callings. Empty until
+    /// a town reports. It holds after the town goes down, since callings
     /// don't change while it's away.
-    pub fn roles(&self) -> HashMap<String, String> {
+    pub fn buckets(&self) -> HashMap<String, Buckets> {
         let inner = self.inner();
         let Some((report, _)) = inner.latest.as_ref() else { return HashMap::new() };
-        report.citizens.iter().map(|c| (c.name.clone(), c.role.clone())).collect()
+        report
+            .citizens
+            .iter()
+            .map(|c| {
+                let style = c.calling.as_ref().map(|k| k.style.clone());
+                (c.name.clone(), Buckets { role: c.role.clone(), style })
+            })
+            .collect()
     }
 
     /// The reports since the last sample, for this one; `None` if none came
@@ -169,7 +178,7 @@ impl Town {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capitol_protocol::metrics::CitizenReport;
+    use capitol_protocol::metrics::{CallingReport, CitizenReport};
 
     fn decision(at_ms: i64) -> DecisionBrief {
         DecisionBrief { at_ms, question: "work".into(), by: "rules".into(), ..DecisionBrief::default() }
@@ -235,21 +244,27 @@ mod tests {
     #[test]
     fn the_newest_report_names_each_citizens_trade() {
         let town = Town::new();
-        assert!(town.roles().is_empty(), "no town, no trades");
+        assert!(town.buckets().is_empty(), "no town, no trades");
         let mut first = report(1, &[("Ada", &[]), ("Bo", &[])]);
         first.citizens[0].role = "merchant".into();
         first.citizens[1].role = "gatherer-wood".into();
         town.receive(first, 1_000);
-        let roles = town.roles();
-        assert_eq!((roles["Ada"].as_str(), roles["Bo"].as_str()), ("merchant", "gatherer-wood"));
+        let named = town.buckets();
+        assert_eq!((named["Ada"].role.as_str(), named["Bo"].role.as_str()), ("merchant", "gatherer-wood"));
+        assert_eq!(named["Ada"].style, None, "a town before callings names no style");
         town.quiet(1_000 + TOWN_QUIET_MS);
-        assert_eq!(town.roles().len(), 2, "kept while the town is down");
-        // Callings K3.3: an all-rounder is counted with the all-rounders
+        assert_eq!(town.buckets().len(), 2, "kept while the town is down");
+        // Callings K3.3: an all-rounder is counted with the all-rounders,
+        // and since #559 each by its style
         let mut later = report(1, &[("Ada", &[]), ("Bo", &[])]);
         later.citizens[0].role = "merchant".into();
+        later.citizens[0].calling = Some(CallingReport { style: "specialist".into(), ..Default::default() });
         later.citizens[1].role = capitol_protocol::metrics::ROLE_ALL_ROUNDER.into();
+        later.citizens[1].calling = Some(CallingReport { style: "all-rounder".into(), ..Default::default() });
         town.receive(later, 70_000);
-        assert_eq!(town.roles()["Bo"], "all-rounder");
+        let named = town.buckets();
+        assert_eq!(named["Bo"], Buckets { role: "all-rounder".into(), style: Some("all-rounder".into()) });
+        assert_eq!(named["Ada"].style.as_deref(), Some("specialist"));
     }
 
     #[test]

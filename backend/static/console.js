@@ -645,6 +645,21 @@
     // Drawn outermost first, so each bar's inner lines paint over it
     series: () => money.lines.map((l) => ({ key: l.key, label: l.label, color: l.color, bars: true })).reverse(),
   });
+  // Each group's share of the Strands over its share of the accounts (#559),
+  // for those furthest from even, with even drawn through them
+  CHARTS.headcount = () => lineChart($("chart-headcount"), {
+    has: (s) => s.distribution?.[wealthView.by],
+    height: 200,
+    range: (u, min, max) => [0, Math.max(2, (max ?? 1) * 1.1)],
+    axis: (v) => `${Number(v.toFixed(1))}×`,
+    legend: (v) => `${v.toFixed(2)}×`,
+    series: () => [
+      ...wealthView.lines.map((key, k) => ({
+        label: groupName(key), color: `--s${k + 1}`, value: (s) => against(s.distribution, wealthView.by)[key]?.ratio ?? null,
+      })),
+      { label: "Even", color: "--budget", width: 1, dash: [5, 4], value: () => 1 },
+    ],
+  });
   CHARTS.escrow = () => lineChart($("chart-escrow"), {
     has: (s) => s.strands,
     height: 160,
@@ -1262,7 +1277,8 @@
     if (!d || d.gini == null) {
       $("spread-headline").textContent = d ? "Too few hold any Strands to say how evenly." : "Waiting for a sample that says.";
       $("roles-headline").textContent = "Waiting for a sample that says.";
-      $("roles").tBodies[0].replaceChildren(emptyRow(6, "No sample says yet."));
+      $("roles").tBodies[0].replaceChildren(emptyRow(8, "No sample says yet."));
+      $("headcount-headline").textContent = "";
       return;
     }
     const tenth = Math.max(1, Math.ceil(d.accounts / 10));
@@ -1308,7 +1324,10 @@
   // together (Callings K3.3; before callings, its trade, which is the same
   // key), and people together
   const trade = (role) => role === "person" ? "People" : role === "citizen" ? "Citizens with no calling named" : role === "all-rounder" ? "All-rounders" : jobName(role);
-  const each = (h) => h.strands / Math.max(h.accounts, 1);
+  /** A group's balances with its escrow (#559): what it holds, all told */
+  const held = (h) => h.strands + escrowOf(h);
+  const escrowOf = (h) => (h.escrow?.bids ?? 0) + (h.escrow?.commissions ?? 0) + (h.escrow?.wages ?? 0);
+  const each = (h) => held(h) / Math.max(h.accounts, 1);
   /** One of a bucket, in a sentence: "a person", "an all-rounder", "a citizen who favours wood" */
   const one = (role) => role === "person" ? "a person" : role === "citizen" ? "a citizen with no calling named" : role === "all-rounder" ? "an all-rounder" : `a citizen who favours ${jobName(role).toLowerCase()}`;
   /** All of a bucket, to start a sentence: "People", "All-rounders", "Those who favour wood" */
@@ -1379,31 +1398,146 @@
     return [bar, words];
   }
 
-  // The wealth table: each trade's accounts and Strands now, against the
-  // first sample in the range that has the trade (the town names them only
+  // The styles' rows (#559), as the town's report names them; a style the
+  // page has no words for is shown as it's named
+  const STYLE_NAMES = {
+    specialist: ["Specialists", "a specialist"],
+    leaner: ["Leaners", "a leaner"],
+    "all-rounder": ["All-rounders", "an all-rounder"],
+    saver: ["Savers", "a saver"],
+    person: ["People", "a person"],
+    citizen: ["Citizens with no style named", "a citizen with no style named"],
+  };
+  /** A group of the table, as the switch has it: "Wood", "Specialists" */
+  const groupName = (key) => wealthView.by === "styles" ? STYLE_NAMES[key]?.[0] ?? capital(key) : trade(key);
+  /** All of a group, to start a sentence */
+  const groupThose = (key) => wealthView.by === "styles" ? groupName(key) : those(key);
+  // The savers (#556), once they're a style, lead the headline
+  const LEAD_STYLE = "saver";
+  // A group past this, either way, is named in the headline
+  const FAR = 2;
+
+  // Each group's share of what's held, balances and escrow, over its share
+  // of the accounts: 1 is even. `null` while nobody holds anything. Kept
+  // per distribution, since the chart asks again on every redraw
+  const againstMemo = { roles: new WeakMap(), styles: new WeakMap() };
+  function against(d, by) {
+    const memo = againstMemo[by];
+    if (memo.has(d)) return memo.get(d);
+    const groups = d[by] ?? {};
+    const accounts = Object.values(groups).reduce((n, h) => n + h.accounts, 0);
+    const total = Object.values(groups).reduce((n, h) => n + Math.max(held(h), 0), 0);
+    const out = {};
+    for (const [key, h] of Object.entries(groups)) {
+      const share = total ? Math.max(held(h), 0) / total : null;
+      const heads = accounts ? h.accounts / accounts : 0;
+      out[key] = { share, heads, ratio: share == null || !heads ? null : share / heads };
+    }
+    memo.set(d, out);
+    return out;
+  }
+  /** How far a ratio is from even, either way: 2× and ½× are as far */
+  const farness = (r) => (r == null ? -1 : r > 0 ? Math.abs(Math.log(r)) : Infinity);
+  const times = (r) => `${r < 10 ? r.toFixed(1) : Math.round(r)}×`;
+
+  // The wealth table: each group's accounts and Strands now, against the
+  // first sample in the range that has the group (the town names them only
   // once it reports in), as the soak report's table of trades has them
   function roles(d, inRange) {
-    const total = Object.values(d.roles).reduce((n, h) => n + Math.max(h.strands, 0), 0);
-    const rows = Object.entries(d.roles).sort((a, b) => b[1].strands - a[1].strands);
-    const byEach = [...rows].sort((a, b) => each(b[1]) - each(a[1]));
-    const [richest, poorest] = [byEach[0], byEach.at(-1)];
-    $("roles-headline").textContent = rows.length < 2 || each(richest[1]) === each(poorest[1])
-      ? `Every calling holds ${nf.format(Math.round(each(richest[1])))} Strands each.`
-      : `${those(richest[0])} hold the most, ${nf.format(Math.round(each(richest[1])))} Strands each on average; ${thoseAfter(poorest[0])} the least, ${nf.format(Math.round(each(poorest[1])))}.`;
-    $("roles").tBodies[0].replaceChildren(...rows.map(([role, h]) => {
-      const before = inRange.find((d) => d.roles?.[role])?.roles[role];
+    const by = wealthView.by;
+    $("roles-group").textContent = by === "styles" ? "Style" : "Calling";
+    const groups = d[by] ?? {};
+    const rows = Object.entries(groups).sort((a, b) => held(b[1]) - held(a[1]));
+    if (!rows.length) {
+      $("roles-headline").textContent = by === "styles" ? "No sample in the range names the styles yet: the town names them since #559." : "No sample says yet.";
+      $("roles").tBodies[0].replaceChildren(emptyRow(8, "No sample says yet."));
+      $("headcount-headline").textContent = "";
+      return headcountChart([]);
+    }
+    const ratios = against(d, by);
+    const escrow = rows.reduce((n, [, h]) => n + escrowOf(h), 0);
+    const all = rows.reduce((n, [, h]) => n + Math.max(held(h), 0), 0);
+    $("roles-headline").textContent = headline(rows, ratios, escrow, all);
+    $("roles").tBodies[0].replaceChildren(...rows.map(([key, h]) => {
+      const before = inRange.find((d) => d[by]?.[key])?.[by][key];
       const change = before ? each(h) - each(before) : null;
+      const r = ratios[key];
       const tr = document.createElement("tr");
+      const inEscrow = cell(escrowOf(h) ? nf.format(escrowOf(h)) : "–", `num ${escrowOf(h) ? "" : "dim"}`);
+      if (escrowOf(h)) inEscrow.title = escrowSays(h);
       tr.append(
-        cell(trade(role)),
+        cell(groupName(key)),
         cell(nf.format(h.accounts), "num"),
         cell(nf.format(h.strands), "num"),
+        inEscrow,
         cell(nf.format(Math.round(each(h))), "num"),
         cell(change == null ? "–" : `${change > 0 ? "+" : change < 0 ? "−" : "±"}${nf.format(Math.abs(Math.round(change)))}`, `num ${change > 0 ? "up" : change < 0 ? "down" : "dim"}`),
-        cell(total ? percent(Math.max(h.strands, 0) / total) : "–", "num dim"),
+        cell(r.share == null ? "–" : percent(r.share), "num dim"),
+        cell(r.ratio == null ? "–" : times(r.ratio), `num against ${r.ratio == null ? "dim" : r.ratio >= FAR ? "far over" : r.ratio <= 1 / FAR ? "far under" : ""}`),
       );
       return tr;
     }));
+    headcountChart(rows.map(([key]) => key).filter((key) => ratios[key].ratio != null).sort((a, b) => farness(ratios[b].ratio) - farness(ratios[a].ratio)));
+  }
+
+  /** What a group's escrow is: "1,200 in bids, 40 in commissions" */
+  function escrowSays(h) {
+    const parts = [["bids", "bids"], ["commissions", "commissions"], ["wages", "wage offers"]]
+      .filter(([k]) => h.escrow?.[k]).map(([k, say]) => `${nf.format(h.escrow[k])} in ${say}`);
+    return `${capital(andList(parts))}.`;
+  }
+
+  // The savers' distance from even first, once they're a style (#556);
+  // otherwise the group furthest from it. Then anyone else over 2×, and how
+  // much of it sits in escrow
+  function headline(rows, ratios, escrow, all) {
+    const ranked = rows.map(([key]) => key).filter((key) => ratios[key].ratio != null).sort((a, b) => farness(ratios[b].ratio) - farness(ratios[a].ratio));
+    if (!ranked.length) return "Nobody holds a Strand yet.";
+    const lead = wealthView.by === "styles" && ratios[LEAD_STYLE]?.ratio != null ? LEAD_STYLE : ranked[0];
+    const r = ratios[lead];
+    const even = (key) => farness(ratios[key].ratio) < 0.05;
+    const tail = escrow > 0 && all > 0 ? ` ${percent(escrow / all)} of it sits in escrow.` : "";
+    if (ranked.every(even)) return `Every ${wealthView.by === "styles" ? "style" : "calling"} holds about even with its headcount.${tail}`;
+    const where = even(lead) ? "about even with their headcount" : `${times(r.ratio)} their headcount's share`;
+    let line = `${groupThose(lead)} hold ${where}: ${percent(r.share)} of the Strands with ${percent(r.heads)} of the accounts.`;
+    const others = ranked.filter((key) => key !== lead && ratios[key].ratio >= FAR);
+    if (others.length) {
+      const named = others.slice(0, 3).map((key) => `${groupName(key).toLowerCase()} at ${times(ratios[key].ratio)}`);
+      line += ` Also over ${FAR}×: ${andList(named)}${others.length > 3 ? `, and ${others.length - 3} more` : ""}.`;
+    } else if (ratios[lead].ratio < FAR) {
+      line += ` Nobody is over ${FAR}×.`;
+    }
+    return line + tail;
+  }
+
+  // The chart over time draws the groups furthest from even now, at most
+  // one per series colour; a new set of them rebuilds it
+  const HEADCOUNT_LINES = 5;
+  function headcountChart(ranked) {
+    const lines = ranked.slice(0, HEADCOUNT_LINES);
+    const changed = lines.join() !== wealthView.lines.join();
+    wealthView.lines = lines;
+    $("headcount-headline").textContent = lines.length
+      ? `Over time, the ${lines.length === 1 ? "group" : `${lines.length} groups`} furthest from even now, by their share of the Strands over their share of the accounts.`
+      : "";
+    if (changed) state.charts.headcount?.rebuild();
+    chart("headcount");
+  }
+
+  function rolesControls() {
+    const group = $("roles-by");
+    for (const b of group.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.by === wealthView.by));
+    group.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-by]");
+      if (!b) return;
+      wealthView.by = b.dataset.by;
+      prefs.set("observatory.wealth.by", wealthView.by);
+      for (const x of group.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+      // The same keys can name other groups: all-rounders are in both
+      wealthView.lines = [];
+      state.charts.headcount?.rebuild();
+      distribution();
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -2448,6 +2582,12 @@
     making: { keys: MAKING_KEYS, says: "of the making jobs" },
     jobs: { keys: JOB_KEYS, says: "of the eight jobs" },
     work: { keys: null, says: "of all its work" },
+  };
+  // The wealth table's groups (#559): `roles` by calling, `styles` by style.
+  // `lines` are the groups the chart over time draws, furthest from even first
+  const wealthView = {
+    by: prefs.get("observatory.wealth.by") === "styles" ? "styles" : "roles",
+    lines: [],
   };
   const stylesView = {
     of: SHARE_OF[prefs.get("observatory.styles.of")] ? prefs.get("observatory.styles.of") : "making",
@@ -4530,6 +4670,7 @@
     }
     mapControls();
     rosterControls();
+    rolesControls();
     stylesControls();
     tuningControls();
     // The link goes to the map; this says whom to follow there
