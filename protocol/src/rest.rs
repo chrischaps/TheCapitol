@@ -273,7 +273,8 @@ pub const WALKERS_MAX_RADIUS: f64 = 2000.0;
 
 /// One player as the server is moving them (D5.3), for the admin's world
 /// layers: where they stand, where the server is walking them (a citizen's
-/// next leg, or a person's click), and what they're doing.
+/// next leg, or a person's click), what they're doing, and for a citizen
+/// out walking, what the walk is for (#414).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct Walker {
@@ -287,6 +288,21 @@ pub struct Walker {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dest: Option<[f64; 2]>,
     pub doing: Doing,
+    /// A citizen's whole walk, from its town's newest report (#414): where
+    /// it means to end up and why. `None` for a person, a citizen standing,
+    /// or with no town reporting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<Heading>,
+}
+
+/// Where a citizen's walk is bound for and why (#414): the end of the walk
+/// it set out on, past every leg of the walk graph, and its town's words for
+/// what it's doing, "gather clay", "to its stall".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Heading {
+    pub to: [f64; 2],
+    pub why: String,
 }
 
 /// What a [`Walker`] is busy with.

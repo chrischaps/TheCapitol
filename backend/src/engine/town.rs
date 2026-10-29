@@ -29,6 +29,7 @@ use std::sync::Mutex;
 
 use capitol_protocol::annotation::AnnotationKind;
 use capitol_protocol::metrics::{Buckets, DecisionBrief, TownLatest, TownReport, TownSummary, TOWN_QUIET_MS};
+use capitol_protocol::rest::Heading;
 
 /// A marker the town's comings and goings make, for `annotations::note`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +155,16 @@ impl Town {
             .collect()
     }
 
+    /// Each walking citizen's heading, by name (#414): where the walk it's
+    /// on is bound for and why, for the admin's walkers. Empty while the
+    /// town is down, since a report it stopped sending no longer says where
+    /// anyone is going.
+    pub fn headings(&self) -> HashMap<String, Heading> {
+        let inner = self.inner();
+        let Some((report, _)) = inner.latest.as_ref().filter(|_| inner.up) else { return HashMap::new() };
+        report.citizens.iter().filter_map(|c| Some((c.name.clone(), c.walking.clone()?))).collect()
+    }
+
     /// The reports since the last sample, for this one; `None` if none came
     pub fn take_sample(&self) -> Option<TownSummary> {
         self.inner().sample.take()
@@ -265,6 +276,21 @@ mod tests {
         let named = town.buckets();
         assert_eq!(named["Bo"], Buckets { role: "all-rounder".into(), style: Some("all-rounder".into()) });
         assert_eq!(named["Ada"].style.as_deref(), Some("specialist"));
+    }
+
+    /// #414: the walkers' headings are the newest report's, while the town is up
+    #[test]
+    fn the_headings_are_the_newest_reports_while_the_town_is_up() {
+        let town = Town::new();
+        assert!(town.headings().is_empty(), "no town, no headings");
+        let mut walking = report(1, &[("Ada", &[]), ("Bo", &[])]);
+        walking.citizens[0].walking = Some(Heading { to: [7400.0, 6100.0], why: "gather clay".into() });
+        town.receive(walking, 1_000);
+        let headings = town.headings();
+        assert_eq!(headings.len(), 1, "Bo is standing");
+        assert_eq!(headings["Ada"].why, "gather clay");
+        town.quiet(1_000 + TOWN_QUIET_MS);
+        assert!(town.headings().is_empty(), "a quiet town says nothing of where anyone's going");
     }
 
     #[test]

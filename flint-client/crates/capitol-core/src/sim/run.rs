@@ -274,6 +274,8 @@ pub(crate) fn live(
     bot.answer_trades(true);
     bot.greet_people(true);
     bot.speak_with(voice);
+    // Where its walks are bound for, for the town's report (#414)
+    bot.share_bound(town.bound());
     let strands = bot.state().strands();
     town.health(|h| h.strands = strands);
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);

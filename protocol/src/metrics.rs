@@ -934,6 +934,11 @@ pub struct CitizenReport {
     /// lesson)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub minted: BTreeMap<String, i64>,
+    /// Where the walk it's on is bound for, and its activity's words for
+    /// why (#414); `None` when it isn't walking. The server hands it to the
+    /// admin's walkers layer, which knows only the walk's next leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walking: Option<crate::rest::Heading>,
 }
 
 /// A citizen's calling, briefly (Callings K3.3): what the console's roster

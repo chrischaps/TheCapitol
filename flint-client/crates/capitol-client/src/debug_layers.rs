@@ -23,7 +23,7 @@
 use capitol_core::motion::Pose;
 use capitol_core::paths::WalkGraph;
 use capitol_core::protocol::land;
-use capitol_core::protocol::rest::{Doing, Walker};
+use capitol_core::protocol::rest::{Doing, Heading, Walker};
 use capitol_core::protocol::rules::habitat::{Massifs, Verdict};
 use capitol_core::protocol::rules::{interest_cell, INTEREST_CELL};
 use capitol_core::state::GameState;
@@ -139,6 +139,19 @@ pub struct WalkerMark {
     pub citizen: bool,
     /// `crafting rope`; empty when idle.
     pub doing: String,
+    /// Where a citizen's walk is bound for, past the leg, and why (#414).
+    pub goal: Option<GoalMark>,
+}
+
+/// Where a citizen's walk ends, from its town (#414).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoalMark {
+    pub at: [f32; 2],
+    /// `gather clay · 340 m`: what it set out to do, and how far it still
+    /// has to go as the crow flies
+    pub words: String,
+    /// The leg ends there: this is the walk's last
+    pub last_leg: bool,
 }
 
 /// Gathers what `layer` shows round `me` (server units). `poses` place the
@@ -199,17 +212,33 @@ pub fn gather(
                     .iter()
                     .find(|p| p.id == w.player_id)
                     .map_or_else(|| to_world(w.x, w.y), |p| to_world(p.x, p.y));
+                let dest = w.dest.map(|[x, y]| to_world(x, y));
                 WalkerMark {
                     at,
-                    dest: w.dest.map(|[x, y]| to_world(x, y)),
+                    dest,
                     name: w.name.clone(),
                     citizen: w.citizen,
                     doing: doing_words(&w.doing, state),
+                    goal: w.heading.as_ref().map(|h| goal(at, dest, h)),
                 }
             })
             .collect();
     }
     mark
+}
+
+/// A heading as the layer draws it: its end, and its words with the way
+/// still to go.
+fn goal(at: [f32; 2], dest: Option<[f32; 2]>, heading: &Heading) -> GoalMark {
+    let to = to_world(heading.to[0], heading.to[1]);
+    let far = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    // Within a step of the leg's end, the walk has one leg left
+    let last_leg = dest.is_some_and(|d| far(d, to) < 1.0);
+    let words = match far(at, to) {
+        m if m < 10.0 => format!("{} · {m:.1} m", heading.why),
+        m => format!("{} · {m:.0} m", heading.why),
+    };
+    GoalMark { at: to, words, last_leg }
 }
 
 /// Your cell of the interest grid and the eight round it.
@@ -351,6 +380,7 @@ mod tests {
             y: 6790.0,
             dest: Some([6900.0, 6800.0]),
             doing: Doing::Extracting { node_id: near.id },
+            heading: None,
         };
         let pose = Pose { id: walker.player_id, x: 6820.0, y: 6795.0, facing: 0.0, moving: true };
         let off = gather(Layer::Off, (6800.0, 6800.0), &state, None, std::slice::from_ref(&walker), &[pose]);
@@ -366,6 +396,32 @@ mod tests {
         assert_eq!(ada.at, to_world(6820.0, 6795.0), "drawn where its pose is");
         assert_eq!(ada.dest, Some(to_world(6900.0, 6800.0)));
         assert_eq!(ada.doing, "gathering iron vein");
+        assert_eq!(ada.goal, None, "no town, no goal");
+    }
+
+    /// #414: a citizen's walk is drawn on past its leg to where it's bound,
+    /// with what it set out to do and how far it has to go
+    #[test]
+    fn a_citizens_goal_lies_past_its_leg() {
+        let state = GameState::new();
+        let walker = |dest: [f64; 2]| Walker {
+            player_id: Uuid::from_u128(9),
+            name: "Ada".into(),
+            citizen: true,
+            x: 6800.0,
+            y: 6800.0,
+            dest: Some(dest),
+            doing: Doing::Idle,
+            heading: Some(Heading { to: [6800.0, 6100.0], why: "gather clay".into() }),
+        };
+        let first = gather(Layer::Walkers, (6800.0, 6800.0), &state, None, &[walker([6900.0, 6700.0])], &[]);
+        let goal = first.walkers[0].goal.as_ref().unwrap();
+        assert_eq!(goal.at, to_world(6800.0, 6100.0));
+        let metres = (to_world(6800.0, 6100.0)[1] - to_world(6800.0, 6800.0)[1]).abs();
+        assert_eq!(goal.words, format!("gather clay · {metres:.0} m"));
+        assert!(!goal.last_leg, "a leg to the bridge first");
+        let last = gather(Layer::Walkers, (6800.0, 6800.0), &state, None, &[walker([6800.0, 6100.0])], &[]);
+        assert!(last.walkers[0].goal.as_ref().unwrap().last_leg, "the leg is the walk's last");
     }
 
     #[test]

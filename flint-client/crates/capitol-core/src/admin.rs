@@ -311,6 +311,7 @@ mod tests {
             y: 6740.0,
             dest: Some([6900.0, 6700.0]),
             doing: capitol_protocol::rest::Doing::Idle,
+            heading: None,
         };
         w.observe(&RestResponse::Walkers(vec![ada.clone()]));
         assert_eq!(w.walkers(), std::slice::from_ref(&ada));

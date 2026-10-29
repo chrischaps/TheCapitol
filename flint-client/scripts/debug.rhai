@@ -15,7 +15,10 @@
 //              walks on.
 //   walkers    where the server is walking each player near you: a line to
 //              the end of the leg, a ring there, and what they're doing.
-//              Citizens in their lantern's pale blue, people in gold.
+//              Citizens in their lantern's pale blue, people in gold. A
+//              citizen's walk runs on past the leg in dashes, to where its
+//              town says it's bound, a ringed post there with what it set out
+//              to do and how far it still has to go (#414).
 //
 // The colours are their own, apart from the game's marks, so a layer never
 // reads as something you can click.
@@ -126,9 +129,44 @@ fn draw_walker(w, y) {
         let dz = w.dest[1];
         ground_run(w.x, w.z, dx, dz, y + 0.05, c, 0.75, 2.0);
         ring(dx, dz, 0.9, y + 0.05, c, 0.9);
-        label(dx, dz, 1.8, `${w.name}'s leg`, 12.0, c, 0.85);
+        // On its last leg the leg's end is the goal, which says it all
+        let last = w.goal != () && w.goal.last_leg;
+        if !last { label(dx, dz, 1.8, `${w.name}'s leg`, 12.0, c, 0.85); }
+        if w.goal != () { draw_goal(w, dx, dz, y, c); }
     }
     if w.doing != "" {
         label(w.x, w.z, 3.2, w.doing, 12.0, c, 0.9);
+    }
+}
+
+// Where a citizen's walk is bound (#414): dashes on from the leg's end
+// (dx, dz), a post and two rings at the end, and its words over them.
+fn draw_goal(w, dx, dz, y, c) {
+    let g = w.goal;
+    if !g.last_leg { ground_dashes(dx, dz, g.x, g.z, y + 0.05, c, 0.55, 1.5); }
+    let h = cap_ground_at(g.x, g.z);
+    draw_world_line(g.x, h, g.z, g.x, h + stalk(), g.z, c[0], c[1], c[2], 0.9, 2.0);
+    ring(g.x, g.z, 1.2, y + 0.05, c, 0.9);
+    ring(g.x, g.z, 1.8, y + 0.05, c, 0.45);
+    label(g.x, g.z, stalk() + 0.3, `${w.name}: ${g.words}`, 13.0, c, 0.95);
+}
+
+// A dashed line along the ground: a dash, then a gap, each a piece long, so
+// a walk's way on reads apart from the leg the server is walking.
+fn ground_dashes(ax, az, bx, bz, y, c, alpha, width) {
+    let dx = bx - ax;
+    let dz = bz - az;
+    let span = (dx * dx + dz * dz).sqrt();
+    let n = (span / piece()).ceiling().to_int().max(1);
+    for i in 0..n {
+        if i % 2 == 1 { continue; }
+        let t0 = i.to_float() / n.to_float();
+        let t1 = (i + 1).to_float() / n.to_float();
+        let px = ax + dx * t0;
+        let pz = az + dz * t0;
+        let qx = ax + dx * t1;
+        let qz = az + dz * t1;
+        draw_world_line(px, y + cap_rise(px, pz), pz, qx, y + cap_rise(qx, qz), qz,
+                        c[0], c[1], c[2], alpha, width);
     }
 }
