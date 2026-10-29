@@ -40,8 +40,9 @@ use capitol_protocol::rest::{
     AutomationMode, BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuildFloorResponse, BuyListing, ClosedStall, CollectRequest,
     CollectResponse, ConfigureAutomation, DepositRequest, DepositResponse, GrantRequest, GrantResponse,
     HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder, MarketSummaryResponse, MoveItemRequest,
-    MyOrdersQuery, MyStallResponse, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest, RentStall,
-    ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse, StationAutomation, StationInfo, StationTool,
+    Letter, LetterBox, LettersQuery, MyOrdersQuery, MyStallResponse, PlaceOrder, PlaceStationRequest, PlotInfo,
+    RegisterRequest, RentStall, ResourceNodeInfo, SendLetter, SlotItem, SplitStackRequest, SplitStackResponse,
+    StationAutomation, StationInfo, StationTool,
     StockListing, SubscribeRequest, Subscription, WithdrawRequest, WithdrawResponse,
 };
 use capitol_protocol::rules::{self, steer, Zone};
@@ -113,6 +114,27 @@ pub const TRADE_THINK: Duration = Duration::from_millis(1500);
 /// How long [`Bot::trade_with`] leaves an unanswered request before asking
 /// again.
 const ASK_AGAIN: Duration = Duration::from_secs(20);
+
+/// A letter from a person that came (S1.5), until the in box's page with
+/// its whole text does (#432).
+#[derive(Debug, Clone)]
+struct Arrived {
+    id: Uuid,
+    from: Uuid,
+    name: String,
+    /// What its notice showed, for when the page doesn't have it.
+    first_line: String,
+}
+
+/// A call of the bot's own that nothing waits on: [`Bot::frame`] takes its
+/// answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Posted {
+    /// The in box, for the letters that came.
+    InBox,
+    /// A letter read, or a reply sent: only a refusal is told.
+    Letter,
+}
 
 /// What [`Bot::trade_with`] puts on its side of a trade.
 #[derive(Debug, Clone, Default)]
@@ -287,6 +309,10 @@ pub struct Bot {
     prints_talk: bool,
     /// Hails citizens by name ([`Bot::hail_citizens`]): when it last did.
     hails: Option<Option<Instant>>,
+    /// Letters from people its voice hasn't read yet (#432).
+    letters: Vec<Arrived>,
+    /// Calls nothing waits on, by tag.
+    posted: Vec<(Tag, Posted)>,
 }
 
 impl Bot {
@@ -370,6 +396,8 @@ impl Bot {
             voice: None,
             prints_talk: false,
             hails: None,
+            letters: Vec::new(),
+            posted: Vec::new(),
         })
     }
 
@@ -495,7 +523,10 @@ impl Bot {
             self.poller.observe(&event, &applied, &self.state);
             changes.extend(applied);
             if let NetEvent::Rest(tag, result) = event {
-                if tag < crate::poll::FIRST_TAG {
+                if let Some(i) = self.posted.iter().position(|(t, _)| *t == tag) {
+                    let (_, posted) = self.posted.swap_remove(i);
+                    self.answered(posted, result);
+                } else if tag < crate::poll::FIRST_TAG {
                     self.replies.push((tag, result));
                 } else if let Err(e) = result {
                     self.log(format!("a refetch failed: {e}"));
@@ -509,6 +540,8 @@ impl Bot {
             journal.extend(changes.iter().filter(|c| journaled(c)).cloned());
         }
         if self.voice.is_some() {
+            self.letters_came(&changes);
+            self.post_replies();
             self.answer_talk(&changes);
         }
         if self.prints_talk {
@@ -2726,6 +2759,119 @@ impl Bot {
         }
     }
 
+    /// Notes the letters from people in a frame's `changes` (S1.5) and asks
+    /// for the in box, where their whole text is: its page comes to
+    /// [`read_letters`](Self::read_letters). An office's letter takes no
+    /// reply (#447), and a citizen's isn't answered: two citizens would
+    /// write to each other a letter a day for ever.
+    fn letters_came(&mut self, changes: &[StateEvent]) {
+        let me = self.state.me();
+        let before = self.letters.len();
+        for change in changes {
+            if let StateEvent::LetterArrived {
+                id,
+                from,
+                name,
+                citizen: false,
+                office: false,
+                first_line,
+            } = change
+            {
+                if Some(*from) != me {
+                    self.letters.push(Arrived {
+                        id: *id,
+                        from: *from,
+                        name: name.clone(),
+                        first_line: first_line.clone(),
+                    });
+                }
+            }
+        }
+        if self.letters.len() > before {
+            let query = LettersQuery {
+                which: LetterBox::In,
+                before: None,
+            };
+            self.post(Posted::InBox, RestRequest::Letters(query));
+        }
+    }
+
+    /// Hands the letters that came to the voice, each with its text from
+    /// `page` (the in box's newest), and reads them (#432). The voice
+    /// replies to a writer once a game day. A letter `page` doesn't have
+    /// waits for the next page asked for, or with none, goes by its first
+    /// line.
+    fn read_letters(&mut self, page: &[Letter]) {
+        let Some(ms) = self.state.server_time_ms() else {
+            return;
+        };
+        let asked_again = self.posted.iter().any(|(_, p)| *p == Posted::InBox);
+        let now = Instant::now();
+        for arrived in std::mem::take(&mut self.letters) {
+            let text = match page.iter().find(|l| l.id == arrived.id) {
+                Some(letter) => letter.body.clone(),
+                None if asked_again => {
+                    self.letters.push(arrived);
+                    continue;
+                }
+                None => arrived.first_line.clone(),
+            };
+            let mut moment = Moment::with(&arrived.name, arrived.from, Some(ms));
+            moment.heard = Some(text);
+            if let Some(voice) = self.voice.as_mut() {
+                voice.letter(arrived.from, &moment, ms, now);
+            }
+            self.post(Posted::Letter, RestRequest::ReadLetter { letter_id: arrived.id });
+        }
+    }
+
+    /// Sends the voice's replies that are ready (#432), postage paid like
+    /// anyone's. One it can't pay for isn't sent. The letters it sent.
+    fn post_replies(&mut self) -> Vec<SendLetter> {
+        let replies = match self.voice.as_mut() {
+            Some(voice) => voice.replies(Instant::now()),
+            None => return Vec::new(),
+        };
+        let mut purse = self.state.strands();
+        let mut sent = Vec::new();
+        for (to, body) in replies {
+            if purse.is_some_and(|s| s < rules::talk::POSTAGE) {
+                self.log(format_args!("can't pay the postage on a reply to {to}"));
+                continue;
+            }
+            purse = purse.map(|s| s - rules::talk::POSTAGE);
+            self.log(format_args!("replies by letter: \"{body}\""));
+            let letter = SendLetter { to, body };
+            self.post(Posted::Letter, RestRequest::SendLetter(letter.clone()));
+            sent.push(letter);
+        }
+        sent
+    }
+
+    /// Sends `request` with nothing waiting on it: its answer comes to
+    /// [`answered`](Self::answered).
+    fn post(&mut self, what: Posted, request: RestRequest) {
+        let tag = self.next_tag;
+        self.next_tag += 1;
+        self.net.rest(request, tag);
+        self.posted.push((tag, what));
+    }
+
+    /// The answer to a [`post`](Self::post).
+    fn answered(&mut self, what: Posted, result: Result<RestResponse, RestError>) {
+        match (what, result) {
+            (Posted::InBox, Ok(RestResponse::Mailbox(mailbox))) => self.read_letters(&mailbox.letters),
+            (Posted::InBox, other) => {
+                if let Err(e) = other {
+                    self.log(format!("couldn't read the in box: {e}"));
+                }
+                self.read_letters(&[]);
+            }
+            (Posted::Letter, Err(e)) => self.log(format!("a letter went wrong: {e}")),
+            (Posted::Letter, Ok(_)) => {}
+        }
+    }
+
     /// Waits until a container holds at least `item.quantity` more of
     /// `item.item_type` than it did, which takes a refetch after the finish.
     fn wait_for_items(&mut self, container: &str, item: &Yield) -> Result<(), BotError> {
@@ -3023,6 +3169,93 @@ mod tests {
     }
 
     #[test]
+    fn a_persons_letters_get_one_reply_a_game_day() {
+        use capitol_protocol::rest::Correspondent;
+        let (me, ada, brin) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        let mut bot = offline_bot(false);
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        bot.state.apply_ws(&ServerMessage::AuthOk {
+            player_id: me,
+            server_time_ms: now_ms,
+            subscription: Default::default(),
+            fees: Default::default(),
+            is_admin: false,
+            day_offset_ms: 0,
+        });
+        bot.state.apply_ws(&ServerMessage::CurrencyChanged { new_balance: 10 });
+        bot.speak_with(Voice::phrasebook(&Default::default(), 1));
+        let came = |n: u128, from: Uuid, citizen: bool, office: bool| StateEvent::LetterArrived {
+            id: Uuid::from_u128(100 + n),
+            from,
+            name: if office { "The Registrar".into() } else { "Ada".into() },
+            citizen,
+            office,
+            first_line: "Dear Wren…".into(),
+        };
+        bot.letters_came(&[
+            came(1, ada, false, false),
+            came(2, ada, false, false),
+            came(3, Uuid::nil(), false, true),
+            came(4, brin, true, false),
+        ]);
+        assert_eq!(bot.letters.len(), 2, "an office's letter and a citizen's aren't answered");
+        assert!(bot.post_replies().is_empty(), "nothing until the voice has read them");
+
+        // The in box comes with the first letter's whole text; the second
+        // isn't on it, and nothing else is asked, so it goes by its first line
+        let writer = Correspondent { id: ada, name: "Ada".into(), citizen: false, office: false };
+        let page = vec![Letter {
+            id: Uuid::from_u128(101),
+            from: writer.clone(),
+            to: Correspondent { id: me, name: "Wren Cooper".into(), citizen: true, office: false },
+            body: "Dear Wren, how is the weaving?".into(),
+            sent_at: Default::default(),
+            read_at: None,
+        }];
+        let (tag, posted) = bot.posted.remove(0);
+        assert_eq!(posted, Posted::InBox);
+        assert!(tag < crate::poll::FIRST_TAG);
+        let mailbox = capitol_protocol::rest::Mailbox { letters: page, unread: 2, more: false };
+        bot.answered(Posted::InBox, Ok(RestResponse::Mailbox(mailbox)));
+        assert!(bot.letters.is_empty(), "both are read");
+        assert_eq!(bot.posted.iter().filter(|(_, p)| *p == Posted::Letter).count(), 2, "and marked read");
+
+        let sent = bot.post_replies();
+        assert_eq!(sent.len(), 1, "two letters from Ada on one game day get one reply: {sent:?}");
+        assert_eq!(sent[0].to, ada);
+        assert!(!sent[0].body.is_empty() && sent[0].body.chars().count() <= rules::talk::MAX_LETTER);
+        assert!(bot.post_replies().is_empty(), "and it's sent once");
+    }
+
+    #[test]
+    fn a_reply_it_cant_pay_for_isnt_sent() {
+        let (me, ada) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut bot = offline_bot(false);
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        bot.state.apply_ws(&ServerMessage::AuthOk {
+            player_id: me,
+            server_time_ms: now_ms,
+            subscription: Default::default(),
+            fees: Default::default(),
+            is_admin: false,
+            day_offset_ms: 0,
+        });
+        bot.state.apply_ws(&ServerMessage::CurrencyChanged { new_balance: rules::talk::POSTAGE - 1 });
+        bot.speak_with(Voice::phrasebook(&Default::default(), 1));
+        bot.letters_came(&[StateEvent::LetterArrived {
+            id: Uuid::from_u128(101),
+            from: ada,
+            name: "Ada".into(),
+            citizen: false,
+            office: false,
+            first_line: "Dear Wren…".into(),
+        }]);
+        bot.posted.clear();
+        bot.answered(Posted::InBox, Err(RestError::Transport("timed out".into())));
+        assert!(bot.post_replies().is_empty(), "no postage, no reply");
+    }
+
+    #[test]
     fn random_stays_in_the_unit_interval_and_moves() {
         let net = Net::spawn(NetConfig::with_base_url("http://127.0.0.1:9")).unwrap();
         let mut bot = Bot {
@@ -3048,6 +3281,8 @@ mod tests {
             voice: None,
             prints_talk: false,
             hails: None,
+            letters: Vec::new(),
+            posted: Vec::new(),
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));

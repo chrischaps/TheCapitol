@@ -1173,3 +1173,65 @@ fn a_builder_fills_an_urban_workshop_and_builds_up_for_its_chest() {
     assert_eq!(chest.floor, 1, "{chest:?}");
     assert!(ground.contains((chest.x, chest.y)));
 }
+
+/// #432: a citizen answers a person's letter with one short reply, postage
+/// paid, on a key like its own; a second letter the same game day gets
+/// none.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn a_citizen_replies_to_a_persons_letters_once_a_game_day() {
+    use capitol_core::citizen::phrases::Voice;
+    use capitol_core::protocol::rest::{LetterBox, LettersQuery, SendLetter};
+
+    let (_owner, _auth, key) = key_with("letters", vec![ApiKeyScope::Play, ApiKeyScope::Trade]);
+    let mut citizen = Bot::with_api_key(NetConfig::with_base_url(server_url()), &key)
+        .expect("in the world")
+        .quiet();
+    citizen.speak_with(Voice::phrasebook(&Default::default(), 432));
+    let to = citizen.state().me().expect("the citizen's id");
+    let strands = citizen.state().strands();
+
+    let account = fresh_account();
+    let person = Net::spawn(NetConfig::with_base_url(server_url())).unwrap();
+    let RestResponse::Auth(auth) = rest(
+        &person,
+        RestRequest::Register(RegisterRequest {
+            email: account.email.replace("live", "writer"),
+            password: account.password,
+            player_name: account.name.replace("Live", "Writer"),
+        }),
+        1,
+    ) else {
+        panic!("registered");
+    };
+    person.connect(&auth);
+    let letters = [
+        "Dear neighbour, I saw your rope at the hall today. How long have you been at the ropewalk? Write back if you've a moment.",
+        "Me again! Forgot to ask: do you ever sell to the bazaar, or only the hall?",
+    ];
+    for (n, body) in letters.iter().enumerate() {
+        let letter = SendLetter { to, body: body.to_string() };
+        let RestResponse::Letter(sent) = rest(&person, RestRequest::SendLetter(letter), 2 + n as u64) else {
+            panic!("the letter went");
+        };
+        println!("{} wrote: {}", sent.from.name, sent.body);
+        citizen.idle(Duration::from_secs(4)).expect("the citizen read it");
+    }
+
+    let in_box = |net: &Net, tag| match rest(net, RestRequest::Letters(LettersQuery { which: LetterBox::In, before: None }), tag) {
+        RestResponse::Mailbox(mailbox) => mailbox,
+        other => panic!("not a mailbox: {other:?}"),
+    };
+    let mine = in_box(&person, 10);
+    let replies: Vec<_> = mine.letters.iter().filter(|l| l.from.id == to).collect();
+    for reply in &replies {
+        println!("{} replied: {}", reply.from.name, reply.body);
+    }
+    assert_eq!(replies.len(), 1, "one reply a game day: {replies:?}");
+    assert!(!replies[0].body.is_empty() && replies[0].body.chars().count() <= rules::talk::MAX_LETTER);
+    let after = citizen.idle(Duration::from_millis(500)).map(|_| citizen.state().strands()).unwrap();
+    println!("the citizen's Strands: {strands:?} before, {after:?} after");
+    if let (Some(before), Some(after)) = (strands, after) {
+        assert_eq!(before - after, rules::talk::POSTAGE, "postage paid once");
+    }
+}

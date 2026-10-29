@@ -629,8 +629,8 @@ impl Voice {
 
     /// A reply to a letter from `from` (S1.5) is due, unless it replied to
     /// them this game day already. True if one was; it comes from
-    /// [`replies`](Self::replies). Nothing calls it until the mailbox lands
-    /// ([#432](https://github.com/chrischaps/TheCapitol/issues/432)). A
+    /// [`replies`](Self::replies). [`Bot`](crate::bot::Bot) calls it as a
+    /// person's letter comes, and posts the reply (#432). A
     /// letter isn't talk, so the window doesn't count it: the server's
     /// bucket counts letters with lines, but a reply a game day apart never
     /// comes near it.

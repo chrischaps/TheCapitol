@@ -180,8 +180,10 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         // Mending a station the weather wore: a citizen repairs its own on
         // its key (Plots v2 V3.6, #478)
         | ("POST", "stations", [_, "repair"])
-        // Reading a letter of your own: a citizen does it on the road in (#450)
-        | ("POST", "letters", [_, "read"])
+        // Reading a letter of your own: a citizen does it on the road in
+        // (#450), and as one comes. Writing one: a citizen replies to a
+        // person's, postage paid, as it talks on this scope (#432)
+        | ("POST", "letters", [_, "read"] | [])
         // Working for a wage: a citizen takes the work and stops its shift
         // on its key (Commons S2.8). Offering it is trade (below)
         | ("POST", "wages", [_, "take"])
@@ -418,10 +420,10 @@ mod tests {
         assert_eq!(rest(Method::POST, "/bazaar/mine/listings"), Some(Trade));
         assert_eq!(rest(Method::POST, "/bazaar/listings/abc/buy"), Some(Trade));
         assert_eq!(rest(Method::DELETE, "/bazaar/listings/abc"), Some(Trade));
-        // A citizen reads its letters on the road in (#450), but sends none
-        // and drops none on a key
+        // A citizen reads its letters (#450) and replies to them (#432) on
+        // a key, but drops none
         assert_eq!(rest(Method::POST, "/letters/abc/read"), Some(Play));
-        assert_eq!(rest(Method::POST, "/letters"), None);
+        assert_eq!(rest(Method::POST, "/letters"), Some(Play));
         assert_eq!(rest(Method::DELETE, "/letters/abc"), None);
         // The hall's board is trade (S2.5)
         assert_eq!(rest(Method::GET, "/commissions"), Some(Read));

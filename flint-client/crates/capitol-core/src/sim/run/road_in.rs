@@ -559,7 +559,8 @@ impl SimBot {
             RestResponse::Mailbox(mailbox) => mailbox.letters,
             _ => Vec::new(),
         };
-        // An office's letter takes no reply, and a citizen sends none (#432)
+        // An office's letter takes no reply (#447); a person's is the
+        // voice's to answer, as it comes (#432)
         let letter = letters
             .iter()
             .find(|l| l.from.office)
