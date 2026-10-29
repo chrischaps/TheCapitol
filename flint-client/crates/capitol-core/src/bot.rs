@@ -1269,7 +1269,11 @@ impl Bot {
             })
             .expect("until stopped on one of these")?;
         match station {
-            // Made at a station, it waits in the station's box (#489)
+            // Made at a station, it waits in the station's box (#489): ours
+            // holds only ours, and a guild hall's other members' too (#510)
+            Some(station_id) if self.state.station(station_id).is_some_and(|s| Some(s.owner_id) != self.state.me()) => {
+                self.collect_made_from_station(station_id, &item)?
+            }
             Some(station_id) => self.collect_from_station(station_id, &item.item_type)?,
             None => self.wait_for_items(container_type::CRAFTING_OUTPUT, &item)?,
         }
@@ -1316,6 +1320,35 @@ impl Bot {
         self.move_to_inventory(&made, "collecting from the station's box")?;
         self.wait_until(&format!("{want} {item_type} in the inventory"), |bot| {
             bot.count(container_type::PLAYER_INVENTORY, item_type) >= want
+        })
+    }
+
+    /// Takes what a craft at someone else's station made, `item`, out of its
+    /// box, where other people's may wait too: a guild hall's bench (#510).
+    /// The box doesn't say whose a stack is
+    /// ([#587](https://github.com/chrischaps/TheCapitol/issues/587)), so
+    /// it takes each stack of the type in turn, the server refusing those
+    /// that aren't ours, until the inventory holds what was made.
+    pub fn collect_made_from_station(&mut self, station_id: Uuid, item: &Yield) -> Result<(), BotError> {
+        let what = "looking in the station's box";
+        let RestResponse::StationContainer(the_box) =
+            self.call(what, RestRequest::StationContainer { station_id })?
+        else {
+            return Err(BotError::Failed(format!("{what}: an answer that isn't a box")));
+        };
+        let want = self.count(container_type::PLAYER_INVENTORY, &item.item_type) + item.quantity;
+        for stack in the_box.slots.iter().filter(|i| i.item_type == item.item_type) {
+            if self.count(container_type::PLAYER_INVENTORY, &item.item_type) >= want {
+                break;
+            }
+            match self.move_to_inventory(std::slice::from_ref(stack), "collecting from the station's box") {
+                Ok(()) => {}
+                Err(e) if e.is_final() => return Err(e),
+                Err(_) => {}
+            }
+        }
+        self.wait_until(&format!("{want} {} in the inventory", item.item_type), |bot| {
+            bot.count(container_type::PLAYER_INVENTORY, &item.item_type) >= want
         })
     }
 

@@ -235,6 +235,7 @@ fn round(r: u32) -> Vec<Situation> {
                 charter: format!("For everyone in the {word} trade."),
                 invited: n.is_multiple_of(3),
                 trade: true,
+                near: false,
             }];
             if n % 4 == 1 {
                 guilds.push(GuildSeen {
@@ -244,6 +245,7 @@ fn round(r: u32) -> Vec<Situation> {
                     charter: String::new(),
                     invited: false,
                     trade: true,
+                    near: false,
                 });
             }
             let mut menu: Vec<Choice> = guilds.iter().map(|g| Choice::Apply { guild: g.name.clone() }).collect();

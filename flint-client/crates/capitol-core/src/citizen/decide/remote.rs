@@ -459,6 +459,7 @@ pub fn question(q: &Question) -> String {
                         (false, true) => ", for your trade",
                         (false, false) => "",
                     };
+                    let why = if g.near { format!("{why}, with its hall on your side of town") } else { why.to_string() };
                     let charter = if g.charter.is_empty() { String::new() } else { format!(": \"{}\"", g.charter) };
                     format!("{} [{}], {} members{why}{charter}", g.name, g.tag, g.members)
                 })
@@ -521,6 +522,7 @@ pub fn label(c: &Choice) -> String {
         Choice::Decline => "decline".into(),
         Choice::Rest => "rest".into(),
         Choice::Hall => "hall".into(),
+        Choice::GuildHall { guild } => format!("{guild}'s hall"),
         Choice::Lane => "the bazaar lane".into(),
         Choice::Park { .. } => "the park".into(),
         Choice::Bridge { .. } => "the bridge".into(),
@@ -607,6 +609,7 @@ pub fn entry(c: &Choice) -> String {
         Choice::Decline => "Decline the trade".into(),
         Choice::Rest => "Sit out a while where you are".into(),
         Choice::Hall => "Pass the time on the Exchange hall's steps, among people".into(),
+        Choice::GuildHall { guild } => format!("Pass the time outside your guild's hall, {guild}'s, among its members"),
         Choice::Lane => "Stroll the bazaar's lane, among the stalls".into(),
         Choice::Park { .. } => "Sit a while in the park nearby".into(),
         Choice::Bridge { .. } => "Stand a while on the bridge nearby, looking down the water at dusk".into(),

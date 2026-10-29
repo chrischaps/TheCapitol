@@ -25,6 +25,7 @@
 mod board;
 mod detour;
 mod guilds;
+mod hall;
 mod hire;
 mod idle;
 mod merchant;
@@ -507,6 +508,8 @@ struct SimBot {
     /// Its guild as it last read it, and what it has done about guilds
     /// (S4.5). Only a citizen joins one.
     guilds: guilds::Guilds,
+    /// Its guild's hall as it last looked round it (#510)
+    hall: hall::Hall,
     /// Its offers of work, and the boxes they left (Callings K2.4). Only a
     /// citizen hires.
     hiring: hire::Hiring,
@@ -602,6 +605,7 @@ impl SimBot {
             board: board::Board::new(),
             wages: wages::Wages::new(),
             guilds: guilds::Guilds::new(),
+            hall: hall::Hall::default(),
             hiring: hire::Hiring::new(),
             repacked: None,
             last_detour: None,
@@ -1663,8 +1667,9 @@ impl SimBot {
             Step::Gather { resource, .. } => self.gather(resource),
             Step::Craft { recipe, station } => {
                 let at = match station {
+                    // Its own, or its hall's when its own is busy (#510)
                     Some(kind) => {
-                        let s = self.own(kind).cloned().ok_or_else(|| {
+                        let s = self.bench(kind)?.ok_or_else(|| {
                             BotError::Failed(format!("no {kind} of ours is known"))
                         })?;
                         self.bot.walk_to(s.x, s.y + 10.0)?;
@@ -1674,7 +1679,12 @@ impl SimBot {
                 };
                 // Anything left in the output would block a different craft.
                 self.bot.collect_output()?;
-                self.bot.craft_at(recipe, at)?;
+                if let Err(e) = self.bot.craft_at(recipe, at) {
+                    if let Some(at) = at.filter(|_| hall::refusal(&e)) {
+                        self.hall_refused(at);
+                    }
+                    return Err(e);
+                }
                 // Made once, it's no longer something new to try (K1.5)
                 self.stints.made.insert(recipe.clone());
                 self.bot.collect_output()

@@ -13,10 +13,14 @@
 //!   [`LEAVE_AFTER_WEEKS`] weeks of them ([`too_deep`]): it stops paying into
 //!   a guild that's going under, and two weeks still leaves the guild two to
 //!   find the money before it's dissolved.
+//! - **Its hall** (#510). A guild whose hall is within the citizen's usual
+//!   walk ([`near`]: on its side of town) is on its menu too, its trade's or
+//!   not. A member works at the hall's station of a kind when its own is
+//!   busy ([`busy`], [`hall_bench`]), and spends free time there.
 
 use std::collections::HashSet;
 
-use capitol_protocol::rest::{GuildSummary, GuildTreasury};
+use capitol_protocol::rest::{GuildSummary, GuildTreasury, StationInfo};
 use uuid::Uuid;
 
 use super::Role;
@@ -32,14 +36,47 @@ pub const LEAVE_AFTER_WEEKS: i64 = 2;
 pub const CHARTER_SHOWN: usize = 200;
 /// The most guilds on one question's menu.
 pub const MENU_GUILDS: usize = 5;
+/// Whether a guild's hall `to_hall` seconds' walk from a citizen's home is
+/// within its usual walk (#510): no further than the walk to the Exchange
+/// hall it makes most days, `to_exchange`. The guild district rings the
+/// Exchange, so a hall on the citizen's side of town is, and one across it
+/// isn't: about half the ring, from anywhere.
+pub fn near(to_hall: f64, to_exchange: f64) -> bool {
+    to_hall <= to_exchange
+}
+
+/// Whether a member's own `station` is busy, so the hall's will do (#510):
+/// lent out to someone it hired (`lent`, the stations its open offers are
+/// at), or worn out, at a `condition` of 0, which takes it out of use by
+/// hand too until it's mended.
+pub fn busy(station: Uuid, condition: i32, lent: &[Uuid]) -> bool {
+    lent.contains(&station) || condition <= 0
+}
+
+/// The hall's station of `kind` a member works at (#510), of those it saw
+/// there (`benches`): the best, worn out or not, of those that haven't
+/// `refused` it.
+pub fn hall_bench<'a>(kind: &str, benches: &'a [StationInfo], refused: &HashSet<Uuid>) -> Option<&'a StationInfo> {
+    benches
+        .iter()
+        .filter(|s| s.station_type == kind && s.condition > 0 && !refused.contains(&s.id))
+        .max_by_key(|s| (s.quality, std::cmp::Reverse(s.id)))
+}
 
 /// The guilds a citizen who works at `jobs` is asked about (S4.5), from the
 /// registry as `listed` has it (the largest first, each with its charter):
-/// those for one of its jobs' trades, and those in `invited`, which come
-/// first. Then those of its first job (its favourite, Callings K1.2), then
-/// the next's. Guilds it has `applied` to already wait on their officers,
-/// and aren't asked again. At most [`MENU_GUILDS`].
-pub fn seen(jobs: &[Role], listed: &[(&GuildSummary, &str)], invited: &[Uuid], applied: &HashSet<Uuid>) -> Vec<(Uuid, GuildSeen)> {
+/// those for one of its jobs' trades, those whose hall is within its usual
+/// walk (`near`, #510), and those in `invited`, which come first. Then
+/// those of its first job (its favourite, Callings K1.2), then the next's,
+/// then those near it. Guilds it has `applied` to already wait on their
+/// officers, and aren't asked again. At most [`MENU_GUILDS`].
+pub fn seen(
+    jobs: &[Role],
+    listed: &[(&GuildSummary, &str)],
+    invited: &[Uuid],
+    applied: &HashSet<Uuid>,
+    near: &HashSet<Uuid>,
+) -> Vec<(Uuid, GuildSeen)> {
     let mut seen: Vec<(usize, Uuid, GuildSeen)> = listed
         .iter()
         .filter(|(g, _)| !applied.contains(&g.id))
@@ -47,7 +84,8 @@ pub fn seen(jobs: &[Role], listed: &[(&GuildSummary, &str)], invited: &[Uuid], a
             let rank = jobs.iter().position(|&job| names_trade(job, &g.name, charter));
             let trade = rank.is_some();
             let invited = invited.contains(&g.id);
-            (trade || invited).then(|| {
+            let near = near.contains(&g.id);
+            (trade || invited || near).then(|| {
                 let guild = GuildSeen {
                     name: g.name.clone(),
                     tag: g.tag.clone(),
@@ -55,6 +93,7 @@ pub fn seen(jobs: &[Role], listed: &[(&GuildSummary, &str)], invited: &[Uuid], a
                     charter: shown(charter),
                     invited,
                     trade,
+                    near,
                 };
                 (rank.unwrap_or(jobs.len()), g.id, guild)
             })
@@ -175,22 +214,22 @@ mod tests {
         let listed = [(&diggers, "Miners of the ranges."), (&ore_guild, ""), (&sawyers, "Planks."), (&store, "Shopkeepers.")];
         let names = |seen: &[(Uuid, GuildSeen)]| seen.iter().map(|(_, g)| g.name.clone()).collect::<Vec<_>>();
         // Its trade's, the largest first: by charter, then by name
-        let seen = seen(&[ore], &listed, &[], &HashSet::new());
+        let seen = seen(&[ore], &listed, &[], &HashSet::new(), &HashSet::new());
         assert_eq!(names(&seen), ["Diggers", "The Ore Guild"]);
         assert!(seen.iter().all(|(_, g)| g.trade && !g.invited));
         // An invitation from another trade's guild comes first
-        let asked = super::seen(&[ore], &listed, &[sawyers.id], &HashSet::new());
+        let asked = super::seen(&[ore], &listed, &[sawyers.id], &HashSet::new(), &HashSet::new());
         assert_eq!(names(&asked), ["Sawyers", "Diggers", "The Ore Guild"]);
         assert!(asked[0].1.invited && !asked[0].1.trade);
         // One it applied to waits on its officers
         let applied = HashSet::from([diggers.id]);
-        assert_eq!(names(&super::seen(&[ore], &listed, &[], &applied)), ["The Ore Guild"]);
+        assert_eq!(names(&super::seen(&[ore], &listed, &[], &applied, &HashSet::new())), ["The Ore Guild"]);
         // A trade no guild names has none
-        assert!(super::seen(&[Role::Builder], &listed, &[], &HashSet::new()).is_empty());
+        assert!(super::seen(&[Role::Builder], &listed, &[], &HashSet::new(), &HashSet::new()).is_empty());
         // Several trades (Callings K1.2): every one's guilds, its favourite's first
         let planks = Role::Crafter(Craft::Planks);
-        assert_eq!(names(&super::seen(&[planks, ore], &listed, &[], &HashSet::new())), ["Sawyers", "Diggers", "The Ore Guild"]);
-        assert_eq!(names(&super::seen(&[ore, planks], &listed, &[], &HashSet::new())), ["Diggers", "The Ore Guild", "Sawyers"]);
+        assert_eq!(names(&super::seen(&[planks, ore], &listed, &[], &HashSet::new(), &HashSet::new())), ["Sawyers", "Diggers", "The Ore Guild"]);
+        assert_eq!(names(&super::seen(&[ore, planks], &listed, &[], &HashSet::new(), &HashSet::new())), ["Diggers", "The Ore Guild", "Sawyers"]);
         // Asking to join each, then staying out
         assert_eq!(
             menu(&seen),
@@ -199,7 +238,69 @@ mod tests {
         // At most five
         let many: Vec<GuildSummary> = (0..8).map(|n| summary(10 + n, &format!("Ore Guild {n}"), 3)).collect();
         let listed: Vec<(&GuildSummary, &str)> = many.iter().map(|g| (g, "")).collect();
-        assert_eq!(super::seen(&[ore], &listed, &[], &HashSet::new()).len(), MENU_GUILDS);
+        assert_eq!(super::seen(&[ore], &listed, &[], &HashSet::new(), &HashSet::new()).len(), MENU_GUILDS);
+    }
+
+    #[test]
+    fn a_guild_whose_hall_is_near_is_on_the_menu_after_its_trades() {
+        let ore = Role::Gatherer(Gather::Ore);
+        let (diggers, lane, far) = (summary(1, "Diggers", 9), summary(2, "Hill Lane", 4), summary(3, "Far Side", 6));
+        let listed = [(&diggers, "Miners."), (&lane, "Neighbours."), (&far, "Neighbours too.")];
+        let near = HashSet::from([lane.id, diggers.id]);
+        let seen = seen(&[ore], &listed, &[], &HashSet::new(), &near);
+        let names: Vec<_> = seen.iter().map(|(_, g)| (g.name.as_str(), g.trade, g.near)).collect();
+        // Its trade's first, then the neighbours', and none across town
+        assert_eq!(names, [("Diggers", true, true), ("Hill Lane", false, true)]);
+    }
+
+    #[test]
+    fn a_hall_on_its_side_of_town_is_within_its_usual_walk() {
+        // The Exchange a minute off: a hall on the way is, one past it isn't
+        assert!(near(45.0, 60.0));
+        assert!(near(60.0, 60.0));
+        assert!(!near(61.0, 60.0));
+    }
+
+    fn station(n: u128, kind: &str, quality: i32, condition: i32) -> StationInfo {
+        StationInfo {
+            id: Uuid::from_u128(n),
+            station_type: kind.into(),
+            name: kind.into(),
+            category: "crafting".into(),
+            icon: None,
+            x: 0.0,
+            y: 0.0,
+            owner_id: Uuid::from_u128(100),
+            container_id: None,
+            interaction_range: 75.0,
+            quality,
+            tool: None,
+            automation: None,
+            production: Vec::new(),
+            indoors: true,
+            condition,
+            floor: 0,
+        }
+    }
+
+    #[test]
+    fn a_member_works_at_the_halls_bench_when_its_own_is_busy() {
+        let (mine, lent_out) = (Uuid::from_u128(1), [Uuid::from_u128(1)]);
+        // Lent to a hire, or worn out, it's busy; worn is still in use
+        assert!(busy(mine, 100, &lent_out));
+        assert!(busy(mine, 0, &[]));
+        assert!(!busy(mine, 12, &[]));
+        // The hall's best of the kind that works and hasn't refused it
+        let benches = [
+            station(10, "sawbench", 40, 100),
+            station(11, "sawbench", 80, 0),
+            station(12, "sawbench", 70, 50),
+            station(13, "forge", 90, 100),
+        ];
+        let pick = |refused: &HashSet<Uuid>| hall_bench("sawbench", &benches, refused).map(|s| s.id.as_u128());
+        assert_eq!(pick(&HashSet::new()), Some(12));
+        assert_eq!(pick(&HashSet::from([Uuid::from_u128(12)])), Some(10));
+        assert_eq!(hall_bench("loom", &benches, &HashSet::new()), None);
     }
 
     #[test]

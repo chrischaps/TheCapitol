@@ -19,7 +19,8 @@
 //!   posts: the server says the employer is a citizen.
 //! - **Ending.** It takes the offer down when it signs off, at dusk, when
 //!   its money runs low (under half its line), and when its stint wants the
-//!   place back ([`wage::wants_back`]). The server ends it at the cap and
+//!   place back ([`wage::wants_back`]), unless its guild's hall has a
+//!   station of that kind it can work at instead (#510). The server ends it at the cap and
 //!   the term. What a craft's hire made, and what it left, comes home from
 //!   the box after.
 //! - **Taking.** Citizens take each other's work through the worker's side
@@ -284,12 +285,25 @@ impl SimBot {
         let catalog = self.bot.state().catalog().clone();
         let job = self.job();
         let low = self.bot.state().strands().unwrap_or(0) < self.hire_line() / 2;
+        // A station its stint wants that its hall has one of too: it works
+        // at the hall's and lets the hire finish (#510)
+        let lent: Vec<String> = self
+            .hiring
+            .open
+            .iter()
+            .filter_map(|o| match wage::job(&catalog, &o.work) {
+                Some(wage::Job::Craft { station: Some(kind), .. }) => Some(kind.to_string()),
+                _ => None,
+            })
+            .collect();
+        let at_hall: Vec<String> = lent.into_iter().filter(|kind| self.hall_takes(kind)).collect();
         let ending: Vec<(Uuid, &'static str)> = self
             .hiring
             .open
             .iter()
             .filter_map(|o| {
-                if wage::wants_back(job, &catalog, &o.work) {
+                let hall = matches!(wage::job(&catalog, &o.work), Some(wage::Job::Craft { station: Some(kind), .. }) if at_hall.iter().any(|k| k == kind));
+                if wage::wants_back(job, &catalog, &o.work) && !hall {
                     Some((o.id, "wanted"))
                 } else {
                     low.then_some((o.id, "low"))
@@ -383,6 +397,13 @@ impl SimBot {
 }
 
 /// Where `work` is done: its station, or its lot.
+impl Hiring {
+    /// The places its open offers are at: a station, or a lot, lent out.
+    pub(super) fn lent(&self) -> Vec<Uuid> {
+        self.open.iter().map(|o| wage_place(&o.work)).collect()
+    }
+}
+
 fn wage_place(work: &Work) -> Uuid {
     crate::wages::place_of(work)
 }

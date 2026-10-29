@@ -8,7 +8,8 @@
 //!   guild message names it: a roster change, an invitation, debt, the end.
 //! - **Joining.** A citizen in no guild is asked once a game day
 //!   ([`Question::Guild`]) about the guilds whose name or charter names its
-//!   trade ([`guild::names_trade`]), and at once when a guild invites it,
+//!   trade ([`guild::names_trade`]) or whose hall is within its usual walk
+//!   ([`guild::near`], #510), and at once when a guild invites it,
 //!   with that guild on the menu. It asks to join one, or stays out and
 //!   declines the invitation. An officer or the leader takes it in, a
 //!   person; an invitation it accepts takes it in at once. It says so in the
@@ -20,9 +21,8 @@
 //!   them ([`guild::too_deep`]).
 //!
 //! Each is a call from wherever it stands, between its other business: no
-//! walk, and no round of its day. A guild's hall, its stations and its
-//! steps as a place to be wait on S4.3
-//! ([#510](https://github.com/chrischaps/TheCapitol/issues/510)).
+//! walk, and no round of its day. A guild's hall, its benches and its front
+//! as a place to be are [`hall`](super::hall)'s (#510).
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -85,7 +85,7 @@ impl Guilds {
     }
 
     /// Its guild, if it's in one.
-    fn guild(&self) -> Option<&GuildDetail> {
+    pub(super) fn guild(&self) -> Option<&GuildDetail> {
         self.mine.as_ref()?.guild.as_ref()
     }
 }
@@ -265,13 +265,15 @@ impl SimBot {
                 Err(_) => {}
             }
         }
+        let near = self.halls_near();
         let listed: Vec<(&GuildSummary, &str)> = list
             .iter()
             .filter_map(|g| Some((g, self.guilds.charters.get(&g.id)?.as_str())))
             .collect();
         // The guilds of every trade it's willing to work at, its favourite's
-        // first (Callings K1.2)
-        let seen = guild::seen(&self.willing(), &listed, &invited, &applied);
+        // first (Callings K1.2), and those with a hall on its side of town
+        // (#510)
+        let seen = guild::seen(&self.willing(), &listed, &invited, &applied, &near);
         if seen.is_empty() {
             return Ok(None);
         }

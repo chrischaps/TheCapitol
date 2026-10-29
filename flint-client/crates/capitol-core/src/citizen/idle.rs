@@ -12,7 +12,9 @@
 //! suburb's parks (big enough to stand about in) and the canals' bridges.
 //! A detour (Callings K1.5, [`detour`](super::detour)) goes further: to the
 //! wilds' sights at the ends of their trails, a lake, a ford or a ridge top
-//! ([`Sight`]), and to a neighbour's lot ([`Places::lots`]).
+//! ([`Sight`]), and to a neighbour's lot ([`Places::lots`]). A guild's
+//! member has its hall too (#510): out front of it, on the street
+//! ([`Places::guild_hall`]).
 
 use std::collections::HashMap;
 
@@ -48,6 +50,16 @@ pub struct Place {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaceKind {
+    /// Out front of its guild's hall, `guild`, on lot `lot` (#510): on the
+    /// street along the lot's front, `from` to `to`, `out` from it, looking
+    /// in at the hall.
+    GuildHall {
+        guild: String,
+        lot: String,
+        from: Point,
+        to: Point,
+        out: Point,
+    },
     /// The Exchange hall's steps: in front of its door, along the face it's
     /// on, within reach of the market.
     HallSteps {
@@ -117,6 +129,15 @@ impl Place {
                 let skew = (draw2 - 0.5) * 0.8;
                 (p, (p.0 + (out.0 + along.0 * skew) * 50.0, p.1 + (out.1 + along.1 * skew) * 50.0))
             }
+            PlaceKind::GuildHall { from, to, out, .. } => {
+                // Along the front, short of its corners, a pace or two out
+                // on the street, looking in at the door
+                let t = 0.2 + 0.6 * draw;
+                let o = 6.0 + 12.0 * draw2;
+                let p = (from.0 + (to.0 - from.0) * t + out.0 * o, from.1 + (to.1 - from.1) * t + out.1 * o);
+                let door = ((from.0 + to.0) / 2.0 - out.0 * 30.0, (from.1 + to.1) / 2.0 - out.1 * 30.0);
+                (p, door)
+            }
             PlaceKind::Lane { from, to } => {
                 let t = 0.15 + 0.7 * draw;
                 let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -152,6 +173,7 @@ impl Place {
     /// What the health line says on the way there.
     pub fn going(&self) -> &'static str {
         match self.kind {
+            PlaceKind::GuildHall { .. } => "to its guild's hall",
             PlaceKind::HallSteps { .. } => "to the hall steps",
             PlaceKind::Lane { .. } => "to the bazaar lane",
             PlaceKind::Park { .. } => "to the park",
@@ -165,6 +187,7 @@ impl Place {
     /// What the health line says it's doing there.
     pub fn activity(&self) -> &'static str {
         match self.kind {
+            PlaceKind::GuildHall { .. } => "at its guild's hall",
             PlaceKind::HallSteps { .. } => "on the hall steps",
             PlaceKind::Lane { .. } => "strolling the bazaar lane",
             PlaceKind::Park { .. } => "in the park",
@@ -176,7 +199,8 @@ impl Place {
     }
 
     /// The park's, the bridge's or the sight's id; `None` for the steps
-    /// and the lane, of which there's one each.
+    /// and the lane, of which there's one each, and a guild's hall, which
+    /// is its member's alone.
     pub fn id(&self) -> Option<&str> {
         match &self.kind {
             PlaceKind::Park { id, .. } | PlaceKind::Bridge { id, .. } | PlaceKind::Sight { id, .. } => Some(id),
@@ -197,6 +221,9 @@ pub struct Places {
     /// Every lot's middle, by its `/terrain` id: where a neighbour lives,
     /// for a citizen calling on them (K1.5).
     pub lots: HashMap<String, Point>,
+    /// The guild district's lots, by their `/terrain` id: where a guild's
+    /// hall may stand (#510).
+    pub hall_lots: HashMap<String, HallLot>,
     /// The world's centre, for which way a place lies.
     pub centre: Point,
 }
@@ -259,6 +286,18 @@ impl Places {
                 (l.id.clone(), middle)
             })
             .collect();
+        let hall_lots = terrain
+            .terrain_plots
+            .iter()
+            .filter(|l| l.zone == "guild_district")
+            .map(|l| {
+                let lot = HallLot {
+                    corners: l.corners,
+                    street: l.street_facing_edge,
+                };
+                (l.id.clone(), lot)
+            })
+            .collect();
         Places {
             hall_steps,
             lane,
@@ -266,8 +305,33 @@ impl Places {
             bridges,
             sights: sights(terrain),
             lots,
+            hall_lots,
             centre,
         }
+    }
+
+    /// Out front of `guild`'s hall on the guild-district lot `lot` (#510).
+    pub fn guild_hall(&self, guild: &str, lot: &str) -> Option<Place> {
+        let hall = self.hall_lots.get(lot)?;
+        let (from, to) = (hall.corners[hall.street.0], hall.corners[hall.street.1]);
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let len = dx.hypot(dy).max(1e-6);
+        // Out is away from the lot's middle
+        let middle = hall.middle();
+        let front = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+        let normal = (-dy / len, dx / len);
+        let away = (front.0 - middle.0) * normal.0 + (front.1 - middle.1) * normal.1;
+        let out = if away >= 0.0 { normal } else { (-normal.0, -normal.1) };
+        Some(Place {
+            kind: PlaceKind::GuildHall {
+                guild: guild.to_string(),
+                lot: lot.to_string(),
+                from,
+                to,
+                out,
+            },
+            at: front,
+        })
     }
 
     /// The park, bridge or sight `id` names.
@@ -295,11 +359,42 @@ impl Places {
     }
 }
 
+/// A guild-district lot, where a guild's hall may stand (#510).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HallLot {
+    pub corners: [Point; 4],
+    /// The corners of its front, on the street
+    pub street: (usize, usize),
+}
+
+impl HallLot {
+    pub fn middle(&self) -> Point {
+        let (x, y) = self.corners.iter().fold((0.0, 0.0), |(x, y), p| (x + p.0, y + p.1));
+        (x / 4.0, y / 4.0)
+    }
+
+    /// Whether `p` is on the lot: a station on it is the hall's.
+    pub fn contains(&self, p: Point) -> bool {
+        let mut inside = false;
+        for k in 0..4 {
+            let (a, b) = (self.corners[k], self.corners[(k + 1) % 4]);
+            if (a.1 > p.1) != (b.1 > p.1) && p.0 < a.0 + (p.1 - a.1) / (b.1 - a.1) * (b.0 - a.0) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+}
+
 /// What a citizen at `at` could do with its free time at `time` (the day's
-/// share): rest where it is, the hall, and of the rest whatever is near
-/// enough. `stall` is its own stall's id, if it keeps one.
-pub fn menu(places: &Places, at: Point, time: Option<f64>, stall: Option<&str>) -> Vec<Choice> {
+/// share): rest where it is, the hall, its guild's hall (`guild_hall`, its
+/// guild's name, when that's within its usual walk: #510), and of the rest
+/// whatever is near enough. `stall` is its own stall's id, if it keeps one.
+pub fn menu(places: &Places, at: Point, time: Option<f64>, stall: Option<&str>, guild_hall: Option<&str>) -> Vec<Choice> {
     let mut menu = vec![Choice::Rest, Choice::Hall];
+    if let Some(guild) = guild_hall {
+        menu.push(Choice::GuildHall { guild: guild.to_string() });
+    }
     let near_centre = places.hall_steps.as_ref().is_some_and(|h| distance(h.at, at) <= CENTRE_REACH);
     if near_centre && places.lane.is_some() {
         menu.push(Choice::Lane);
@@ -580,19 +675,45 @@ mod tests {
         let steps = places.hall_steps.as_ref().unwrap().at;
         let kinds = |menu: Vec<Choice>| menu.into_iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(" ");
         // By the hall: the lane and its stall, and at noon no bridge
-        let noon = kinds(menu(places, steps, Some(0.5), Some("stall_3")));
+        let noon = kinds(menu(places, steps, Some(0.5), Some("stall_3"), None));
         assert!(noon.starts_with("Rest Hall Lane Stall"), "{noon}");
         assert!(!noon.contains("Bridge"), "{noon}");
         // At dusk the bridge over the moat or a canal
-        let dusk = kinds(menu(places, steps, Some(0.75), None));
+        let dusk = kinds(menu(places, steps, Some(0.75), None, None));
         assert!(dusk.contains("Bridge") && !dusk.contains("Stall"), "{dusk}");
         // Out in the suburb, a park and no lane
         let park = &places.parks[0];
-        let out = kinds(menu(places, park.at, Some(0.5), Some("stall_3")));
+        let out = kinds(menu(places, park.at, Some(0.5), Some("stall_3"), None));
         assert!(out.contains("Park") && !out.contains("Lane") && !out.contains("Stall"), "{out}");
         // Far out in the wilds, only resting or the walk to the hall
         let wilds = (terrain.center_x, terrain.center_y + 5700.0);
-        assert_eq!(menu(places, wilds, Some(0.75), None), vec![Choice::Rest, Choice::Hall]);
+        assert_eq!(menu(places, wilds, Some(0.75), None, None), vec![Choice::Rest, Choice::Hall]);
+    }
+
+    #[test]
+    fn a_guild_hall_is_out_front_of_its_lot_on_the_street() {
+        let (terrain, graph) = world();
+        let places = graph.places();
+        assert_eq!(places.hall_lots.len(), terrain.terrain_plots.iter().filter(|l| l.zone == "guild_district").count());
+        assert!(!places.hall_lots.is_empty());
+        for (id, lot) in &places.hall_lots {
+            let hall = places.guild_hall("The Ore Guild", id).unwrap();
+            assert_eq!(hall.going(), "to its guild's hall");
+            for (a, b) in draws() {
+                let (p, look) = hall.spot(a, b);
+                // Off the lot, near its front, looking in at the hall
+                assert!(!lot.contains(p), "{id}: {p:?} is on the lot");
+                assert!(distance(p, hall.at) < 100.0, "{id}: {p:?}");
+                assert!(lot.contains(look), "{id}: looks at {look:?}");
+                assert!(graph.walkable(hall.at, p), "{id}: {p:?}");
+            }
+            assert!(lot.contains(lot.middle()));
+        }
+        assert_eq!(places.guild_hall("The Ore Guild", "sub_0_0_0_L_0"), None);
+        // On the free-time menu after the Exchange's, for a member
+        let steps = places.hall_steps.as_ref().unwrap().at;
+        let menu = menu(places, steps, Some(0.5), None, Some("The Ore Guild"));
+        assert_eq!(menu[..3], [Choice::Rest, Choice::Hall, Choice::GuildHall { guild: "The Ore Guild".into() }]);
     }
 
     #[test]

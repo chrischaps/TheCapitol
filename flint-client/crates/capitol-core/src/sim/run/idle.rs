@@ -2,7 +2,8 @@
 //! a break at noon, the company it drifts toward while it lingers, and a
 //! while on a bridge on the way home at dusk. The places and the menus are
 //! [`citizen::idle`](crate::citizen::idle); this is the walking and the
-//! standing about.
+//! standing about. A member's guild hall is among the places (#510,
+//! [`hall`](super::hall)).
 //!
 //! The swarm's bots have no persona, so none of this: their free time is
 //! still a rest or the hall, as C1.1's was.
@@ -49,7 +50,9 @@ impl SimBot {
         let at = self.bot.position();
         let stall = self.bot.state().bazaar().my_shop().map(|s| s.stall_id.clone());
         let time = self.bot.state().time_of_day();
-        let mut menu = idle::menu(&places, at, time, stall.as_deref());
+        // Its guild's hall, for a member, within its usual walk (#510)
+        let hall = self.hall_to_be_at();
+        let mut menu = idle::menu(&places, at, time, stall.as_deref(), hall.as_ref().map(|(name, _)| name.as_str()));
         if self.detours_open(self.phase()) {
             menu.extend(self.detours(holdings));
         }
@@ -67,6 +70,12 @@ impl SimBot {
                     None => self.stay(end, town, None),
                 }
             }),
+            // Out front of its guild's hall, and a look at what stands
+            // there, for a day its own bench is busy (#510)
+            Some(Choice::GuildHall { .. }) => match hall {
+                Some((_, place)) => self.linger(&place, end, town).and_then(|()| self.look_round_hall()),
+                None => Ok(()),
+            },
             Some(Choice::Lane) => match places.lane.clone() {
                 Some(lane) => self.bot.go_to_bazaar().and_then(|()| self.linger(&lane, end, town)),
                 None => Ok(()),

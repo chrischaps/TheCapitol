@@ -347,6 +347,9 @@ pub struct GuildSeen {
     /// Its name or charter names the citizen's trade
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trade: bool,
+    /// Its hall is within the citizen's usual walk from home (#510)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub near: bool,
 }
 
 impl Question {
@@ -456,6 +459,9 @@ pub enum Choice {
     /// Pass the time at the Exchange hall, among people: on its steps
     /// (C2.1).
     Hall,
+    /// Pass the time outside its own guild's hall, `guild`, among its
+    /// members (#510).
+    GuildHall { guild: String },
     /// Make a market in `items` at the hall (C1.6): quote both sides of
     /// each, sized to what it holds. `float` is what it has to do it with,
     /// in Strands: its Strands, those on its bids included, and its stock

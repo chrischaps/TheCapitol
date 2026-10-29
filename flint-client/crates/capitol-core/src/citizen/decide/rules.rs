@@ -258,6 +258,9 @@ impl Decider for RulesDecider {
                 Choice::Accept | Choice::Counter { .. } | Choice::Pay { .. } | Choice::Decline => trade(s, i, choice),
                 Choice::Rest => (0.8 - 0.2 * t.sociability as f64, Decision::plain(i)),
                 Choice::Hall => (0.4 + 0.4 * t.sociability as f64, Decision::plain(i)),
+                // Its own guild's hall (#510): the Exchange's company, among
+                // people it belongs with, as the whim takes it
+                Choice::GuildHall { .. } => (0.45 + 0.4 * t.sociability as f64 + whim(s, i), Decision::plain(i)),
                 Choice::MakeMarket { float, making, .. } => (SURE * *float as f64 / enough_float(t, *making), Decision::plain(i)),
                 // Idle life (C2.1): the company of the lane for the sociable,
                 // a park's quiet for the rest, a bridge at dusk and its own
@@ -704,7 +707,8 @@ fn hire(s: &Situation, i: usize, rate: &Span<i64>, cap: &Span<i32>) -> (f64, Dec
 /// members appeals the more the more sociable the citizen, and an
 /// invitation more again. A guild for its trade, and a bigger one, a little
 /// more. A middling citizen asks to join its trade's guild, a reserved one
-/// waits to be asked, and the most reserved stay out even then.
+/// waits to be asked, and the most reserved stay out even then. One whose
+/// hall is on its side of town a little more (#510).
 fn guild(s: &Situation, i: usize, name: &str) -> (f64, Decision) {
     let Question::Guild { guilds } = &s.question else {
         return (0.0, Decision::plain(i));
@@ -716,6 +720,7 @@ fn guild(s: &Situation, i: usize, name: &str) -> (f64, Decision) {
     let u = 0.15 + 0.7 * t.sociability as f64
         + if g.invited { 0.25 } else { 0.0 }
         + if g.trade { 0.05 } else { 0.0 }
+        + if g.near { 0.05 } else { 0.0 }
         + 0.01 * g.members.min(10) as f64;
     (u, Decision::plain(i))
 }
@@ -1457,6 +1462,7 @@ mod tests {
             charter: "For the miners of the ranges.".into(),
             invited,
             trade,
+            near: false,
         }
     }
 
@@ -1483,6 +1489,42 @@ mod tests {
         let mut s = guilds(vec![ore()], Temperament::default());
         s.menu[0] = Choice::Apply { guild: "Nobody's".into() };
         assert_eq!(decide(&s).0.pick, 1);
+    }
+
+    #[test]
+    fn a_hall_on_its_side_of_town_draws_a_citizen_a_little() {
+        let pick = |g: Vec<_>, t| decide(&guilds(g, t)).0.pick;
+        let near = |name: &str, trade| super::super::GuildSeen {
+            near: true,
+            ..seen(name, 3, false, trade)
+        };
+        // Of two alike, the one whose hall is near (#510)
+        let both = vec![seen("Diggers", 3, false, true), near("The Ore Guild", true)];
+        assert_eq!(pick(both, Temperament::default()), 1);
+        // A middling citizen joins its neighbourhood's guild, not of its trade
+        assert_eq!(pick(vec![near("The Hill Lane Guild", false)], Temperament::default()), 0);
+        // A reserved one still waits to be asked
+        assert_eq!(pick(vec![near("The Ore Guild", true)], with(|t| t.sociability = 0.2)), 1);
+    }
+
+    #[test]
+    fn a_member_who_likes_company_goes_to_its_guilds_hall() {
+        let menu = || vec![Choice::Rest, Choice::Hall, Choice::GuildHall { guild: "The Ore Guild".into() }];
+        let picks = |t: Temperament| {
+            let mut picks = [0; 3];
+            for quarter in 0..96 {
+                let mut s = situation(Question::FreeTime, menu(), t);
+                s.when.time_of_day = Some(quarter as f64 / 96.0);
+                picks[decide(&s).0.pick] += 1;
+            }
+            picks
+        };
+        // The sociable to its hall more than the Exchange's, by a whim
+        let social = picks(with(|t| t.sociability = 1.0));
+        assert!(social[2] > social[1] && social[1] > 0, "{social:?}");
+        // The reserved rest
+        let shy = picks(with(|t| t.sociability = 0.0));
+        assert!(shy[0] > shy[2], "{shy:?}");
     }
 
     use crate::citizen::calling::{self, Calling, Style};
