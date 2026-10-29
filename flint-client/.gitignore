@@ -15,6 +15,9 @@
 /town.status
 /town.presence.csv
 /town.report-key
+# Every key the town has run, to settle a citizen dropped from it (#585)
+/town.known.json
+/town.stints.json
 /keys/
 /town.decisions/
 /town.corpus/

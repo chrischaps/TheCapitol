@@ -20,6 +20,8 @@
 //!   K1.5): an untried recipe, a lake, the lane, the paper, a neighbour.
 //! - [`report`]: what the town did, and in a soak whether the server's books
 //!   balanced and how hard it worked (C1.7).
+//! - [`departed`]: citizens who have left the roster, settled as the town
+//!   starts: their stalls closed and their escrow taken down (#585).
 //! - [`balance`]: a soak under a preset of tunables, and two of them held up
 //!   against each other (D6.3).
 //! - [`measures`]: §10's callings measures, for a soak's report and a
@@ -28,6 +30,7 @@
 pub mod balance;
 pub mod calling;
 pub mod decide;
+pub mod departed;
 pub mod detour;
 pub mod habit;
 pub mod idle;

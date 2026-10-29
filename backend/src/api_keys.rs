@@ -198,6 +198,9 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("DELETE", "market", ["orders", _])
         | ("POST", "bazaar", ["stalls", _, "rent"] | ["mine", "listings"] | ["listings", _, "buy"])
         | ("DELETE", "bazaar", ["listings", _])
+        // Giving a stall up (#268): a citizen's idle one (#523), and one
+        // dropped from the roster as the town next starts (#585)
+        | ("POST", "bazaar", ["mine", "close"])
         | ("POST", "plots", [_, "claim" | "pay-tax"])
         | ("PUT", "plots", [_, "permissions"])
         // Building upward: a permit and goods, as a claim is (V3.6, #478)
@@ -420,6 +423,7 @@ mod tests {
         assert_eq!(rest(Method::POST, "/bazaar/mine/listings"), Some(Trade));
         assert_eq!(rest(Method::POST, "/bazaar/listings/abc/buy"), Some(Trade));
         assert_eq!(rest(Method::DELETE, "/bazaar/listings/abc"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/bazaar/mine/close"), Some(Trade));
         // A citizen reads its letters (#450) and replies to them (#432) on
         // a key, but drops none
         assert_eq!(rest(Method::POST, "/letters/abc/read"), Some(Play));
