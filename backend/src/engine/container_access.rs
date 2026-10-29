@@ -472,7 +472,8 @@ pub async fn gathering_terms(
     }
     // A hall's is the guild's, not its leader's (S4.3)
     let whose = guild.or(owner_name).map_or_else(|| "someone else's".to_string(), |name| format!("{name}'s"));
-    Ok(Err(format!("This {resource} grows on {whose} lot")))
+    let words = format!("This {resource} grows on {whose} lot");
+    Ok(Err(super::extraction::refuse(&resource_type, (super::extraction::Refused::Lot, words))))
 }
 
 #[cfg(test)]

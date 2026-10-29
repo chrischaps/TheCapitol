@@ -51,6 +51,12 @@ use crate::state::AppState;
 static FLOWS: LazyLock<Mutex<BTreeMap<(String, UnitFlow), i64>>> = LazyLock::new(Default::default);
 /// Crafts finished since the server started, by recipe id (D2.4)
 static CRAFTS: LazyLock<Mutex<BTreeMap<String, Crafts>>> = LazyLock::new(Default::default);
+/// Gathers refused since the server started, by resource type then why
+/// (#562)
+static REFUSED: LazyLock<Mutex<Refusals>> = LazyLock::new(Default::default);
+
+/// Gathers refused, by resource type then why
+type Refusals = BTreeMap<String, BTreeMap<String, u64>>;
 /// The gate between unit writes and snapshots (#408). A write holds it shared
 /// from just before its commit until its flows are counted; a snapshot holds
 /// it alone while it reads the flows and fixes its database snapshot, a few
@@ -157,7 +163,24 @@ fn add_crafts(all: &mut BTreeMap<String, Crafts>, flows: &Flows) {
 thread_local! {
     static TEST_FLOWS: std::cell::RefCell<BTreeMap<(String, UnitFlow), i64>> = Default::default();
     static TEST_CRAFTS: std::cell::RefCell<BTreeMap<String, Crafts>> = Default::default();
+    static TEST_REFUSED: std::cell::RefCell<Refusals> = Default::default();
     static TEST_GATE: &'static RwLock<()> = Box::leak(Box::default());
+}
+
+/// A gather of `resource` was refused, `why` (#562): the ledger counts it.
+pub fn refused(resource: &str, why: super::extraction::Refused) {
+    let count = |all: &mut Refusals| *all.entry(resource.to_string()).or_default().entry(why.slug().to_string()).or_insert(0) += 1;
+    #[cfg(test)]
+    TEST_REFUSED.with(|mine| count(&mut mine.borrow_mut()));
+    count(&mut REFUSED.lock().unwrap_or_else(|e| e.into_inner()));
+}
+
+/// The refusals counted so far.
+pub(crate) fn refused_now() -> Refusals {
+    #[cfg(not(test))]
+    return REFUSED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    #[cfg(test)]
+    return TEST_REFUSED.with(|mine| mine.borrow().clone());
 }
 
 /// The gate between unit writes and snapshots: the process's, or in a test
@@ -206,6 +229,7 @@ pub async fn snapshot(state: &AppState) -> Result<Ledger, sqlx::Error> {
     ledger.load.db_pool_size = db.size();
     ledger.load.db_pool_idle = db.num_idle() as u32;
     ledger.load.db_transactions = db_transactions(db).await?;
+    ledger.refused = refused_now();
     Ok(ledger)
 }
 
@@ -281,6 +305,7 @@ pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
         units_settled,
         crafts,
         grants,
+        refused: BTreeMap::new(),
         held_flows,
         load: Default::default(),
     })

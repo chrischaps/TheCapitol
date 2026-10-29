@@ -293,7 +293,7 @@
       ...["phases", "loops"].flatMap((part) => WORK_FIELDS.map((f) => `load.${part}.*.${f}`)),
       "events",
     ].join(","),
-    money: "strand_flows,new_accounts,grants,market,bazaar,distribution,books,flows",
+    money: "strand_flows,new_accounts,grants,market,bazaar,distribution,books,flows,grass,refused",
     making: "units,unit_flows,crafts",
     town: "town",
   };
@@ -804,7 +804,7 @@
 
   const PAGE_CHARTS = {
     overview: ["players"],
-    economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making"],
+    economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making", "mint", "grass", "refused"],
     performance: ["tick", "phases", "over", "commands", "writer", "bus", "sockets", "pool", "txns"],
     town: ["townOn", "rulings", "cost"],
     tuning: ["tune-sinks", "tune-production", "tune-distribution", "tune-prices", "tune-tick"],
@@ -1251,6 +1251,7 @@
     if (books) productionStories();
     await prices();
     await earns();
+    if (books) mint();
   }
 
   function strands() {
@@ -1770,6 +1771,245 @@
       else if (goesView.off.size < CHANNELS.length - 1) goesView.off.add(ch);
       prefs.set("observatory.goes.off", [...goesView.off].join(","));
       goes();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // The mint (#562): who the Exchange pays for fiber, and why, and the grass
+  // the fiber comes from. The deposits by group are #561's flows from the
+  // Exchange; the motives are the town's (TownSummary::minting), totals
+  // since it started; the grass is a gauge each sample takes, and the
+  // refused gathers the server's own count over each window
+
+  // Why a citizen banked, in the town's words: short, then in a sentence. A
+  // saver's banking and a goal's are both `banked` until #556
+  const MOTIVES = {
+    banked: ["Banked", "banked on a fiber stint"],
+    goal: ["For a goal", "for a goal that wanted Strands"],
+    rescue: ["Rescue", "as a rescue, down to their floor"],
+    float: ["A merchant's float", "for a merchant's float"],
+    road_in: ["The road in", "on the road in"],
+  };
+  // The refused gathers drawn, each with its ink; the rest are `other`
+  const REFUSALS = [["spent", "Spent grass", "--down"], ["taken", "Someone else's", "--waiting"], ["other", "Other", "--fl-other"]];
+  // Half the grass spent at once is short
+  const GRASS_SHORT = 0.5;
+  const mintView = {
+    by: prefs.get("observatory.mint.by") === "styles" ? "styles" : "roles",
+    lines: [],
+    rows: null,
+    refused: null,
+    key: "",
+  };
+  // A group's ink in the mint's bars: a calling's job's, or a style's
+  const MINT_STYLE_INK = { specialist: "--s1", leaner: "--s2", saver: "--s5", "all-rounder": "--s3", person: "--s4" };
+  const MINT_ROLE_INK = { "all-rounder": "--s3", person: "--s4", admin: "--s5" };
+  const mintInk = (key) =>
+    (mintView.by === "styles" ? MINT_STYLE_INK[key] : MINT_ROLE_INK[key] ?? (JOBS[key] && `--a-${JOBS[key].activity}`)) ?? "--fl-other";
+  const mintName = (key) => (key === "admin" ? "Admins" : mintView.by === "styles" ? STYLE_NAMES[key]?.[0] ?? capital(key) : trade(key));
+  /** A sample's deposits by group, as its flows from the Exchange have them */
+  const mintedBy = (s, by) => (s.flows?.[by] ?? []).filter((f) => f.from === "exchange" && f.channel === "exchange");
+  /** The gathers refused on grass in a sample's window, by REFUSALS' keys */
+  function refusedOf(s) {
+    const out = { spent: 0, taken: 0, other: 0 };
+    for (const [why, n] of Object.entries(s.refused?.grass ?? {})) out[out[why] == null ? "other" : why] += n;
+    return out;
+  }
+
+  /** The range's samples in the money's bins: deposits by group, fiber cut and gathers refused */
+  function binMint() {
+    const binMs = BIN_MINUTES[state.hours] * 60_000;
+    const first = Math.floor(rangeFrom() / binMs) * binMs;
+    const bins = Array.from({ length: Math.ceil((Date.now() - first) / binMs) }, (_, k) => ({
+      at: first + k * binMs, ms: 0, by: {}, fiber: 0, deposits: 0, refused: { spent: 0, taken: 0, other: 0 },
+    }));
+    const shown = inRange((s) => s.strand_flows || s.unit_flows || s.refused);
+    for (const s of shown) {
+      const b = bins[Math.floor((s.at_ms - first) / binMs)];
+      if (!b) continue;
+      b.ms += s.since_ms;
+      for (const f of mintedBy(s, mintView.by)) b.by[f.to] = (b.by[f.to] ?? 0) + f.strands;
+      b.fiber += s.unit_flows?.fiber?.gathered ?? 0;
+      b.deposits += s.strand_flows?.exchange_deposit ?? 0;
+      const r = refusedOf(s);
+      for (const why of Object.keys(r)) b.refused[why] += r[why];
+    }
+    return { binMs, bins, shown };
+  }
+
+  /** Each motive's Strands over the range, run by run, as `earningOver` counts the earnings */
+  function mintingOver(list) {
+    const by = {};
+    let first = 0;
+    list.forEach((s, i) => {
+      const next = list[i + 1];
+      if (next && next.town.started_ms === s.town.started_ms) return;
+      const base = list[first].town.started_ms > rangeFrom() ? null : list[first];
+      for (const [motive, n] of Object.entries(s.town.minting ?? {})) by[motive] = (by[motive] ?? 0) + n - (base?.town.minting?.[motive] ?? 0);
+      for (const [motive, n] of Object.entries(base?.town.minting ?? {})) if (!(motive in (s.town.minting ?? {}))) by[motive] = (by[motive] ?? 0) - n;
+      first = i + 1;
+    });
+    return by;
+  }
+
+  CHARTS.mint = () => lineChart($("chart-mint"), {
+    rows: () => mintView.rows,
+    axis: short,
+    legend: (v) => `${count(v)} a game hour`,
+    // Drawn outermost first, so each bar's inner groups paint over it; the
+    // fiber cut over them all
+    series: () => [
+      ...mintView.lines.map((key) => ({ key, label: mintName(key), color: mintInk(key), bars: true })).reverse(),
+      { key: "fiber", label: "Fiber cut", color: "--uf-gathered", width: 2.5 },
+    ],
+  });
+  CHARTS.grass = () => lineChart($("chart-grass"), {
+    has: (s) => s.grass,
+    height: 220,
+    axis: short,
+    legend: (v) => `${count(v)} nodes`,
+    series: [
+      { label: "Ready", color: "--n-grass", width: 2, value: (s) => s.grass.ready },
+      { label: "Being cut", color: "--s2", value: (s) => s.grass.gathering },
+      { label: "Spent", color: "--down", width: 2, value: (s) => s.grass.spent },
+    ],
+  });
+  CHARTS.refused = () => lineChart($("chart-refused"), {
+    rows: () => mintView.refused,
+    height: 160,
+    axis: short,
+    legend: (v) => `${count(v)} a game hour`,
+    series: REFUSALS.map(([key, label, color]) => ({ key, label, color, bars: true })).reverse(),
+  });
+
+  function mint() {
+    const { binMs, bins, shown } = binMint();
+    const x = bins.map((b) => (b.at + binMs / 2) / 1000);
+    const hourly = (b, v) => (b.ms ? perGameHour(v, b.ms) : null);
+
+    // The groups that took any, the most first
+    const totals = {};
+    for (const b of bins) for (const [g, v] of Object.entries(b.by)) totals[g] = (totals[g] ?? 0) + v;
+    const lines = Object.keys(totals).filter((g) => totals[g] > 0).sort((a, b) => totals[b] - totals[a]);
+    const values = { fiber: bins.map((b) => hourly(b, b.fiber)) };
+    const own = { fiber: values.fiber };
+    for (const g of lines) {
+      values[g] = [];
+      own[g] = [];
+    }
+    for (const b of bins) {
+      let up = 0;
+      for (const g of lines) {
+        const v = hourly(b, b.by[g] ?? 0);
+        own[g].push(v);
+        values[g].push(v ? (up += v) : null);
+      }
+    }
+    const stack = { values: {}, own: {} };
+    for (const b of bins) {
+      let up = 0;
+      for (const [why] of REFUSALS) {
+        const v = hourly(b, b.refused[why]);
+        (stack.own[why] ??= []).push(v);
+        (stack.values[why] ??= []).push(v ? (up += v) : null);
+      }
+    }
+    const key = `${mintView.by}:${lines.join()}`;
+    const rebuild = key !== mintView.key;
+    mintView.lines = lines;
+    mintView.key = key;
+    mintView.rows = { x, shown, values, own };
+    mintView.refused = { x, shown, ...stack };
+    if (rebuild) state.charts.mint?.rebuild();
+    chart("mint");
+    chart("grass");
+    chart("refused");
+
+    // The range's sums, over the time the samples cover
+    const ms = bins.reduce((a, b) => a + b.ms, 0);
+    const minted = lines.reduce((a, g) => a + totals[g], 0);
+    const deposits = bins.reduce((a, b) => a + b.deposits, 0);
+    const refused = { spent: 0, taken: 0, other: 0 };
+    for (const b of bins) for (const why of Object.keys(refused)) refused[why] += b.refused[why];
+    const grass = inRange((s) => s.grass);
+    const worst = grass.reduce((w, s) => {
+      const share = spentShare(s.grass);
+      return share != null && (w == null || share > w.share) ? { share, at: s.at_ms } : w;
+    }, null);
+
+    const town = inRange((s) => s.town?.minting);
+    const motives = mintingOver(town);
+    mintMotives(motives, ms);
+    $("mint-headline").textContent = mintHeadline({ shown, ms, minted, totals, lines, refused, worst, grass });
+    const citizens = lines.filter((g) => g !== "person" && g !== "admin").reduce((a, g) => a + totals[g], 0);
+    const told = Object.values(motives).reduce((a, n) => a + n, 0);
+    $("mint-note").textContent = shown.length
+      ? `Deposits by group come to ${nf.format(minted)} Strands over the range, and Coming and going's deposits to ${nf.format(deposits)}. ` +
+        (town.length ? `Citizens took ${nf.format(citizens)} of them; the town gave a motive for ${nf.format(told)}, as it reports each game minute.` : "No sample in the range carries the town's motives.")
+      : "";
+  }
+
+  /** The share of the grass that's spent, as `Grass::spent_share` has it */
+  function spentShare(g) {
+    const all = g.ready + g.gathering + g.spent;
+    return all > 0 ? g.spent / all : null;
+  }
+
+  function mintMotives(motives, ms) {
+    const total = Object.values(motives).reduce((a, n) => a + n, 0);
+    const order = Object.keys(MOTIVES);
+    const rows = Object.entries(motives)
+      .filter(([, n]) => n !== 0)
+      .sort(([a, x], [b, y]) => y - x || order.indexOf(a) - order.indexOf(b))
+      .map(([motive, n]) => {
+        const tr = document.createElement("tr");
+        tr.append(
+          cell(MOTIVES[motive]?.[0] ?? capital(item(motive))),
+          cell(nf.format(n), "num"),
+          cell(ms ? count(perGameHour(n, ms)) : "–", "num now"),
+          cell(total > 0 ? percent(n / total) : "–", "num dim"),
+        );
+        return tr;
+      });
+    const waiting = document.createElement("tr");
+    waiting.className = "dim";
+    waiting.append(cell("Saving, funding a goal"), cell("waits on #556", "num dim"), cell("", "num"), cell("", "num"));
+    $("mint-motives").tBodies[0].replaceChildren(...(rows.length ? rows : [emptyRow(4, "No citizen banked in the range, or no sample carries the town's motives (since #562).")]), waiting);
+  }
+
+  // Whether the grass kept up: its share spent at its worst and the gathers
+  // refused, then who took the most of the mint
+  function mintHeadline({ shown, ms, minted, totals, lines, refused, worst, grass }) {
+    if (!shown.length) return "Waiting for the first sample.";
+    const when = since(shown[0]);
+    const a = (n) => (ms ? count(perGameHour(n, ms)) : "–");
+    const turned = refused.spent + refused.taken;
+    let first;
+    if (!grass.length) first = "No sample in the range counts the grass: the sampler does since #562.";
+    else {
+      const short = worst && worst.share >= GRASS_SHORT;
+      const at = worst ? `at its worst, at ${clock(worst.at)}, ${percent(worst.share)} of it was spent` : "none of it was spent";
+      const turnedAway = turned
+        ? `${a(turned)} gathers a game hour were turned away: ${a(refused.spent)} on spent grass and ${a(refused.taken)} on grass someone else was cutting`
+        : "no gather was turned away for want of it";
+      first = `The grass ${short ? "ran short" : "kept up"} ${when}. ${capital(at)}, and ${turnedAway}.`;
+    }
+    if (!minted) return `${first} The Exchange minted nothing.`;
+    const top = lines[0];
+    const topShare = totals[top] / minted;
+    return `${first} The Exchange minted ${a(minted)} Strands a game hour, ${percent(topShare)} of it to ${mintView.by === "styles" ? lc(mintName(top)) : thoseAfter(top)}.`;
+  }
+
+  function mintControls() {
+    const group = $("mint-by");
+    for (const b of group.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.by === mintView.by));
+    group.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-by]");
+      if (!b) return;
+      mintView.by = b.dataset.by;
+      prefs.set("observatory.mint.by", mintView.by);
+      for (const x of group.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+      if (books) mint();
     });
   }
 
@@ -5063,6 +5303,7 @@
     rosterControls();
     rolesControls();
     goesControls();
+    mintControls();
     stylesControls();
     tuningControls();
     // The link goes to the map; this says whom to follow there

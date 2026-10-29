@@ -9,7 +9,7 @@ use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyQuery, Nearb
 use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};
 
 use crate::engine::container_access::gathering_terms;
-use crate::engine::{extraction_refusal, Command};
+use crate::engine::{extraction_refusal, refuse, Command};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::ResourceNodeInfo;
@@ -144,8 +144,8 @@ pub async fn start_extraction(
         })?;
 
         // The same reasons the tick gives over the WebSocket as extraction_failed
-        if let Some(reason) = extraction_refusal(player, node, resource_type, tool.as_ref()) {
-            return Err(AppError::BadRequest(reason));
+        if let Some(refusal) = extraction_refusal(player, node, resource_type, tool.as_ref()) {
+            return Err(AppError::BadRequest(refuse(&resource_type.id, refusal)));
         }
     }
 

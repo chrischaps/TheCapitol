@@ -56,7 +56,7 @@ use super::activity::{self, Activity};
 use super::grade;
 use super::lot;
 use super::plan::{Goal, Holdings, Step, Upward, FLOAT};
-use super::report::{self, BotRun, Entry, Report, MAKER_ROLE};
+use super::report::{self, BotRun, Entry, Motive, Report, MAKER_ROLE};
 use super::{is_tool, watched, Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError, NO_WAY};
 use crate::catalog::Catalog;
@@ -532,6 +532,9 @@ struct SimBot {
     /// Tools its standing bids bought since it last collected its market
     /// box (K2.1): they wait there, not in its pack.
     boxed_tools: std::collections::HashSet<String>,
+    /// Why the next deposit is taken (#562): its round sets it as it picks
+    /// the step
+    minting: Motive,
     /// Its stations whose repair the server refused, by type, and when, in
     /// the run's game hours (#478): left for [`REPAIR_RETRY_HOURS`], so a
     /// refusal isn't asked again every round.
@@ -613,6 +616,7 @@ impl SimBot {
             stalls_full: None,
             stall_stocked: None,
             boxed_tools: Default::default(),
+            minting: Motive::Banked,
             refused_repairs: HashMap::new(),
         }
     }
@@ -804,6 +808,9 @@ impl SimBot {
                             }
                             h.doing(Standing::Working, &label);
                         });
+                    }
+                    if let Action::Step(Step::Deposit) = &action {
+                        self.minting = Motive::of(goal.as_ref().and_then(Option::as_ref), self.job());
                     }
                     let began = self.now();
                     let result = match &action {
@@ -1736,6 +1743,7 @@ impl SimBot {
                 self.entries.push(Entry::Deposited {
                     fiber: deposit.deposited_quantity,
                     strands: deposit.strands_received,
+                    motive: self.minting,
                 });
                 Ok(())
             }

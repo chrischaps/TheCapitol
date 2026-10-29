@@ -34,6 +34,7 @@ use capitol_protocol::tutorial::{Chapter, Grant, Judge, Step as Lesson, Steps, T
 use capitol_protocol::ws::{Channel, ClientMessage};
 
 use super::super::plan::{self, Goal, Holdings, Step};
+use super::super::report::Motive;
 use super::super::{stint, Errand, Role};
 use super::{SimBot, PLOT_ZONES};
 use crate::bot::{Bot, BotError};
@@ -287,6 +288,7 @@ impl SimBot {
                     return self.one_more(FIBER);
                 }
                 self.bot.go_to_exchange()?;
+                self.minting = Motive::RoadIn;
                 self.take(&Step::Deposit)?;
                 Ok(true)
             }

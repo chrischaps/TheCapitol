@@ -60,5 +60,5 @@ pub mod zone_sync;
 
 pub use commands::Command;
 pub use events::{BoardChange, GameEvent};
-pub use extraction::extraction_refusal;
+pub use extraction::{extraction_refusal, refuse};
 pub use tick::{run_tick_loop, GameState};

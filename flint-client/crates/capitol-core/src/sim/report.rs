@@ -7,7 +7,60 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use super::Activity;
+use super::plan::Goal;
+use super::{Activity, Role};
+
+/// Why a citizen took fiber to the exchange (#562), as its town reports
+/// its deposits. Only what its errand can say: #556 will tell a saver's
+/// banking from a goal's, which are both [`Banked`](Motive::Banked) now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Motive {
+    /// Banking on a fiber stint: what fiber is for
+    Banked,
+    /// Banking on a trading stint: a merchant earning its float
+    Float,
+    /// Down to its floor, earning its float back (`Goal::Strands`)
+    Rescue,
+    /// A goal that wanted Strands, as a deed's cost does
+    Goal,
+    /// The road in's lesson at the exchange
+    RoadIn,
+}
+
+impl Motive {
+    /// Its name in the town's report (`CitizenReport::minted`)
+    pub fn slug(self) -> &'static str {
+        match self {
+            Motive::Banked => "banked",
+            Motive::Float => "float",
+            Motive::Rescue => "rescue",
+            Motive::Goal => "goal",
+            Motive::RoadIn => "road_in",
+        }
+    }
+
+    /// Why a deposit is taken for the errand that led to it: its `goal`
+    /// (`None` for banking), on a stint at `job`.
+    pub fn of(goal: Option<&Goal>, job: Role) -> Motive {
+        match goal {
+            Some(Goal::Strands(_)) => Motive::Rescue,
+            Some(_) => Motive::Goal,
+            None if job == Role::Merchant => Motive::Float,
+            None => Motive::Banked,
+        }
+    }
+}
+
+/// The Strands a batch of entries took at the exchange, by motive (#562).
+pub fn minted(entries: &[Entry]) -> BTreeMap<Motive, i64> {
+    let mut by = BTreeMap::new();
+    for entry in entries {
+        if let Entry::Deposited { strands, motive, .. } = entry {
+            *by.entry(*motive).or_insert(0) += strands;
+        }
+    }
+    by
+}
 
 /// One thing a bot saw or did. Times are game hours since the run began.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,8 +99,8 @@ pub enum Entry {
     Failed { label: String, why: String },
     /// The planner found no way to the bot's goal.
     Stuck { reason: String },
-    /// Fiber went in at the exchange.
-    Deposited { fiber: i32, strands: i64 },
+    /// Fiber went in at the exchange, for `motive` (#562).
+    Deposited { fiber: i32, strands: i64, motive: Motive },
     /// A deed was bought.
     Claimed { cost: i64 },
     /// One of the bot's orders filled (E3.8): `sold` units, or bought them,
@@ -1249,6 +1302,29 @@ fn left_words(why: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A deposit's motive is its errand's (#562): a rescue for its float,
+    /// a goal's for anything else that wants Strands, and banking a float
+    /// on a trading stint or plain banking on any other. A batch's deposits
+    /// add up by motive.
+    #[test]
+    fn a_deposit_is_minted_for_its_errands_motive() {
+        use crate::sim::Gather;
+        let fiber = Role::Gatherer(Gather::Fiber);
+        assert_eq!(Motive::of(Some(&Goal::Strands(100)), Role::Builder), Motive::Rescue);
+        assert_eq!(Motive::of(Some(&Goal::hold("rope", 2)), fiber), Motive::Goal);
+        assert_eq!(Motive::of(None, Role::Merchant), Motive::Float);
+        assert_eq!(Motive::of(None, fiber), Motive::Banked);
+        let deposit = |strands, motive| Entry::Deposited { fiber: strands as i32, strands, motive };
+        let entries = [
+            deposit(196, Motive::Banked),
+            Entry::Claimed { cost: 250 },
+            deposit(98, Motive::Rescue),
+            deposit(40, Motive::Banked),
+        ];
+        assert_eq!(minted(&entries), BTreeMap::from([(Motive::Banked, 236), (Motive::Rescue, 98)]));
+        assert_eq!(Motive::RoadIn.slug(), "road_in");
+    }
+
     fn made(item: &str, quantity: i32, quality: i32, gathered: bool, at: f64) -> Entry {
         Entry::Made {
             item: item.into(),
@@ -1359,6 +1435,7 @@ mod tests {
                 Entry::Deposited {
                     fiber: 300,
                     strands: 299,
+                    motive: Motive::Goal,
                 },
                 Entry::Claimed { cost: 250 },
             ],
@@ -1610,7 +1687,7 @@ mod tests {
             at: 0.0,
         };
         let entries = vec![
-            Entry::Deposited { fiber: 40, strands: 40 },
+            Entry::Deposited { fiber: 40, strands: 40, motive: Motive::Banked },
             traded("plank", true, 3, 12),
             traded("log", false, 5, 4),
             traded("stone", true, 2, 3),

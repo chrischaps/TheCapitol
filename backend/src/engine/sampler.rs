@@ -24,6 +24,10 @@
 //! Since D2.3 each sample carries the market's books as it was taken: the
 //! units resting on each side of each item and the best price either side.
 //!
+//! Since #562 each sample says how the grass stands as it was taken
+//! ([`grass`]): fiber's one source, so the faucet's. The gathers the server
+//! refused over the window come with the ledger (`Ledger::refused`).
+//!
 //! It runs beside the tick, as a loop of its own (`load::Loop::Sampler`). It
 //! takes the game's lock only to read, twice a sample: the ledger's count of
 //! the players, and its own.
@@ -34,8 +38,8 @@ use std::time::Duration;
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    Book, Buckets, Channel, Distribution, EventBus, Feed, Flows, Paid, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES,
-    SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
+    Book, Buckets, Channel, Distribution, EventBus, Feed, Flows, Grass, Paid, Players, Sample, Trades, KEEP_DAYS,
+    RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -43,6 +47,7 @@ use uuid::Uuid;
 
 use super::ledger;
 use super::load::Loop;
+use crate::models::{NodeState, ResourceNodeState};
 use crate::state::AppState;
 
 /// Samples a prune comes round: an hour's
@@ -139,6 +144,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
                         drift: sample.drift.clone(),
                         town: town.clone(),
                         distribution: sample.distribution.clone(),
+                        grass: sample.grass,
                         ..stored
                     };
                     store(&state.db, &whole).await
@@ -191,6 +197,7 @@ async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSe
         queued: game.event_sender.len() as u64,
         capacity: super::tick::GameState::EVENT_CAPACITY as u64,
     };
+    sample.grass = Some(grass(game.resource_nodes.values()));
     drop(game);
     sample.distribution = Some(Distribution::of(&now, &admins, |name| buckets.get(name)));
     // Last, once nothing can fail: a missed sample leaves the town's reports
@@ -270,6 +277,22 @@ async fn paid(db: &PgPool, from_ms: i64, to_ms: i64) -> Result<Vec<Paid>, sqlx::
         })
         .collect())
 }
+
+/// How the grass nodes among `nodes` stand (#562).
+fn grass<'a>(nodes: impl IntoIterator<Item = &'a ResourceNodeState>) -> Grass {
+    let mut grass = Grass::default();
+    for node in nodes.into_iter().filter(|n| n.resource_type == GRASS) {
+        *match node.state {
+            NodeState::Available => &mut grass.ready,
+            NodeState::BeingHarvested => &mut grass.gathering,
+            NodeState::Depleted => &mut grass.spent,
+        } += 1;
+    }
+    grass
+}
+
+/// The resource fiber comes from
+const GRASS: &str = "grass";
 
 /// The players whose accounts are admins'.
 async fn admins(db: &PgPool) -> Result<HashSet<Uuid>, sqlx::Error> {
@@ -503,6 +526,34 @@ mod tests {
     use super::*;
     use capitol_protocol::ledger::Load;
 
+    /// The grass is counted by its nodes' states, and nothing else is
+    /// (#562)
+    #[test]
+    fn the_grass_is_counted_by_state() {
+        let node = |resource: &str, state| ResourceNodeState {
+            id: Uuid::new_v4(),
+            resource_type: resource.into(),
+            x: 0.0,
+            y: 0.0,
+            base_quality: 50,
+            state,
+            harvested_by: None,
+            regenerates_at_tick: None,
+        };
+        let nodes = [
+            node("grass", NodeState::Available),
+            node("grass", NodeState::Available),
+            node("grass", NodeState::BeingHarvested),
+            node("grass", NodeState::Depleted),
+            node("grass", NodeState::Depleted),
+            node("grass", NodeState::Depleted),
+            node("tree", NodeState::Depleted),
+            node("tree", NodeState::Available),
+        ];
+        assert_eq!(grass(&nodes), Grass { ready: 2, gathering: 1, spent: 3 });
+        assert_eq!(grass(&nodes[6..]), Grass::default());
+    }
+
     fn sample(at_ms: i64) -> Sample {
         let ledger = |at_ms| Ledger {
             at_ms,
@@ -514,6 +565,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            refused: Default::default(),
             held_flows: Default::default(),
             load: Load::default(),
         };
@@ -572,6 +624,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            refused: Default::default(),
             held_flows: Default::default(),
             load: load(n),
         };

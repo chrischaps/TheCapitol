@@ -68,7 +68,7 @@ use super::schedule::{self, Phase, Schedule};
 use super::voice;
 use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
-use crate::sim::report::{BotRun, Entry};
+use crate::sim::report::{BotRun, Entry, Motive};
 use crate::sim::patron;
 use crate::sim::stint::{self, Kept};
 use crate::sim::wage;
@@ -860,6 +860,9 @@ pub struct Health {
     /// Strands its work brought in on each job since the town started, less
     /// the inputs bought for it (#560, [`earned`](crate::sim::report::earned)).
     pub earned: BTreeMap<Activity, i64>,
+    /// Strands it took at the exchange since the town started, by why
+    /// (#562, [`minted`](crate::sim::report::minted)).
+    pub minted: BTreeMap<Motive, i64>,
     pub standing: Standing,
     /// Where in its day it is, by the clock (C1.2).
     pub phase: Option<Phase>,
@@ -886,6 +889,7 @@ impl Health {
             stint_hours: 0.0,
             time: BTreeMap::new(),
             earned: BTreeMap::new(),
+            minted: BTreeMap::new(),
             standing: Standing::Starting,
             phase: None,
             strands: None,
@@ -914,7 +918,8 @@ impl Health {
         self.calling.as_ref().map_or(self.role.slug(), Calling::bucket)
     }
 
-    /// Adds the time in `entries` to its time by activity.
+    /// Adds the time in `entries` to its time by activity, and their
+    /// deposits to what it minted (#562).
     fn spent(&mut self, entries: &[Entry]) {
         for entry in entries {
             let (activity, hours) = match entry {
@@ -923,6 +928,9 @@ impl Health {
                 _ => continue,
             };
             *self.time.entry(activity).or_insert(0.0) += hours;
+        }
+        for (motive, strands) in crate::sim::report::minted(entries) {
+            *self.minted.entry(motive).or_insert(0) += strands;
         }
     }
 
@@ -967,6 +975,7 @@ impl Health {
                 .filter(|(_, s)| **s != 0)
                 .map(|(a, s)| (a.slug().to_string(), *s))
                 .collect(),
+            minted: self.minted.iter().filter(|(_, s)| **s != 0).map(|(m, s)| (m.slug().to_string(), *s)).collect(),
         }
     }
 
@@ -2165,6 +2174,10 @@ key = "j"
             // nothing is left out
             a.earned(&BTreeMap::from([(Activity::Wood, 40), (Activity::Planks, -12)]));
             a.earned(&BTreeMap::from([(Activity::Wood, 25), (Activity::Planks, 12)]));
+            // And what it took at the exchange, by motive (#562)
+            let deposit = |strands, motive| Entry::Deposited { fiber: strands as i32, strands, motive };
+            a.spent(&[deposit(98, Motive::Rescue), deposit(40, Motive::Banked)]);
+            a.spent(&[deposit(60, Motive::Banked)]);
         }
         cora.lock().unwrap().calling = Some(Calling {
             favourite: None,
@@ -2184,6 +2197,7 @@ key = "j"
         assert_eq!((doing.job.as_str(), doing.hours), ("crafter-planks", 0.76));
         assert_eq!(a.time, BTreeMap::from([("free".to_string(), 0.5), ("planks".to_string(), 0.25), ("wood".to_string(), 2.0)]));
         assert_eq!(a.earned, BTreeMap::from([("wood".to_string(), 65)]));
+        assert_eq!(a.minted, BTreeMap::from([("banked".to_string(), 100), ("rescue".to_string(), 98)]));
         let c = &report.citizens[1];
         assert_eq!(c.role, "all-rounder");
         let calling = c.calling.as_ref().unwrap();

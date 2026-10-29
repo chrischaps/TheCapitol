@@ -72,6 +72,12 @@ pub struct Ledger {
     /// when one is spent. A ledger from before reads with none.
     #[serde(default)]
     pub grants: DeedGrants,
+    /// Gathers the server refused since it started (#562), by resource type
+    /// then why: `spent` (the node is regrowing), `taken` (someone else is
+    /// gathering it), `lot` (it's on a lot the gatherer may not gather on),
+    /// `busy`, `far` and `tool`. A ledger from before reads with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refused: BTreeMap<String, BTreeMap<String, u64>>,
     pub load: Load,
 }
 
@@ -808,6 +814,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            refused: Default::default(),
             held_flows: BTreeMap::new(),
             load: Load::default(),
         }

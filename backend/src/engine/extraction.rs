@@ -219,28 +219,61 @@ pub fn gather_duration(resource_type: &ResourceType, tool: Option<&HeldTool>) ->
     }
 }
 
+/// Why a gather was refused, as the ledger counts them (#562).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// The gatherer is already doing something
+    Busy,
+    /// Someone else is gathering the node
+    Taken,
+    /// The node is spent, growing back
+    Spent,
+    /// The gatherer is out of reach
+    Far,
+    /// It takes a tool the gatherer hasn't got
+    Tool,
+    /// It grows on a lot the gatherer may not gather on
+    /// (`container_access::gathering_terms`)
+    Lot,
+}
+
+impl Refused {
+    /// Its name in [`Ledger::refused`](capitol_protocol::ledger::Ledger::refused)
+    pub fn slug(self) -> &'static str {
+        match self {
+            Refused::Busy => "busy",
+            Refused::Taken => "taken",
+            Refused::Spent => "spent",
+            Refused::Far => "far",
+            Refused::Tool => "tool",
+            Refused::Lot => "lot",
+        }
+    }
+}
+
 /// Why `player` can't start gathering `node` right now, in words the player can act on.
 /// `None` means they can. `tool` is the best one they hold of the type that works
-/// it (`tools::tool_for_node`). The REST `/world/extract` check uses this too.
+/// it (`tools::tool_for_node`). The REST `/world/extract` check uses this too, and
+/// [`refuse`] counts what it refuses.
 pub fn extraction_refusal(
     player: &PlayerState,
     node: &ResourceNodeState,
     resource_type: &ResourceType,
     tool: Option<&HeldTool>,
-) -> Option<String> {
+) -> Option<(Refused, String)> {
     // Check if player is already extracting
     if !matches!(player.action_state, ActionState::Idle) {
-        return Some("Already performing an action".to_string());
+        return Some((Refused::Busy, "Already performing an action".to_string()));
     }
 
     // Check if node is available
     match node.state {
         NodeState::Available => {}
         NodeState::BeingHarvested => {
-            return Some(format!("Someone else is already gathering this {}", resource_type.name));
+            return Some((Refused::Taken, format!("Someone else is already gathering this {}", resource_type.name)));
         }
         NodeState::Depleted => {
-            return Some(format!("This {} is spent; it will grow back", resource_type.name));
+            return Some((Refused::Spent, format!("This {} is spent; it will grow back", resource_type.name)));
         }
     }
 
@@ -249,20 +282,27 @@ pub fn extraction_refusal(
     let dy = player.y - node.y;
     let distance = (dx * dx + dy * dy).sqrt();
     if distance > EXTRACTION_RANGE {
-        return Some(format!(
-            "Too far from resource ({:.0} units; gathering needs {:.0})",
-            distance, EXTRACTION_RANGE
+        return Some((
+            Refused::Far,
+            format!("Too far from resource ({:.0} units; gathering needs {:.0})", distance, EXTRACTION_RANGE),
         ));
     }
 
     // Check tool requirement
     if let Some(required) = &resource_type.required_tool {
         if tool.is_none() {
-            return Some(format!("You need a {} to gather {}", required, resource_type.name));
+            return Some((Refused::Tool, format!("You need a {} to gather {}", required, resource_type.name)));
         }
     }
 
     None
+}
+
+/// The words of a refusal of a gather of `resource`, counted on the ledger
+/// (#562).
+pub fn refuse(resource: &str, (why, words): (Refused, String)) -> String {
+    super::ledger::refused(resource, why);
+    words
 }
 
 /// Start extraction for a player on a node, with the best `tool` they hold for it.
@@ -276,8 +316,8 @@ pub fn start_extraction(
     tools: &mut HashMap<Uuid, HeldTool>,
     event_sender: &broadcast::Sender<GameEvent>,
 ) -> Result<(), String> {
-    if let Some(reason) = extraction_refusal(player, node, resource_type, tool.as_ref()) {
-        return Err(reason);
+    if let Some(refusal) = extraction_refusal(player, node, resource_type, tool.as_ref()) {
+        return Err(refuse(&resource_type.id, refusal));
     }
 
     // Stop any movement
@@ -663,6 +703,37 @@ mod tests {
         assert_eq!(done[0].tool.as_ref().unwrap().held.item_id, sickle.item_id);
         assert!(held.is_empty());
         assert_eq!(players[&ada_id].action_state, ActionState::Idle);
+    }
+
+    /// Each refused gather is counted on the ledger by resource and why
+    /// (#562): spent, taken, out of reach, already busy, and wanting a tool;
+    /// a gather that starts counts nothing
+    #[test]
+    fn refused_gathers_are_counted_by_why() {
+        let (events, _rx) = broadcast::channel(64);
+        let mut held = HashMap::new();
+        let mut try_one = |player: &mut PlayerState, node: &mut ResourceNodeState, resource: &ResourceType| {
+            start_extraction(player, node, resource, None, &mut held, &events)
+        };
+        let reeds = ResourceType { required_tool: Some("sickle".into()), ..grass() };
+        let mut spent = node();
+        spent.state = NodeState::Depleted;
+        let mut taken = node();
+        taken.state = NodeState::BeingHarvested;
+        let mut far = node();
+        far.x = EXTRACTION_RANGE * 3.0;
+        assert_eq!(try_one(&mut player(), &mut spent, &grass()).unwrap_err(), "This Wild Grass is spent; it will grow back");
+        try_one(&mut player(), &mut spent, &grass()).unwrap_err();
+        try_one(&mut player(), &mut taken, &grass()).unwrap_err();
+        try_one(&mut player(), &mut far, &grass()).unwrap_err();
+        try_one(&mut player(), &mut node(), &reeds).unwrap_err();
+        let mut ada = player();
+        try_one(&mut ada, &mut node(), &grass()).unwrap();
+        try_one(&mut ada, &mut node(), &grass()).unwrap_err();
+        let counted = super::super::ledger::refused_now();
+        let want = [("busy", 1), ("far", 1), ("spent", 2), ("taken", 1), ("tool", 1)];
+        assert_eq!(counted["grass"], want.iter().map(|(w, n)| (w.to_string(), *n)).collect());
+        assert_eq!(counted.len(), 1, "only grass was tried");
     }
 
     fn player() -> PlayerState {

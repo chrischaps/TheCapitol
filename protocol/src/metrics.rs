@@ -116,6 +116,36 @@ pub struct Sample {
     /// sample stored before it reads with none
     #[serde(default, skip_serializing_if = "Flows::is_empty")]
     pub flows: Flows,
+    /// The grass as it was taken (#562); `None` in a sample stored before
+    /// it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grass: Option<Grass>,
+    /// Gathers the server refused over the window (#562), by resource type
+    /// then why, as [`Ledger::refused`] names them; a sample stored before
+    /// it reads with none
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refused: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+/// The grass nodes as a sample was taken (#562): fiber's one source, so the
+/// faucet's. Every node is one of the three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Grass {
+    /// Ready to gather
+    pub ready: u64,
+    /// Being gathered now
+    pub gathering: u64,
+    /// Spent, and growing back
+    pub spent: u64,
+}
+
+impl Grass {
+    /// The share of the grass that's spent; `None` with no grass
+    pub fn spent_share(&self) -> Option<f64> {
+        let all = self.ready + self.gathering + self.spent;
+        (all > 0).then(|| self.spent as f64 / all as f64)
+    }
 }
 
 /// What the books haven't explained since the server started: the drift
@@ -264,6 +294,15 @@ impl Sample {
                 crafts.insert(recipe.clone(), done);
             }
         }
+        let mut refused: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+        for (resource, by_why) in &end.refused {
+            for (why, n) in by_why {
+                let was = if same_boot { start.refused.get(resource).and_then(|w| w.get(why)).copied().unwrap_or(0) } else { 0 };
+                if *n > was {
+                    refused.entry(resource.clone()).or_default().insert(why.clone(), n - was);
+                }
+            }
+        }
         let since_ms = end.at_ms - start.at_ms;
         Sample {
             at_ms: end.at_ms,
@@ -288,6 +327,8 @@ impl Sample {
             town: None,
             distribution: None,
             flows: Flows::default(),
+            grass: None,
+            refused,
         }
     }
 }
@@ -885,6 +926,14 @@ pub struct CitizenReport {
     /// delivered in it, and for fiber, deposits
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub earned: BTreeMap<String, i64>,
+    /// Strands it took at the exchange since the town started, by why it
+    /// took them (#562): `rescue` (it was down to its floor), `goal` (a
+    /// goal that wanted Strands, a deed's cost), `float` (banking on a
+    /// trading stint), `banked` (banking on a fiber stint, which #556 will
+    /// tell apart as a saver's or a goal's) and `road_in` (the road in's
+    /// lesson)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub minted: BTreeMap<String, i64>,
 }
 
 /// A citizen's calling, briefly (Callings K3.3): what the console's roster
@@ -1097,6 +1146,11 @@ pub struct TownSummary {
     /// while the run's [`started_ms`](Self::started_ms) holds.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub earning: BTreeMap<String, Earning>,
+    /// Strands taken at the exchange, every citizen's together, since the
+    /// town started, as the newest report has them (#562): by motive, as
+    /// [`CitizenReport::minted`] names them. Totals, as `earning` is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub minting: BTreeMap<String, i64>,
 }
 
 /// One activity's time and earnings, every citizen's together (#560).
@@ -1125,6 +1179,16 @@ impl TownReport {
         by.retain(|_, e| e.hours > 0.0 || e.strands != 0);
         by
     }
+
+    /// Its citizens' deposits by motive, all together (#562)
+    pub fn minting(&self) -> BTreeMap<String, i64> {
+        let mut by: BTreeMap<String, i64> = BTreeMap::new();
+        for (motive, strands) in self.citizens.iter().flat_map(|c| &c.minted) {
+            *by.entry(motive.clone()).or_insert(0) += strands;
+        }
+        by.retain(|_, s| *s != 0);
+        by
+    }
 }
 
 impl TownSummary {
@@ -1135,6 +1199,7 @@ impl TownSummary {
         self.reports += 1;
         self.standing = report.standing();
         self.earning = report.earning();
+        self.minting = report.minting();
         for (by, n) in &report.rulings {
             *self.rulings.entry(by.clone()).or_insert(0) += n;
         }
@@ -1151,6 +1216,7 @@ impl TownSummary {
         self.reports += later.reports;
         self.standing = later.standing.clone();
         self.earning = later.earning.clone();
+        self.minting = later.minting.clone();
         for (by, n) in &later.rulings {
             *self.rulings.entry(by.clone()).or_insert(0) += n;
         }
@@ -1203,6 +1269,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            refused: Default::default(),
             held_flows: Default::default(),
             load: Load::default(),
         }
@@ -1227,6 +1294,50 @@ mod tests {
         assert_eq!(sample.crafts["rope_basic"].mean_quality(), Some(60.0));
         let rebooted = crafted(20_000, 2, &[("rope_basic", rope(1, 70))]);
         assert_eq!(Sample::between(&l1, &rebooted, &HashSet::new()).crafts["rope_basic"], rope(1, 70));
+    }
+
+    /// A window's refused gathers are the ends' difference, by resource and
+    /// why (#562); a reason with none new is left out, and a new boot
+    /// counts from nothing
+    #[test]
+    fn a_windows_refusals_are_the_ends_difference() {
+        let refused = |at_ms, booted_ms, counts: &[(&str, &str, u64)]| {
+            let mut by: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+            for (resource, why, n) in counts {
+                by.entry(resource.to_string()).or_default().insert(why.to_string(), *n);
+            }
+            Ledger { booted_ms, refused: by, ..ledger(at_ms, vec![], 0, &[], &[]) }
+        };
+        let l0 = refused(0, 1, &[("grass", "spent", 40), ("grass", "taken", 3)]);
+        let l1 = refused(10_000, 1, &[("grass", "spent", 52), ("grass", "taken", 3), ("stone", "far", 1)]);
+        let sample = Sample::between(&l0, &l1, &HashSet::new());
+        let want = |counts: &[(&str, &str, u64)]| {
+            let mut by: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+            for (resource, why, n) in counts {
+                by.entry(resource.to_string()).or_default().insert(why.to_string(), *n);
+            }
+            by
+        };
+        assert_eq!(sample.refused, want(&[("grass", "spent", 12), ("stone", "far", 1)]));
+        let rebooted = refused(20_000, 2, &[("grass", "taken", 2)]);
+        assert_eq!(Sample::between(&l1, &rebooted, &HashSet::new()).refused, want(&[("grass", "taken", 2)]));
+        // An old sample has none, and an old ledger too
+        let json = serde_json::to_value(&sample).unwrap();
+        assert_eq!(json["refused"]["grass"]["spent"], 12);
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("refused");
+        assert!(serde_json::from_value::<Sample>(old).unwrap().refused.is_empty());
+        let mut old = serde_json::to_value(&l0).unwrap();
+        old.as_object_mut().unwrap().remove("refused");
+        assert!(serde_json::from_value::<Ledger>(old).unwrap().refused.is_empty());
+    }
+
+    /// The grass's spent share counts the three states, and no grass has
+    /// none (#562)
+    #[test]
+    fn the_grass_spent_share() {
+        assert_eq!(Grass { ready: 6, gathering: 2, spent: 2 }.spent_share(), Some(0.2));
+        assert_eq!(Grass::default().spent_share(), None);
     }
 
     /// Four ledgers ten seconds apart: a deposit, a newcomer, a bid into
@@ -1545,6 +1656,48 @@ mod tests {
         assert!(serde_json::from_value::<TownSummary>(old).unwrap().earning.is_empty());
         let old_citizen = serde_json::json!({"name": "Ada", "role": "all-rounder", "standing": "away", "activity": "", "restarts": 0});
         assert!(serde_json::from_value::<CitizenReport>(old_citizen).unwrap().earned.is_empty());
+    }
+
+    /// The summary keeps the newest report's deposits by motive, every
+    /// citizen's added together (#562), and an old sample reads as none
+    #[test]
+    fn a_summary_keeps_the_towns_deposits_by_motive() {
+        let citizen = |name: &str, minted: &[(&str, i64)]| CitizenReport {
+            name: name.into(),
+            minted: minted.iter().map(|(m, s)| (m.to_string(), *s)).collect(),
+            ..CitizenReport::default()
+        };
+        let first = TownReport {
+            started_ms: 7,
+            citizens: vec![citizen("Ada", &[("banked", 300)]), citizen("Bo", &[("rescue", 98)])],
+            ..TownReport::default()
+        };
+        let second = TownReport {
+            citizens: vec![
+                citizen("Ada", &[("banked", 500), ("goal", 40)]),
+                citizen("Bo", &[("rescue", 196)]),
+                citizen("Cy", &[("float", 120), ("banked", 10)]),
+            ],
+            ..first.clone()
+        };
+        let mut summary = TownSummary::default();
+        summary.add(&first, 100);
+        summary.add(&second, 105);
+        let want = BTreeMap::from([
+            ("banked".to_string(), 510),
+            ("float".to_string(), 120),
+            ("goal".to_string(), 40),
+            ("rescue".to_string(), 196),
+        ]);
+        assert_eq!(summary.minting, want, "the newest report's, not the two added");
+        let (mut a, mut b) = (TownSummary::default(), TownSummary::default());
+        a.add(&first, 100);
+        b.add(&second, 105);
+        assert_eq!(a.then(&b).minting, want);
+        let mut old = serde_json::to_value(&summary).unwrap();
+        assert_eq!(old["minting"]["rescue"], 196);
+        old.as_object_mut().unwrap().remove("minting");
+        assert!(serde_json::from_value::<TownSummary>(old).unwrap().minting.is_empty());
     }
 
     /// A window of the Exchange's faucet, a fill, a wage, a tax and a
