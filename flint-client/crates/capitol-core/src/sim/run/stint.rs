@@ -110,7 +110,7 @@ impl SimBot {
     pub(super) fn spare(&self, holdings: &Holdings, goal: Option<&Goal>) -> Vec<(&'static str, i32)> {
         let job = self.job();
         let selling = surplus::selling(job, holdings, goal);
-        let mut spare = surplus::spare(holdings, job, selling, &self.willing());
+        let mut spare = surplus::spare(holdings, job, selling, &self.willing(), self.calling.favourite);
         if self.persona.is_none() {
             spare.retain(|&(item, _)| job.product() == Some(item));
         }

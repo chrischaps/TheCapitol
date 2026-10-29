@@ -901,7 +901,7 @@ mod tests {
 
     // Setup and the dabble (Callings D5, #529)
 
-    use crate::sim::{Commitment, Craft, Gather, Role, BUILD, ROLES, TOOLS};
+    use crate::sim::{Commitment, Craft, Gather, Role, BUILD, HANDLE_STOCK, ROLES, TOOLS};
 
     fn set_up(h: &Holdings, goal: Goal) -> Setup {
         setup(&Catalog::fallback(), h, &goal).unwrap()
@@ -1016,7 +1016,7 @@ mod tests {
         let tools = Role::Crafter(Craft::Tools);
         let empty = holding(&[]);
         assert_eq!(tools.work(&catalog, &empty, Commitment::Full).len(), TOOLS.len() + 1);
-        assert_eq!(tools.work(&catalog, &empty, Commitment::Dabble), [Goal::hold("tool_handle", 1)]);
+        assert_eq!(tools.work(&catalog, &empty, Commitment::Dabble), [Goal::hold("tool_handle", HANDLE_STOCK)]);
         // Going back picks up where it left off: the bench stayed, so the
         // handle is nearer
         let bench = with(holding(&[]), &[], &["workbench"]);
@@ -1027,7 +1027,7 @@ mod tests {
         let mut owing = bench;
         owing.owed = vec![("rope".into(), 2)];
         let goals = tools.goals_at(&catalog, &owing, Commitment::Dabble);
-        assert_eq!(goals, [Goal::hold("rope", 2), Goal::Strands(FLOAT), Goal::hold("tool_handle", 1)]);
+        assert_eq!(goals, [Goal::hold("rope", 2), Goal::Strands(FLOAT), Goal::hold("tool_handle", HANDLE_STOCK)]);
     }
 
     #[test]

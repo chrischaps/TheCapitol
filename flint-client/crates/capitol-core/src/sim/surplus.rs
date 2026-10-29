@@ -16,7 +16,9 @@
 //!     something else (a builder still building keeps its bricks), as
 //!     before callings ([`selling`]);
 //!   - a working stock ([`STOCK`]) of anything another job it's willing to
-//!     do uses, for its next stint at it.
+//!     do uses, for its next stint at it, but its favourite's own product
+//!     (#583): an ingot crafter makes more ingots when its tools want them,
+//!     so it sells what it has.
 //!
 //!   Everything else is spare, whatever its stint. The sell and stall
 //!   menus offer it once there's enough to be worth the walk, and a trade
@@ -26,8 +28,9 @@
 //!   pack. A tool crafter makes its few for sale ([`for_sale`](super::for_sale)).
 //! - **What it wants** ([`wants`]) is the job at hand's inputs, then those
 //!   of the jobs it leans to most ([`NEAR`]: its favourite and its biggest
-//!   leanings), never what the job at hand makes. Its bids, its posts and
-//!   what it asks a neighbour for come from it, up to a working stock.
+//!   leanings), never what the job at hand makes, nor for those jobs what
+//!   its favourite makes. Its bids, its posts and what it asks a neighbour
+//!   for come from it, up to a working stock.
 //!
 //! A swarm bot's calling is its role alone, so it wants what its role
 //! needs; what it sells stays its product, as in E3.8 (`SimBot::spare`).
@@ -61,9 +64,15 @@ pub fn selling(job: Role, holdings: &Holdings, goal: Option<&Goal>) -> bool {
 /// [`TOOLS`]'): what it holds less what its claims still want, the job at
 /// hand's inputs, its product unless it's `selling` it, a builder's next
 /// floor's goods while it builds up ([`Holdings::building_up`]), and a
-/// [`STOCK`] of what its other `willing` jobs use. Of each tool, all but
-/// one (K2.1). Never a good with none spare.
-pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role]) -> Vec<(&'static str, i32)> {
+/// [`STOCK`] of what its other `willing` jobs use, unless its `favourite`
+/// makes it. Of each tool, all but one (K2.1). Never a good with none
+/// spare.
+///
+/// An ingot crafter leaning to tools and building kept twenty of its own
+/// ingots back for them, a thousand Strands at their target, and sold
+/// none under thirty. In a soak its four ingot crafters held 77 ingots
+/// while 27 stood bid for at 50 to 76, and one traded (#583).
+pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role], favourite: Option<Role>) -> Vec<(&'static str, i32)> {
     let mut out: Vec<(&'static str, i32)> = MARKET_ITEMS
         .into_iter()
         .filter_map(|item| {
@@ -71,7 +80,8 @@ pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role]) 
             if (product && !selling) || (!product && doing.uses().contains(&item)) {
                 return None;
             }
-            let others = willing.iter().any(|&job| job != doing && job.uses().contains(&item));
+            let own = favourite.is_some_and(|f| f.product() == Some(item));
+            let others = !own && willing.iter().any(|&job| job != doing && job.uses().contains(&item));
             // A builder building up keeps the floor's goods (#478)
             let floor = if doing == Role::Builder { holdings.building_up(item) } else { 0 };
             let keep = holdings.promised(item) + floor + if others { STOCK } else { 0 };
@@ -90,12 +100,16 @@ pub fn spare(holdings: &Holdings, doing: Role, selling: bool, willing: &[Role]) 
 
 /// What a citizen at `doing` wants of the hall's goods, soonest first: the
 /// job at hand's needs, then its [`near`] jobs'. Never what `doing` makes,
-/// which it's at.
+/// which it's at, nor for its other jobs what its favourite makes, which
+/// it would make for them (#583).
 pub fn wants(calling: &Calling, doing: Role) -> Vec<&'static str> {
+    let own = calling.favourite.and_then(|f| f.product());
     let mut out: Vec<&'static str> = Vec::new();
     for job in near(calling, doing) {
         for &item in job.needs() {
-            if doing.product() != Some(item) && !out.contains(&item) {
+            // What its favourite makes it makes for its other jobs (#583)
+            let made = job != doing && own == Some(item);
+            if doing.product() != Some(item) && !made && !out.contains(&item) {
                 out.push(item);
             }
         }
@@ -150,21 +164,42 @@ mod tests {
         let h = holding(&[("iron_ore", 30), ("log", 4), ("stone", 3), ("fiber", 80)]);
         // A wood stint, willing to fell trees and saw: the ore and stone are
         // spare, and fiber isn't the hall's
-        assert_eq!(spare(&h, WOOD, true, &[WOOD, PLANKS]), [("iron_ore", 30), ("stone", 3)]);
+        assert_eq!(spare(&h, WOOD, true, &[WOOD, PLANKS], None), [("iron_ore", 30), ("stone", 3)]);
         // Willing to smelt too: a working stock of the ore stays
-        assert_eq!(spare(&h, WOOD, true, &[WOOD, PLANKS, INGOTS]), [("iron_ore", 30 - STOCK), ("stone", 3)]);
+        assert_eq!(spare(&h, WOOD, true, &[WOOD, PLANKS, INGOTS], None), [("iron_ore", 30 - STOCK), ("stone", 3)]);
         // On an ingot stint it's working the ore, and the logs for its
         // charcoal: neither is spare
-        assert_eq!(spare(&h, INGOTS, false, &[INGOTS, WOOD]), [("stone", 3)]);
+        assert_eq!(spare(&h, INGOTS, false, &[INGOTS, WOOD], None), [("stone", 3)]);
+    }
+
+    #[test]
+    fn its_favourites_product_is_kept_for_no_other_job() {
+        // #583: an ingot crafter leaning to tools and building, on a fiber
+        // stint, held its ingots back for them and sold none under thirty
+        let h = holding(&[("iron_ingot", 24), ("iron_ore", 30)]);
+        let jobs = [INGOTS, FIBER, TOOLS, Role::Builder];
+        assert_eq!(spare(&h, FIBER, true, &jobs, Some(INGOTS)), [("iron_ingot", 24), ("iron_ore", 30 - STOCK)]);
+        // Its ore it still keeps a stock of, for its next stint at the forge;
+        // and one whose favourite isn't the forge keeps the ingots too
+        assert_eq!(spare(&h, FIBER, true, &jobs, Some(TOOLS)), [("iron_ore", 30 - STOCK), ("iron_ingot", 24 - STOCK)]);
+        // On a tools stint it's working them: none spare
+        assert_eq!(spare(&h, TOOLS, true, &jobs, Some(INGOTS)), [("iron_ore", 30 - STOCK)]);
+        // Nor does it bid for its own ingots for its tools, off its tools
+        // stint; on it, they're the job at hand's
+        let c = calling(Some(INGOTS), 0.5, &[(TOOLS, 0.3), (Role::Builder, 0.2)]);
+        assert!(!wants(&c, FIBER).contains(&"iron_ingot"), "{:?}", wants(&c, FIBER));
+        assert!(wants(&c, TOOLS).contains(&"iron_ingot"));
+        let smith = calling(Some(TOOLS), 0.5, &[(INGOTS, 0.3)]);
+        assert!(wants(&smith, FIBER).contains(&"iron_ingot"), "a tool crafter still buys them");
     }
 
     #[test]
     fn nothing_a_claim_owes_is_spare() {
         let mut h = holding(&[("iron_ore", 30), ("plank", 25)]);
         h.promised = vec![("iron_ore".into(), 12), ("plank".into(), 40)];
-        assert_eq!(spare(&h, WOOD, true, &[WOOD]), [("iron_ore", 18)]);
+        assert_eq!(spare(&h, WOOD, true, &[WOOD], None), [("iron_ore", 18)]);
         // Owed with some kept for a job besides
-        assert!(spare(&h, WOOD, true, &[WOOD, INGOTS]).is_empty());
+        assert!(spare(&h, WOOD, true, &[WOOD, INGOTS], None).is_empty());
     }
 
     /// A builder building up keeps the floor's bricks back from the
@@ -179,27 +214,27 @@ mod tests {
             goods: vec![("plank".into(), 30), ("brick".into(), 45)],
             room: 4,
         });
-        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder]), [("brick", 15)]);
+        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder], None), [("brick", 15)]);
         // Not at the builder's job, nor without the permit, nor with room
-        assert_eq!(spare(&h, WOOD, true, &[WOOD]), [("brick", 60)]);
+        assert_eq!(spare(&h, WOOD, true, &[WOOD], None), [("brick", 60)]);
         h.strands = 300;
-        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder]), [("brick", 60)]);
+        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder], None), [("brick", 60)]);
         h.strands = 600;
         h.plot_room = Some(1);
-        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder]), [("brick", 60)]);
+        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder], None), [("brick", 60)]);
     }
 
     #[test]
     fn the_product_is_spare_while_the_job_only_makes_more_of_it() {
         let h = holding(&[("brick", 40), ("log", 30)]);
         // A builder still building keeps its bricks; once built, sells them
-        assert!(spare(&h, Role::Builder, false, &[Role::Builder]).iter().all(|(i, _)| *i != "brick"));
-        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder])[0], ("brick", 40));
+        assert!(spare(&h, Role::Builder, false, &[Role::Builder], None).iter().all(|(i, _)| *i != "brick"));
+        assert_eq!(spare(&h, Role::Builder, true, &[Role::Builder], None)[0], ("brick", 40));
         // A builder at another job keeps its stock of bricks for the forge
-        assert_eq!(spare(&h, WOOD, true, &[WOOD, Role::Builder]), [("brick", 40 - STOCK), ("log", 30 - STOCK)]);
+        assert_eq!(spare(&h, WOOD, true, &[WOOD, Role::Builder], None), [("brick", 40 - STOCK), ("log", 30 - STOCK)]);
         // A woodcutter's logs, a working stock kept back for its sawing
-        assert_eq!(spare(&h, WOOD, true, &[WOOD, PLANKS]), [("brick", 40), ("log", 30 - STOCK)]);
-        assert_eq!(spare(&h, WOOD, true, &[WOOD]), [("brick", 40), ("log", 30)]);
+        assert_eq!(spare(&h, WOOD, true, &[WOOD, PLANKS], None), [("brick", 40), ("log", 30 - STOCK)]);
+        assert_eq!(spare(&h, WOOD, true, &[WOOD], None), [("brick", 40), ("log", 30)]);
         let goal = Goal::hold("log", 31);
         assert!(selling(WOOD, &h, Some(&goal)));
         assert!(selling(WOOD, &h, Some(&Goal::Strands(100))));
@@ -211,16 +246,16 @@ mod tests {
     fn a_tool_is_spare_past_one_of_each_whatever_the_job() {
         let h = holding(&[("stone_axe", 3), ("iron_pickaxe", 1), ("log", 12)]);
         for doing in [WOOD, TOOLS, Role::Builder] {
-            let spare = spare(&h, doing, true, &[doing]);
+            let spare = spare(&h, doing, true, &[doing], None);
             assert!(spare.contains(&("stone_axe", 2)), "{doing}: {spare:?}");
             assert!(spare.iter().all(|(i, _)| *i != "iron_pickaxe"), "{doing}: the one it uses");
         }
         // A good outnumbers it, so the logs come first
-        assert_eq!(spare(&h, ORE, true, &[ORE]), [("log", 12), ("stone_axe", 2)]);
+        assert_eq!(spare(&h, ORE, true, &[ORE], None), [("log", 12), ("stone_axe", 2)]);
         // What a claim owes isn't spare
         let mut owing = h.clone();
         owing.promised = vec![("stone_axe".into(), 1)];
-        assert_eq!(spare(&owing, ORE, true, &[ORE]), [("log", 12), ("stone_axe", 1)]);
+        assert_eq!(spare(&owing, ORE, true, &[ORE], None), [("log", 12), ("stone_axe", 1)]);
     }
 
     #[test]
@@ -229,9 +264,10 @@ mod tests {
         let c = calling(Some(PLANKS), 0.7, &[(Role::Builder, 0.15), (TOOLS, 0.1), (ORE, 0.05)]);
         assert_eq!(near(&c, PLANKS), [PLANKS, Role::Builder, TOOLS]);
         assert_eq!(wants(&c, PLANKS), ["log", "stone", "iron_ingot", "charcoal"]);
-        // On a wood stint: no bid for the logs it's felling
+        // On a wood stint: no bid for the logs it's felling, nor for the
+        // planks its building takes, which it saws itself (#583)
         assert_eq!(near(&c, WOOD), [WOOD, PLANKS, Role::Builder]);
-        assert_eq!(wants(&c, WOOD), ["stone", "iron_ingot", "plank", "charcoal"]);
+        assert_eq!(wants(&c, WOOD), ["stone", "iron_ingot", "charcoal"]);
         // A swarm bot wants what its role needs, as before callings
         for role in ROLES {
             assert_eq!(wants(&Calling::single(role), role), role.needs(), "{role}");
@@ -249,11 +285,12 @@ mod tests {
                 let c = Calling::seeded(&mut rng, &Mix::only(style), role);
                 for doing in ROLES.into_iter().filter(|&r| r != Role::Merchant && c.share(r) > 0.0) {
                     let jobs = willing(&c, doing);
-                    let spare = spare(&h, doing, true, &jobs);
+                    let spare = spare(&h, doing, true, &jobs, c.favourite);
                     for item in MARKET_ITEMS {
                         let n = spare.iter().find(|(i, _)| *i == item).map_or(0, |(_, n)| *n);
                         let used_now = doing.uses().contains(&item) && doing.product() != Some(item);
-                        let used_later = jobs.iter().any(|&j| j != doing && j.uses().contains(&item));
+                        let own = c.favourite.and_then(|f| f.product()) == Some(item);
+                        let used_later = !own && jobs.iter().any(|&j| j != doing && j.uses().contains(&item));
                         let expect = if used_now {
                             0
                         } else if used_later {

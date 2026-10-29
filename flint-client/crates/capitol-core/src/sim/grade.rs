@@ -86,9 +86,19 @@ pub fn bid_grade_of(book: Option<&Book>) -> Option<&str> {
 }
 
 /// The quality a price for any grade is for: the typical trade's, else the
-/// best bid's grade, or Q50 for a target price.
+/// grade the best bid asks, or Q50 for a target price.
+///
+/// A bid for any grade (F) asks no grade, so it says nothing of quality:
+/// its price came from the bidder's worth, a target's for Q50 before the
+/// good trades. Read as F's middle, Q17, it made every D and C unit worth
+/// half again the bid and more, kept apart and asked for at 80 to 194
+/// where ingots were bid for at 47 to 61. None sold, so none traded to
+/// give a typical quality, and the ingot crafters chose to keep their
+/// ingots every time they were asked (#583).
 pub fn worth_quality(book: Option<&Book>, typical: Option<i32>) -> i32 {
-    typical.or_else(|| bid_grade_of(book).and_then(grade_mid)).unwrap_or(50)
+    typical
+        .or_else(|| bid_grade_of(book).filter(|&g| g != "F").and_then(grade_mid))
+        .unwrap_or(50)
 }
 
 /// How many of the latest trades [`typical_last`] reads.
@@ -465,7 +475,24 @@ pub(crate) mod tests {
     fn the_worth_a_bid_is_carried_from_is_the_typical_trades() {
         let b = book(vec![level(OrderSide::Buy, 10, "F", 40)]);
         assert_eq!(worth_quality(Some(&b), Some(70)), 70);
-        assert_eq!(worth_quality(Some(&b), None), 17);
+        // A bid for any grade says nothing of quality (#583)
+        assert_eq!(worth_quality(Some(&b), None), 50);
         assert_eq!(worth_quality(None, None), 50);
+        let c = book(vec![level(OrderSide::Buy, 14, "C", 5), level(OrderSide::Buy, 10, "F", 40)]);
+        assert_eq!(worth_quality(Some(&c), None), 64, "a bid for C is for C");
+    }
+
+    #[test]
+    fn untraded_ingots_go_into_a_bid_for_any_grade() {
+        // #583: ingots bid for at 57, for any grade, none traded yet; the
+        // smith holds D and C ingots. Read at Q17, only an F was loose and
+        // the D stood at 80 to 160; at Q50 the D units go into the bid
+        let b = book(vec![level(OrderSide::Buy, 57, "F", 5)]);
+        let held = Units::from_pairs([(30, 1), (44, 7), (60, 2)]);
+        let at = worth_quality(Some(&b), None);
+        assert_eq!(loose(&held, 57, at, Some(&b), false), Units::from_pairs([(30, 1), (44, 7)]));
+        assert!(premium(57, at, "D", Some(&b)) <= 57);
+        assert_eq!(premium(57, at, "C", Some(&b)), carried(57, 50, 64), "a C still asks its premium");
+        assert_eq!(premium(57, 17, "D", Some(&b)), 80, "as it was");
     }
 }

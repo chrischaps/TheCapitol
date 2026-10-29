@@ -297,6 +297,13 @@ pub const TOOLS: [&str; 8] = [
 /// and a pack has 24 slots, so it's small.
 pub const TOOL_STOCK: i32 = 2;
 
+/// The most handles a dabble at tools makes ahead of the tools that take
+/// them (#583): one for each of its [`TOOL_STOCK`]. The hall doesn't trade
+/// handles, and nobody posts for them, so past these its work is done. A
+/// dabble that made one more each time made a thousand a soak, none sold,
+/// in the hours an ingot or plank crafter's tools leaning gave it.
+pub const HANDLE_STOCK: i32 = TOOL_STOCK;
+
 /// Whether `item` is one of the [`TOOLS`].
 pub fn is_tool(item: &str) -> bool {
     TOOLS.contains(&item)
@@ -501,12 +508,13 @@ impl Role {
     /// A job whose stations don't [fit](Self::fits) is left off too (D6,
     /// #519): a deed can't be given up, so a trade its lot can never take
     /// isn't one it takes up. It can still work that trade for a wage at
-    /// someone else's bench.
+    /// someone else's bench. So is one whose work is all done: a dabble at
+    /// tools with its handles and its tools for sale made (#583).
     pub fn take(&self, catalog: &Catalog, holdings: &Holdings, commitment: Commitment, pays: i64) -> Option<Choice> {
         if !self.fits(holdings) {
             return None;
         }
-        let setup = self.setup(catalog, holdings, commitment).ok()?;
+        let setup = self.setup(catalog, holdings, commitment).ok().filter(|s| s.total > 0)?;
         Some(Choice::Take {
             job: self.slug().to_string(),
             setup: setup.steps,
@@ -521,14 +529,23 @@ impl Role {
     /// ladder's order. `None` for a role with one product, whose dabble is
     /// its ladder, and when no product can be reached, so the ladder's
     /// errands say why.
+    ///
+    /// A dabble at tools makes handles only up to [`HANDLE_STOCK`] (#583),
+    /// which nobody buys: with its tools, those for sale and its handles
+    /// made, its work is the handles it holds, done, and the job is left
+    /// off the stint menu ([`take`](Self::take)). Taken up all the same,
+    /// it has no errand, and the stint ends stuck. A favourite's ladder
+    /// still makes them without end (#597): with no errand it would never
+    /// go to sell the tools that free its stock.
     fn dabble(&self, catalog: &Catalog, holdings: &Holdings) -> Option<Vec<Goal>> {
         let more = |item: &str| Goal::hold(item, holdings.count(item) + 1);
+        let handles = Goal::hold("tool_handle", HANDLE_STOCK);
         let products: Vec<Goal> = match self {
             Role::Crafter(Craft::Tools) => TOOLS
                 .iter()
                 .map(|t| Goal::hold(t, 1))
                 .chain(for_sale(holdings))
-                .chain([more("tool_handle")])
+                .chain([handles.clone()])
                 .collect(),
             Role::Builder => BUILD.iter().map(|s| Goal::Station(s.to_string())).chain([more("brick")]).collect(),
             _ => return None,
@@ -544,7 +561,9 @@ impl Role {
                 best = Some((setup.total, goal));
             }
         }
-        best.map(|(_, goal)| vec![goal])
+        // A dabble at tools with its handles made has done its work
+        let done = *self == Role::Crafter(Craft::Tools) && holdings.count("tool_handle") >= HANDLE_STOCK;
+        best.map(|(_, goal)| vec![goal]).or_else(|| done.then(|| vec![handles]))
     }
 
     /// The role's whole ladder, today's work: a tool crafter's tools and a
@@ -1480,7 +1499,7 @@ mod tests {
     fn sell(role: Role, catalog: &Catalog, h: &Holdings, bid: Option<i64>) -> Option<Choice> {
         let product = role.product()?;
         let selling = surplus::selling(role, h, Some(&role.goal(catalog, h)));
-        let (_, spare) = surplus::spare(h, role, selling, &[role]).into_iter().find(|(i, _)| *i == product)?;
+        let (_, spare) = surplus::spare(h, role, selling, &[role], None).into_iter().find(|(i, _)| *i == product)?;
         let menu = sell_menu(h, product, spare, bid, None)?;
         rules_pick(Question::Sell { item: product.into() }, menu, h, bid, None)
     }
@@ -2036,8 +2055,34 @@ mod tests {
         assert_eq!(dabble.len(), 1);
         // Spare tools aren't sold as a product; they're spare
         assert_eq!(tools.product(), None);
-        let spare = surplus::spare(&stocked, tools, false, &[tools]);
+        let spare = surplus::spare(&stocked, tools, false, &[tools], None);
         assert_eq!(spare, [("stone_axe", 1), ("stone_pickaxe", 1)]);
+    }
+
+    #[test]
+    fn a_dabble_at_tools_makes_a_few_handles_and_is_done() {
+        // #583: an ingot crafter's tools leaning made handles, one more
+        // each time, a hundred and more each a soak; none sold
+        let catalog = Catalog::fallback();
+        let tools = Role::Crafter(Craft::Tools);
+        let dabble = |h: &Holdings| tools.work(&catalog, h, Commitment::Dabble);
+        let stocked = tool_set(&[("stone_axe", 1), ("stone_pickaxe", 1)]);
+        assert_eq!(for_sale(&stocked), None, "its tools for sale are made");
+        // Short of its handles, it makes them
+        let one = tool_set(&[("stone_axe", 1), ("stone_pickaxe", 1), ("tool_handle", 1)]);
+        assert_eq!(dabble(&one), [Goal::hold("tool_handle", HANDLE_STOCK)]);
+        assert!(tools.take(&catalog, &one, Commitment::Dabble, 0).is_some());
+        // With them, its work is done: nothing to take up, and taken up
+        // all the same, no errand, so the stint ends stuck
+        let done = tool_set(&[("stone_axe", 1), ("stone_pickaxe", 1), ("tool_handle", HANDLE_STOCK)]);
+        assert_eq!(dabble(&done), [Goal::hold("tool_handle", HANDLE_STOCK)]);
+        assert_eq!(tools.take(&catalog, &done, Commitment::Dabble, 0), None);
+        assert_eq!(tools.errands_at(&catalog, &done, Commitment::Dabble), Ok(Vec::new()));
+        // One sold, and it makes another, from the handles it kept
+        let sold = tool_set(&[("stone_axe", 1), ("tool_handle", HANDLE_STOCK)]);
+        assert_eq!(dabble(&sold), [Goal::hold("stone_pickaxe", 2)]);
+        // Its favourite's ladder is as it was: handles after its tools
+        assert_eq!(tools.work(&catalog, &done, Commitment::Full), [Goal::hold("tool_handle", HANDLE_STOCK + 1)]);
     }
 
     #[test]
@@ -2116,7 +2161,7 @@ mod tests {
         h.strands = 500;
         h.plot_room = Some(2);
         let tools = Role::Crafter(Craft::Tools);
-        let spare = surplus::spare(&h, tools, false, &[tools]);
+        let spare = surplus::spare(&h, tools, false, &[tools], None);
         assert_eq!(spare, [("stone_axe", 1)]);
         // One spare is enough to sell, or to keep a stall for, so it
         // doesn't wear in the pack

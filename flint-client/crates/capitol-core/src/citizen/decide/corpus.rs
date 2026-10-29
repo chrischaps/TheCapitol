@@ -120,7 +120,7 @@ fn round(r: u32) -> Vec<Situation> {
             // jobs (Callings K1.4)
             let goal = errands.first().and_then(|e| e.goal.as_ref());
             let willing = stint::willing(&calling, role);
-            let spare = surplus::spare(&h, role, surplus::selling(role, &h, goal), &willing);
+            let spare = surplus::spare(&h, role, surplus::selling(role, &h, goal), &willing, calling.favourite);
             if let Some(&(item, n)) = spare.first() {
                 if let Some(menu) = sell_menu(&h, item, n, last.map(|l| l - 1), last.map(|l| l + 2)) {
                     out.push(s(Question::Sell { item: item.into() }, menu, 1));
