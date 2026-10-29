@@ -1,33 +1,29 @@
-//! Selling and bidding by grade (#429). Pure.
+//! Goods by grade (#429, #579): what a grade is worth, the book read by
+//! grade, and the units a sale names. Pure.
 //!
 //! Every unit keeps its own quality (D2), and the hall's book splits by
 //! grade (E3.3): a sell counts at the grade of each of its units, a bid at
 //! the grade it asks. A sell that names no units takes the lowest, so a
 //! citizen used to sell its worst first, at the good's one price: the wilds'
-//! ore, Q40 to Q89 in the pack, went to the book at Q12 (#429). So:
+//! ore, Q40 to Q89 in the pack, went to the book at Q12 (#429).
 //!
-//! - **A bid for any grade gets the lowest units**, at the price the mind
-//!   chose ([`plan_sale`]), as before: that's what such a bid is for, and
-//!   it keeps the goods moving.
-//! - **A grade someone bids for sells into that bid**, at the best bid that
-//!   takes it ([`taker`]).
-//! - **The best grade stands as an ask at its premium** beside them, so the
-//!   book shows it ([`premium`]): the mind's price carried by what quality
-//!   is worth ([`worth_factor`]) from the units it was for, to the grade's
-//!   middle, no dearer than the cheapest ask at that grade and never under a
-//!   bid that takes it. Only a gatherer stands its best: a citizen whose
-//!   work uses the good keeps its best for its own crafts, as crafting takes
-//!   the best first, and sells its lowest.
-//! - **A crafter's standing bid asks a grade** ([`bid_grade`]) for the main
-//!   ingredient of what it makes, by its thrift, at that grade's price.
+//! Since #579 the mind chooses the grade. Its quotes are split by grade
+//! ([`quotes`]: the best bid a grade meets, the cheapest ask at it, and what
+//! it's worth), and its sell, buy and bid menus offer a grade each
+//! ([`graded_sell_menu`](super::graded_sell_menu), [`graded_bids`](super::graded_bids),
+//! [`graded_buys`](super::graded_buys)), each priced at its grade. This
+//! module keeps the arithmetic those menus price with and the unit picking:
+//!
+//! - **A sale for any grade gets the loose units** ([`loose`]): those no
+//!   grade of their own prices over the bid, lowest first. It keeps the
+//!   goods moving, and never throws a good grade in with the worst.
+//! - **A sale of a grade names a lot of it alone** ([`lot`]), best first,
+//!   or lowest first for a citizen that keeps its best for its own crafts,
+//!   as crafting takes the best first.
 //!
 //! Units are never averaged away: a sale names exactly the units it takes,
-//! and what's left in the stack is each unit as it was.
-//!
-//! The mind still chooses per item: its quotes have no grade, so the price
-//! is carried to the grade after it decides, and the bid's grade is a rule
-//! of thrift, not a choice (#579). A stall still stocks the lowest units at
-//! one price (#578).
+//! and what's left in the stack is each unit as it was. A stall still
+//! stocks the lowest units at one price (#578).
 
 use capitol_protocol::rest::{DepthLevel, MarketTrade};
 use capitol_protocol::rules::market::{grade_floor, OrderSide};
@@ -36,10 +32,15 @@ use capitol_protocol::rules::stacking::{Pick, Units};
 
 use super::Role;
 use crate::catalog::Catalog;
+use crate::citizen::decide::GradeQuote;
 use crate::market::Book;
 
 /// The grades, best first.
 pub const GRADES: [&str; 5] = ["A", "B", "C", "D", "F"];
+
+/// The grades a crafter may ask of its main ingredient (#429), best first:
+/// none asks for A, and F is any.
+pub const BID_GRADES: [&str; 3] = ["B", "C", "D"];
 
 /// What a unit at `quality` is worth against one at Q50: half at Q0, one and
 /// a half at Q100, as quality scales a tool's yield and life (items.toml).
@@ -74,8 +75,8 @@ pub fn bid_grade_of(book: Option<&Book>) -> Option<&str> {
     book?.side(OrderSide::Buy).next().map(|l| l.grade.as_str())
 }
 
-/// The quality a bid's worth is for: the typical trade's, else the best
-/// bid's grade, or Q50 for a target price.
+/// The quality a price for any grade is for: the typical trade's, else the
+/// best bid's grade, or Q50 for a target price.
 pub fn worth_quality(book: Option<&Book>, typical: Option<i32>) -> i32 {
     typical.or_else(|| bid_grade_of(book).and_then(grade_mid)).unwrap_or(50)
 }
@@ -110,13 +111,23 @@ fn levels(book: Option<&Book>, side: OrderSide) -> impl Iterator<Item = &DepthLe
 }
 
 /// Whether someone bids for `grade` itself, not for any.
-fn bid_for(book: Option<&Book>, grade: &str) -> bool {
+pub fn bid_for(book: Option<&Book>, grade: &str) -> bool {
     grade != "F" && levels(book, OrderSide::Buy).any(|l| l.grade == grade)
 }
 
 /// The cheapest ask at `grade`.
-fn ask_at(book: Option<&Book>, grade: &str) -> Option<i64> {
+pub fn ask_at(book: Option<&Book>, grade: &str) -> Option<i64> {
     levels(book, OrderSide::Sell).filter(|l| l.grade == grade).map(|l| l.price).min()
+}
+
+/// The cheapest ask at `grade` or better: what a buy asking that grade
+/// pays.
+pub fn ask_meeting(book: Option<&Book>, grade: &str) -> Option<i64> {
+    let floor = grade_floor(grade)?;
+    levels(book, OrderSide::Sell)
+        .filter(|l| grade_floor(&l.grade).is_some_and(|f| f >= floor))
+        .map(|l| l.price)
+        .min()
 }
 
 /// The best bid that takes units of `grade`: one asking that grade or a
@@ -130,7 +141,7 @@ pub fn taker(book: Option<&Book>, grade: &str) -> Option<i64> {
         .max()
 }
 
-/// What units of `grade` stand at, when the mind chose `price` for units at
+/// What units of `grade` are worth asking for, when `price` is for units at
 /// `at`: `price` carried to the grade's middle, but no dearer than the
 /// cheapest ask at that grade, and never under the best bid that takes it
 /// (a bid for any grade at 6 takes B units too).
@@ -143,135 +154,81 @@ pub fn premium(price: i64, at: i32, grade: &str, book: Option<&Book>) -> i64 {
     asked.max(taker(book, grade).unwrap_or(1)).max(1)
 }
 
+/// A good's book split by grade, as the mind sees it (#579), best first:
+/// for each grade, the best bid that takes it, the cheapest ask at it, and
+/// `worth` (the price for any grade, for units at `at`) carried to it. A
+/// grade the book and the books say nothing of is left out.
+pub fn quotes(book: Option<&Book>, worth: Option<i64>, at: i32) -> Vec<GradeQuote> {
+    GRADES
+        .iter()
+        .map(|&g| GradeQuote {
+            grade: g.to_string(),
+            bid: taker(book, g),
+            ask: ask_at(book, g),
+            worth: worth.zip(grade_mid(g)).map(|(w, mid)| carried(w, at, mid)),
+        })
+        .filter(|q| q.bid.is_some() || q.ask.is_some() || q.worth.is_some())
+        .collect()
+}
+
 /// The units of `held` at `grade`.
 pub fn at_grade(held: &Units, grade: &str) -> Units {
     Units::from_pairs(held.pairs().filter(|&(q, _)| quality_grade(q) == grade))
 }
 
-/// One order at the hall: the units it names, and its price.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Sale {
-    pub units: Units,
-    pub price: i64,
+/// The grades `held` has units at, best first.
+pub fn grades_held(held: &Units) -> Vec<&'static str> {
+    GRADES.iter().copied().filter(|g| !at_grade(held, g).is_empty()).collect()
 }
 
-/// What a citizen puts on the book at one visit: a sale into the bids,
-/// waited on, and an ask that stands.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Plan {
-    pub sell: Option<Sale>,
-    pub stand: Option<Sale>,
-}
-
-/// What a citizen does at the hall with `held`, the mind having chosen to
-/// sell up to `quantity` at `price` on the item's book. `typical` is the
-/// quality its trades typically are ([`typical_quality`]).
-///
-/// - **The sale**, up to `quantity`: of a grade someone bids for, the best
-///   such grade (the lowest, if it `keeps_best`), at the best bid that
-///   takes it; else, if a bid for any grade pays its best grade's
-///   [`premium`], those; else its lowest units into a bid for any grade, at
-///   `price`. A grade it stands is kept out of that sale.
-/// - **The stand**, up to a `lot` of its best grade at its premium, if it
-///   doesn't keep its best, has no ask up (`asking`), promised none
-///   (`free`), holds another grade or finds no bid at all, and isn't selling
-///   that grade. With no bid at all, a citizen that keeps its best stands its
-///   lowest (#501's ask to open the book). The premium is carried from the
-///   quality `price` is for: the grade the best bid asks, or for a bid for
-///   any grade the mean of the units it gets, or with no bid `typical`, else
-///   Q50.
-#[allow(clippy::too_many_arguments)]
-pub fn plan_sale(
-    held: &Units,
-    quantity: i32,
-    lot: i32,
-    price: i64,
-    book: Option<&Book>,
-    typical: Option<i32>,
-    keeps_best: bool,
-    asking: bool,
-    free: bool,
-) -> Plan {
-    let grades: Vec<&'static str> = GRADES.iter().copied().filter(|g| !at_grade(held, g).is_empty()).collect();
-    let (Some(&top), Some(&lowest)) = (grades.first(), grades.last()) else {
-        return Plan::default();
-    };
-    if quantity < 1 {
-        return Plan::default();
-    }
-    let bids = taker(book, "A").is_some();
-    // The grade it would stand: its best, or keeping its best, its lowest
-    // to open an empty book
-    let standing = match (keeps_best, bids) {
-        (false, _) if grades.len() > 1 || !bids => Some(top),
-        (true, false) => Some(lowest),
-        _ => None,
-    }
-    .filter(|_| free && !asking);
-    // What a bid for any grade gets: the lowest, but for a grade it stands
-    let rest = match standing {
-        Some(g) if bids => Units::from_pairs(held.pairs().filter(|&(q, _)| quality_grade(q) != g)),
-        _ => held.clone(),
-    };
-    let cheap = rest.pick(quantity.min(rest.count() as i32), Pick::Lowest);
-    let at = match bid_grade_of(book) {
-        Some("F") => cheap.as_ref().and_then(Units::mean).unwrap_or(17),
-        Some(g) => grade_mid(g).unwrap_or(50),
-        None => typical.unwrap_or(50),
-    };
-    let pick = if keeps_best { Pick::Lowest } else { Pick::Best };
-    let of_grade = |g: &str, most: i32| {
-        let units = at_grade(held, g);
-        units.pick((units.count() as i32).min(most), pick)
-    };
-    let mut order = grades.clone();
+/// Whether a grade of `held` is kept apart from a sale for any grade at
+/// `bid`, being worth more: someone bids for the grade itself, or its
+/// [`premium`] (from `bid`, for units at `at`) is over `bid`. A citizen
+/// that `keeps_best` sells its lowest as they come, and holds only its best
+/// grade back.
+pub fn apart(held: &Units, grade: &str, bid: i64, at: i32, book: Option<&Book>, keeps_best: bool) -> bool {
     if keeps_best {
-        order.reverse();
+        let grades = grades_held(held);
+        return grades.len() > 1 && grades.first() == Some(&grade);
     }
-    let graded = order.iter().copied().find(|g| bid_for(book, g));
-    let pays_top = !keeps_best && taker(book, top).is_some_and(|bid| bid >= premium(price, at, top, book));
-    let sell = match graded {
-        Some(g) => of_grade(g, quantity).zip(taker(book, g)),
-        None if pays_top => of_grade(top, quantity).zip(taker(book, top)),
-        None if bids => cheap.map(|units| (units, price.max(1))),
-        None => None,
-    }
-    .map(|(units, price)| Sale { units, price });
-    let sold = |g: &str| sell.as_ref().is_some_and(|s| s.units.pairs().any(|(q, _)| quality_grade(q) == g));
-    let stand = standing
-        .filter(|g| !sold(g))
-        .and_then(|g| of_grade(g, quantity.min(lot)).map(|units| Sale { units, price: premium(price, at, g, book) }));
-    Plan { sell, stand }
+    bid_for(book, grade) || premium(bid, at, grade, book) > bid
 }
 
-/// The grade a crafter's standing bid for `item` asks (#429), or `None` for
-/// any: when `item` is the main ingredient (half or more of the inputs'
-/// share of the quality cascade) of what one of `jobs` makes, by its
-/// `thrift`. The least thrifty pay for B, then C, then D; the thriftiest
-/// take any.
-pub fn bid_grade(catalog: &Catalog, item: &str, jobs: &[Role], thrift: f32) -> Option<&'static str> {
+/// What a sale for any grade at `bid` may take of `held`: the units of
+/// every grade not kept [`apart`].
+pub fn loose(held: &Units, bid: i64, at: i32, book: Option<&Book>, keeps_best: bool) -> Units {
+    let own: Vec<&str> = grades_held(held)
+        .into_iter()
+        .filter(|g| apart(held, g, bid, at, book, keeps_best))
+        .collect();
+    Units::from_pairs(held.pairs().filter(|&(q, _)| !own.contains(&quality_grade(q))))
+}
+
+/// A lot of `n` of `held`'s units at `grade`, best first, or the lowest
+/// first if it `keeps_best`.
+pub fn lot(held: &Units, grade: &str, n: i32, keeps_best: bool) -> Option<Units> {
+    let units = at_grade(held, grade);
+    units.pick(n.min(units.count() as i32), if keeps_best { Pick::Lowest } else { Pick::Best })
+}
+
+/// Whether `item` is the main ingredient (half or more of the inputs' share
+/// of the quality cascade) of what one of `jobs` makes: what a crafter's
+/// menus offer it by grade (#429), the grade being the mind's to choose by
+/// its thrift (#579).
+pub fn main_ingredient(catalog: &Catalog, item: &str, jobs: &[Role]) -> bool {
     let makes = |output: &str| jobs.iter().any(|j| j.product() == Some(output));
-    let main = catalog.recipes().iter().any(|r| {
+    catalog.recipes().iter().any(|r| {
         let w = &r.quality_weights.inputs;
         let all: f64 = w.values().sum();
         r.outputs.iter().any(|o| makes(&o.item_type)) && all > 0.0 && w.get(item).is_some_and(|share| share * 2.0 >= all)
-    });
-    if !main {
-        return None;
-    }
-    match thrift {
-        t if t < 0.25 => Some("B"),
-        t if t < 0.5 => Some("C"),
-        t if t < 0.75 => Some("D"),
-        _ => None,
-    }
+    })
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn level(side: OrderSide, price: i64, grade: &str, quantity: i64) -> DepthLevel {
+    pub(crate) fn level(side: OrderSide, price: i64, grade: &str, quantity: i64) -> DepthLevel {
         DepthLevel {
             side,
             price,
@@ -284,13 +241,13 @@ mod tests {
         }
     }
 
-    fn book(levels: Vec<DepthLevel>) -> Book {
+    pub(crate) fn book(levels: Vec<DepthLevel>) -> Book {
         Book { seq: 1, levels }
     }
 
     /// An ore gatherer's pack after the wilds: a few low units from the
     /// ring, and most of it C and B.
-    fn wild_ore() -> Units {
+    pub(crate) fn wild_ore() -> Units {
         Units::from_pairs([(12, 4), (40, 6), (62, 20), (80, 30), (93, 3)])
     }
 
@@ -304,75 +261,23 @@ mod tests {
         assert_eq!(carried(1, 95, 0), 1, "never under a Strand");
     }
 
-    /// `plan_sale` for a gatherer with no ask up and nothing promised.
-    fn plan(held: &Units, quantity: i32, price: i64, book: Option<&Book>) -> Plan {
-        plan_sale(held, quantity, 20, price, book, None, false, false, true)
-    }
-
     #[test]
-    fn a_gatherer_sells_its_lowest_into_a_bid_for_any_grade_and_stands_its_best_at_a_premium() {
-        // #429: the book bids 10 for any ore, and before this the sale took
-        // the lowest units at that price and nothing showed the better
-        let b = book(vec![level(OrderSide::Buy, 10, "F", 40)]);
-        let p = plan(&wild_ore(), 20, 10, Some(&b));
-        let sell = p.sell.unwrap();
-        assert_eq!(sell.units, Units::from_pairs([(12, 4), (40, 6), (62, 10)]), "the units named, the lowest");
-        assert_eq!(sell.price, 10, "at the mind's price, as before");
-        let stand = p.stand.unwrap();
-        assert_eq!(stand.units, Units::uniform(3, 93), "its best grade, apart");
-        // Carried from the mean of what the bid gets (Q45) to A's middle
-        assert_eq!(stand.price, carried(10, 45, 95));
-        assert!(stand.price > 10, "at a premium: {}", stand.price);
-    }
-
-    #[test]
-    fn with_its_ask_up_or_its_units_promised_nothing_more_stands() {
-        let b = book(vec![level(OrderSide::Buy, 10, "F", 40)]);
-        for (asking, free) in [(true, true), (false, false)] {
-            let p = plan_sale(&wild_ore(), 20, 20, 10, Some(&b), None, false, asking, free);
-            assert_eq!(p.stand, None);
-            assert_eq!(p.sell.unwrap().units, Units::from_pairs([(12, 4), (40, 6), (62, 10)]));
-        }
-    }
-
-    #[test]
-    fn a_bid_for_a_grade_buys_that_grade_at_its_price() {
-        // Bids best first, as the server sends them
-        let b = book(vec![level(OrderSide::Buy, 18, "B", 10), level(OrderSide::Buy, 10, "F", 40)]);
-        let p = plan(&wild_ore(), 10, 18, Some(&b));
-        assert_eq!(p.sell, Some(Sale { units: Units::uniform(10, 80), price: 18 }));
-        // A stands, carried from B, the grade the mind's price was for
-        assert_eq!(p.stand, Some(Sale { units: Units::uniform(3, 93), price: carried(18, 82, 95) }));
-    }
-
-    #[test]
-    fn a_bid_for_any_grade_that_pays_the_premium_takes_the_best() {
-        let b = book(vec![level(OrderSide::Buy, 30, "F", 40)]);
-        let p = plan(&wild_ore(), 20, 10, Some(&b));
-        assert_eq!(p.sell, Some(Sale { units: Units::uniform(3, 93), price: 30 }));
-        assert_eq!(p.stand, None, "its best is sold");
-    }
-
-    #[test]
-    fn a_crafter_keeps_its_best_and_sells_its_lowest() {
-        let b = book(vec![level(OrderSide::Buy, 10, "F", 40)]);
-        let p = plan_sale(&wild_ore(), 5, 20, 10, Some(&b), None, true, false, true);
-        assert_eq!(p.sell, Some(Sale { units: Units::from_pairs([(12, 4), (40, 1)]), price: 10 }));
-        assert_eq!(p.stand, None);
-    }
-
-    #[test]
-    fn an_empty_book_opens_at_a_grade_and_a_standing_ask_is_not_doubled() {
-        // #501: nobody bids or asks, the price is a worth, for Q50 or the last trade
-        let p = plan(&wild_ore(), 40, 10, None);
-        assert_eq!(p.sell, None);
-        assert_eq!(p.stand, Some(Sale { units: Units::uniform(3, 93), price: carried(10, 50, 95) }));
-        let p = plan_sale(&wild_ore(), 40, 20, 10, None, Some(70), false, false, true);
-        assert_eq!(p.stand.unwrap().price, carried(10, 70, 95));
-        assert_eq!(plan_sale(&wild_ore(), 40, 20, 10, None, None, false, true, true), Plan::default());
-        // One that keeps its best opens with its lowest
-        let p = plan_sale(&wild_ore(), 40, 20, 10, None, None, true, false, true);
-        assert_eq!(p.stand, Some(Sale { units: Units::uniform(4, 12), price: carried(10, 50, 17) }));
+    fn the_book_is_quoted_grade_by_grade() {
+        // #579: a bid for any ore at 10, one for C at 14, and a B asked at 25
+        let b = book(vec![
+            level(OrderSide::Buy, 14, "C", 5),
+            level(OrderSide::Buy, 10, "F", 40),
+            level(OrderSide::Sell, 25, "B", 5),
+        ]);
+        let q = quotes(Some(&b), Some(10), 44);
+        let at = |g: &str| q.iter().find(|q| q.grade == g).unwrap();
+        assert_eq!(q.len(), 5);
+        assert_eq!((at("A").bid, at("B").bid, at("C").bid, at("D").bid, at("F").bid), (Some(14), Some(14), Some(14), Some(10), Some(10)));
+        assert_eq!((at("B").ask, at("C").ask), (Some(25), None));
+        assert_eq!(at("B").worth, Some(carried(10, 44, 82)));
+        assert_eq!(at("D").worth, Some(10), "D's middle is the quality the price is for");
+        // Nothing known of a grade: left out
+        assert!(quotes(None, None, 50).is_empty());
     }
 
     #[test]
@@ -386,27 +291,53 @@ mod tests {
     }
 
     #[test]
-    fn a_one_grade_lot_meets_a_bid_at_or_below_its_grade() {
+    fn a_one_grade_lot_meets_a_bid_at_or_below_its_grade_and_a_buy_an_ask_at_or_above() {
         let b = book(vec![level(OrderSide::Buy, 30, "A", 1), level(OrderSide::Buy, 14, "C", 1), level(OrderSide::Buy, 9, "F", 1)]);
         assert_eq!(taker(Some(&b), "B"), Some(14));
         assert_eq!(taker(Some(&b), "A"), Some(30));
         assert_eq!(taker(Some(&b), "F"), Some(9));
         assert_eq!(taker(None, "A"), None);
+        let b = book(vec![level(OrderSide::Sell, 8, "D", 1), level(OrderSide::Sell, 20, "A", 1), level(OrderSide::Sell, 16, "B", 1)]);
+        assert_eq!(ask_meeting(Some(&b), "C"), Some(16));
+        assert_eq!(ask_meeting(Some(&b), "D"), Some(8));
+        assert_eq!(ask_meeting(Some(&b), "A"), Some(20));
     }
 
     #[test]
-    fn a_crafter_bids_for_a_grade_of_its_main_ingredient_by_its_thrift() {
+    fn a_sale_for_any_grade_takes_the_loose_units_and_never_a_better_grade() {
+        // A bid for any ore at 10, for ore typically Q44: everything over D
+        // is worth more than that, so only the F and D units are loose
+        let b = book(vec![level(OrderSide::Buy, 10, "F", 40)]);
+        let held = wild_ore();
+        assert_eq!(loose(&held, 10, 44, Some(&b), false), Units::from_pairs([(12, 4), (40, 6)]));
+        assert!(apart(&held, "C", 10, 44, Some(&b), false));
+        assert!(!apart(&held, "D", 10, 44, Some(&b), false));
+        // A bid for D at 9 keeps the D units out of it too
+        let b = book(vec![level(OrderSide::Buy, 10, "F", 40), level(OrderSide::Buy, 9, "D", 10)]);
+        assert_eq!(loose(&held, 10, 44, Some(&b), false), Units::uniform(4, 12));
+        // A crafter that keeps its best sells everything else
+        assert_eq!(loose(&held, 10, 44, Some(&b), true), Units::from_pairs([(12, 4), (40, 6), (62, 20), (80, 30)]));
+    }
+
+    #[test]
+    fn a_lot_is_one_grade_best_first_or_lowest_for_one_that_keeps_its_best() {
+        let held = Units::from_pairs([(62, 5), (70, 5), (80, 2)]);
+        assert_eq!(lot(&held, "C", 6, false), Some(Units::from_pairs([(62, 1), (70, 5)])));
+        assert_eq!(lot(&held, "C", 6, true), Some(Units::from_pairs([(62, 5), (70, 1)])));
+        assert_eq!(lot(&held, "C", 50, false), Some(Units::from_pairs([(62, 5), (70, 5)])), "no more than it holds");
+        assert_eq!(lot(&held, "A", 1, false), None);
+    }
+
+    #[test]
+    fn the_main_ingredient_of_what_its_jobs_make_is_offered_by_grade() {
         use crate::sim::Craft;
         let catalog = Catalog::fallback();
         let smith = [Role::Crafter(Craft::Ingots)];
         // Ore is 0.85 of an ingot's inputs; charcoal the rest
-        assert_eq!(bid_grade(&catalog, "iron_ore", &smith, 0.1), Some("B"));
-        assert_eq!(bid_grade(&catalog, "iron_ore", &smith, 0.4), Some("C"));
-        assert_eq!(bid_grade(&catalog, "iron_ore", &smith, 0.6), Some("D"));
-        assert_eq!(bid_grade(&catalog, "iron_ore", &smith, 0.9), None, "the thriftiest take any");
-        assert_eq!(bid_grade(&catalog, "charcoal", &smith, 0.1), None, "not its main ingredient");
-        assert_eq!(bid_grade(&catalog, "log", &[Role::Crafter(Craft::Planks)], 0.4), Some("C"));
-        assert_eq!(bid_grade(&catalog, "iron_ore", &[Role::Crafter(Craft::Planks)], 0.1), None, "not what it makes");
+        assert!(main_ingredient(&catalog, "iron_ore", &smith));
+        assert!(!main_ingredient(&catalog, "charcoal", &smith), "not its main ingredient");
+        assert!(main_ingredient(&catalog, "log", &[Role::Crafter(Craft::Planks)]));
+        assert!(!main_ingredient(&catalog, "iron_ore", &[Role::Crafter(Craft::Planks)]), "not what it makes");
     }
 
     fn trade(quality: i32, price: i64, quantity: i32) -> MarketTrade {

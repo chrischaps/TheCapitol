@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use super::super::plan::Holdings;
 use super::super::report::{AskFate, Entry};
-use super::super::{bid_menu, grade, is_tool, stall_at, stall_menu, surplus, worth_unbooked, Trade, STALL_DAYS};
+use super::super::{
+    bid_menu, grade, graded_bids, graded_sell_menu, is_tool, stall_at, stall_menu, surplus, worth_unbooked, Trade, STALL_DAYS,
+};
 use super::{Action, SimBot};
 use crate::bazaar;
 use crate::bot::BotError;
@@ -251,6 +253,70 @@ impl SimBot {
         meet::worth(state, item).or_else(|| worth_unbooked(state.catalog(), item))
     }
 
+    /// The quality its [`worth`](Self::worth) of `item` is for: its typical
+    /// trade's, else the best bid's grade, or Q50 (#429).
+    pub(super) fn worth_quality(&self, item: &str) -> i32 {
+        let market = self.bot.state().market();
+        grade::worth_quality(market.book(item), grade::typical_quality(market.trades(item)))
+    }
+
+    /// Whether its work keeps the best of `item` for its own crafts, and
+    /// sells its lowest.
+    pub(super) fn keeps_best(&self, item: &str) -> bool {
+        self.job().uses().contains(&item) || self.wants().contains(&item)
+    }
+
+    /// Whether an ask of `item` may stand: none stands already, and its
+    /// claims want none of it, which stays in hand.
+    pub(super) fn may_stand(&self, item: &str) -> bool {
+        let asking = self
+            .bot
+            .state()
+            .market()
+            .open_orders()
+            .iter()
+            .any(|o| o.side == OrderSide::Sell && o.item_type == item);
+        !asking && !self.board.promised().iter().any(|(i, _)| i == item)
+    }
+
+    /// Whether a citizen's menus offer `item` by grade (#579): it's the
+    /// main ingredient of what the jobs it's near make.
+    pub(super) fn main_ingredient(&self, item: &str) -> bool {
+        let jobs = surplus::near(&self.calling, self.job());
+        self.people && !is_tool(item) && grade::main_ingredient(self.bot.state().catalog(), item, &jobs)
+    }
+
+    /// The stack it sells `item` from: the biggest; of tools, which don't
+    /// stack, the freshest, so it keeps its most worn to use up. The book
+    /// shows a tool's wear (#547), so it's priced by the share of its uses
+    /// left, as at a stall.
+    pub(super) fn sell_stack(&self, item: &str) -> Option<SlotItem> {
+        let inventory = self.bot.state().inventory()?;
+        inventory
+            .items()
+            .filter(|i| i.item_type == item)
+            .max_by_key(|i| (i.quantity, i.durability.unwrap_or(0)))
+            .cloned()
+    }
+
+    /// The menu for selling `spare` of the good `item` by grade (#579),
+    /// from the stack it sells from.
+    pub(super) fn graded_sell_menu(&self, holdings: &Holdings, item: &str, spare: i32) -> Option<Vec<Choice>> {
+        let stack = self.sell_stack(item)?;
+        let book = self.bot.state().market().book(item);
+        graded_sell_menu(
+            holdings,
+            item,
+            spare,
+            &stack.units,
+            book,
+            self.worth(item),
+            self.worth_quality(item),
+            self.keeps_best(item),
+            self.may_stand(item),
+        )
+    }
+
     /// Whether it has a standing bid up for `item`.
     pub(super) fn bidding(&self, item: &str) -> bool {
         self.bot
@@ -292,10 +358,17 @@ impl SimBot {
         if !self.people {
             return None;
         }
-        let menu = bid_menu(holdings, item, &self.wants(), self.worth(item), self.bidding(item))?;
-        match self.decide(Question::Buy { item: item.into() }, menu, 1, holdings)? {
-            (d, Choice::Bid { item, .. }) => Some(Trade::Bid {
+        let mut menu = bid_menu(holdings, item, &self.wants(), self.worth(item), self.bidding(item))?;
+        // Its main ingredient, by grade too: which grade is the mind's to
+        // choose (#579)
+        if self.main_ingredient(item) {
+            graded_bids(&mut menu, holdings, item, self.worth(item), self.worth_quality(item));
+        }
+        let gather = menu.len() - 1;
+        match self.decide(Question::Buy { item: item.into() }, menu, gather, holdings)? {
+            (d, Choice::Bid { item, grade, .. }) => Some(Trade::Bid {
                 item,
+                grade,
                 quantity: d.quantity?,
                 price: d.price?,
             }),
@@ -340,8 +413,16 @@ impl SimBot {
                 self.settle(mark, None, &Ok(()));
                 continue;
             };
-            let Trade::Bid { item, quantity, price } = &trade else { unreachable!() };
-            let result = self.bid(item, *quantity, *price);
+            let Trade::Bid {
+                item,
+                grade,
+                quantity,
+                price,
+            } = &trade
+            else {
+                unreachable!()
+            };
+            let result = self.bid(item, grade.as_deref(), *quantity, *price);
             self.settle(mark, Some(&Action::Trade(trade)), &result);
             result?;
         }
@@ -351,25 +432,10 @@ impl SimBot {
         self.post_patronage()
     }
 
-    /// Leaves a bid for `quantity` of `item` at `price` on the book, to
-    /// stand until it fills or goes stale. The bot must be at the hall.
-    pub(super) fn bid(&mut self, item: &str, quantity: i32, price: i64) -> Result<(), BotError> {
-        // For the main ingredient of what it makes, a grade by its thrift, at
-        // the grade's price, carried from the worth its price came from (#429)
-        let jobs = surplus::near(&self.calling, self.job());
-        let state = self.bot.state();
-        let wanted = (!is_tool(item))
-            .then(|| grade::bid_grade(state.catalog(), item, &jobs, self.mind.temperament.thrift))
-            .flatten();
-        let (price, quantity) = match wanted.and_then(grade::grade_mid) {
-            Some(mid) => {
-                let market = state.market();
-                let at = grade::worth_quality(market.book(item), grade::typical_quality(market.trades(item)));
-                let price = grade::carried(price, at, mid);
-                (price, quantity.min(super::super::affordable(&self.holdings(), price)))
-            }
-            None => (price, quantity),
-        };
+    /// Leaves a bid for `quantity` of `item` at `price` on the book, for
+    /// `grade` or better or any, as the mind chose (#579), to stand until it
+    /// fills or goes stale. The bot must be at the hall.
+    pub(super) fn bid(&mut self, item: &str, grade: Option<&str>, quantity: i32, price: i64) -> Result<(), BotError> {
         if quantity < 1 {
             return Ok(());
         }
@@ -380,7 +446,7 @@ impl SimBot {
             quantity,
             item_id: None,
             qualities: None,
-            min_grade: wanted.map(String::from),
+            min_grade: grade.map(String::from),
             grade_rule: None,
             // A tool: at least half its uses (#547)
             min_durability: super::super::fewest_uses(self.bot.state().catalog(), item),

@@ -79,20 +79,28 @@ const EARSHOT: f64 = 15.0;
 
 /// The books a citizen watches, as it sees them: best bid and ask, and the
 /// last trade, of each of the hall's goods and the tools ([`watched`],
-/// Callings K2.1). A good's last trade is the median of its latest few
-/// ([`grade::typical_last`], #429), so a lot sold at a grade's premium
-/// doesn't raise its worth for any grade; a tool's is as it sold.
+/// Callings K2.1), and a good's split by grade (#579). A good's last trade
+/// is the median of its latest few ([`grade::typical_last`], #429), so a lot
+/// sold at a grade's premium doesn't raise its worth for any grade; a
+/// tool's is as it sold.
 pub fn quotes(state: &GameState) -> Vec<Quote> {
     watched()
         .map(|item| {
             let book = state.market().book(item);
             let trades: Vec<_> = state.market().trades(item).collect();
-            Quote {
+            let mut quote = Quote {
                 item: item.to_string(),
                 bid: book.and_then(|b| b.best_bid()),
                 ask: book.and_then(|b| b.best_ask()),
                 last: if is_tool(item) { trades.first().map(|t| t.price) } else { grade::typical_last(&trades) },
+                grades: Vec::new(),
+            };
+            // A good's book by grade, its worth carried to each (#579)
+            if !is_tool(item) {
+                let at = grade::worth_quality(book, grade::typical_quality(trades.iter().copied()));
+                quote.grades = grade::quotes(book, worth_in(std::slice::from_ref(&quote), item), at);
             }
+            quote
         })
         .collect()
 }
@@ -795,6 +803,7 @@ mod tests {
             bid: None,
             ask: None,
             last: Some(price),
+            grades: Vec::new(),
         }]
     }
 
@@ -861,6 +870,7 @@ mod tests {
             bid: None,
             ask: None,
             last: Some(6),
+            grades: Vec::new(),
         });
         let side = window(Some(&inv), &wares(&[("log", 4), ("iron_ore", 3)]), &market);
         assert_eq!(side.lines, vec![(LOGS, "log".to_string(), 4), (ORE, "iron_ore".to_string(), 3)]);
@@ -1088,6 +1098,7 @@ mod tests {
             bid: None,
             ask: None,
             last: Some(20),
+            grades: Vec::new(),
         });
         let menu = ask_menu(&wants, &spare, &holdings, &market, &[ada.clone(), ivor.clone(), hazel.clone()]).unwrap();
         assert_eq!(
@@ -1144,6 +1155,7 @@ mod tests {
             bid: None,
             ask: None,
             last: Some(6),
+            grades: Vec::new(),
         });
         let spare = [("iron_ore", 30), ("plank", 14)];
         let menu = ask_menu(&[], &spare, &holdings, &market, &[ada, ida, hazel]).unwrap();

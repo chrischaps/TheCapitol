@@ -512,6 +512,7 @@ mod tests {
             Choice::Keep,
             Choice::Sell {
                 item: "log".into(),
+                grade: None,
                 price: Span::new(2, 6),
                 quantity: Span::new(1, 10),
             },

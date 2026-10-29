@@ -321,13 +321,37 @@ fn character(t: &Temperament) -> String {
 
 fn book(q: &super::Quote) -> String {
     let side = |v: Option<i64>, none: &str, some: &str| v.map_or(none.to_string(), |p| format!("{some} {p}"));
-    format!(
+    let mut out = format!(
         "{} {}, {}, {}",
         q.item.replace('_', " "),
         side(q.bid, "no bids", "bid"),
         side(q.ask, "no offers", "ask"),
         side(q.last, "never traded", "last traded at")
-    )
+    );
+    // By grade (#579): what each takes, is asked and is worth
+    let grades: Vec<String> = q
+        .grades
+        .iter()
+        .map(|g| {
+            let said: Vec<String> = [(g.bid, "bid"), (g.ask, "ask"), (g.worth, "worth")]
+                .into_iter()
+                .filter_map(|(v, what)| v.map(|v| format!("{what} {v}")))
+                .collect();
+            format!("{} {}", g.grade, said.join(" "))
+        })
+        .collect();
+    if !grades.is_empty() {
+        out.push_str(&format!(" (by grade: {})", grades.join(", ")));
+    }
+    out
+}
+
+/// `grade B or better iron_ore`, or `iron_ore` for any grade.
+fn graded(item: &str, grade: Option<&str>) -> String {
+    match grade {
+        Some(g) => format!("grade {g} or better {item}"),
+        None => item.to_string(),
+    }
 }
 
 /// `a, b and c`.
@@ -509,9 +533,9 @@ pub fn label(c: &Choice) -> String {
     match c {
         Choice::Work { goal, .. } => format!("work: {goal}"),
         Choice::Bank => "bank".into(),
-        Choice::Sell { item, .. } => format!("sell {item}"),
-        Choice::Buy { item, .. } => format!("buy {item}"),
-        Choice::Bid { item, .. } => format!("bid for {item}"),
+        Choice::Sell { item, grade, .. } => format!("sell {}{item}", grade.as_ref().map_or(String::new(), |g| format!("{g} "))),
+        Choice::Buy { item, grade, .. } => format!("buy {}{item}", grade.as_ref().map_or(String::new(), |g| format!("{g} "))),
+        Choice::Bid { item, grade, .. } => format!("bid for {}{item}", grade.as_ref().map_or(String::new(), |g| format!("{g} "))),
         Choice::Stock { item, .. } => format!("stock stall with {item}"),
         Choice::Keep => "keep".into(),
         Choice::Gather { item } => format!("gather {item}"),
@@ -580,18 +604,24 @@ pub fn entry(c: &Choice) -> String {
     match c {
         Choice::Work { goal, step } => format!("Work toward {goal}; the next step is {step}"),
         Choice::Bank => "Take your fiber to the exchange for Strands".into(),
-        Choice::Sell { item, price, quantity } => format!(
-            "Sell {item} at the hall now, at {} Strands each, {} of them",
+        Choice::Sell { item, grade, price, quantity } => format!(
+            "Sell {} at the hall now, at {} Strands each, {} of them",
+            match grade {
+                Some(g) => format!("your grade {g} {item}, a lot of that grade alone, standing as an ask if no bid takes it"),
+                None => item.clone(),
+            },
             range(price),
             count(quantity)
         ),
-        Choice::Buy { item, price, quantity } => format!(
-            "Buy {item} at the hall now, paying up to {} Strands each, {} of them",
+        Choice::Buy { item, grade, price, quantity } => format!(
+            "Buy {} at the hall now, paying up to {} Strands each, {} of them",
+            graded(item, grade.as_deref()),
             range(price),
             count(quantity)
         ),
-        Choice::Bid { item, price, quantity } => format!(
-            "Leave a standing bid for {item} at the hall, which anyone may sell into while you work: {} Strands each, for {} of them",
+        Choice::Bid { item, grade, price, quantity } => format!(
+            "Leave a standing bid for {} at the hall, which anyone may sell into while you work: {} Strands each, for {} of them",
+            graded(item, grade.as_deref()),
             range(price),
             count(quantity)
         ),
@@ -739,6 +769,7 @@ mod tests {
                 bid: None,
                 ask: Some(5),
                 last: Some(3),
+                grades: Vec::new(),
             }],
             question: Question::Sell { item: "plank".into() },
             menu: vec![Choice::Keep],
@@ -863,6 +894,40 @@ mod tests {
         assert_eq!(role("gatherer-ore"), "an ore gatherer");
         assert_eq!(role("crafter-iron_ingots"), "an iron ingots crafter");
         assert_eq!(role("builder"), "a builder");
+    }
+
+    #[test]
+    fn a_grade_reads_in_the_books_and_the_entries() {
+        // #579: a model tier sees the grades it chooses between
+        let q = super::super::Quote {
+            item: "iron_ore".into(),
+            bid: Some(10),
+            ask: None,
+            last: Some(10),
+            grades: vec![super::super::GradeQuote {
+                grade: "B".into(),
+                bid: Some(18),
+                ask: None,
+                worth: Some(14),
+            }],
+        };
+        assert_eq!(book(&q), "iron ore bid 10, no offers, last traded at 10 (by grade: B bid 18 worth 14)");
+        let sell = Choice::Sell {
+            item: "iron_ore".into(),
+            grade: Some("B".into()),
+            price: Span::new(9, 36),
+            quantity: Span::new(1, 30),
+        };
+        assert_eq!(label(&sell), "sell B iron_ore");
+        assert!(entry(&sell).starts_with("Sell your grade B iron_ore, a lot of that grade alone"), "{}", entry(&sell));
+        let bid = Choice::Bid {
+            item: "iron_ore".into(),
+            grade: Some("C".into()),
+            price: Span::new(4, 12),
+            quantity: Span::new(1, 10),
+        };
+        assert_eq!(label(&bid), "bid for C iron_ore");
+        assert!(entry(&bid).contains("bid for grade C or better iron_ore"), "{}", entry(&bid));
     }
 
     #[test]

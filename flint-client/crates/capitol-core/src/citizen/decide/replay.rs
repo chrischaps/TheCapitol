@@ -967,6 +967,7 @@ mod tests {
         s.holdings.items.insert("log".into(), 10);
         s.menu.push(Choice::Bid {
             item: "log".into(),
+            grade: None,
             price: Span::new(1, 9),
             quantity: Span::new(1, 9),
         });
