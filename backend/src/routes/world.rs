@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
+use tower_http::{compression::CompressionLayer, CompressionLevel};
 use uuid::Uuid;
 
 use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyQuery, NearbyResponse};
@@ -18,7 +19,10 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/nearby", get(get_nearby))
-        .route("/nodes", get(get_all_nodes))
+        // Every node is about 2.5 MB of JSON since the flip (#460). The
+        // fastest gzip makes it 0.7 MB in about 20 ms, off the tick; the
+        // clients' reqwest asks for it.
+        .route("/nodes", get(get_all_nodes).layer(CompressionLayer::new().quality(CompressionLevel::Fastest)))
         .route("/extract", post(start_extraction))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
@@ -80,8 +84,8 @@ pub async fn get_nearby(
 /// Every resource node in the world, wherever the player is (E2.5). The
 /// Flint client draws the woods and outcrops from it, so they stand on the
 /// horizon rather than appearing as you walk; the nearby list and the
-/// WebSocket keep the states near you current. About a thousand nodes on the
-/// default world, fetched once a session.
+/// WebSocket keep the states near you current. About 18,000 nodes on the
+/// default world since Plots v2 (#460), fetched once a session, gzipped.
 #[utoipa::path(
     get,
     path = "/world/nodes",
