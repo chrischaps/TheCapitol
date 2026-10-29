@@ -80,7 +80,7 @@ pub async fn found(
     let founder = player_of(&state.db, subscriber.account_id).await?;
     let (_, told) = found_at_the_hall(&state.game, &state.db, founder, &req).await?;
     tell(&state, told).await;
-    Ok(Json(guilds::mine(&state.db, founder).await.map_err(refused)?))
+    Ok(Json(guilds::mine(&state.db, founder, &lots(&state).await).await.map_err(refused)?))
 }
 
 /// [`found`] past its extractor: at the hall, then the registry's.
@@ -113,7 +113,7 @@ pub async fn get_guild(
     Path(id): Path<Uuid>,
 ) -> Result<Json<GuildDetail>, AppError> {
     let viewer = player_of(&state.db, auth_user.account_id).await.ok();
-    Ok(Json(guilds::detail(&state.db, id, viewer).await.map_err(refused)?))
+    Ok(Json(guilds::detail(&state.db, id, viewer, &lots(&state).await).await.map_err(refused)?))
 }
 
 /// Ask to join a guild. If it invited you, you're in, for a Strand.
@@ -411,7 +411,12 @@ pub async fn claim_hall(
 /// Tell what `told` says, then answer `player` with their guild now.
 async fn answer(state: &AppState, player: Uuid, told: Told) -> Result<Json<MyGuild>, AppError> {
     tell(state, told).await;
-    Ok(Json(guilds::mine(&state.db, player).await.map_err(refused)?))
+    Ok(Json(guilds::mine(&state.db, player, &lots(state).await).await.map_err(refused)?))
+}
+
+/// The tax rate now and the world's addresses, for a guild's hall (#582)
+pub(crate) async fn lots(state: &AppState) -> guilds::Lots {
+    guilds::Lots { rate: state.tunables.get().property_tax_rate, addresses: state.game.read().await.addresses.clone() }
 }
 
 /// Sends a committed change's `guild_changed`, its notices and the payer's
@@ -494,7 +499,7 @@ mod tests {
         let (id, _) = found_at_the_hall(&game, &db, ada, &req).await.unwrap();
         let balance: i64 = sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1").bind(ada).fetch_one(&db).await.unwrap();
         assert_eq!(balance, 600 - FOUNDING_FEE);
-        assert_eq!(guilds::mine(&db, ada).await.unwrap().guild.map(|g| g.id), Some(id));
+        assert_eq!(guilds::mine(&db, ada, &guilds::Lots::default()).await.unwrap().guild.map(|g| g.id), Some(id));
     }
 
     #[test]

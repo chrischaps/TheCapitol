@@ -49,6 +49,7 @@
 //! those named, which wait for anyone away ([`notices::queue`]).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use capitol_protocol::rest::{
     Correspondent, GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary, MyGuild, Subscription,
@@ -959,7 +960,7 @@ pub async fn claim_hall(
     if role != GuildRole::Leader {
         return Err(GuildError::NotAllowed("Only the leader claims a hall for the guild"));
     }
-    if hall_of(&mut tx, guild_id).await?.is_some() {
+    if hall_of(&mut tx, guild_id, &Lots::default()).await?.is_some() {
         return Err(GuildError::HasAHall);
     }
     let row: Option<(String, Option<Uuid>, Option<i32>, f32, f32)> = sqlx::query_as(
@@ -1115,20 +1116,38 @@ pub(crate) async fn officers(conn: &mut PgConnection, guild_id: Uuid) -> Result<
     officers_of(conn, guild_id).await
 }
 
-/// `guild_id`'s hall, as its members see it.
-async fn hall_of(conn: &mut PgConnection, guild_id: Uuid) -> Result<Option<GuildHall>, sqlx::Error> {
-    let row: Option<(Uuid, Option<String>, f32, f32, Option<DateTime<Utc>>, i32)> = sqlx::query_as(
-        "SELECT id, terrain_id, world_x, world_y, claimed_at, tax_owed FROM plots WHERE guild_id = $1",
+/// What a hall reads off the world (#582): the property tax rate now, for
+/// its weekly tax, and every lot's address (`GameState::addresses`)
+#[derive(Debug, Clone)]
+pub struct Lots {
+    pub rate: f64,
+    pub addresses: Arc<HashMap<String, String>>,
+}
+
+impl Default for Lots {
+    /// The default rate, and no addresses
+    fn default() -> Self {
+        Lots { rate: capitol_protocol::tunables::PROPERTY_TAX_RATE, addresses: Arc::default() }
+    }
+}
+
+/// `guild_id`'s hall, as its members see it, at the tax rate and with the
+/// addresses of `lots`.
+async fn hall_of(conn: &mut PgConnection, guild_id: Uuid, lots: &Lots) -> Result<Option<GuildHall>, sqlx::Error> {
+    let row: Option<(Uuid, Option<String>, f32, f32, Option<DateTime<Utc>>, i32, i32)> = sqlx::query_as(
+        "SELECT id, terrain_id, world_x, world_y, claimed_at, tax_owed, assessed_value FROM plots WHERE guild_id = $1",
     )
     .bind(guild_id)
     .fetch_optional(conn)
     .await?;
-    Ok(row.map(|(plot_id, terrain_id, x, y, claimed_at, tax_owed)| GuildHall {
+    Ok(row.map(|(plot_id, terrain_id, x, y, claimed_at, tax_owed, assessed_value)| GuildHall {
         plot_id,
+        address: terrain_id.as_ref().and_then(|lot| lots.addresses.get(lot).cloned()),
         terrain_id,
         x: x as f64,
         y: y as f64,
         claimed_at: claimed_at.unwrap_or(DateTime::UNIX_EPOCH),
+        weekly_tax: weekly_tax(assessed_value, lots.rate),
         tax_owed: tax_owed as i64,
     }))
 }
@@ -1216,13 +1235,19 @@ pub async fn list(db: &PgPool) -> Result<Vec<GuildSummary>, sqlx::Error> {
 }
 
 /// The guild `guild_id` as `viewer` sees it: who's waiting only for its
-/// officers and leader.
-pub async fn detail(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>) -> Result<GuildDetail, GuildError> {
-    detail_at(db, guild_id, viewer, Utc::now()).await
+/// officers and leader. Its hall reads its address and tax off `lots`.
+pub async fn detail(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>, lots: &Lots) -> Result<GuildDetail, GuildError> {
+    detail_at(db, guild_id, viewer, lots, Utc::now()).await
 }
 
 /// [`detail`] as of `now`, for the week an officer's withdrawals count in.
-async fn detail_at(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>, now: DateTime<Utc>) -> Result<GuildDetail, GuildError> {
+async fn detail_at(
+    db: &PgPool,
+    guild_id: Uuid,
+    viewer: Option<Uuid>,
+    lots: &Lots,
+    now: DateTime<Utc>,
+) -> Result<GuildDetail, GuildError> {
     let mut conn = db.acquire().await?;
     type Row = (String, String, String, DateTime<Utc>, Uuid, String, bool, Uuid, String, bool);
     let row: Option<Row> = sqlx::query_as(
@@ -1289,7 +1314,7 @@ async fn detail_at(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>, now: DateT
         None => None,
     };
     // Where its hall stands is anyone's to see; what it owes, its members'
-    let hall = hall_of(&mut conn, guild_id).await?.map(|h| GuildHall {
+    let hall = hall_of(&mut conn, guild_id, lots).await?.map(|h| GuildHall {
         tax_owed: if member.is_some() { h.tax_owed } else { 0 },
         ..h
     });
@@ -1309,8 +1334,8 @@ async fn detail_at(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>, now: DateT
 }
 
 /// `player`'s guild, their role in it, and the invitations and
-/// applications naming them.
-pub async fn mine(db: &PgPool, player: Uuid) -> Result<MyGuild, GuildError> {
+/// applications naming them. Its hall reads its address and tax off `lots`.
+pub async fn mine(db: &PgPool, player: Uuid, lots: &Lots) -> Result<MyGuild, GuildError> {
     let mut conn = db.acquire().await?;
     let invites = invites(&mut conn, "i.player_id", player).await?;
     let Some(guild_id) = guild_of(&mut conn, player).await? else {
@@ -1318,7 +1343,7 @@ pub async fn mine(db: &PgPool, player: Uuid) -> Result<MyGuild, GuildError> {
     };
     let role = role_in(&mut conn, guild_id, player).await?;
     drop(conn);
-    Ok(MyGuild { guild: Some(detail(db, guild_id, Some(player)).await?), role, invites })
+    Ok(MyGuild { guild: Some(detail(db, guild_id, Some(player), lots).await?), role, invites })
 }
 
 /// The guild `player` is in now (S4.4): the guild channel's reach.
@@ -1799,7 +1824,7 @@ mod tests {
         assert_eq!(strands_accounted(&db).await, total - guild::FOUNDING_FEE, "sunk, not held");
         assert_audited(&db, &start).await;
 
-        let detail = detail(&db, id, None).await.unwrap();
+        let detail = detail(&db, id, None, &Lots::default()).await.unwrap();
         assert_eq!((detail.name.as_str(), detail.tag.as_str(), detail.charter.as_str()), ("The Rope Walkers", "ROPE", "We make rope."));
         assert_eq!((detail.founder.id, detail.leader.id), (ada, ada));
         assert_eq!(detail.members.len(), 1);
@@ -1843,9 +1868,9 @@ mod tests {
         // Cy is asked by both, and joins one: the other's invitation lapses
         invite(&db, ada, ropers, cy, at(0)).await.unwrap();
         invite(&db, bea, weavers, cy, at(0)).await.unwrap();
-        assert_eq!(mine(&db, cy).await.unwrap().invites.len(), 2);
+        assert_eq!(mine(&db, cy, &Lots::default()).await.unwrap().invites.len(), 2);
         apply(&db, cy, ropers, at(1)).await.unwrap();
-        let cys = mine(&db, cy).await.unwrap();
+        let cys = mine(&db, cy, &Lots::default()).await.unwrap();
         assert_eq!((cys.guild.map(|g| g.id), cys.role, cys.invites.len()), (Some(ropers), Some(GuildRole::Member), 0));
         assert!(matches!(apply(&db, cy, weavers, at(1)).await, Err(GuildError::InAGuild)));
         // Their card says so (S0.3)
@@ -1868,9 +1893,9 @@ mod tests {
         let waiting = notices::take_all(&db, bea, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap();
         assert!(matches!(&waiting[..], [ServerMessage::GuildNotice { kind: GuildNoticeKind::Invited, who, tag, .. }] if *who == ada && tag == "ROPE"));
         assert!(matches!(invite(&db, ada, ropers, bea, at(1)).await, Err(GuildError::AlreadyWaiting)));
-        let as_leader = detail(&db, ropers, Some(ada)).await.unwrap();
+        let as_leader = detail(&db, ropers, Some(ada), &Lots::default()).await.unwrap();
         assert_eq!(as_leader.waiting.len(), 1);
-        assert!(detail(&db, ropers, Some(bea)).await.unwrap().waiting.is_empty(), "only officers see who's waiting");
+        assert!(detail(&db, ropers, Some(bea), &Lots::default()).await.unwrap().waiting.is_empty(), "only officers see who's waiting");
 
         // She accepts by applying, and pays the roster's Strand
         let told = apply(&db, bea, ropers, at(2)).await.unwrap();
@@ -1882,7 +1907,7 @@ mod tests {
         assert!(matches!(&told.notices[..], [(to, _, ServerMessage::GuildNotice { kind: GuildNoticeKind::Applied, citizen: true, .. })] if *to == ada));
         invite(&db, ada, ropers, brin, at(4)).await.unwrap();
         assert_eq!(role(&db, ropers, brin).await, Some(GuildRole::Member));
-        let members: Vec<Uuid> = detail(&db, ropers, None).await.unwrap().members.iter().map(|m| m.id).collect();
+        let members: Vec<Uuid> = detail(&db, ropers, None, &Lots::default()).await.unwrap().members.iter().map(|m| m.id).collect();
         assert_eq!(members, vec![ada, bea, brin], "the leader, then by tenure");
 
         // Withdrawn and declined
@@ -1893,7 +1918,7 @@ mod tests {
         apply(&db, cy, ropers, at(5)).await.unwrap();
         assert!(matches!(withdraw(&db, bea, ropers, cy).await, Err(GuildError::NotAllowed(_))), "a member can't turn someone down");
         withdraw(&db, ada, ropers, cy).await.unwrap();
-        assert!(mine(&db, cy).await.unwrap().invites.is_empty());
+        assert!(mine(&db, cy, &Lots::default()).await.unwrap().invites.is_empty());
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1945,7 +1970,7 @@ mod tests {
         let told = set_role(&db, ada, ropers, bea, GuildRole::Leader, at(7)).await.unwrap();
         assert!(matches!(&told.notices[..], [(to, _, ServerMessage::GuildNotice { kind: GuildNoticeKind::Lead, .. })] if *to == bea));
         assert_eq!((role(&db, ropers, bea).await, role(&db, ropers, ada).await), (Some(GuildRole::Leader), Some(GuildRole::Officer)));
-        assert_eq!(detail(&db, ropers, None).await.unwrap().leader.id, bea);
+        assert_eq!(detail(&db, ropers, None, &Lots::default()).await.unwrap().leader.id, bea);
 
         // Anyone else leaves, for nothing
         let before = balances_of(&db, [dee]).await[&dee];
@@ -2037,9 +2062,9 @@ mod tests {
         assert!(matches!(books(&db, ropers, outsider).await, Err(GuildError::NotInAGuild)), "only members read them");
         let flows = held_flows(&mut db.acquire().await.unwrap()).await.unwrap();
         assert_eq!(flows["guild_dues"], -130);
-        let seen = detail(&db, ropers, Some(bea)).await.unwrap().treasury.unwrap();
+        let seen = detail(&db, ropers, Some(bea), &Lots::default()).await.unwrap().treasury.unwrap();
         assert_eq!((seen.strands, seen.weekly_dues, seen.dissolves_at), (870, 65, 260));
-        assert!(detail(&db, ropers, None).await.unwrap().treasury.is_none(), "only members see it");
+        assert!(detail(&db, ropers, None, &Lots::default()).await.unwrap().treasury.is_none(), "only members see it");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2069,7 +2094,7 @@ mod tests {
         assert_eq!(told.paid, vec![bea]);
         assert!(matches!(withdraw_strands(&db, bea, ropers, 50, "", at(2)).await, Err(GuildError::OverLimit(40))));
         withdraw_strands(&db, bea, ropers, 40, "", at(2)).await.unwrap();
-        let seen = detail_at(&db, ropers, Some(bea), at(2)).await.unwrap().treasury.unwrap();
+        let seen = detail_at(&db, ropers, Some(bea), &Lots::default(), at(2)).await.unwrap().treasury.unwrap();
         assert_eq!((seen.strands, seen.withdrawal_limit, seen.withdrawn_this_week), (900, 100, 100));
         // A member can't at all; the leader has no limit, only the treasury's
         assert!(matches!(withdraw_strands(&db, cy, ropers, 1, "", at(2)).await, Err(GuildError::NotAllowed(_))));
@@ -2163,7 +2188,7 @@ mod tests {
         assert_eq!(treasury(&db, ropers).await, (0, guild::dissolves_at(3)));
         let status: String = sqlx::query_scalar("SELECT status FROM guilds WHERE id = $1").bind(ropers).fetch_one(&db).await.unwrap();
         assert_eq!(status, "dissolved");
-        assert!(mine(&db, cy).await.unwrap().guild.is_none(), "the roster's cleared");
+        assert!(mine(&db, cy, &Lots::default()).await.unwrap().guild.is_none(), "the roster's cleared");
         assert!(collect_dues(&db, at(40)).await.is_empty(), "and no more dues");
         // Its name is free, and nothing was made or lost
         found(&db, ada, "The Rope Walkers", "ROPE", "", at(41)).await.unwrap();
@@ -2381,8 +2406,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(guild, Some(ropers), "for the Gazette's deeds column");
-        let hall = detail(&db, ropers, None).await.unwrap().hall.expect("anyone sees where its hall stands");
+        let lots = Lots { addresses: Arc::new(HashMap::from([("hall-1".into(), "3 Guild Ring".into())])), ..Lots::default() };
+        let hall = detail(&db, ropers, None, &lots).await.unwrap().hall.expect("anyone sees where its hall stands");
         assert_eq!((hall.plot_id, hall.terrain_id.as_deref()), (lot, Some("hall-1")));
+        // Its address, and a week's tax, 2% of its deed (#582)
+        assert_eq!((hall.address.as_deref(), hall.weekly_tax), (Some("3 Guild Ring"), HALL / 50));
 
         // One hall a guild, and one guild a lot
         deposit(&db, ada, ropers, HALL, at(2)).await.unwrap();
@@ -2471,7 +2499,7 @@ mod tests {
         assert_eq!(hall_row(&db, lot).await.0, None);
         assert_eq!(hall_row(&db, lot).await.1, None, "the guild's no longer");
         assert_eq!(treasury(&db, ropers).await.0, HALL - 400);
-        assert!(detail(&db, ropers, None).await.unwrap().hall.is_none());
+        assert!(detail(&db, ropers, None, &Lots::default()).await.unwrap().hall.is_none());
         let entry = books(&db, ropers, ada).await.unwrap().entries.remove(0);
         assert_eq!((entry.kind, entry.strands), (GuildEntryKind::Refund, HALL - 400));
 

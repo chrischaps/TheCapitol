@@ -606,6 +606,9 @@ mod tests {
         let lot = &world.terrain_plots.iter().find(|l| l.zone == "rural").expect("a farm").adjacent_street_id;
         let street = world.roads.iter().find(|r| &r.id == lot).and_then(|r| r.name.clone()).expect("named");
         let numbers = on_street(&format!(" {street}"));
+        // Every guild hall too, so a guild can say where its hall is (#582)
+        let halls: Vec<&str> = world.terrain_plots.iter().filter(|l| l.zone == "guild_district").map(|l| l.id.as_str()).collect();
+        assert!(!halls.is_empty() && halls.iter().all(|id| addresses.contains_key(*id)), "a hall with no address");
         assert!(numbers.contains(&1) || numbers.contains(&2), "{street}: {numbers:?}");
         let (odd, even): (Vec<usize>, Vec<usize>) = numbers.iter().partition(|n| *n % 2 == 1);
         assert!(odd.iter().enumerate().all(|(k, n)| *n == 2 * k + 1), "{street}: {odd:?}");
@@ -633,7 +636,7 @@ mod tests {
         }
         let addresses = world.addresses();
         let hall = world.landmarks[0].door;
-        for zone in ["rural", "suburban", "urban"] {
+        for zone in ["rural", "suburban", "urban", "guild_district"] {
             let mut near: Vec<_> = world.terrain_plots.iter().filter(|l| l.zone == zone).collect();
             let d = |l: &TerrainPlot| dist2(l.corners[0], hall);
             near.sort_by(|a, b| d(a).total_cmp(&d(b)));
