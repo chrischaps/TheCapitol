@@ -26,8 +26,12 @@
 //!
 //! The mind still chooses per item: its quotes have no grade, so the price
 //! is carried to the grade after it decides, and the bid's grade is a rule
-//! of thrift, not a choice (#579). A stall still stocks the lowest units at
-//! one price (#578).
+//! of thrift, not a choice (#579).
+//!
+//! A stall stocks a grade to a listing too (#578, [`plan_stall`]), every
+//! unit named and each grade at its own price ([`graded_price`]): a buyer
+//! who names no units gets a listing's best, so a listing of mixed grades
+//! sold its A units at the F's price.
 
 use capitol_protocol::rest::{DepthLevel, MarketTrade};
 use capitol_protocol::rules::market::{grade_floor, OrderSide};
@@ -67,6 +71,12 @@ pub fn grade_mid(grade: &str) -> Option<i32> {
 /// `price`, for units at `from`, carried to units at `to`.
 pub fn carried(price: i64, from: i32, to: i32) -> i64 {
     ((price as f64 * worth_factor(to) / worth_factor(from)).round() as i64).max(1)
+}
+
+/// `price`, for units at `at`, carried to `grade`'s middle: what a grade
+/// stands at with no book to hold it to. `price` itself if `grade` isn't one.
+pub fn graded_price(price: i64, at: i32, grade: &str) -> i64 {
+    grade_mid(grade).map_or(price.max(1), |mid| carried(price, at, mid))
 }
 
 /// The grade of the book's best bid.
@@ -135,10 +145,7 @@ pub fn taker(book: Option<&Book>, grade: &str) -> Option<i64> {
 /// cheapest ask at that grade, and never under the best bid that takes it
 /// (a bid for any grade at 6 takes B units too).
 pub fn premium(price: i64, at: i32, grade: &str, book: Option<&Book>) -> i64 {
-    let Some(mid) = grade_mid(grade) else {
-        return price.max(1);
-    };
-    let carried = carried(price, at, mid);
+    let carried = graded_price(price, at, grade);
     let asked = ask_at(book, grade).map_or(carried, |ask| carried.min(ask));
     asked.max(taker(book, grade).unwrap_or(1)).max(1)
 }
@@ -242,6 +249,35 @@ pub fn plan_sale(
         .filter(|g| !sold(g))
         .and_then(|g| of_grade(g, quantity.min(lot)).map(|units| Sale { units, price: premium(price, at, g, book) }));
     Plan { sell, stand }
+}
+
+/// What a citizen stocks its stall with (#578), the mind having chosen to
+/// stock up to `quantity` of `held` at `price` for units at `at` (the
+/// quality the worth it priced from was for, [`worth_quality`]): one listing
+/// a grade, its units named, at the grade's [`graded_price`], in no more
+/// than `room` listings. A gatherer stocks its best first; a citizen whose
+/// work uses the good (`keeps_best`) its lowest, as at the hall
+/// ([`plan_sale`]), and the shelf's room goes to the grades it stocks first.
+/// Best grade first either way, so the shelf reads down.
+pub fn plan_stall(held: &Units, quantity: i32, price: i64, at: i32, keeps_best: bool, room: usize) -> Vec<Sale> {
+    let pick = if keeps_best { Pick::Lowest } else { Pick::Best };
+    let Some(chosen) = held.pick(quantity.min(held.count() as i32), pick) else {
+        return Vec::new();
+    };
+    let mut grades: Vec<&str> = GRADES.iter().copied().filter(|g| !at_grade(&chosen, g).is_empty()).collect();
+    if keeps_best {
+        grades.reverse();
+    }
+    grades.truncate(room);
+    let mut sales: Vec<Sale> = grades
+        .into_iter()
+        .map(|g| Sale {
+            units: at_grade(&chosen, g),
+            price: graded_price(price, at, g),
+        })
+        .collect();
+    sales.sort_by_key(|s| std::cmp::Reverse(s.units.max()));
+    sales
 }
 
 /// The grade a crafter's standing bid for `item` asks (#429), or `None` for
@@ -407,6 +443,50 @@ mod tests {
         assert_eq!(bid_grade(&catalog, "charcoal", &smith, 0.1), None, "not its main ingredient");
         assert_eq!(bid_grade(&catalog, "log", &[Role::Crafter(Craft::Planks)], 0.4), Some("C"));
         assert_eq!(bid_grade(&catalog, "iron_ore", &[Role::Crafter(Craft::Planks)], 0.1), None, "not what it makes");
+    }
+
+    fn shelf(sales: &[Sale]) -> Vec<(Units, i64)> {
+        sales.iter().map(|s| (s.units.clone(), s.price)).collect()
+    }
+
+    #[test]
+    fn a_stall_stocks_a_grade_to_a_listing_each_at_its_price() {
+        // #578: 30 of the wild ore, the mind's price 10 for Q50
+        let p = plan_stall(&wild_ore(), 30, 10, 50, false, 24);
+        assert_eq!(
+            shelf(&p),
+            vec![(Units::uniform(3, 93), carried(10, 50, 95)), (Units::uniform(27, 80), carried(10, 50, 82))],
+            "its best first, each grade apart at its own price"
+        );
+        assert_eq!(p.iter().map(|s| s.price).collect::<Vec<_>>(), vec![15, 13], "A and B over the mind's 10");
+        // One whose work uses ore stocks its lowest, and the F goes under
+        // the mind's price, not at it
+        let p = plan_stall(&wild_ore(), 12, 10, 50, true, 24);
+        assert_eq!(
+            shelf(&p),
+            vec![
+                (Units::uniform(2, 62), carried(10, 50, 64)),
+                (Units::uniform(6, 40), carried(10, 50, 44)),
+                (Units::uniform(4, 12), carried(10, 50, 17)),
+            ]
+        );
+        assert_eq!(p.iter().map(|s| s.price).collect::<Vec<_>>(), vec![11, 9, 7]);
+    }
+
+    #[test]
+    fn a_stall_of_several_grades_keeps_to_the_shelf() {
+        // Room for one: the grade it stocks first, and the rest stays in the pack
+        let p = plan_stall(&wild_ore(), 63, 10, 50, false, 1);
+        assert_eq!(p, vec![Sale { units: Units::uniform(3, 93), price: carried(10, 50, 95) }]);
+        let p = plan_stall(&wild_ore(), 63, 10, 50, true, 1);
+        assert_eq!(p, vec![Sale { units: Units::uniform(4, 12), price: carried(10, 50, 17) }]);
+        assert!(plan_stall(&wild_ore(), 5, 10, 50, false, 0).is_empty());
+        assert!(plan_stall(&Units::new(), 5, 10, 50, false, 24).is_empty());
+        // All it holds: every unit in one listing, a grade to each
+        let all = plan_stall(&wild_ore(), 999, 10, 50, false, 24);
+        assert_eq!(all.len(), 5);
+        assert_eq!(all.iter().map(|s| s.units.count()).sum::<i64>(), wild_ore().count());
+        assert_eq!(graded_price(10, 50, "Z"), 10);
     }
 
     fn trade(quality: i32, price: i64, quantity: i32) -> MarketTrade {

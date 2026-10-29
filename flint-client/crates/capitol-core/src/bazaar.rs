@@ -358,6 +358,21 @@ pub fn stock(stack: &SlotItem, n: i32, price: i64, listings: usize) -> Result<St
     })
 }
 
+/// Stocking your shop with exactly `units` of `stack` at `price` a unit
+/// (#578): one grade to a listing, so a buyer who names no units gets what
+/// the price was for. Refused as [`stock`] refuses, and unless `stack` holds
+/// every one of them.
+pub fn stock_units(stack: &SlotItem, units: &Units, price: i64, listings: usize) -> Result<StockListing, Refusal> {
+    if !stack.units.contains(units) {
+        return Err(Refusal::NotHeld { has: stack.quantity });
+    }
+    let n = i32::try_from(units.count()).unwrap_or(i32::MAX);
+    Ok(StockListing {
+        qualities: Some(units.clone()),
+        ..stock(stack, n, price, listings)?
+    })
+}
+
 /// The most days you may pay now: a week for a stall you don't keep, and
 /// for your own, up to a week from `now`.
 pub fn days_payable(mine: Option<&BazaarShop>, now: DateTime<Utc>) -> i64 {
@@ -696,6 +711,16 @@ mod tests {
         assert_eq!(stock(&stack, 5, 9, 0), Err(Refusal::NotHeld { has: 4 }));
         assert_eq!(stock(&stack, 1, 9, rules::MAX_LISTINGS), Err(Refusal::Full));
         assert!(matches!(stock(&stack, 1, 0, 0), Err(Refusal::Rule(BazaarError::BadPrice))));
+    }
+
+    #[test]
+    fn stocking_named_units_takes_only_units_the_stack_holds() {
+        let mut stack = SlotItem::new(Uuid::from_u128(5), "iron_ore".into(), "Iron ore".into(), 60, 6, 0);
+        stack.units = Units::from_pairs([(12, 2), (80, 4)]);
+        let s = stock_units(&stack, &Units::uniform(3, 80), 14, 0).unwrap();
+        assert_eq!((s.quantity, s.price, s.qualities), (3, 14, Some(Units::uniform(3, 80))));
+        assert_eq!(stock_units(&stack, &Units::uniform(3, 12), 14, 0), Err(Refusal::NotHeld { has: 6 }));
+        assert_eq!(stock_units(&stack, &Units::uniform(1, 80), 14, rules::MAX_LISTINGS), Err(Refusal::Full));
     }
 
     #[test]

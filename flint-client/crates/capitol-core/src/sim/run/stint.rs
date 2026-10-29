@@ -133,6 +133,12 @@ impl SimBot {
         surplus::wants(&self.calling, self.job())
     }
 
+    /// Whether its work keeps the best of `item` for its own crafts, so it
+    /// sells and stocks its lowest (#429, #578).
+    pub(super) fn keeps_best(&self, item: &str) -> bool {
+        self.job().uses().contains(&item) || self.wants().contains(&item)
+    }
+
     /// The first of its [willing](Self::willing) jobs that answers a
     /// commission for `item`, if any does.
     pub(super) fn answerer(&self, item: &str) -> Option<Role> {
