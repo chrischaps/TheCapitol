@@ -102,7 +102,7 @@ use capitol_protocol::rest::{
     StationContainerResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
-use capitol_protocol::metrics::{Feed, Holding, Sample, TownReport, ROLE_ALL_ROUNDER, ROLE_PERSON};
+use capitol_protocol::metrics::{Channel, Feed, Flows, Holding, Sample, TownReport, ROLE_ALL_ROUNDER, ROLE_PERSON};
 use capitol_protocol::watch::{Watch, WatchKind};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
@@ -404,6 +404,17 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(spread.styles.values().map(|h| h.accounts).sum::<u64>(), spread.accounts);
     assert_eq!(spread.styles.values().map(Holding::holding).sum::<i64>(), spread.roles.values().map(Holding::holding).sum::<i64>());
     assert_eq!(sample.grants.returned, 1);
+    // #561: who paid whom, by role and by style. The faucet is the
+    // Exchange's deposits, the goods are the market's and the bazaar's
+    // trades, the newcomer's 100 comes from the Capitol, and every Strand
+    // that leaves a group arrives in another
+    for flows in [&sample.flows.roles, &sample.flows.styles] {
+        let by = |channel| flows.iter().filter(|f| f.channel == channel).map(|f| f.strands).sum::<i64>();
+        assert_eq!(by(Channel::Exchange), sample.strand_flows["exchange_deposit"]);
+        assert_eq!(by(Channel::Goods), sample.market["log"].strands + sample.bazaar["rope"].strands);
+        assert_eq!(Flows::net(flows)["capitol"], -sample.strand_flows["market_fee"] - 100 * sample.new_accounts as i64);
+        assert_eq!(Flows::net(flows).values().sum::<i64>(), 0);
+    }
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
 }
 

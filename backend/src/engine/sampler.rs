@@ -28,13 +28,14 @@
 //! takes the game's lock only to read, twice a sample: the ledger's count of
 //! the players, and its own.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    Book, Distribution, EventBus, Feed, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
+    Book, Buckets, Channel, Distribution, EventBus, Feed, Flows, Paid, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES,
+    SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -128,7 +129,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
         watcher.check(&state, &last, &ledger, &admins, &mut sample).await;
         if taken.is_multiple_of(STORE_EVERY) {
             let town = state.town.take_minute();
-            let stored = match window(&state.db, &minute, &ledger, &admins).await {
+            let stored = match window(&state.db, &minute, &ledger, &admins, &state.town.buckets()).await {
                 Ok(stored) => {
                     let whole = Sample {
                         books: sample.books.clone(),
@@ -180,7 +181,8 @@ async fn targets(state: &AppState) -> BTreeMap<String, f64> {
 async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSet<Uuid>), sqlx::Error> {
     let now = ledger::snapshot(state).await?;
     let admins = admins(&state.db).await?;
-    let mut sample = window(&state.db, last, &now, &admins).await?;
+    let buckets = state.town.buckets();
+    let mut sample = window(&state.db, last, &now, &admins, &buckets).await?;
     sample.books = books(&state.db).await?;
     let game = state.game.read().await;
     let citizens = game.players.values().filter(|p| p.citizen).count() as u64;
@@ -190,7 +192,6 @@ async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSe
         capacity: super::tick::GameState::EVENT_CAPACITY as u64,
     };
     drop(game);
-    let buckets = state.town.buckets();
     sample.distribution = Some(Distribution::of(&now, &admins, |name| buckets.get(name)));
     // Last, once nothing can fail: a missed sample leaves the town's reports
     // for the next
@@ -198,12 +199,76 @@ async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSe
     Ok((sample, now, admins))
 }
 
-/// The ledgers' sample from `start` to `end`, with the trades between.
-async fn window(db: &PgPool, start: &Ledger, end: &Ledger, admins: &HashSet<Uuid>) -> Result<Sample, sqlx::Error> {
+/// The ledgers' sample from `start` to `end`, with the trades between and
+/// who paid whom (#561), its citizens grouped by `buckets`.
+async fn window(
+    db: &PgPool,
+    start: &Ledger,
+    end: &Ledger,
+    admins: &HashSet<Uuid>,
+    buckets: &HashMap<String, Buckets>,
+) -> Result<Sample, sqlx::Error> {
     let mut sample = Sample::between(start, end, admins);
     sample.market = trades(db, Venue::Market, start.at_ms, end.at_ms).await?;
     sample.bazaar = trades(db, Venue::Bazaar, start.at_ms, end.at_ms).await?;
+    let paid = paid(db, start.at_ms, end.at_ms).await?;
+    sample.flows = Flows::between(start, end, admins, |name| buckets.get(name), &paid);
     Ok(sample)
+}
+
+/// What accounts paid one another after `from_ms` and up to `to_ms`, by
+/// payer, payee and channel (#561), each from its channel's own rows, which
+/// name both sides: the market's fills (the bid's player to the ask's, at
+/// the fill's price), the bazaar's sales, the court's payouts (from the
+/// commission's poster or the wage offer's employer) and a trade window's
+/// Strands (its `trade_sent` row's player to its `trade_received` row's,
+/// written together, at one time).
+async fn paid(db: &PgPool, from_ms: i64, to_ms: i64) -> Result<Vec<Paid>, sqlx::Error> {
+    let time = |ms: i64| DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or(DateTime::<Utc>::MIN_UTC);
+    let rows: Vec<(Uuid, Uuid, String, i64)> = sqlx::query_as(
+        "SELECT b.player_id, s.player_id, 'goods', SUM(t.price * t.quantity)::BIGINT
+         FROM market_trades t
+         JOIN market_orders b ON b.id = t.buy_order_id
+         JOIN market_orders s ON s.id = t.sell_order_id
+         WHERE t.at > $1 AND t.at <= $2
+         GROUP BY 1, 2
+         UNION ALL
+         SELECT buyer_id, merchant_id, 'goods', SUM(price * quantity)::BIGINT
+         FROM bazaar_sales WHERE at > $1 AND at <= $2
+         GROUP BY 1, 2
+         UNION ALL
+         SELECT COALESCE(c.poster_id, w.employer_id), p.player_id,
+                CASE WHEN c.id IS NULL THEN 'wages' ELSE 'commissions' END, SUM(p.amount)::BIGINT
+         FROM currency_transactions p
+         LEFT JOIN commissions c ON c.id = p.reference_id
+         LEFT JOIN wage_offers w ON w.id = p.reference_id
+         WHERE p.transaction_type = 'court_payout' AND p.occurred_at > $1 AND p.occurred_at <= $2
+           AND COALESCE(c.poster_id, w.employer_id) IS NOT NULL
+         GROUP BY 1, 2, 3
+         UNION ALL
+         SELECT s.player_id, r.player_id, 'trades', SUM(r.amount)::BIGINT
+         FROM currency_transactions r
+         JOIN currency_transactions s
+           ON s.reference_id = r.reference_id AND s.occurred_at = r.occurred_at AND s.transaction_type = 'trade_sent'
+         WHERE r.transaction_type = 'trade_received' AND r.occurred_at > $1 AND r.occurred_at <= $2
+         GROUP BY 1, 2",
+    )
+    .bind(time(from_ms))
+    .bind(time(to_ms))
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(from, to, channel, strands)| {
+            let channel = match channel.as_str() {
+                "goods" => Channel::Goods,
+                "wages" => Channel::Wages,
+                "commissions" => Channel::Commissions,
+                _ => Channel::Trades,
+            };
+            Paid { from, to, channel, strands }
+        })
+        .collect())
 }
 
 /// The players whose accounts are admins'.
@@ -655,6 +720,101 @@ mod tests {
             assert_eq!(fiber, Trades { trades: 2, units: 5, strands: 23 });
             assert_eq!(fiber.vwap(), Some(4.6));
             assert!(trades(&db, Venue::Market, 0, ms("2026-10-21T12:00:10Z")).await.unwrap().is_empty());
+        }
+
+        /// Who paid whom in a window (#561): a fill from the bid's player to
+        /// the ask's, a stall's sale, a commission's and a wage's payouts
+        /// from whoever posted them, and a trade window's Strands from the
+        /// side that sent them, each only inside the window, and a payout
+        /// the court can't place left out
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn a_windows_payments_name_both_sides(db: PgPool) {
+            let (ada, bo, cy) = (player(&db, "ada", 100).await, player(&db, "bo", 100).await, player(&db, "cy", 100).await);
+            let exec = |sql: &'static str, binds: Vec<String>| {
+                let db = db.clone();
+                async move {
+                    let mut q = sqlx::query(sql);
+                    for b in binds {
+                        q = q.bind(b);
+                    }
+                    q.execute(&db).await.unwrap();
+                }
+            };
+            let s = |u: Uuid| u.to_string();
+            let order = |id: Uuid, who: Uuid, side: &'static str| {
+                exec(
+                    "INSERT INTO market_orders (id, player_id, side, item_type, min_grade, grade_rule, price,
+                                                quantity_total, quantity_remaining, status, fee, expires_at)
+                     VALUES ($1::UUID, $2::UUID, $3, 'fiber', CASE WHEN $3 = 'buy' THEN 'F' END,
+                             CASE WHEN $3 = 'buy' THEN 'average' END, 5, 10, 2, 'open', 1, NOW() + INTERVAL '1 hour')",
+                    vec![s(id), s(who), side.into()],
+                )
+            };
+            let (bid, ask) = (Uuid::new_v4(), Uuid::new_v4());
+            order(bid, ada, "buy").await;
+            order(ask, bo, "sell").await;
+            let fill = |quantity: i32, at: &'static str| {
+                exec(
+                    "INSERT INTO market_trades (id, buy_order_id, sell_order_id, item_type, grade, quality, min_quality,
+                                                price, quantity, at)
+                     VALUES ($1::UUID, $2::UUID, $3::UUID, 'fiber', 'C', 50, 50, 5, $4::INTEGER, $5::TIMESTAMPTZ)",
+                    vec![s(Uuid::new_v4()), s(bid), s(ask), quantity.to_string(), at.into()],
+                )
+            };
+            fill(4, "2026-10-21T12:00:05Z").await;
+            fill(3, "2026-10-21T12:00:05Z").await;
+            fill(9, "2026-10-21T12:00:11Z").await;
+            exec(
+                "INSERT INTO bazaar_sales (id, listing_id, stall_id, shop_name, merchant_id, buyer_id,
+                                           item_type, quality, price, quantity, at)
+                 VALUES ($1::UUID, $1::UUID, 'stall_0', 'Bo''s', $2::UUID, $3::UUID, 'fiber', 50, 3, 2, '2026-10-21T12:00:05Z')",
+                vec![s(Uuid::new_v4()), s(bo), s(cy)],
+            )
+            .await;
+            let (commission, offer, trade) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            exec(
+                "INSERT INTO commissions (id, poster_id, item_type, min_quality, quantity, price_per_unit, escrow_strands,
+                                          fee, due_at)
+                 VALUES ($1::UUID, $2::UUID, 'fiber', 0, 10, 6, 48, 1, NOW() + INTERVAL '1 day')",
+                vec![s(commission), s(cy)],
+            )
+            .await;
+            exec(
+                "INSERT INTO wage_offers (id, employer_id, work_kind, resource_type, rate, cap, escrow_strands, fee, ends_at)
+                 VALUES ($1::UUID, $2::UUID, 'gather', 'grass', 2, 10, 16, 1, NOW() + INTERVAL '1 day')",
+                vec![s(offer), s(bo)],
+            )
+            .await;
+            let row = |who: Uuid, amount: i64, kind: &'static str, reference: Uuid, at: &'static str| {
+                exec(
+                    "INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type,
+                                                        reference_id, occurred_at)
+                     VALUES ($1::UUID, $2::BIGINT, 100, 100 + $2::BIGINT, $3, $4::UUID, $5::TIMESTAMPTZ)",
+                    vec![s(who), amount.to_string(), kind.into(), s(reference), at.into()],
+                )
+            };
+            row(ada, 12, "court_payout", commission, "2026-10-21T12:00:03Z").await;
+            row(cy, 4, "court_payout", offer, "2026-10-21T12:00:04Z").await;
+            row(cy, 2, "court_payout", offer, "2026-10-21T12:00:10Z").await;
+            row(cy, 99, "court_payout", Uuid::new_v4(), "2026-10-21T12:00:04Z").await;
+            row(ada, -9, "trade_sent", trade, "2026-10-21T12:00:06Z").await;
+            row(cy, 9, "trade_received", trade, "2026-10-21T12:00:06Z").await;
+            // Before the window
+            row(ada, 50, "court_payout", commission, "2026-10-21T12:00:00Z").await;
+
+            let ms = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+            let mut paid = paid(&db, ms("2026-10-21T12:00:00Z"), ms("2026-10-21T12:00:10Z")).await.unwrap();
+            paid.sort_by_key(|p| (p.channel, p.from, p.to));
+            let mut want = vec![
+                Paid { from: ada, to: bo, channel: Channel::Goods, strands: 35 },
+                Paid { from: cy, to: bo, channel: Channel::Goods, strands: 6 },
+                Paid { from: bo, to: cy, channel: Channel::Wages, strands: 6 },
+                Paid { from: cy, to: ada, channel: Channel::Commissions, strands: 12 },
+                Paid { from: ada, to: cy, channel: Channel::Trades, strands: 9 },
+            ];
+            want.sort_by_key(|p| (p.channel, p.from, p.to));
+            assert_eq!(paid, want);
         }
 
         /// A book is what's still open and unexpired on each side, with the

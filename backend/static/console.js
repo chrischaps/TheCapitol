@@ -293,7 +293,7 @@
       ...["phases", "loops"].flatMap((part) => WORK_FIELDS.map((f) => `load.${part}.*.${f}`)),
       "events",
     ].join(","),
-    money: "strand_flows,new_accounts,grants,market,bazaar,distribution,books",
+    money: "strand_flows,new_accounts,grants,market,bazaar,distribution,books,flows",
     making: "units,unit_flows,crafts",
     town: "town",
   };
@@ -319,7 +319,10 @@
       try {
         const res = await api("/admin/stream", { signal: abort.signal });
         if (!res.ok || !res.body) throw new Error(`stream: ${res.status}`);
-        // After a gap, the samples missed are in the series
+        // After a gap, the samples missed are in the series. After a server
+        // restart they're its stored minutes, which merge into the ten-second
+        // samples held and count most minutes twice in every summed story
+        // until a reload (#600)
         if (state.lastSampleAt) {
           state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity };
           await Promise.all([
@@ -1244,6 +1247,7 @@
     escrow();
     grants();
     distribution();
+    goes();
     if (books) productionStories();
     await prices();
     await earns();
@@ -1538,6 +1542,234 @@
       wealthView.lines = [];
       state.charts.headcount?.rebuild();
       distribution();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Where the money goes (#561): who paid whom over the range, by group and
+  // channel. Each sample's flows are its own window's (Sample::flows), so a
+  // stretch's are their sum. The first sample in the range only starts the
+  // stretch, so each group's net can be read against the change in what it
+  // holds between the same two samples, as the wealth table counts it
+
+  const CHANNELS = [
+    ["goods", "Goods"], ["wages", "Wages"], ["commissions", "Commissions"], ["trades", "Trades"],
+    ["exchange", "Exchange"], ["capitol", "Capitol"], ["guilds", "Guilds"],
+  ];
+  const CHANNEL = Object.fromEntries(CHANNELS);
+  // What ran by a channel, in a sentence: "1,200 in goods", "55 at the Exchange"
+  const CHANNEL_SAID = {
+    goods: "in goods", wages: "in wages", commissions: "in commissions", trades: "in trade windows",
+    exchange: "at the Exchange", capitol: "to and from the Capitol", guilds: "through the guilds",
+  };
+  // The flows' groups that are no calling's: the ends, which are no account's,
+  // and the admins, whom the wealth table leaves out. Short, then in a sentence
+  const ENDS = {
+    exchange: ["Exchange", "the Exchange"],
+    capitol: ["Capitol", "the Capitol"],
+    guilds: ["Guilds", "the guilds' treasuries"],
+    admin: ["Admins", "the admins"],
+  };
+  // The ends' places: the faucet first, the sinks last
+  const END_ORDER = { exchange: -1, admin: 1, guilds: 2, capitol: 3 };
+  const goesView = {
+    by: prefs.get("observatory.goes.by") === "styles" ? "styles" : "roles",
+    // The channels hidden, as the chips have it
+    off: new Set((prefs.get("observatory.goes.off") ?? "").split(",").filter((c) => CHANNEL[c])),
+  };
+  const goesName = (key) => ENDS[key]?.[0] ?? (goesView.by === "styles" ? STYLE_NAMES[key]?.[0] ?? capital(key) : trade(key));
+  const goesSaid = (key) => ENDS[key]?.[1] ?? lc(goesName(key));
+
+  function goes() {
+    const by = goesView.by;
+    const list = inRange((s) => s.flows || s.distribution);
+    if (!list.some((s) => s.flows)) {
+      $("goes-headline").textContent = list.length ? "No sample in the range says who paid whom: the sampler counts it since #561." : "Waiting for the first sample.";
+      $("goes").tHead.replaceChildren();
+      $("goes").tBodies[0].replaceChildren(emptyRow(1, "No sample says yet."));
+      $("goes").tFoot.replaceChildren();
+      $("goes-note").textContent = "";
+      return goesChips({});
+    }
+    // The stretch ends at the last sample anything moved in: after it the
+    // holdings stand still, but a town gone quiet stops naming its
+    // citizens' groups
+    const end = list.findLastIndex((s) => s.flows);
+    const [first, last] = [list[0], list[end]];
+    // Each pair's Strands by channel, the shown channels' and every one's
+    const cells = new Map();
+    const net = {};
+    const byChannel = {};
+    for (const s of list.slice(1, end + 1)) {
+      for (const f of s.flows?.[by] ?? []) {
+        byChannel[f.channel] = (byChannel[f.channel] ?? 0) + f.strands;
+        net[f.to] = (net[f.to] ?? 0) + f.strands;
+        net[f.from] = (net[f.from] ?? 0) - f.strands;
+        const key = `${f.from}\t${f.to}`;
+        const c = cells.get(key) ?? { from: f.from, to: f.to, shown: 0, all: 0, by: {} };
+        c.all += f.strands;
+        if (!goesView.off.has(f.channel)) {
+          c.shown += f.strands;
+          c.by[f.channel] = (c.by[f.channel] ?? 0) + f.strands;
+        }
+        cells.set(key, c);
+      }
+    }
+    goesChips(byChannel);
+    // What each group holds at either end, balances and escrow, as the
+    // wealth table has it; the ends and the admins hold nothing of the
+    // town's
+    const holding = (s, key) => {
+      const h = s.distribution?.[by]?.[key];
+      return h ? held(h) : null;
+    };
+    const turnover = {};
+    for (const c of cells.values()) {
+      turnover[c.from] = (turnover[c.from] ?? 0) + c.all;
+      turnover[c.to] = (turnover[c.to] ?? 0) + c.all;
+    }
+    const nodes = Object.keys(turnover).sort((a, b) => (END_ORDER[a] ?? 0) - (END_ORDER[b] ?? 0) || turnover[b] - turnover[a]);
+    const cellOf = (from, to) => cells.get(`${from}\t${to}`);
+    const shown = (from, to) => cellOf(from, to)?.shown ?? 0;
+    const columns = nodes.filter((to) => nodes.some((from) => shown(from, to) > 0));
+    const max = Math.max(1, ...[...cells.values()].filter((c) => c.from !== c.to).map((c) => c.shown));
+    const heldChange = (key) => {
+      if (ENDS[key]) return null;
+      const [was, now] = [holding(first, key), holding(last, key)];
+      return now == null ? null : now - (was ?? 0);
+    };
+
+    const head = document.createElement("tr");
+    const corner = text("th", "From ↓ To →");
+    corner.className = "corner";
+    head.append(corner, ...columns.map((to) => text("th", goesName(to))));
+    for (const [say, title] of [["Paid out", "What it paid the columns shown, by the channels shown"], ["Net", "What it took in less what it paid out, by every channel"], ["Held", "The change in its balances and escrow over the same samples"]]) {
+      const th = text("th", say);
+      th.className = "num margin";
+      th.title = title;
+      head.append(th);
+    }
+    $("goes").tHead.replaceChildren(head);
+    $("goes").tBodies[0].replaceChildren(...nodes.map((from) => {
+      const tr = document.createElement("tr");
+      const name = text("th", goesName(from));
+      name.scope = "row";
+      tr.append(name);
+      for (const to of columns) tr.append(goesCell(cellOf(from, to), max));
+      const out = columns.reduce((n, to) => n + shown(from, to), 0);
+      const n = net[from] ?? 0;
+      const h = heldChange(from);
+      const heldCell = cell(h == null ? "–" : signed(h), `num margin ${h == null ? "dim" : h === n ? "agrees" : "differs"}`);
+      if (h != null && h !== n) heldCell.title = `${signed(h - n)} the flows don't explain`;
+      tr.append(
+        cell(out ? nf.format(out) : "–", `num margin ${out ? "" : "dim"}`),
+        cell(signed(n), `num margin ${n > 0 ? "up" : n < 0 ? "down" : "dim"}`),
+        heldCell,
+      );
+      return tr;
+    }));
+    const foot = document.createElement("tr");
+    foot.append(text("th", "Taken in"), ...columns.map((to) => cell(nf.format(nodes.reduce((n, from) => n + shown(from, to), 0)), "num")), cell(""), cell(""), cell(""));
+    $("goes").tFoot.replaceChildren(foot);
+
+    $("goes-headline").textContent = goesHeadline(cells, net, first);
+    const checked = nodes.filter((key) => heldChange(key) != null);
+    const off = checked.filter((key) => heldChange(key) !== (net[key] ?? 0));
+    const parts = CHANNELS.filter(([c]) => byChannel[c]).map(([c]) => `${nf.format(byChannel[c])} ${CHANNEL_SAID[c]}`);
+    let note = `Strands over the range: ${andList(parts)}.`;
+    if (checked.length) {
+      note += off.length
+        ? ` For ${andList(off.slice(0, 3).map((key) => lc(goesName(key))))}${off.length > 3 ? ` and ${off.length - 3} more` : ""}, the change held isn't the net: a citizen the town named into a group in the range moves its Strands with it, and a flow written in the moment between a sample's books and its rows lands in the next sample.`
+        : " Each group's net is the change in what it holds: the flows account for every Strand.";
+    }
+    $("goes-note").textContent = note;
+  }
+
+  /** One cell of the matrix: its Strands, tinted by size, and a bar of its
+   * channels; within a group it's hatched */
+  function goesCell(c, max) {
+    const td = document.createElement("td");
+    td.className = "num flow";
+    if (!c?.shown) {
+      td.classList.add("none");
+      return td;
+    }
+    if (c.from === c.to) td.classList.add("within");
+    else td.style.setProperty("--tint", `${Math.round(Math.sqrt(c.shown / max) * 100)}%`);
+    const bar = document.createElement("span");
+    bar.className = "flow-bar";
+    const ran = CHANNELS.filter(([ch]) => c.by[ch]);
+    for (const [ch] of ran) {
+      const part = document.createElement("span");
+      part.style.width = `${(100 * c.by[ch]) / c.shown}%`;
+      part.style.background = `var(--ch-${ch})`;
+      bar.append(part);
+    }
+    td.append(text("span", nf.format(c.shown)), bar);
+    td.title = `${goesName(c.from)} to ${goesName(c.to)}: ${plural(c.shown, "Strand", "Strands")}${ran.length > 1 ? `: ${andList(ran.map(([ch, name]) => `${nf.format(c.by[ch])} ${name.toLowerCase()}`))}` : ` in ${CHANNEL[ran[0][0]].toLowerCase()}`}${c.from === c.to ? ", within the group" : ""}.`;
+    return td;
+  }
+
+  // The biggest flows between two groups, then any calling (or style, or
+  // the people) that took in less than it paid out, by every channel
+  function goesHeadline(cells, net, first) {
+    const between = [...cells.values()].filter((c) => c.from !== c.to && c.shown > 0).sort((a, b) => b.shown - a.shown);
+    if (!between.length) return `Nobody paid anybody ${since(first)}.`;
+    const moved = between.reduce((n, c) => n + c.shown, 0);
+    const said = (c) => `${goesSaid(c.from)} to ${goesSaid(c.to)}`;
+    // The channel between accounts that carried most of a flow, if one did:
+    // a flow to or from an end says its channel in its name already
+    const lead = (c) => CHANNELS.find(([ch]) => (c.by[ch] ?? 0) >= 0.8 * c.shown && !ENDS[ch]);
+    const [top, ...rest] = between;
+    const topBy = lead(top);
+    let line = `The most ran from ${said(top)}: ${plural(top.shown, "Strand", "Strands")}${topBy ? ` ${CHANNEL_SAID[topBy[0]]}` : ""}, ${percent(top.shown / moved)} of what moved between groups ${since(first)}.`;
+    if (rest.length) line += ` Then ${andList(rest.slice(0, 2).map((c) => `${said(c)} (${nf.format(c.shown)})`))}.`;
+    const short = Object.entries(net).filter(([key, n]) => !ENDS[key] && n < 0).sort((a, b) => a[1] - b[1]);
+    const group = goesView.by === "styles" ? "style" : "calling";
+    if (short.length) {
+      const named = short.slice(0, 3).map(([key, n]) => `${lc(goesName(key))} (${signed(n)})`);
+      line += ` Taking in less than ${short.length === 1 ? "it pays" : "they pay"} out: ${andList(named)}${short.length > 3 ? `, and ${short.length - 3} more` : ""}.`;
+    } else {
+      line += ` Every ${group} took in at least what it paid out.`;
+    }
+    return capital(line);
+  }
+
+  /** The channel chips: each with its ink and its Strands over the range,
+   * pressed while it's shown */
+  function goesChips(byChannel) {
+    $("goes-channels").replaceChildren(...CHANNELS.map(([ch, name]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.dataset.channel = ch;
+      b.setAttribute("aria-pressed", String(!goesView.off.has(ch)));
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = `var(--ch-${ch})`;
+      b.append(swatch, `${name} ${byChannel[ch] ? nf.format(byChannel[ch]) : "–"}`);
+      return b;
+    }));
+  }
+
+  function goesControls() {
+    const group = $("goes-by");
+    for (const b of group.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.by === goesView.by));
+    group.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-by]");
+      if (!b) return;
+      goesView.by = b.dataset.by;
+      prefs.set("observatory.goes.by", goesView.by);
+      for (const x of group.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+      goes();
+    });
+    $("goes-channels").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-channel]");
+      if (!b) return;
+      const ch = b.dataset.channel;
+      if (goesView.off.has(ch)) goesView.off.delete(ch);
+      else if (goesView.off.size < CHANNELS.length - 1) goesView.off.add(ch);
+      prefs.set("observatory.goes.off", [...goesView.off].join(","));
+      goes();
     });
   }
 
@@ -4830,6 +5062,7 @@
     mapControls();
     rosterControls();
     rolesControls();
+    goesControls();
     stylesControls();
     tuningControls();
     // The link goes to the map; this says whom to follow there

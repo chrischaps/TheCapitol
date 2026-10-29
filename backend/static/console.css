@@ -133,6 +133,17 @@
   --a-detour: var(--wander);
   --a-road_in: var(--fl-newcomers);
   --a-free: var(--hair);
+  /* where the money goes (#561): what carried it, the goods in the
+     market's blue, the court's wages and commissions in clay and the
+     fees' violet, trades in the wander's rose, the faucet in the
+     deposits' green, the Capitol's sinks in the deeds' red */
+  --ch-goods: var(--s2);
+  --ch-wages: var(--n-clay_bank);
+  --ch-commissions: var(--fl-fees);
+  --ch-trades: var(--wander);
+  --ch-exchange: var(--fl-deposits);
+  --ch-capitol: var(--fl-deeds);
+  --ch-guilds: var(--fl-newcomers);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -803,6 +814,36 @@ a.who:hover { text-decoration-color: var(--accent); }
 /* ---- the wire ---------------------------------------------------------- */
 
 .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+
+/* Where the money goes (#561): payer by payee, each cell tinted by its
+   Strands, a bar of its channels under the figure, the diagonal hatched */
+.goes-tools { display: flex; flex-wrap: wrap; gap: 0 18px; align-items: baseline; }
+#goes-channels .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+#goes-channels button[aria-pressed="false"] .swatch { opacity: 0.25; }
+table.goes { width: auto; min-width: 100%; font-size: 13px; }
+.goes th { white-space: nowrap; }
+.goes thead th { text-align: right; padding-left: 8px; }
+.goes thead th.corner { text-align: left; font-weight: 400; color: var(--ink-dim); letter-spacing: 0.06em; }
+.goes tbody th, .goes tfoot th { text-align: left; font-weight: 600; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--hair); }
+.goes td.flow {
+  position: relative;
+  min-width: 4.2em;
+  padding: 6px 8px 9px;
+  background: color-mix(in srgb, var(--accent) calc(var(--tint, 0%) * 0.34), transparent);
+  border-left: 1px solid var(--hair);
+}
+.goes td.flow.none { background: none; }
+.goes td.flow.within {
+  color: var(--ink-dim);
+  background: repeating-linear-gradient(135deg, transparent 0 5px, var(--well) 5px 7px);
+}
+.goes .flow-bar { position: absolute; left: 8px; right: 8px; bottom: 3px; height: 3px; display: flex; border-radius: 1px; overflow: hidden; }
+.goes .flow-bar > span { display: block; height: 100%; }
+.goes .margin { border-left: 1px solid var(--rule); padding-left: 10px; }
+.goes .margin + .margin { border-left: 1px solid var(--hair); }
+.goes td.agrees { color: var(--ink-dim); }
+.goes td.differs { color: var(--accent); font-weight: 600; }
+.goes tfoot td, .goes tfoot th { border-top: 1px solid var(--rule); border-bottom: 3px double var(--rule); font-weight: 600; }
 .filters button { border-radius: 999px; padding: 5px 12px; color: var(--ink-dim); }
 .filters button[aria-pressed="true"] { color: var(--ink); background: var(--well); border-color: var(--rule); }
 .wire { list-style: none; margin: 10px 0 0; padding: 0; }

@@ -112,6 +112,10 @@ pub struct Sample {
     /// a sample stored before it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<Distribution>,
+    /// Who paid whom over the window, by group and channel (#561); a
+    /// sample stored before it reads with none
+    #[serde(default, skip_serializing_if = "Flows::is_empty")]
+    pub flows: Flows,
 }
 
 /// What the books haven't explained since the server started: the drift
@@ -283,6 +287,7 @@ impl Sample {
             drift: Drift::default(),
             town: None,
             distribution: None,
+            flows: Flows::default(),
         }
     }
 }
@@ -403,15 +408,7 @@ impl Distribution {
         let mut styles: BTreeMap<String, Holding> = BTreeMap::new();
         for account in ledger.accounts.iter().filter(|a| !admins.contains(&a.player_id)) {
             balances.push(account.strands);
-            let (role, style) = if account.citizen {
-                let named = buckets(&account.name);
-                (
-                    named.map_or(ROLE_CITIZEN, |b| b.role.as_str()),
-                    named.and_then(|b| b.style.as_deref()).unwrap_or(ROLE_CITIZEN),
-                )
-            } else {
-                (ROLE_PERSON, ROLE_PERSON)
-            };
+            let (role, style) = bucket_of(account, &buckets);
             roles.entry(role.to_string()).or_default().add(account);
             styles.entry(style.to_string()).or_default().add(account);
         }
@@ -422,6 +419,196 @@ impl Distribution {
             roles,
             styles,
         }
+    }
+}
+
+/// An account's role and style, as [`Distribution`] buckets it: a citizen's
+/// from the town's report, or [`ROLE_CITIZEN`] when it names none, and a
+/// person's [`ROLE_PERSON`].
+fn bucket_of<'a>(account: &AccountBooks, buckets: &impl Fn(&str) -> Option<&'a Buckets>) -> (&'a str, &'a str) {
+    if account.citizen {
+        let named = buckets(&account.name);
+        (
+            named.map_or(ROLE_CITIZEN, |b| b.role.as_str()),
+            named.and_then(|b| b.style.as_deref()).unwrap_or(ROLE_CITIZEN),
+        )
+    } else {
+        (ROLE_PERSON, ROLE_PERSON)
+    }
+}
+
+/// The group of admins' accounts in a sample's [`Flows`]: a market maker's
+/// float. [`Distribution`] leaves them out; the flows can't, or their
+/// trades would show as Strands from nowhere.
+pub const ROLE_ADMIN: &str = "admin";
+
+/// What carries Strands from one group to another (#561). The first four
+/// run between accounts; the last three to or from an end that is no
+/// account's, each named for its channel ([`Channel::end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    /// A fill on the market, or a sale at a bazaar stall: buyer to seller
+    Goods,
+    /// Piece-rate wages, out of an offer's escrow: employer to worker
+    Wages,
+    /// A commission's pay, out of its escrow: poster to deliverer
+    Commissions,
+    /// Strands in a trade window: the side that paid the net to the other
+    Trades,
+    /// Fiber into the Exchange for Strands (the faucet), or back out
+    Exchange,
+    /// The Capitol's sinks (taxes, fees, rent, deeds, postage) and what it
+    /// gives back: refunds, grants and a new account's starting Strands
+    Capitol,
+    /// Into a guild's treasury, and back out to a member
+    Guilds,
+}
+
+impl Channel {
+    /// The group name of the end it runs to or from, for a channel that
+    /// isn't between accounts: `exchange`, `capitol`, `guilds`
+    pub fn end(self) -> Option<&'static str> {
+        match self {
+            Channel::Exchange => Some("exchange"),
+            Channel::Capitol => Some("capitol"),
+            Channel::Guilds => Some("guilds"),
+            _ => None,
+        }
+    }
+
+    /// The channel of an account's audit rows of type `kind` when they run
+    /// to or from an end. `None` for those between accounts, which the
+    /// sampler reads with both sides from the channel's own rows
+    /// ([`Paid`]), and for an account's Strands into or out of its own
+    /// escrow, which its holding counts either way.
+    pub fn of_audit(kind: &str) -> Option<Channel> {
+        match kind {
+            "exchange_deposit" | "exchange_withdraw" => Some(Channel::Exchange),
+            "guild_deposit" | "guild_withdrawal" => Some(Channel::Guilds),
+            "market_escrow" | "market_refund" | "court_escrow" | "court_refund" => None,
+            "market_sale" | "bazaar_purchase" | "bazaar_sale" | "court_payout" | "trade_sent" | "trade_received" => None,
+            _ => Some(Channel::Capitol),
+        }
+    }
+}
+
+/// Strands one account paid another over a window, by one of the channels
+/// between accounts, as the sampler reads them with both sides (#561).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Paid {
+    pub from: Uuid,
+    pub to: Uuid,
+    pub channel: Channel,
+    pub strands: i64,
+}
+
+/// Strands from one group to another by one channel over a window (#561).
+/// A group is a role or a style, as [`Distribution`] names them, or
+/// [`ROLE_ADMIN`], or an end ([`Channel::end`]). Always positive: what ran
+/// the other way is a flow of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Flow {
+    pub from: String,
+    pub to: String,
+    pub channel: Channel,
+    pub strands: i64,
+}
+
+/// Who paid whom over a window (#561): the same Strands grouped by role and
+/// by style. Each group's flows in less its flows out are the change in what
+/// it holds, its escrow counted, over a window its accounts stayed in it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Flows {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<Flow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<Flow>,
+}
+
+impl Flows {
+    pub fn is_empty(&self) -> bool {
+        self.roles.is_empty() && self.styles.is_empty()
+    }
+
+    /// The flows from `start` to `end`. Each account's audit rows to and from
+    /// the ends are the difference in its `flows`, and a new account's
+    /// starting Strands come from the Capitol; `paid` is what ran between
+    /// accounts. `admins` group as [`ROLE_ADMIN`], and `buckets` names a
+    /// citizen's role and style as [`Distribution::of`]'s does.
+    pub fn between<'a>(
+        start: &Ledger,
+        end: &Ledger,
+        admins: &HashSet<Uuid>,
+        buckets: impl Fn(&str) -> Option<&'a Buckets>,
+        paid: &[Paid],
+    ) -> Flows {
+        let group = |account: &AccountBooks| -> (&'a str, &'a str) {
+            if admins.contains(&account.player_id) {
+                (ROLE_ADMIN, ROLE_ADMIN)
+            } else {
+                bucket_of(account, &buckets)
+            }
+        };
+        let groups: BTreeMap<Uuid, (&str, &str)> =
+            start.accounts.iter().chain(&end.accounts).map(|a| (a.player_id, group(a))).collect();
+        let before: BTreeMap<Uuid, &BTreeMap<String, i64>> =
+            start.accounts.iter().map(|a| (a.player_id, &a.flows)).collect();
+        // A pair of accounts' groups, each its (role, style), by channel
+        type Pair<'g> = ((&'g str, &'g str), (&'g str, &'g str), Channel);
+        let mut cells: BTreeMap<Pair, i64> = BTreeMap::new();
+        let mut add = |from, to, channel, strands| *cells.entry((from, to, channel)).or_insert(0) += strands;
+        for account in &end.accounts {
+            let at = groups[&account.player_id];
+            let was = before.get(&account.player_id);
+            if was.is_none() {
+                let capitol = Channel::Capitol.end().unwrap_or_default();
+                add((capitol, capitol), at, Channel::Capitol, crate::ledger::STARTING_STRANDS);
+            }
+            for (kind, sum) in &account.flows {
+                let Some(channel) = Channel::of_audit(kind) else { continue };
+                let moved = sum - was.and_then(|f| f.get(kind)).copied().unwrap_or(0);
+                let node = channel.end().unwrap_or_default();
+                match moved.signum() {
+                    1 => add((node, node), at, channel, moved),
+                    -1 => add(at, (node, node), channel, -moved),
+                    _ => {}
+                }
+            }
+        }
+        let unnamed = (ROLE_PERSON, ROLE_PERSON);
+        for p in paid.iter().filter(|p| p.from != p.to && p.strands > 0) {
+            let from = groups.get(&p.from).copied().unwrap_or(unnamed);
+            let to = groups.get(&p.to).copied().unwrap_or(unnamed);
+            add(from, to, p.channel, p.strands);
+        }
+        // Each cell twice, once by role and once by style
+        let mut by = [BTreeMap::new(), BTreeMap::new()];
+        for ((from, to, channel), strands) in cells {
+            *by[0].entry((from.0, to.0, channel)).or_insert(0) += strands;
+            *by[1].entry((from.1, to.1, channel)).or_insert(0) += strands;
+        }
+        let [roles, styles] = by.map(|cells: BTreeMap<(&str, &str, Channel), i64>| {
+            cells
+                .into_iter()
+                .map(|((from, to, channel), strands)| Flow { from: from.into(), to: to.into(), channel, strands })
+                .collect()
+        });
+        Flows { roles, styles }
+    }
+
+    /// Each group's flows in less its flows out, over `flows`; a flow
+    /// within a group is nothing to it
+    pub fn net(flows: &[Flow]) -> BTreeMap<String, i64> {
+        let mut net = BTreeMap::new();
+        for f in flows.iter().filter(|f| f.from != f.to) {
+            *net.entry(f.to.clone()).or_insert(0) += f.strands;
+            *net.entry(f.from.clone()).or_insert(0) -= f.strands;
+        }
+        net
     }
 }
 
@@ -1358,6 +1545,104 @@ mod tests {
         assert!(serde_json::from_value::<TownSummary>(old).unwrap().earning.is_empty());
         let old_citizen = serde_json::json!({"name": "Ada", "role": "all-rounder", "standing": "away", "activity": "", "restarts": 0});
         assert!(serde_json::from_value::<CitizenReport>(old_citizen).unwrap().earned.is_empty());
+    }
+
+    /// A window of the Exchange's faucet, a fill, a wage, a tax and a
+    /// newcomer (#561): each lands in its channel between its groups, by
+    /// role and by style, the market's own audit row and the escrow moves
+    /// count nothing of their own, and each account's group nets what its
+    /// holding changed by
+    #[test]
+    fn flows_run_between_groups_and_net_their_holdings() {
+        let held = |mut a: AccountBooks, bids, wages| {
+            a.escrow = AccountEscrow { bids, commissions: 0, wages };
+            a
+        };
+        let admins = HashSet::from([Uuid::from_u128(9)]);
+        let l0 = ledger(
+            0,
+            vec![
+                held(account(1, true, 100, &[("court_escrow", -10)]), 0, 10),
+                held(account(2, true, 200, &[("market_escrow", -20)]), 20, 0),
+                account(9, false, 5000, &[]),
+            ],
+            30,
+            &[],
+            &[],
+        );
+        // 1 deposits 30 of fiber and sells 2 the 20 it bid for, and pays 3 a
+        // wage of 4; 2 pays 5 of tax; 3 is new
+        let l1 = ledger(
+            10_000,
+            vec![
+                held(
+                    account(1, true, 150, &[("court_escrow", -10), ("exchange_deposit", 30), ("market_sale", 20)]),
+                    0,
+                    6,
+                ),
+                account(2, true, 195, &[("market_escrow", -20), ("property_tax", -5)]),
+                account(3, false, 104, &[("court_payout", 4)]),
+                account(9, false, 5000, &[]),
+            ],
+            6,
+            &[],
+            &[],
+        );
+        let named: BTreeMap<String, Buckets> = BTreeMap::from([
+            ("player 1".to_string(), Buckets { role: "gatherer-fiber".into(), style: Some("specialist".into()) }),
+            ("player 2".to_string(), Buckets { role: "builder".into(), style: Some("specialist".into()) }),
+        ]);
+        let id = Uuid::from_u128;
+        let paid = [
+            Paid { from: id(2), to: id(1), channel: Channel::Goods, strands: 20 },
+            Paid { from: id(1), to: id(3), channel: Channel::Wages, strands: 4 },
+            // An account selling to itself pays no one
+            Paid { from: id(2), to: id(2), channel: Channel::Goods, strands: 7 },
+        ];
+        let flows = Flows::between(&l0, &l1, &admins, |n| named.get(n), &paid);
+        let flow = |from: &str, to: &str, channel, strands| Flow { from: from.into(), to: to.into(), channel, strands };
+        assert_eq!(
+            flows.roles,
+            [
+                flow("builder", "capitol", Channel::Capitol, 5),
+                flow("builder", "gatherer-fiber", Channel::Goods, 20),
+                flow("capitol", "person", Channel::Capitol, 100),
+                flow("exchange", "gatherer-fiber", Channel::Exchange, 30),
+                flow("gatherer-fiber", "person", Channel::Wages, 4),
+            ]
+        );
+        // By style the two citizens are one group, and the fill between them
+        // a flow within it
+        assert_eq!(
+            flows.styles,
+            [
+                flow("capitol", "person", Channel::Capitol, 100),
+                flow("exchange", "specialist", Channel::Exchange, 30),
+                flow("specialist", "capitol", Channel::Capitol, 5),
+                flow("specialist", "person", Channel::Wages, 4),
+                flow("specialist", "specialist", Channel::Goods, 20),
+            ]
+        );
+        let changed = |n| {
+            let before = l0.accounts.iter().find(|a| a.player_id == id(n)).map_or(0, AccountBooks::holding);
+            l1.accounts.iter().find(|a| a.player_id == id(n)).unwrap().holding() - before
+        };
+        let net = Flows::net(&flows.roles);
+        assert_eq!(net["gatherer-fiber"], changed(1));
+        assert_eq!(net["builder"], changed(2));
+        assert_eq!(net["person"], changed(3));
+        assert_eq!(Flows::net(&flows.styles)["specialist"], changed(1) + changed(2));
+        assert_eq!((net["exchange"], net["capitol"]), (-30, -95));
+        assert!(!net.contains_key(ROLE_ADMIN), "the admin did nothing");
+        assert_eq!(net.values().sum::<i64>(), 0, "every Strand comes from somewhere");
+
+        // On the wire beside the rest, and an old sample has none
+        let json = serde_json::to_value(&flows).unwrap();
+        assert_eq!(json["roles"][1], serde_json::json!({"from": "builder", "to": "gatherer-fiber", "channel": "goods", "strands": 20}));
+        let mut sample = serde_json::to_value(Sample::between(&l0, &l1, &admins)).unwrap();
+        assert!(sample.get("flows").is_none(), "none is left off");
+        sample.as_object_mut().unwrap().insert("flows".into(), json);
+        assert_eq!(serde_json::from_value::<Sample>(sample).unwrap().flows, flows);
     }
 
     #[test]
