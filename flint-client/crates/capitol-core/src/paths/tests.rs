@@ -10,7 +10,7 @@ use super::*;
 use crate::terrain::read_terrain_file;
 
 /// The fixture world and its graph, built once for every test.
-fn world() -> &'static (TerrainResponse, WalkGraph) {
+pub(crate) fn world() -> &'static (TerrainResponse, WalkGraph) {
     static WORLD: OnceLock<(TerrainResponse, WalkGraph)> = OnceLock::new();
     WORLD.get_or_init(|| {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
@@ -222,7 +222,7 @@ fn nowhere_in_a_lake() {
 
 /// A world of one canal, r 1000 and 15 wide round the centre, with one
 /// bridge at 90° and a road over it.
-pub(super) fn one_canal() -> TerrainResponse {
+pub(crate) fn one_canal() -> TerrainResponse {
     TerrainResponse {
         world_size: 13600.0,
         center_x: 6800.0,

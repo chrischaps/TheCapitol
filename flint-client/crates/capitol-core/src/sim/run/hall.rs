@@ -5,9 +5,9 @@
 //! - **Near.** A hall is within a citizen's usual walk when it's no further
 //!   from home than the Exchange hall ([`guild::near`]): the guild district
 //!   rings the Exchange, so a hall on its side of town. The
-//!   walk is the walk graph's estimate, as a wage's is (#507): in a straight
-//!   line, slowed by the slope and the streams, not yet round the water
-//!   (#586). Which lots are halls the world says (`ClaimedPlot.guild`, kept
+//!   walk is the walk graph's, as a wage's is: by the route round the water
+//!   by the bridges, slowed by the slope and the streams (#507, #586), each
+//!   kept for the session. Which lots are halls the world says (`ClaimedPlot.guild`, kept
 //!   current by `plot_claimed`), so knowing costs no call.
 //! - **Benches.** A member whose own station of a kind is busy, lent out to
 //!   someone it hired or worn out ([`guild::busy`]), works at its hall's,
@@ -29,6 +29,7 @@ use super::super::guild;
 use super::SimBot;
 use crate::bot::BotError;
 use crate::citizen::idle::Place;
+use crate::paths::RouteTimes;
 use crate::poll::Fetch;
 
 type Point = (f64, f64);
@@ -52,6 +53,10 @@ pub(super) struct Hall {
     looked: Option<i64>,
     /// The hall's stations that refused it, for the session
     refused: HashSet<Uuid>,
+    /// The walks from home to the halls and the Exchange, by the route
+    /// round the water (#586). Home seldom moves and halls are few, so
+    /// they're kept for the session
+    routes: RouteTimes,
 }
 
 impl SimBot {
@@ -62,14 +67,18 @@ impl SimBot {
         Some((g.hall.clone()?, g.name.clone()))
     }
 
-    /// Whether `to` is within its usual walk from home ([`guild::near`]).
+    /// Whether `to` is within its usual walk from home ([`guild::near`]),
+    /// both walks by the route round the water (#586). Somewhere with no
+    /// way there isn't.
     fn within_walk(&mut self, to: Point) -> bool {
         let Ok(walks) = self.bot.walks() else { return false };
         let Some(exchange) = walks.places().hall_steps.as_ref().map(|s| s.at) else {
             return false;
         };
         let home = self.home();
-        guild::near(walks.walk_secs(home, to), walks.walk_secs(home, exchange))
+        let to_hall = self.hall.routes.secs(&walks, home, to);
+        let to_exchange = self.hall.routes.secs(&walks, home, exchange);
+        to_hall.zip(to_exchange).is_some_and(|(h, e)| guild::near(h, e))
     }
 
     /// The guilds whose halls are within its usual walk, for its guild

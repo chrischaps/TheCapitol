@@ -9,7 +9,8 @@
 //!   Callings K1.2: its favourite, the job it's at, and those its calling
 //!   leans to) is a question ([`Question::Wage`]): what the work pays a
 //!   game hour, with the walk there spread over the shift
-//!   ([`wage::pays_walked`], #507), against what that job's own trade earns
+//!   ([`wage::pays_walked`], #507) and walked by the route round the water
+//!   ([`wage::by_route`], #586), against what that job's own trade earns
 //!   one at the books ([`wage`]). Only in
 //!   its working hours, owing nothing on the board, and once a day for any
 //!   one employer, so a single person doesn't take over a citizen's life.
@@ -41,6 +42,7 @@ use crate::bot::BotError;
 use crate::citizen::decide::{Choice, Question};
 use crate::citizen::phrases::Occasion;
 use crate::citizen::schedule::Phase;
+use crate::paths::RouteTimes;
 use crate::poll::Fetch;
 
 /// How often a citizen reads the work offered, at most, in game seconds.
@@ -61,6 +63,9 @@ pub(super) struct Wages {
     read_at: Option<Instant>,
     /// Offers it passed, and when
     passed: HashMap<Uuid, Instant>,
+    /// The walks to them by the route round the water (#586), until the
+    /// next read
+    routes: RouteTimes,
     /// The shift it's working
     shift: Option<Shift>,
     /// The employers it has worked for, by the day it last did
@@ -94,6 +99,7 @@ impl Wages {
             offers: Vec::new(),
             read_at: None,
             passed: HashMap::new(),
+            routes: RouteTimes::default(),
             shift: None,
             worked: HashMap::new(),
         }
@@ -150,6 +156,7 @@ impl SimBot {
             return Ok(());
         }
         self.wages.read_at = Some(Instant::now());
+        self.wages.routes.clear();
         let read = match self.bot.wages() {
             Ok(read) => read,
             Err(e) if e.is_final() => return Err(e),
@@ -197,9 +204,6 @@ impl SimBot {
             return None;
         }
         let me = self.bot.state().me()?;
-        // The walk to each, by the walk graph where it's to hand (#507): in
-        // a straight line, slowed by the slope and the streams, not yet round
-        // the water by the bridges (#586)
         let walks = self.bot.walks().ok();
         let from = self.bot.position();
         let state = self.bot.state();
@@ -208,23 +212,37 @@ impl SimBot {
         let again = self.wall(ASK_AGAIN);
         self.wages.passed.retain(|_, at| at.elapsed() < again);
         // Best paid first, the walk there spread over the shift: so far-off
-        // work weighs less, and a small offer far off least of all
-        let mut open: Vec<(i64, f64, WageOffer)> = self
+        // work weighs less, and a small offer far off least of all. First by
+        // the straight line on the flat, which no walk beats, for work one
+        // of its willing jobs does
+        let bounded: Vec<(i64, f64, (WageOffer, f64))> = self
             .wages
             .offers
             .iter()
             .filter(|o| o.status == OfferStatus::Open && o.shift.is_none() && o.employer_id != me)
             .filter(|o| o.worker_id.is_none_or(|w| w == me))
             .filter(|o| !self.wages.passed.contains_key(&o.id) && self.wages.worked.get(&o.employer_id) != Some(&today))
+            .filter(|o| wage::job(&catalog, &o.work).is_some_and(|job| self.doer(&job).is_some()))
             .filter_map(|o| {
                 let to = to_work(o);
-                let walk = walks.as_ref().map_or_else(|| (to.0 - from.0).hypot(to.1 - from.1) / PLAYER_SPEED, |w| w.walk_secs(from, to));
+                let walk = (to.0 - from.0).hypot(to.1 - from.1) / PLAYER_SPEED;
                 let secs = self.shift_secs(now, o.ends_at);
-                Some((wage::pays_walked(&catalog, &o.work, o.rate, o.cap - o.made, walk, Some(secs))?, walk, o.clone()))
+                Some((wage::pays_walked(&catalog, &o.work, o.rate, o.cap - o.made, walk, Some(secs))?, walk, (o.clone(), secs)))
             })
             .collect();
-        open.sort_by_key(|(pays, ..)| std::cmp::Reverse(*pays));
-        for (pays, walk, o) in open {
+        // Then by the route there where the walk graph is to hand (#586):
+        // round the moat and the canals by their bridges and the wild water
+        // by its fords, slowed by the slope and the streams. Planned for the
+        // few that could still be best, each kept until the board's next read
+        let routes = &mut self.wages.routes;
+        let open = match &walks {
+            Some(walks) => wage::by_route(bounded, wage::ROUTES_A_ROUND, |(o, secs)| {
+                let walk = routes.secs(walks, from, to_work(o))?;
+                Some((wage::pays_walked(&catalog, &o.work, o.rate, o.cap - o.made, walk, Some(*secs))?, walk))
+            }),
+            None => wage::by_route(bounded, 0, |_| None),
+        };
+        for (pays, walk, (o, _)) in open {
             let Some(job) = wage::job(&catalog, &o.work) else { continue };
             let tooled = wage::tool_needed(&catalog, &o.work).is_none_or(|t| holdings.tools.contains(t));
             let hire = Hire {

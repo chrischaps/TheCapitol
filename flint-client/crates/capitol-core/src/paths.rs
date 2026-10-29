@@ -489,6 +489,24 @@ impl WalkGraph {
         self.cost(a, b) / PLAYER_SPEED
     }
 
+    /// About how many seconds the walk [`Self::plan`] plans from `a` to `b`
+    /// takes: [`Self::walk_secs`] over its legs, round the moat and the
+    /// canals by their bridges and the wild water by its fords (#586). No
+    /// shorter than the straight line on the flat, since no ground is
+    /// quicker than the flat. Why there's no way, as `plan` says.
+    pub fn route_secs(&self, a: Point, b: Point) -> Result<f64, NoWay> {
+        let legs = self.plan(a, b)?;
+        let mut at = a;
+        Ok(legs
+            .into_iter()
+            .map(|leg| {
+                let secs = self.walk_secs(at, leg);
+                at = leg;
+                secs
+            })
+            .sum())
+    }
+
     /// Every crossing of a ring's edge must be on one of its bridges, as the
     /// server tests each tick's step ([`rules::ring_crossing`], in
     /// [`Ground::step`]).
@@ -1088,6 +1106,40 @@ pub fn latest() -> Option<Arc<WalkGraph>> {
     graphs.last().cloned()
 }
 
+/// The cell [`RouteTimes`] rounds where a walk starts and ends to: a
+/// citizen a few steps on from where it last weighed a place walks there
+/// about as long.
+pub const ROUTE_CELL: f64 = 50.0;
+
+/// Walk times by the planned route ([`WalkGraph::route_secs`]), kept by
+/// where each walk starts and ends, rounded to [`ROUTE_CELL`], so a citizen
+/// weighing the same places round after round plans each walk once (#586).
+/// A plan is A*, too dear to run for every place every round.
+#[derive(Debug, Default)]
+pub struct RouteTimes {
+    times: HashMap<(Cell, Cell), Option<f64>>,
+}
+
+impl RouteTimes {
+    /// The seconds' walk from `from` to `to` by the planned route, or
+    /// `None` when there's no way to `to`. From somewhere off the graph
+    /// ([`NoWay::Stranded`]) it's the straight line's, as a walker there
+    /// goes straight.
+    pub fn secs(&mut self, walks: &WalkGraph, from: Point, to: Point) -> Option<f64> {
+        let cell = |p: Point| ((p.0 / ROUTE_CELL).round() as i64, (p.1 / ROUTE_CELL).round() as i64);
+        *self.times.entry((cell(from), cell(to))).or_insert_with(|| match walks.route_secs(from, to) {
+            Ok(secs) => Some(secs),
+            Err(NoWay::Stranded) => Some(walks.walk_secs(from, to)),
+            Err(NoWay::Unreachable) => None,
+        })
+    }
+
+    /// Forgets every walk: the places weighed have changed.
+    pub fn clear(&mut self) {
+        self.times.clear();
+    }
+}
+
 /// A cell of [`WalkGraph::access_by_grid`]'s grid, counted from where it starts.
 type Cell = (i64, i64);
 
@@ -1171,4 +1223,4 @@ fn circle_crossings(center: Point, a: Point, b: Point, radius: f64) -> [Option<P
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

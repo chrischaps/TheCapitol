@@ -155,6 +155,46 @@ pub fn pays_walked(catalog: &Catalog, work: &Work, rate: i64, left: i32, walk: f
     Some((at_work * units / (units + walk * per_hour / 3600.0)).round() as i64)
 }
 
+/// The most walks to work offered a citizen plans in a round (#586). Each
+/// is A* over the walk graph, and a [`RouteTimes`](crate::paths::RouteTimes)
+/// keeps it until the board is next read.
+pub const ROUTES_A_ROUND: usize = 6;
+
+/// Work offered, the best paid an hour first, with the walk there by the
+/// route round the water (#586). `bounded` is each offer with what it pays
+/// with the walk along the straight line on the flat, and that walk: no
+/// route is quicker, so none pays more. The best bounds are routed first
+/// (`routed`: what one pays with the walk by its route, and that walk, or
+/// `None` when there's no way there or no unit fits once there), until the
+/// best routed pays at least every bound left, or `plans` have been. Those
+/// left keep their bound, so with plans to spare the first is the best paid
+/// by its route.
+pub fn by_route<T>(
+    mut bounded: Vec<(i64, f64, T)>,
+    plans: usize,
+    mut routed: impl FnMut(&T) -> Option<(i64, f64)>,
+) -> Vec<(i64, f64, T)> {
+    bounded.sort_by_key(|(pays, ..)| std::cmp::Reverse(*pays));
+    let mut left = bounded.into_iter().peekable();
+    let mut out = Vec::new();
+    let mut best = None;
+    for _ in 0..plans {
+        let Some(&(bound, ..)) = left.peek() else { break };
+        if best.is_some_and(|b| b >= bound) {
+            break;
+        }
+        let Some((_, _, offer)) = left.next() else { break };
+        if let Some((pays, walk)) = routed(&offer) {
+            best = best.max(Some(pays));
+            out.push((pays, walk, offer));
+        }
+    }
+    // Routed before bounded on a tie: the sort keeps the order
+    out.extend(left);
+    out.sort_by_key(|(pays, ..)| std::cmp::Reverse(*pays));
+    out
+}
+
 /// What `role`'s own trade earns a game hour at the books (`worth`), worked
 /// steadily: its first good's worth from the quickest node, or a craft's worth less
 /// its inputs' at one of its stations. `None` when the books can't put a
@@ -470,9 +510,12 @@ fn gathered(r: &CatalogResourceType) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use capitol_protocol::rules::PLAYER_SPEED;
     use uuid::Uuid;
 
     use super::*;
+    use crate::paths::tests::one_canal;
+    use crate::paths::{RouteTimes, WalkGraph};
     use crate::sim::{Craft, Gather};
 
     fn craft(recipe: &str) -> Work {
@@ -558,6 +601,134 @@ mod tests {
         // work, and a minute's walk halves it
         let grass = pays(&catalog, &gather("grass"), 1).unwrap();
         assert_eq!(pays_walked(&catalog, &gather("grass"), 1, 40, 60.0, None), Some(grass / 2));
+    }
+
+    /// Work over a canal pays less an hour than the same work as far off on
+    /// the citizen's own side (#586): the walk there goes round by the
+    /// bridge. By the straight line, as before, the two paid alike.
+    #[test]
+    fn work_over_a_canal_pays_less_an_hour_than_as_far_on_its_own_side() {
+        let catalog = Catalog::fallback();
+        let walks = WalkGraph::new(&one_canal());
+        // The canal is r 1000 round (6800, 6800), its one bridge at 90°
+        let polar = |r: f64, degrees: f64| {
+            let a = f64::to_radians(degrees);
+            (6800.0 + r * a.cos(), 6800.0 + r * a.sin())
+        };
+        let me = polar(1100.0, 60.0);
+        let (over, own) = (polar(900.0, 60.0), polar(1300.0, 60.0));
+        let plank = craft("plank");
+        let flat = |to: (f64, f64)| (to.0 - me.0).hypot(to.1 - me.1) / PLAYER_SPEED;
+        let walked = |walk| pays_walked(&catalog, &plank, 2, 40, walk, None);
+        assert!((flat(over) - flat(own)).abs() < 1e-9);
+        let offers = vec![
+            (walked(flat(over)).unwrap(), flat(over), over),
+            (walked(flat(own)).unwrap(), flat(own), own),
+        ];
+        let mut routes = RouteTimes::default();
+        let ranked = by_route(offers, ROUTES_A_ROUND, |&to| {
+            let walk = routes.secs(&walks, me, to)?;
+            Some((walked(walk)?, walk))
+        });
+        let [(own_pays, own_walk, first), (over_pays, over_walk, second)] = ranked[..] else {
+            panic!("{ranked:?}")
+        };
+        assert_eq!((first, second), (own, over));
+        // Its own side is a straight walk; over the canal is round by the
+        // bridge, several times as far
+        assert!((own_walk - walks.walk_secs(me, own)).abs() < 1e-9, "{own_walk}");
+        assert!(over_walk > 3.0 * own_walk, "{over_walk} s round, {own_walk} s on its side");
+        assert!(over_pays < own_pays, "{over_pays} an hour over the canal, {own_pays} on its side");
+    }
+
+    /// The walk to work over the fixture's outer canal and on its own side,
+    /// by the straight line and by the route, round the ring from a bridge
+    /// to the next; and the guild-district lots within a home's usual walk
+    /// by each (#586). `cargo test -p capitol-core --lib print_walks_round_the_water -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn print_walks_round_the_water() {
+        let (terrain, walks) = crate::paths::tests::world();
+        let catalog = Catalog::fallback();
+        let plank = craft("plank");
+        let centre = (terrain.center_x, terrain.center_y);
+        let polar = |r: f64, degrees: f64| {
+            let a = f64::to_radians(degrees);
+            (centre.0 + r * a.cos(), centre.1 + r * a.sin())
+        };
+        let walked = |walk| pays_walked(&catalog, &plank, 2, 40, walk, None).unwrap();
+        let route = |from, to| walks.route_secs(from, to).unwrap();
+        println!("angle,straight_over,route_over,pays_line_over,pays_route_over,straight_own,route_own,pays_route_own");
+        for k in 0..=18 {
+            let degrees = 2.5 * k as f64;
+            let me = polar(1100.0, degrees);
+            let (over, own) = (polar(900.0, degrees), polar(1300.0, degrees));
+            let (line_over, line_own) = (walks.walk_secs(me, over), walks.walk_secs(me, own));
+            let (route_over, route_own) = (route(me, over), route(me, own));
+            println!(
+                "{degrees},{line_over:.1},{route_over:.1},{},{},{line_own:.1},{route_own:.1},{}",
+                walked(line_over),
+                walked(route_over),
+                walked(route_own)
+            );
+        }
+        let me = polar(1100.0, 22.5);
+        for (name, to) in [("over", polar(900.0, 22.5)), ("own", polar(1300.0, 22.5))] {
+            let legs = walks.plan(me, to).unwrap();
+            println!("legs {name} from ({:.1}, {:.1}): {legs:?}", me.0, me.1);
+        }
+        // Halls: the guild district's lots within a home's usual walk
+        let places = crate::citizen::idle::Places::new(terrain);
+        let exchange = places.hall_steps.as_ref().unwrap().at;
+        let middle = |p: &capitol_protocol::terrain::TerrainPlot| {
+            let (x, y) = p.corners.iter().fold((0.0, 0.0), |s, c| (s.0 + c.0, s.1 + c.1));
+            (x / 4.0, y / 4.0)
+        };
+        let halls: Vec<_> = terrain.terrain_plots.iter().filter(|p| p.zone == "guild_district").map(middle).collect();
+        let homes: Vec<_> = terrain.terrain_plots.iter().filter(|p| p.zone != "guild_district").step_by(193).map(|p| (p.id.clone(), p.zone.clone(), middle(p))).collect();
+        println!("{} guild-district lots, the Exchange at ({:.0}, {:.0})", halls.len(), exchange.0, exchange.1);
+        println!("home,zone,x,y,near_by_line,near_by_route,line_to_exchange,route_to_exchange");
+        for (id, zone, home) in homes {
+            let by_line = halls.iter().filter(|&&h| crate::sim::guild::near(walks.walk_secs(home, h), walks.walk_secs(home, exchange))).count();
+            let Ok(to_exchange) = walks.route_secs(home, exchange) else { continue };
+            let by_route = halls.iter().filter(|&&h| walks.route_secs(home, h).is_ok_and(|s| crate::sim::guild::near(s, to_exchange))).count();
+            println!(
+                "{id},{zone},{:.0},{:.0},{by_line},{by_route},{:.0},{to_exchange:.0}",
+                home.0,
+                home.1,
+                walks.walk_secs(home, exchange)
+            );
+        }
+    }
+
+    /// Routes are planned only while one could still beat the best routed:
+    /// no walk is quicker than the straight line on the flat.
+    #[test]
+    fn only_the_offers_that_could_still_be_best_are_routed() {
+        let offers = || vec![(100, 10.0, 'a'), (50, 20.0, 'c'), (90, 12.0, 'b')];
+        let ranked = |plans, cost: fn(char) -> Option<i64>| {
+            let mut routed = Vec::new();
+            let out: Vec<(i64, char)> = by_route(offers(), plans, |&o| {
+                routed.push(o);
+                Some((cost(o)?, 0.0))
+            })
+            .into_iter()
+            .map(|(pays, _, o)| (pays, o))
+            .collect();
+            (out, routed)
+        };
+        // The best by the line loses little by its route: nothing else can
+        // beat it, so it's the only one routed
+        assert_eq!(ranked(6, |_| Some(95)), (vec![(95, 'a'), (90, 'b'), (50, 'c')], vec!['a']));
+        // It loses a lot: the next is routed, and beats every bound left
+        let far_a = |o| Some(if o == 'a' { 40 } else { 85 });
+        assert_eq!(ranked(6, far_a), (vec![(85, 'b'), (50, 'c'), (40, 'a')], vec!['a', 'b']));
+        // No way to it: it's dropped
+        let no_way_to_a = |o| (o != 'a').then_some(85);
+        assert_eq!(ranked(6, no_way_to_a), (vec![(85, 'b'), (50, 'c')], vec!['a', 'b']));
+        // Out of plans: the rest keep their bounds
+        assert_eq!(ranked(1, far_a), (vec![(90, 'b'), (50, 'c'), (40, 'a')], vec!['a']));
+        assert_eq!(ranked(0, far_a).0, vec![(100, 'a'), (90, 'b'), (50, 'c')]);
     }
 
     #[test]
