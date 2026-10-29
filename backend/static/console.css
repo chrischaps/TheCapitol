@@ -57,6 +57,9 @@
   /* a detour's ink (Callings K1.5): a wildflower rose, apart from
      trading's gold and the Commons' violet in both themes */
   --wander: #a8457a;
+  /* §10's bands behind the callings by style (#558) */
+  --band: rgba(47, 107, 58, 0.14);
+  --band-edge: rgba(47, 107, 58, 0.45);
   /* the units' flows (D2.4), in the money's inks: what's gathered in the
      deposits' green, what's crafted in the grants' blue, what's used up in
      the sinks' gold, reds and browns. Defined once, so each theme's inks
@@ -174,6 +177,8 @@
     --fl-other: #8a8a96;
     --fl-escrow: #e8a24a;
     --wander: #f08cb8;
+    --band: rgba(34, 197, 94, 0.12);
+    --band-edge: rgba(34, 197, 94, 0.4);
     --k-annotation: #c9a227;
     --k-fill: #3b82f6;
     --k-deed: #22c55e;
@@ -255,6 +260,8 @@
   --fl-other: #8a8a96;
   --fl-escrow: #e8a24a;
   --wander: #f08cb8;
+  --band: rgba(34, 197, 94, 0.12);
+  --band-edge: rgba(34, 197, 94, 0.4);
   --k-annotation: #c9a227;
   --k-fill: #3b82f6;
   --k-deed: #22c55e;
@@ -696,6 +703,24 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
   content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 5px; vertical-align: -1px;
   border-radius: 1px; background: var(--c);
 }
+/* Callings by style (#558): a row a style, §10's band shaded behind it, a
+   dot a citizen in its favourite's ink, filled in band and a ring out of it */
+.styles { margin-top: 14px; min-height: 120px; }
+.styles svg { display: block; width: 100%; overflow: visible; }
+.styles .track { fill: var(--well); }
+.styles .band { fill: var(--band); }
+.styles .band-edge { stroke: var(--band-edge); stroke-width: 1; }
+.styles .grid { stroke: var(--grid); stroke-width: 1; }
+.styles .tick { fill: var(--axis); font-size: 11px; }
+.styles .row-name { fill: var(--ink); font-family: "Cinzel", Georgia, serif; font-size: 13px; letter-spacing: 0.06em; }
+.styles .row-count { fill: var(--ink-dim); font-family: "Source Sans 3", system-ui, sans-serif; font-size: 12px; letter-spacing: 0; }
+.styles .median { stroke: var(--ink); stroke-width: 1.5; }
+.styles .dot circle { fill: var(--c); stroke: var(--c); stroke-width: 1.5; transition: r 0.12s; }
+.styles .dot.out circle { fill: var(--paper); stroke-width: 2; }
+.styles .dot:hover circle, .styles .dot:focus circle, .styles .dot.lit circle { stroke: var(--ink); stroke-width: 2.5; }
+.styles .dot:focus { outline: none; }
+.styles-note { margin: 10px 0 0; min-height: 2.6em; font-size: 14px; color: var(--ink-dim); }
+.styles-note .who { font-weight: 600; }
 .roster td.failure { color: var(--down); min-width: 16em; max-width: 28em; }
 .roster td.failure .dim { display: block; font-size: 12px; }
 @media (max-width: 640px) {

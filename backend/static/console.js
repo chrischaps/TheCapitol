@@ -1332,7 +1332,7 @@
     if (!k.favourite) return "an all-rounder";
     const fav = jobName(k.favourite).toLowerCase();
     const also = andList((k.leanings ?? []).map((l) => jobName(l.job).toLowerCase()));
-    if (k.style === "specialist") return `a ${fav} specialist${also ? ` who also does ${also}` : ""}`;
+    if (k.style === "specialist") return `${/^[aeiou]/.test(fav) ? "an" : "a"} ${fav} specialist${also ? ` who also does ${also}` : ""}`;
     return `a citizen who leans to ${fav}${also ? `, and to ${also} too` : ""}`;
   }
 
@@ -2203,6 +2203,7 @@
     }
     townOn();
     rosterTable();
+    callingsByStyle();
     rulings();
     if (books) cost();
   }
@@ -2425,6 +2426,266 @@
       cell("–", "dim"),
     );
     return tr;
+  }
+
+  // --- Callings by style (#558): each citizen's favourite's share of its
+  // time against §10's band, from the roster's time by activity, which
+  // counts from the town's start. The shares and bands are capitol-town's
+  // `citizen::measures` (#553), so the counts match a balance's.
+
+  // §10's bands: an all-rounder's is its biggest job's
+  const STYLE_ROWS = [
+    { style: "specialist", name: "Specialists", band: [0.6, 0.8] },
+    { style: "leaner", name: "Leaners", band: [0.35, 0.55] },
+    { style: "all-rounder", name: "All-rounders", band: [0, 0.35] },
+  ];
+  // The eight jobs and the seven making jobs, as time by activity keys them
+  const JOB_KEYS = Object.values(JOBS).map((j) => j.activity);
+  const MAKING_KEYS = JOB_KEYS.filter((k) => k !== "trading");
+  // What a share is of: the making jobs (§10's measure since #555), the
+  // eight jobs, or all the work; `keys` null for all of it
+  const SHARE_OF = {
+    making: { keys: MAKING_KEYS, says: "of the making jobs" },
+    jobs: { keys: JOB_KEYS, says: "of the eight jobs" },
+    work: { keys: null, says: "of all its work" },
+  };
+  const stylesView = {
+    of: SHARE_OF[prefs.get("observatory.styles.of")] ? prefs.get("observatory.styles.of") : "making",
+    rows: null, // each style's row, with its dots, for the chart
+    width: 0, // the chart's width when it was drawn
+    lit: null, // the name of the citizen pointed at
+    left: "", // the note under the chart with no dot pointed at
+  };
+
+  const SVG = "http://www.w3.org/2000/svg";
+  /** An SVG element with its attributes */
+  function svgEl(tag, attrs = {}) {
+    const el = document.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+    return el;
+  }
+
+  /**
+   * One citizen's dot: its share of `of` (its favourite's, or an
+   * all-rounder's biggest job's), whether that's in its band, its ink, its
+   * trading's share of its work and the job that took the most of the rest.
+   * `share` null with nothing to measure: no work yet, or a trading
+   * favourite held to the making jobs.
+   */
+  function styleDot(c, of) {
+    const k = c.calling;
+    const row = STYLE_ROWS.find((r) => r.style === k.style);
+    const time = c.time ?? {};
+    const hours = (key) => time[key] ?? 0;
+    const keys = SHARE_OF[of].keys;
+    const work = Object.entries(time).reduce((n, [key, h]) => n + (key === "free" ? 0 : h), 0);
+    const whole = keys ? keys.reduce((n, key) => n + hours(key), 0) : work;
+    const fav = k.favourite ? JOBS[k.favourite]?.activity ?? null : null;
+    // The jobs a share is counted over, the biggest first
+    const jobs = (keys ?? JOB_KEYS).filter((key) => hours(key) > 0).sort((a, b) => hours(b) - hours(a));
+    const at = row.style === "all-rounder" ? jobs[0] : fav;
+    const share = whole > 0 && at && (keys ?? JOB_KEYS).includes(at) ? hours(at) / whole : null;
+    const lo = row.style === "all-rounder" ? -Infinity : row.band[0];
+    const next = jobs.find((key) => key !== at && key !== "trading");
+    return {
+      c,
+      row,
+      at,
+      share,
+      inBand: share == null ? null : share >= lo && share <= row.band[1],
+      ink: at ?? "free",
+      trading: work > 0 ? hours("trading") / work : null,
+      next: next ? { key: next, share: hours(next) / whole } : null,
+      why: !(work > 0) ? "no work yet" : share == null && fav === "trading" ? "a trading favourite" : share == null ? "no job yet" : null,
+    };
+  }
+
+  function median(xs) {
+    if (!xs.length) return null;
+    const s = [...xs].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  }
+
+  /** A dot's citizen, in words, for the note under the chart */
+  function dotSays(d) {
+    const of = SHARE_OF[stylesView.of].says;
+    const job = (key) => lc(ACTIVITY[key] ?? key);
+    const band = d.inBand ? "in its band" : d.row.style === "all-rounder" || d.share > d.row.band[1] ? "over its band" : "under its band";
+    const lead = d.row.style === "all-rounder"
+      ? `its biggest job, ${job(d.at)}, takes ${percent(d.share)} ${of}, ${band}`
+      : `${job(d.at)} takes ${percent(d.share)} ${of}, ${band}`;
+    const trading = d.trading == null ? "" : d.trading > 0 ? `Trading took ${percent(d.trading)} of its work` : "It hasn't traded";
+    const next = d.next ? `${d.row.style === "all-rounder" ? "the next job" : "of the rest"}, ${job(d.next.key)} the most, ${percent(d.next.share)}` : "no other job";
+    return [`◇ `, Object.assign(text("span", d.c.name), { className: "who" }), `, ${callingSays(d.c)}: ${lead}. ${trading}${trading ? "; " : ""}${next}. Click for their page.`];
+  }
+
+  /** The note under the chart: the dot pointed at, kept by name across a redraw, or how many are shown */
+  function stylesNote(d) {
+    stylesView.lit = d?.c.name ?? null;
+    const note = $("styles-note");
+    if (d) return void note.replaceChildren(...dotSays(d));
+    note.textContent = stylesView.left ?? "";
+  }
+
+  function callingsByStyle() {
+    const t = townView.latest;
+    const h = $("styles-headline");
+    const box = $("styles");
+    if (t === undefined) return void (h.textContent = "Reading the town's report.");
+    if (!t) {
+      box.replaceChildren();
+      return void (h.textContent = "No town has reported in to this server, so there are no callings to show.");
+    }
+    const called = t.report.citizens.filter((c) => c.calling && STYLE_ROWS.some((r) => r.style === c.calling.style));
+    if (!called.length) {
+      box.replaceChildren();
+      return void (h.textContent = "The town's report says no citizen's calling: it's from a town before callings (K3.3).");
+    }
+    const of = stylesView.of;
+    const dots = called.map((c) => styleDot(c, of));
+    const shown = dots.filter((d) => d.share != null);
+    const rows = STYLE_ROWS.map((r) => {
+      const these = shown.filter((d) => d.row === r);
+      return { ...r, dots: these, inBand: these.filter((d) => d.inBand).length, median: median(these.map((d) => d.share)) };
+    });
+
+    // The headline: each style's in band and its median
+    const said = rows.filter((r) => r.dots.length).map((r, i) => {
+      const n = `${nf.format(r.inBand)} of ${plural(r.dots.length, r.name.toLowerCase().replace(/s$/, ""), r.name.toLowerCase())}`;
+      const at = `${i ? "at" : "the median at"} ${percent(r.median)}`;
+      return r.style === "all-rounder"
+        ? `${n} keep${r.inBand === 1 ? "s" : ""} ${r.dots.length === 1 ? "its" : "their"} biggest job to 35% or under, ${at}`
+        : `${n} ${r.inBand === 1 ? "is" : "are"} in ${r.dots.length === 1 ? "its" : "their"} band, ${at}`;
+    });
+    let line = said.length ? `${capital(SHARE_OF[of].says)}: ${said.join("; ")}.` : `No citizen has worked at a job yet, so there's no share ${SHARE_OF[of].says} to show.`;
+    const out = dots.filter((d) => d.share == null);
+    const why = {};
+    for (const d of out) why[d.why] = (why[d.why] ?? 0) + 1;
+    const left = [
+      why["no work yet"] && `${plural(why["no work yet"], "citizen hasn't", "citizens haven't")} worked yet`,
+      why["no job yet"] && `${plural(why["no job yet"], "citizen has", "citizens have")} worked at no job yet`,
+      why["a trading favourite"] && `${plural(why["a trading favourite"], "trading favourite has", "trading favourites have")} no share of the making jobs`,
+    ].filter(Boolean);
+    if (left.length) line += ` ${capital(andList(left))}.`;
+    h.textContent = line;
+    stylesView.left = `${plural(shown.length, "citizen", "citizens")} shown, their time counted from the town's start, as of its report of ${clockSecs(t.report.at_ms)}. Point at a dot to see who it is.`;
+    stylesView.rows = rows;
+    drawStyles();
+    stylesNote(shown.find((d) => d.c.name === stylesView.lit) ?? null);
+  }
+
+  /** The chart: a row a style, its band behind it, its citizens as dots stacked where they crowd */
+  function drawStyles() {
+    const box = $("styles");
+    const rows = stylesView.rows;
+    const W = box.clientWidth;
+    if (!rows || W <= 0) return;
+    stylesView.width = W;
+    const narrow = W < 520;
+    const most = Math.max(...rows.map((r) => r.dots.length));
+    const r = most > 150 ? 3 : most > 60 ? 4 : narrow ? 5 : 6;
+    const padX = narrow ? 10 : 16;
+    const x = (s) => padX + s * (W - 2 * padX);
+    const step = r + 0.5;
+    // How far a crowd stacks from a row's middle, before its dots overlap
+    const MOST_HALF = 70;
+    const LABEL = 24;
+    const AXIS = 22;
+
+    // Each row's dots stacked up and down from its middle where they'd touch
+    const laid = rows.map((row) => {
+      const placed = [];
+      for (const d of [...row.dots].sort((a, b) => a.share - b.share || a.c.name.localeCompare(b.c.name))) {
+        const cx = x(d.share);
+        // The nearest free place to the middle, or where it overlaps least
+        let best = { dy: 0, gap: -1 };
+        for (let k = 0; Math.ceil(k / 2) * step <= MOST_HALF; k++) {
+          const dy = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
+          const gap = Math.min(Infinity, ...placed.map((p) => Math.hypot(p.cx - cx, p.dy - dy)));
+          if (gap > best.gap) best = { dy, gap };
+          if (gap >= 2 * r + 1) break;
+        }
+        placed.push({ d, cx, dy: best.dy });
+      }
+      const half = Math.max(16, ...placed.map((p) => Math.abs(p.dy) + r + 6));
+      return { row, placed, half };
+    });
+
+    const H = laid.reduce((n, l) => n + LABEL + 2 * l.half + 10, 0) + AXIS;
+    const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "group", "aria-label": `Each citizen's favourite's share ${SHARE_OF[stylesView.of].says}, by style, against §10's bands` });
+    const grid = svgEl("g");
+    const ticks = [0, 0.2, 0.4, 0.6, 0.8, 1];
+    for (const s of ticks) {
+      grid.append(svgEl("line", { class: "grid", x1: x(s), x2: x(s), y1: LABEL - 4, y2: H - AXIS }));
+      const t = svgEl("text", { class: "tick", x: x(s), y: H - 6, "text-anchor": s === 0 ? "start" : s === 1 ? "end" : "middle" });
+      t.textContent = percent(s);
+      grid.append(t);
+    }
+    svg.append(grid);
+
+    let y = 0;
+    for (const { row, placed, half } of laid) {
+      const top = y + LABEL;
+      const mid = top + half;
+      const bottom = top + 2 * half;
+      const name = svgEl("text", { class: "row-name", x: padX, y: y + 16 });
+      name.textContent = row.name;
+      const count = svgEl("tspan", { class: "row-count", dx: 8 });
+      count.textContent = row.dots.length ? `${nf.format(row.inBand)} of ${nf.format(row.dots.length)} in band` : "none to show";
+      name.append(count);
+      svg.append(name);
+      if (row.median != null) {
+        const m = svgEl("text", { class: "row-count", x: W - padX, y: y + 16, "text-anchor": "end" });
+        m.textContent = `median ${percent(row.median)}`;
+        svg.append(m);
+      }
+      svg.append(svgEl("rect", { class: "track", x: x(0), y: top, width: x(1) - x(0), height: 2 * half, rx: 3 }));
+      const [lo, hi] = row.band;
+      svg.append(svgEl("rect", { class: "band", x: x(lo), y: top, width: x(hi) - x(lo), height: 2 * half }));
+      for (const edge of row.style === "all-rounder" ? [hi] : [lo, hi]) {
+        svg.append(svgEl("line", { class: "band-edge", x1: x(edge), x2: x(edge), y1: top, y2: bottom }));
+      }
+      if (row.median != null) {
+        const m = svgEl("line", { class: "median", x1: x(row.median), x2: x(row.median), y1: top - 3, y2: bottom + 3 });
+        m.append(Object.assign(svgEl("title"), { textContent: `The median, ${percent(row.median)}` }));
+        svg.append(m);
+      }
+      for (const p of placed) {
+        const d = p.d;
+        const a = svgEl("a", { href: `#citizen/${encodeURIComponent(d.c.name)}`, class: `dot ${d.inBand ? "in" : "out"}${d.c.name === stylesView.lit ? " lit" : ""}` });
+        const circle = svgEl("circle", { cx: p.cx.toFixed(1), cy: (mid + p.dy).toFixed(1), r });
+        circle.style.setProperty("--c", `var(--a-${d.ink})`);
+        a.append(circle);
+        a.setAttribute("aria-label", `${d.c.name}: ${percent(d.share)}, ${d.inBand ? "in" : "out of"} band`);
+        const lit = () => { a.classList.add("lit"); stylesNote(d); };
+        const unlit = () => { a.classList.remove("lit"); stylesNote(null); };
+        a.addEventListener("pointerenter", lit);
+        a.addEventListener("pointerleave", unlit);
+        a.addEventListener("focus", lit);
+        a.addEventListener("blur", unlit);
+        svg.append(a);
+      }
+      y = bottom + 10;
+    }
+    box.replaceChildren(svg);
+  }
+
+  function stylesControls() {
+    const group = $("styles-of");
+    for (const b of group.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.of === stylesView.of));
+    group.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-of]");
+      if (!b) return;
+      stylesView.of = b.dataset.of;
+      prefs.set("observatory.styles.of", stylesView.of);
+      for (const x of group.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+      callingsByStyle();
+    });
+    new ResizeObserver(() => {
+      const w = $("styles").clientWidth;
+      if (w > 0 && w !== stylesView.width) drawStyles();
+    }).observe($("styles"));
   }
 
   function rosterControls() {
@@ -4269,6 +4530,7 @@
     }
     mapControls();
     rosterControls();
+    stylesControls();
     tuningControls();
     // The link goes to the map; this says whom to follow there
     $("citizen-follow").addEventListener("click", () => { map.want = citizenView.detail?.player_id ?? null; });
