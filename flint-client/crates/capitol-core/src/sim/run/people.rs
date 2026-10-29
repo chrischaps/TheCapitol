@@ -502,8 +502,8 @@ impl SimBot {
     /// As its session ends, gives up an empty stall it won't be on to stock
     /// for [`STALL_BACK_SECS`] before the rent runs out (#523): its habit's
     /// hours (#276) say when it's back, and a citizen on always keeps it.
-    /// A citizen dropped from the roster never signs in to do this, so its
-    /// stall lapses by the bazaar's sweep (#585).
+    /// A citizen dropped from the roster closes its stall as the town next
+    /// starts (`citizen::departed`, #585).
     pub(super) fn close_stall_on_leaving(&mut self) -> Result<(), BotError> {
         if !self.people {
             return Ok(());

@@ -34,6 +34,7 @@ use capitol_core::citizen::balance::{self, Balance, Preset};
 use capitol_core::citizen::decide::{corpus, log};
 use capitol_core::citizen::decide::replay::Replayer;
 use capitol_core::citizen::decide::{self, Cascade};
+use capitol_core::citizen::departed;
 use capitol_core::citizen::habit::{self, Habit, Kind};
 use capitol_core::citizen::measures;
 use capitol_core::citizen::report::{Soak, TownReport};
@@ -211,7 +212,11 @@ what a balance run compares in town.soak-<when>.balance.json. A
 running town also reports to the server each game minute, for its admin
 console, with the key in town.report-key: a run with
 $CAPITOL_ADMIN_EMAIL and $CAPITOL_ADMIN_PASSWORD set mints one if
-there's none. Ctrl-C lets each citizen finish
+there's none. The key of every citizen the town has run or minted is kept
+in town.known.json beside the roster, so one dropped from the roster is
+settled as the town next starts: it signs in once, closes its stall and
+takes its orders, commissions, wage offers and claims down (#585), and is
+forgotten. Ctrl-C lets each citizen finish
 its step and stops; any order it has resting on the book stays up, as a
 market maker's does. A second Ctrl-C stops at once.";
 
@@ -606,6 +611,10 @@ fn mint(options: &Options, size: Size) -> Result<(), String> {
         Size::Online(n) => (n / roster.mix.share()).ceil().max(1.0) as usize,
     };
     let result = town::mint(&NetConfig::with_base_url(&server), &admin, &mut roster, count, options.role, options.calling);
+    // Known from the start, so one dropped before the town runs is settled too (#585)
+    if let Err(e) = departed::remember(&roster) {
+        eprintln!("capitol-town: writing {}: {e}", departed::known_path(&roster.path).display());
+    }
     for citizen in &roster.citizens[had..] {
         let p = &citizen.persona;
         println!(
@@ -1027,6 +1036,10 @@ fn live(
         keep: log::LOG_KEEP,
     });
     let hours = if options.always_on { Hours::AlwaysOn } else { Hours::Habits };
+    // Those who've left the roster take down what they left first (#585)
+    for line in departed::settle_departed(roster, server) {
+        println!("capitol-town: {line}");
+    }
     let mut town = Town::start(roster, server, stop.clone(), logs.as_ref(), hours)
         .map_err(|e| format!("starting the town: {e}"))?;
     println!(
