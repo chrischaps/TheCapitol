@@ -225,9 +225,7 @@ $towns = @(for ($i = 0; $i -lt $presets.Count; $i++) {
         Roster = if ($rosterOf) { (Resolve-Path -LiteralPath $rosterOf).Path } else { $null }
     }
 })
-if (-not (Test-Path -LiteralPath (Join-Path $root "backend\.env"))) {
-    Die "backend/.env is missing: copy backend/.env.example (the servers read its JWT_SECRET)"
-}
+Assert-BackendEnv
 foreach ($town in $towns) {
     # Not Use-Town: the run has no folder yet
     $server = "http://127.0.0.1:$($town.Port)"

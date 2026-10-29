@@ -100,6 +100,29 @@ function Build-Copy([string]$ws, [string]$package, [string]$bin, [string]$to, [s
     }
 }
 
+# The server reads backend/.env (its JWT_SECRET) from its working directory.
+# A worktree has none: it's git-ignored. Then the main checkout's is read,
+# as ci.sh's main_env does (#580), and Start-Backend hands its variables to
+# the server, under the script's own. Nothing is copied: the secret stays
+# in the one file. Dies when neither has one.
+$mainEnv = @{}
+function Assert-BackendEnv {
+    if (Test-Path -LiteralPath (Join-Path $root "backend\.env")) { return }
+    $common = git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null
+    $main = if ($LASTEXITCODE -eq 0 -and $common) { Split-Path -Parent "$common".Trim() } else { $null }
+    $file = if ($main) { Join-Path $main "backend\.env" } else { $null }
+    if (-not $file -or -not (Test-Path -LiteralPath $file)) {
+        $where = if ($main) { "here and in the main checkout ($main)" } else { "here, and no main checkout was found" }
+        Die "backend/.env is missing $where`: copy backend/.env.example there (the servers read its JWT_SECRET)"
+    }
+    foreach ($line in [IO.File]::ReadAllLines($file)) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$') {
+            $script:mainEnv[$Matches[1]] = $Matches[2].Trim('"', "'")
+        }
+    }
+    Say "this worktree has no backend/.env: the server reads the main checkout's ($file)"
+}
+
 # Sets environment variables for the processes started inside $block, and
 # puts back what was there, so none of them stays in the caller's session.
 function Invoke-WithEnv([hashtable]$vars, [scriptblock]$block) {
@@ -124,12 +147,12 @@ function Start-Backend {
     # The variables set here win over backend/.env's: dotenvy fills only
     # what's unset. cmd puts stdout and stderr in the one log, as town.sh
     # does; Start-Process alone would want a file for each.
-    $vars = @{
-        DATABASE_URL = "postgres://capitol:capitol_dev@localhost:5433/$db"
-        REDIS_URL = "redis://localhost:6379/$redisDb"
-        HOST = "127.0.0.1"
-        PORT = "$port"
-    }
+    $vars = @{}
+    foreach ($name in $mainEnv.Keys) { $vars[$name] = $mainEnv[$name] }
+    $vars.DATABASE_URL = "postgres://capitol:capitol_dev@localhost:5433/$db"
+    $vars.REDIS_URL = "redis://localhost:6379/$redisDb"
+    $vars.HOST = "127.0.0.1"
+    $vars.PORT = "$port"
     if ($backendEnv) { foreach ($name in $backendEnv.Keys) { $vars[$name] = $backendEnv[$name] } }
     $script:backend = Invoke-WithEnv $vars {
         Start-Process cmd -ArgumentList "/c `"`"$backendExe`" > `"$log`" 2>&1`"" `
