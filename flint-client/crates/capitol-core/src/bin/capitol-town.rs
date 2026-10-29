@@ -985,7 +985,7 @@ fn books(file: &Path) -> Result<bool, String> {
 fn load_line(before: &Ledger, now: &Ledger) -> String {
     let secs = (now.at_ms - before.at_ms) as f64 / 1000.0;
     let w = capitol_core::protocol::ledger::LoadWindow::between(&before.load, &now.load, secs);
-    let p99 = w.tick_p99_ms.map_or("over 1 s".to_string(), |b| format!("≤ {b} ms"));
+    let p99 = w.tick_p99_ms.map_or("over 1 s".to_string(), |b| format!("{b:.2} ms"));
     format!(
         "load: ticks {:.2} ms mean, p99 {p99} of {:.0} ms, {} over; {} in the world, {} sockets, {} dropped; {:.0} DB transactions/s",
         w.tick_mean_ms, w.tick_period_ms, w.ticks_over, w.players_in_world, w.sockets_open, w.sockets_dropped, w.db_transactions_per_sec

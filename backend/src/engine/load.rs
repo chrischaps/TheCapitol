@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use capitol_protocol::ledger::{Load, PhaseLoad, COMMAND_BUCKETS, TICK_BUCKETS_MS};
+use capitol_protocol::ledger::{tick_bucket, Load, PhaseLoad, COMMAND_BUCKETS, TICK_BUCKETS_MS};
 
 /// Running totals of something timed: how often, how long, the slowest,
 /// and a histogram over [`TICK_BUCKETS_MS`].
@@ -46,17 +46,20 @@ impl Timings {
         self.runs.fetch_add(1, Ordering::Relaxed);
         self.nanos.fetch_add(nanos, Ordering::Relaxed);
         self.max_nanos.fetch_max(nanos, Ordering::Relaxed);
-        let ms = nanos as f64 / 1e6;
-        let bucket = TICK_BUCKETS_MS.iter().position(|bound| ms <= *bound).unwrap_or(TICK_BUCKETS_MS.len());
-        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        self.buckets[tick_bucket(nanos as f64 / 1e6)].fetch_add(1, Ordering::Relaxed);
     }
 
     fn read(&self) -> PhaseLoad {
+        // 226 buckets, nearly all empty past the slowest run: the ledger
+        // leaves the empty tail off (#409)
+        let mut buckets: Vec<u64> = self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect();
+        let used = buckets.iter().rposition(|n| *n > 0).map_or(0, |i| i + 1);
+        buckets.truncate(used);
         PhaseLoad {
             runs: self.runs.load(Ordering::Relaxed),
             secs: self.nanos.load(Ordering::Relaxed) as f64 / 1e9,
             max_ms: self.max_nanos.load(Ordering::Relaxed) as f64 / 1e6,
-            buckets: self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect(),
+            buckets,
             slow_statements: self.slow_statements.load(Ordering::Relaxed),
         }
     }
@@ -494,9 +497,11 @@ mod tests {
         let after = read(Duration::from_millis(100));
         assert!(after.ticks >= before.ticks + 2);
         assert!(after.tick_max_ms >= 2000.0);
-        // 1.5 ms is under the 2 ms bound; 2 s is past the last
-        assert!(after.tick_buckets[2] > before.tick_buckets[2]);
-        assert!(after.tick_buckets[TICK_BUCKETS_MS.len()] > before.tick_buckets[TICK_BUCKETS_MS.len()]);
+        // 1.5 ms is in its bucket; 2 s is past the last
+        let count = |buckets: &[u64], ms: f64| buckets.get(tick_bucket(ms)).copied().unwrap_or(0);
+        assert!(count(&after.tick_buckets, 1.5) > count(&before.tick_buckets, 1.5));
+        assert!(count(&after.tick_buckets, 2000.0) > count(&before.tick_buckets, 2000.0));
+        assert_eq!(after.tick_buckets.len(), TICK_BUCKETS_MS.len() + 1, "none past the slow tick to leave off");
         assert!(after.sockets_ended["vanished"] > before.sockets_ended["vanished"]);
         assert!(after.socket_resyncs > before.socket_resyncs);
         assert!(after.events_lagged["admin_stream"] >= before.events_lagged["admin_stream"] + 3);
@@ -541,9 +546,10 @@ mod tests {
         assert!(is.runs > was.runs);
         assert!(is.secs - was.secs >= 0.003);
         assert!(is.max_ms >= 3.0);
-        assert_eq!(is.buckets.len(), TICK_BUCKETS_MS.len() + 1);
         // 3 ms and more: past the 2 ms bound
-        assert!(is.buckets[2..].iter().sum::<u64>() > was.buckets[2..].iter().sum::<u64>());
+        let from = tick_bucket(2.0) + 1;
+        let past = |buckets: &[u64]| buckets.iter().skip(from).sum::<u64>();
+        assert!(past(&is.buckets) > past(&was.buckets));
         assert!(after.loops["bazaar"].runs > before.loops["bazaar"].runs);
     }
 }

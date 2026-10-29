@@ -110,7 +110,7 @@ pub struct Reading {
     pub market: BTreeMap<String, Trades>,
     pub ticks: u64,
     pub tick_period_ms: f64,
-    /// The bucket bound the window's p95 falls under; `None` past the last
+    /// The window's p95, read inside its bucket (#409); `None` past the last
     pub tick_p95_ms: Option<f64>,
 }
 

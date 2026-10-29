@@ -22,9 +22,46 @@ use uuid::Uuid;
 /// no audit row.
 pub const STARTING_STRANDS: i64 = 100;
 
+/// The buckets [`TICK_BUCKETS_MS`] cuts each doubling into.
+pub const TICK_BUCKETS_PER_OCTAVE: usize = 16;
+/// The first bucket's bound, in ms: everything up to it is one bucket.
+const TICK_BUCKETS_FLOOR_MS: f64 = 1.0 / 16.0;
+/// Doublings from the floor to the last bound, 1024 ms.
+const TICK_BUCKET_OCTAVES: usize = 14;
+
 /// The upper bounds of [`Load::tick_buckets`], in milliseconds of work a
 /// tick. A last bucket past them holds the slower ticks.
-pub const TICK_BUCKETS_MS: [f64; 10] = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0, 1000.0];
+///
+/// They're log-linear (#409), as an HDR histogram's are: up to 1/16 ms is
+/// one bucket, then each doubling to 1024 ms is cut into 16 even ones, so
+/// a bucket is never wider than a 16th of its value. 16 to 32 ms goes up a
+/// millisecond at a time, 32 to 64 two. Every bound is a binary fraction,
+/// so it reads back from JSON exactly. [`LoadWindow`]'s percentiles are
+/// interpolated inside the bucket, so they move with a change smaller than
+/// a bucket too.
+pub const TICK_BUCKETS_MS: [f64; 1 + TICK_BUCKET_OCTAVES * TICK_BUCKETS_PER_OCTAVE] = tick_bounds();
+
+const fn tick_bounds() -> [f64; 1 + TICK_BUCKET_OCTAVES * TICK_BUCKETS_PER_OCTAVE] {
+    let mut bounds = [TICK_BUCKETS_FLOOR_MS; 1 + TICK_BUCKET_OCTAVES * TICK_BUCKETS_PER_OCTAVE];
+    let mut base = TICK_BUCKETS_FLOOR_MS;
+    let mut octave = 0;
+    while octave < TICK_BUCKET_OCTAVES {
+        let mut k = 1;
+        while k <= TICK_BUCKETS_PER_OCTAVE {
+            bounds[octave * TICK_BUCKETS_PER_OCTAVE + k] = base + base * k as f64 / TICK_BUCKETS_PER_OCTAVE as f64;
+            k += 1;
+        }
+        base *= 2.0;
+        octave += 1;
+    }
+    bounds
+}
+
+/// The bucket of [`TICK_BUCKETS_MS`] a run of `ms` counts in: the first
+/// whose bound it's at or under, or `TICK_BUCKETS_MS.len()` past the last.
+pub fn tick_bucket(ms: f64) -> usize {
+    TICK_BUCKETS_MS.partition_point(|bound| *bound < ms)
+}
 
 /// The upper bounds of [`Load::command_buckets`]: commands waiting when a
 /// tick took them up (D3.1). A last bucket past them holds the deeper queues.
@@ -207,7 +244,8 @@ pub struct Load {
     /// The slowest tick yet, in ms
     pub tick_max_ms: f64,
     /// Ticks by how long they took, under [`TICK_BUCKETS_MS`], and one more
-    /// for those slower than all of them
+    /// for those slower than all of them. Empty buckets at the end may be
+    /// left off.
     pub tick_buckets: Vec<u64>,
     /// Avatars in the world now
     pub players_in_world: u64,
@@ -296,7 +334,8 @@ pub struct PhaseLoad {
     /// Its slowest run yet, in ms
     pub max_ms: f64,
     /// Runs by how long they took, under [`TICK_BUCKETS_MS`], and one more
-    /// for those slower than all of them
+    /// for those slower than all of them. Empty buckets at the end may be
+    /// left off.
     pub buckets: Vec<u64>,
     /// Its database statements that took [`Load::slow_statement_ms`] or
     /// longer (D3.2)
@@ -639,7 +678,8 @@ pub struct LoadWindow {
     /// The tick's budget: its period
     pub tick_period_ms: f64,
     pub tick_mean_ms: f64,
-    /// The bucket bounds the window's ticks fall under; `None` past the last
+    /// The window's ticks' percentiles, interpolated inside the bucket of
+    /// [`TICK_BUCKETS_MS`] each falls in (#409); `None` past the last
     pub tick_p50_ms: Option<f64>,
     pub tick_p95_ms: Option<f64>,
     pub tick_p99_ms: Option<f64>,
@@ -690,7 +730,8 @@ pub struct PhaseWindow {
     pub secs: f64,
     /// The mean of a run, in ms
     pub mean_ms: f64,
-    /// The bucket bounds its runs fall under; `None` past the last
+    /// Its runs' 95th percentile, interpolated inside its bucket; `None`
+    /// past the last
     pub p95_ms: Option<f64>,
     /// Its slow statements over the window (D3.2)
     pub slow_statements: u64,
@@ -705,7 +746,7 @@ impl PhaseWindow {
             runs,
             secs,
             mean_ms: if runs > 0 { secs * 1000.0 / runs as f64 } else { 0.0 },
-            p95_ms: percentile(&TICK_BUCKETS_MS, &buckets, runs, 0.95),
+            p95_ms: percentile_ms(&buckets, runs, 0.95),
             slow_statements: b.slow_statements.saturating_sub(a.map_or(0, |a| a.slow_statements)),
         }
     }
@@ -717,6 +758,30 @@ fn since(a: &[u64], b: &[u64]) -> Vec<u64> {
         .enumerate()
         .map(|(i, n)| n.saturating_sub(a.get(i).copied().unwrap_or(0)))
         .collect()
+}
+
+/// The `q`th of `runs` timed under [`TICK_BUCKETS_MS`], in ms: found in
+/// its bucket as if the bucket's runs were spread evenly across it, to the
+/// µs. `None` in the bucket past the last, or with no runs.
+fn percentile_ms(buckets: &[u64], runs: u64, q: f64) -> Option<f64> {
+    if runs == 0 {
+        return None;
+    }
+    let rank = runs as f64 * q;
+    let mut seen = 0;
+    for (i, &n) in buckets.iter().enumerate() {
+        if n == 0 {
+            continue;
+        }
+        if (seen + n) as f64 >= rank {
+            let upper = *TICK_BUCKETS_MS.get(i)?;
+            let lower = if i == 0 { 0.0 } else { TICK_BUCKETS_MS[i - 1] };
+            let into = ((rank - seen as f64) / n as f64).clamp(0.0, 1.0);
+            return Some(((lower + (upper - lower) * into) * 1000.0).round() / 1000.0);
+        }
+        seen += n;
+    }
+    None
 }
 
 /// The bound in `bounds` of the bucket the `q`th of `runs` falls under;
@@ -741,7 +806,7 @@ impl LoadWindow {
     pub fn between(a: &Load, b: &Load, secs: f64) -> LoadWindow {
         let ticks = b.ticks.saturating_sub(a.ticks);
         let buckets = since(&a.tick_buckets, &b.tick_buckets);
-        let tick_percentile = |q: f64| percentile(&TICK_BUCKETS_MS, &buckets, ticks, q);
+        let tick_percentile = |q: f64| percentile_ms(&buckets, ticks, q);
         // Every tick takes the queue up once, so the depths count ticks
         let depths = since(&a.command_buckets, &b.command_buckets);
         let depth_runs: u64 = depths.iter().sum();
@@ -1014,24 +1079,69 @@ mod tests {
         };
         a.sockets_ended.insert("vanished".into(), 2);
         let mut b = a.clone();
-        // 100 ticks: 90 under 2 ms, 8 under 10, 1 under 20 and 1 past a second
+        // 100 ticks: 90 just under 2 ms, 8 just under 10, 1 just under 20
+        // and 1 past a second
         b.ticks = 100;
         b.tick_secs = 0.5;
-        b.tick_buckets[2] = 90;
-        b.tick_buckets[4] = 8;
-        b.tick_buckets[5] = 1;
-        b.tick_buckets[TICK_BUCKETS_MS.len()] = 1;
+        b.tick_buckets[tick_bucket(2.0)] = 90;
+        b.tick_buckets[tick_bucket(10.0)] = 8;
+        b.tick_buckets[tick_bucket(20.0)] = 1;
+        b.tick_buckets[tick_bucket(5000.0)] = 1;
         b.db_transactions = 1600;
         b.sockets_ended.insert("vanished".into(), 3);
         b.sockets_ended.insert("closed".into(), 9);
         let w = LoadWindow::between(&a, &b, 60.0);
         assert_eq!(w.ticks, 100);
         assert!((w.tick_mean_ms - 5.0).abs() < 1e-9);
-        assert_eq!((w.tick_p50_ms, w.tick_p95_ms, w.tick_p99_ms), (Some(2.0), Some(10.0), Some(20.0)));
+        // The 50th of 90 in 1.9375 to 2 ms, the 5th of 8 in 9.5 to 10, and the
+        // 99th the top of its bucket
+        assert_eq!((w.tick_p50_ms, w.tick_p95_ms, w.tick_p99_ms), (Some(1.972), Some(9.813), Some(20.0)));
         assert_eq!(w.ticks_over, 2, "the 20 ms tick and the slow one");
         assert_eq!(w.sockets_dropped, 1);
         assert!((w.db_transactions_per_sec - 10.0).abs() < 1e-9);
         assert_eq!((w.commands, w.command_queue_p99), (0, None), "a server before D3.1 has no queue to read");
+    }
+
+    /// One bucket to 1/16 ms, then each doubling cut in 16 to 1024 ms, so
+    /// a bucket is at most a 16th of its value wide (#409)
+    #[test]
+    fn the_tick_buckets_are_log_linear() {
+        assert_eq!(TICK_BUCKETS_MS[0], 0.0625);
+        assert_eq!(TICK_BUCKETS_MS[TICK_BUCKETS_MS.len() - 1], 1024.0);
+        for pair in TICK_BUCKETS_MS.windows(2) {
+            assert!(pair[1] > pair[0]);
+            assert!(pair[1] - pair[0] <= pair[1] / 16.0 + 1e-12, "{pair:?}");
+        }
+        let at = |ms: f64| TICK_BUCKETS_MS.iter().position(|b| *b == ms);
+        assert_eq!(at(21.0).unwrap() - at(20.0).unwrap(), 1, "a millisecond apart from 16 to 32");
+        assert_eq!(at(42.0).unwrap() - at(40.0).unwrap(), 1, "two from 32 to 64");
+        assert!(at(100.0).is_some() && at(10.0).is_some(), "the periods at 1× and 10× are bounds");
+        // A run on a bound counts under it; past the last, in the one after
+        assert_eq!(tick_bucket(0.0), 0);
+        assert_eq!(tick_bucket(0.0625), 0);
+        assert_eq!(tick_bucket(0.065), 1, "1/16 to 17/256 ms");
+        assert_eq!(tick_bucket(20.0), at(20.0).unwrap());
+        assert_eq!(tick_bucket(20.001), at(21.0).unwrap());
+        assert_eq!(tick_bucket(1024.0), TICK_BUCKETS_MS.len() - 1);
+        assert_eq!(tick_bucket(1024.5), TICK_BUCKETS_MS.len());
+    }
+
+    /// The question #409 asks: a loaded town's ticks spread from 15 to
+    /// 45 ms, then the same ticks half a millisecond slower. The p95 moves
+    /// by the half millisecond, where the old buckets read 50 both times.
+    #[test]
+    fn a_half_millisecond_shows_at_p95_in_a_loaded_town() {
+        let window = |shift: f64| {
+            let mut b = Load { tick_period_ms: 100.0, tick_buckets: vec![0; TICK_BUCKETS_MS.len() + 1], ..Load::default() };
+            for i in 0..10_000 {
+                b.tick_buckets[tick_bucket(15.0 + 30.0 * i as f64 / 10_000.0 + shift)] += 1;
+                b.ticks += 1;
+            }
+            LoadWindow::between(&Load::default(), &b, 60.0)
+        };
+        let (before, after) = (window(0.0).tick_p95_ms.unwrap(), window(0.5).tick_p95_ms.unwrap());
+        assert!((before - 43.5).abs() < 0.05, "the true p95 is 43.5 ms, read {before}");
+        assert!((after - before - 0.5).abs() < 0.05, "moved {}", after - before);
     }
 
     #[test]

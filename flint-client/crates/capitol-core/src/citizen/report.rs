@@ -682,7 +682,9 @@ fn load(md: &mut String, soak: &Soak) {
     let _ = writeln!(md, "## Load\n");
     let w = soak.whole();
     let windows = soak.windows();
-    let ms = |b: Option<f64>| b.map_or("over 1 s".to_string(), |b| format!("≤ {b} ms"));
+    // Percentiles read inside their buckets (#409), so they're estimates to
+    // the 100th of a ms, not bounds
+    let ms = |b: Option<f64>| b.map_or("over 1 s".to_string(), |b| format!("{b:.2} ms"));
     let worst = windows.iter().map(|(_, w)| w).max_by(|a, b| a.tick_mean_ms.total_cmp(&b.tick_mean_ms));
     let busiest = windows.iter().map(|(_, w)| w.db_transactions_per_sec).fold(0.0, f64::max);
     let most_open = soak.samples.iter().map(|l| l.load.sockets_open).max().unwrap_or(0);
@@ -722,7 +724,7 @@ fn load(md: &mut String, soak: &Soak) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capitol_protocol::ledger::{AccountBooks, Load, UnitFlow, TICK_BUCKETS_MS};
+    use capitol_protocol::ledger::{tick_bucket, AccountBooks, Load, UnitFlow, TICK_BUCKETS_MS};
     use uuid::Uuid;
 
     fn traded(item: &str, sold: bool, quantity: i32, price: i64) -> Entry {
@@ -867,7 +869,7 @@ mod tests {
             sockets_open: 2,
             ..Load::default()
         };
-        load.tick_buckets[2] = ticks;
+        load.tick_buckets[tick_bucket(2.0)] = ticks;
         Ledger {
             at_ms,
             booted_ms: 1,
@@ -907,7 +909,7 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("**Holds.**"), "{md}");
         assert!(md.contains("| log | +20 | +20 | 0 |"), "{md}");
-        assert!(md.contains("| Tick time, p50 / p95 / p99 | ≤ 2 ms / ≤ 2 ms / ≤ 2 ms |"), "{md}");
+        assert!(md.contains("| Tick time, p50 / p95 / p99 | 1.97 ms / 2.00 ms / 2.00 ms |"), "{md}");
         assert!(md.contains("| DB transactions a second, mean / busiest minute | 300 / 300 |"), "{md}");
         // The server's Strands for Percy, not the town's last look
         assert_eq!((report.citizens[0].strands_start, report.citizens[0].strands_end), (100, 160));
