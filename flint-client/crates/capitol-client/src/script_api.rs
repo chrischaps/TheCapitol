@@ -636,6 +636,9 @@ fn debug_map(mark: &crate::debug_layers::Mark) -> rhai::Map {
             node.insert("kind".into(), n.kind.clone().into());
             node.insert("ground".into(), n.ground.clone().into());
             node.insert("available".into(), n.available.into());
+            // "" off the wilds, else whether it suits and why not
+            node.insert("fit".into(), n.fit.as_ref().map_or_else(String::new, |f| f.words.clone()).into());
+            node.insert("suits".into(), n.fit.as_ref().map_or(rhai::Dynamic::UNIT, |f| f.suits.into()));
             node.into()
         })
         .collect();
@@ -1771,7 +1774,7 @@ mod tests {
         *shared.debug.lock().unwrap() = Some(Mark {
             layer: "every layer",
             cells: vec![Cell { min: [0.0, 1.0], max: [30.0, 31.0], label: "(2, 3)".into(), mine: true }],
-            nodes: vec![NodeMark { at: [4.0, 5.0], kind: "iron_vein".into(), ground: "h 412".into(), available: true }],
+            nodes: vec![NodeMark { at: [4.0, 5.0], kind: "iron_vein".into(), ground: "h 120".into(), available: true, fit: Some(crate::debug_layers::Fit { suits: false, words: "wrong ground: h 120, wants 380 to 900".into() }) }],
             edges: vec![[1.0, 2.0, 3.0, 4.0]],
             walkers: vec![
                 WalkerMark { at: [6.0, 7.0], dest: Some([8.0, 9.0]), name: "Ada".into(), citizen: true, doing: String::new() },
@@ -1783,10 +1786,10 @@ mod tests {
                 r#"let d = cap_debug();
                    let c = d.cells[0];
                    let w = d.walkers;
-                   `${d.layer} ${c.label} ${c.mine} ${c.x1} ${d.nodes[0].kind} ${d.nodes[0].ground} ${d.edges[0][3]} ${w[0].dest[1]} ${w[1].dest == ()} ${w[1].doing}`"#,
+                   `${d.layer} ${c.label} ${c.mine} ${c.x1} ${d.nodes[0].kind} ${d.nodes[0].ground} ${d.nodes[0].suits} ${d.nodes[0].fit} ${d.edges[0][3]} ${w[0].dest[1]} ${w[1].dest == ()} ${w[1].doing}`"#,
             )
             .unwrap();
-        assert_eq!(words, "every layer (2, 3) true 30.0 iron_vein h 412 4.0 9.0 true crafting rope");
+        assert_eq!(words, "every layer (2, 3) true 30.0 iron_vein h 120 false wrong ground: h 120, wants 380 to 900 4.0 9.0 true crafting rope");
     }
 
     #[test]

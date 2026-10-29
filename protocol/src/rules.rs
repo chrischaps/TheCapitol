@@ -241,6 +241,10 @@ pub mod weather;
 /// Floors: building upward, each costing twice the last (V3.3).
 pub mod floors;
 
+/// Habitats: the ground a wild resource grows on, for the planner and the
+/// clients alike (W6, #413).
+pub mod habitat;
+
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
 pub fn quality_grade(quality: i32) -> &'static str {

@@ -23,6 +23,7 @@ use capitol_protocol::rest::{
     CatalogContainerType, CatalogItemType, CatalogResourceType, CatalogResponse,
     CatalogStationType, RecipeInfo,
 };
+use capitol_protocol::rules::habitat::Habitat;
 
 const FALLBACK_JSON: &str = include_str!("catalog_fallback.json");
 
@@ -116,6 +117,12 @@ impl Catalog {
 
     pub fn resource_type(&self, id: &str) -> Option<&CatalogResourceType> {
         self.data.resource_types.iter().find(|t| t.id == id)
+    }
+
+    /// The ground a wild resource grows on (`wilds.toml`, #413), if it has
+    /// a habitat: `rules::habitat` judges a spot by it.
+    pub fn habitat(&self, resource: &str) -> Option<&Habitat> {
+        self.data.habitats.iter().find(|h| h.resource == resource).map(|h| &h.habitat)
     }
 
     pub fn container_type(&self, id: &str) -> Option<&CatalogContainerType> {
@@ -217,6 +224,15 @@ mod tests {
             .join("../../../protocol/tests/fixtures/rest/catalog.json");
         let fixture = fs::read_to_string(&fixture).expect("the protocol's catalog fixture");
         assert_eq!(FALLBACK_JSON.trim_end(), fixture.trim_end());
+    }
+
+    #[test]
+    fn the_veins_keep_to_their_habitats() {
+        let catalog = Catalog::fallback();
+        let iron = catalog.habitat("iron_vein").expect("iron's habitat is in the fallback");
+        assert!(iron.height.is_some() && iron.slope.is_some());
+        assert!(catalog.habitat("tin_vein").is_some_and(|h| h.massifs.is_some()));
+        assert!(catalog.habitat("grass").is_none(), "grass has no wild habitat");
     }
 
     #[test]

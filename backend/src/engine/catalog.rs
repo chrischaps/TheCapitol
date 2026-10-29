@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use capitol_protocol::rest::{
-    CatalogContainerType, CatalogItemType, CatalogResourceType, CatalogResponse,
+    CatalogContainerType, CatalogHabitat, CatalogItemType, CatalogResourceType, CatalogResponse,
     CatalogStationType,
 };
 
@@ -93,6 +93,14 @@ pub fn build(game: &GameState) -> CatalogResponse {
     let mut recipes: Vec<_> = game.recipes.values().map(|r| r.to_info(&item_names)).collect();
     recipes.sort_by(|a, b| a.id.cmp(&b.id));
 
+    // From the content, not a table: only the planner reads `wilds.toml`
+    let mut habitats: Vec<_> = crate::content::wilds()
+        .habitat
+        .iter()
+        .map(|h| CatalogHabitat { resource: h.resource.clone(), habitat: h.habitat() })
+        .collect();
+    habitats.sort_by(|a, b| a.resource.cmp(&b.resource));
+
     let mut catalog = CatalogResponse {
         version: String::new(),
         item_types,
@@ -100,6 +108,7 @@ pub fn build(game: &GameState) -> CatalogResponse {
         resource_types,
         container_types,
         recipes,
+        habitats,
     };
     catalog.version = version(&catalog);
     catalog
@@ -213,6 +222,23 @@ mod tests {
         }
         let tree = wire.resource_types.iter().find(|t| t.id == "tree").unwrap();
         assert_eq!((tree.yield_quantity_min, tree.yield_quantity_max), (1, 2), "a gated resource's least tier");
+    }
+
+    /// #413: every habitat in `wilds.toml` is on the wire, sorted, and
+    /// judges ground as the planner's own does.
+    #[test]
+    fn the_habitats_are_on_the_wire() {
+        let catalog = build(&game());
+        let wilds = crate::content::wilds();
+        assert_eq!(catalog.habitats.len(), wilds.habitat.len());
+        assert!(catalog.habitats.windows(2).all(|w| w[0].resource < w[1].resource), "sorted by resource");
+        for def in &wilds.habitat {
+            let wire = catalog.habitats.iter().find(|h| h.resource == def.resource).unwrap();
+            assert_eq!(wire.habitat, def.habitat(), "{}", def.resource);
+        }
+        let copper = catalog.habitats.iter().find(|h| h.resource == "copper_vein").unwrap();
+        assert!(copper.habitat.suits(500.0, 300.0, 0.8) && !copper.habitat.suits(500.0, 100.0, 0.8));
+        assert!(copper.habitat.on_massif(Some(2)) && !copper.habitat.on_massif(Some(3)), "copper keeps to the even massifs");
     }
 
     /// The protocol's catalog fixture, which is also the Flint client's
