@@ -496,6 +496,12 @@ pub enum Choice {
     /// Bring some of a commission's wants to the hall now, from what it
     /// holds at the grade, and be paid for each. Needs a quantity.
     Deliver { quantity: Span<i32> },
+    /// Give up its claim on a commission while there's time (#505): it
+    /// still has `short` units to make, of which it would make about
+    /// `makes` in the hours it's on before the claim runs out. With more
+    /// than the court's hour of grace left it's no breach, and the share
+    /// goes back to the board for someone else.
+    Release { short: i32, makes: i32 },
     /// Leave a commission for someone else, or post none.
     Pass,
     /// Post a commission on the hall's board for `item`, at or over `grade`,

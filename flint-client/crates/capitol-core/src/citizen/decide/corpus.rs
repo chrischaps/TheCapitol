@@ -157,6 +157,7 @@ fn round(r: u32) -> Vec<Situation> {
                     day_work: LOT,
                     can_make: true,
                     due_soon: false,
+                    behind: None,
                 };
                 let Some(menu) = role.commission_menu(&wanted) else { continue };
                 let question = Question::Commission {

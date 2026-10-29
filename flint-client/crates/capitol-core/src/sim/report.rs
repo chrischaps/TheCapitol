@@ -100,6 +100,9 @@ pub enum Entry {
     Expired { item: String, refunded: i64 },
     /// A claim of the bot's ran out `quantity` short: a breach.
     Lapsed { item: String, quantity: i32 },
+    /// A claim of the bot's it couldn't keep, released in good time
+    /// (#505): `quantity` of `item` back on the board, and no breach.
+    Released { item: String, quantity: i32 },
     /// It took piece-rate work (Commons S2.8): `work` in a few words.
     TookWork { work: String },
     /// `units` of `item` made on its shift went to the employer, and paid
@@ -264,6 +267,8 @@ pub struct Court {
     pub filled: usize,
     /// Claims that ran out short
     pub lapsed: usize,
+    /// Claims given up in good time, no breach (#505)
+    pub released: usize,
     /// Commissions that ran past their due date, and what came back
     pub expired: usize,
     pub refunded: i64,
@@ -297,6 +302,7 @@ impl Court {
             }
             Entry::Filled { .. } => self.filled += 1,
             Entry::Lapsed { .. } => self.lapsed += 1,
+            Entry::Released { .. } => self.released += 1,
             Entry::Expired { refunded, .. } => {
                 self.expired += 1;
                 self.refunded += refunded;
@@ -725,7 +731,8 @@ impl Report {
                     | Entry::Delivered { .. }
                     | Entry::Filled { .. }
                     | Entry::Expired { .. }
-                    | Entry::Lapsed { .. } => {}
+                    | Entry::Lapsed { .. }
+                    | Entry::Released { .. } => {}
                     // Counted by the wages
                     Entry::TookWork { .. }
                     | Entry::Earned { .. }
@@ -1005,12 +1012,13 @@ impl Report {
             let _ = writeln!(md, "\n## The hall's board\n");
             let _ = writeln!(
                 md,
-                "- Commissions posted: {}, {} Strands put down, {} in the court's fees\n- Claims: {}, promising {} units; {} lapsed\n- Delivered: {} units, paid {} Strands from escrow\n- Filled: {}; ran out: {}, {} Strands refunded\n- Strands through the court: {} put in by these posters, {} paid out to these deliverers",
+                "- Commissions posted: {}, {} Strands put down, {} in the court's fees\n- Claims: {}, promising {} units; {} released in good time, {} lapsed\n- Delivered: {} units, paid {} Strands from escrow\n- Filled: {}; ran out: {}, {} Strands refunded\n- Strands through the court: {} put in by these posters, {} paid out to these deliverers",
                 c.posted,
                 c.escrowed,
                 c.fees,
                 c.claims,
                 c.promised,
+                c.released,
                 c.lapsed,
                 c.delivered,
                 c.paid,

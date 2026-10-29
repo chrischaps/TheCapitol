@@ -107,10 +107,16 @@ fn rest(net: &Net, request: RestRequest, tag: u64) -> RestResponse {
     panic!("no answer to call {tag}");
 }
 
-/// A fresh account and a `play` key for it, as a citizen's would be. The
-/// owner is signed in over REST only, so the key's bot can hold the avatar;
-/// connect `owner` with `auth` to act as them again.
+/// A fresh account and a `play` key for it. The owner is signed in over
+/// REST only, so the key's bot can hold the avatar; connect `owner` with
+/// `auth` to act as them again.
 fn play_key(what: &str) -> (Net, AuthResponse, String) {
+    key_with(what, vec![ApiKeyScope::Play])
+}
+
+/// As [`play_key`], with `scopes`: a citizen's are `play` and `trade`
+/// (`backend/src/citizens.rs`).
+fn key_with(what: &str, scopes: Vec<ApiKeyScope>) -> (Net, AuthResponse, String) {
     let account = fresh_account();
     let owner = Net::spawn(NetConfig::with_base_url(server_url())).unwrap();
     let RestResponse::Auth(auth) = rest(
@@ -131,7 +137,7 @@ fn play_key(what: &str) -> (Net, AuthResponse, String) {
     };
     let mint = CreateApiKeyRequest {
         name: what.into(),
-        scopes: vec![ApiKeyScope::Play],
+        scopes,
     };
     let RestResponse::CreatedApiKey(key) = rest(&owner, RestRequest::CreateApiKey(mint), 2) else {
         panic!("minted a key");
@@ -734,6 +740,45 @@ fn a_revoked_key_stops_the_bot_with_revoked() {
         Err(BotError::Revoked(message)) => assert!(message.contains("revoked"), "{message}"),
         other => panic!("the bot didn't stop with Revoked: {other:?}"),
     }
+}
+
+/// #505: a citizen lets a claim it can't keep go in good time, on a key
+/// like its own, from wherever it is: the claim is released, no breach, and
+/// its share is back on the board for anyone.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn a_claim_let_go_in_good_time_is_released_and_its_share_goes_back() {
+    use capitol_core::protocol::rest::PostCommission;
+    use capitol_core::protocol::rules::court::ClaimStatus;
+
+    let mut poster = Bot::sign_in(live(), &fresh_account()).expect("signed in");
+    // Posting is at the Exchange hall (S2.1)
+    poster.go_to_exchange().expect("the poster reached the hall");
+    let posted = poster
+        .post_commission(PostCommission {
+            item_type: "log".into(),
+            min_quality: 0,
+            quantity: 3,
+            price: 5,
+            due_days: 1,
+        })
+        .expect("posted");
+    let (_owner, _auth, key) = key_with("release", vec![ApiKeyScope::Play, ApiKeyScope::Trade]);
+    let mut citizen = Bot::with_api_key(NetConfig::with_base_url(server_url()), &key)
+        .expect("in the world")
+        .quiet();
+    let claimed = citizen.claim_commission(posted.id, 2).expect("claimed");
+    assert_eq!(claimed.claim.status, ClaimStatus::Open);
+    assert_eq!(claimed.commission.claimed, 2);
+    // A day ahead of it, far more than the court's hour of grace
+    let ended = citizen.release_claim(posted.id).expect("let go");
+    assert_eq!(ended.claim.status, ClaimStatus::Released, "no breach");
+    assert_eq!((ended.claim.quantity, ended.claim.delivered), (2, 0));
+    assert_eq!(ended.commission.claimed, 0, "its share is back on the board");
+    let claims = citizen.my_claims().expect("its claims");
+    assert!(!claims.iter().any(|c| c.commission_id == posted.id && c.status == ClaimStatus::Open));
+    // Nothing left to let go
+    assert!(citizen.release_claim(posted.id).is_err());
 }
 
 /// C0.5 (#211): a walk across the outer canal, away from its bridges, goes

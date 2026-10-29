@@ -63,6 +63,7 @@ use crate::citizen::calling::Calling;
 use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Decision, Held, Mind, Place, Question, Situation, When, Who};
 use crate::citizen::detour::Detour;
+use crate::citizen::habit::Habit;
 use crate::citizen::meet;
 use crate::citizen::persona::{Market, Persona};
 use crate::citizen::phrases::Voice;
@@ -277,6 +278,7 @@ pub(crate) fn live(
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
     citizen.people = true;
     citizen.persona = Some(persona.clone());
+    citizen.hours = town.keeps_hours().then_some(persona.habit);
     // The town's line for hiring (K2.4), which its thrift weighs
     citizen.hiring.base_line = hire_line;
     // And for posting for its home (K2.3)
@@ -316,6 +318,10 @@ pub(crate) fn live(
         // A guild day's deposit it hasn't made, before it goes (S4.5)
         if let Err(e) = citizen.pay_in_on_leaving() {
             town.health(|h| h.failed(format!("paying into its guild: {e}")));
+        }
+        // A claim it won't be back in time to keep, while that's free (#505)
+        if let Err(e) = citizen.release_on_leaving() {
+            town.health(|h| h.failed(format!("releasing a claim: {e}")));
         }
     }
     // What the day's last steps did: its walk home, and its deed
@@ -392,7 +398,7 @@ fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>)
         | (Choice::Stock { .. }, Some(Action::Trade(Trade::Stock { .. })))
         | (Choice::MakeMarket { .. }, Some(Action::Trade(Trade::MakeMarket)))
         | (Choice::Road { .. }, Some(Action::Road(_)))
-        | (Choice::Claim { .. } | Choice::Deliver { .. }, Some(Action::Board(_)))
+        | (Choice::Claim { .. } | Choice::Deliver { .. } | Choice::Release { .. }, Some(Action::Board(_)))
         | (Choice::TakeWork, Some(Action::Wage(_)))
         | (Choice::Hire { .. }, Some(Action::Hire(_)))
         | (Choice::Apply { .. }, Some(Action::Guild(_)))
@@ -461,6 +467,10 @@ struct SimBot {
     /// A citizen's persona (C1.2), which gives it a day. A swarm bot works
     /// round the clock.
     persona: Option<Persona>,
+    /// The hours a citizen keeps (#276), when its town keeps them, for
+    /// whether a claim can be kept in time (#505). `None`: on all the
+    /// time, as a swarm bot or an `--always-on` town is.
+    hours: Option<Habit>,
     /// At its market this market's hours.
     at_market: bool,
     /// Home from the day's work, on the night's (#276): set by the walk
@@ -570,6 +580,7 @@ impl SimBot {
             doing: None,
             people: false,
             persona: None,
+            hours: None,
             at_market: false,
             night_shift: false,
             merchant: None,

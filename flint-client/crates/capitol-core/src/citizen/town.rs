@@ -1045,6 +1045,12 @@ impl Tether<'_> {
         self.town_stopped() || local_unix_ms() >= self.session_end.load(Ordering::Relaxed)
     }
 
+    /// Whether its sessions end when its habit says (#276), not on all
+    /// the time: `--always-on` never sets an end.
+    pub(crate) fn keeps_hours(&self) -> bool {
+        self.session_end.load(Ordering::Relaxed) != i64::MAX
+    }
+
     /// Whether the town says stop.
     fn town_stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)

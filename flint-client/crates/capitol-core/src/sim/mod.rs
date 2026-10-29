@@ -194,12 +194,25 @@ pub struct Wanted<'a> {
     pub owed: i32,
     /// Units it holds at the commission's grade
     pub meeting: i32,
-    /// The most it would promise: what it makes in a day's work
+    /// The most it would promise: what it makes in a day's work, or in the
+    /// hours it's on before a claim would run out if that's less (#505)
     pub day_work: i32,
     /// It can gather or make the item at the grade, in the time a claim runs
     pub can_make: bool,
     /// Its claim runs out within the court's hour of grace
     pub due_soon: bool,
+    /// Its claim can't be kept, and there's still time to release it freely
+    /// (#505). `None` when it's on time, has no claim, or it's too late
+    pub behind: Option<Behind>,
+}
+
+/// A claim that won't be kept in time (#505): `short` units still to make
+/// beyond what it holds, of which it would make `makes` at its pace in the
+/// hours it's on before the claim runs out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Behind {
+    pub short: i32,
+    pub makes: i32,
 }
 
 /// A trade a bot makes instead of the planner's step, as its mind decided.
@@ -728,15 +741,19 @@ impl Role {
     /// The menu for a commission on the board (S2.5), if there's a question
     /// to ask:
     /// - **Deliver** what it holds at the grade, up to what's open to it.
-    ///   On a claim of its own, only once it holds all it owes, or its
-    ///   claim is nearly out.
+    ///   On a claim of its own, only once it holds all it owes, its claim
+    ///   is nearly out, or it's behind (it brings what it has, then lets
+    ///   the rest go).
     /// - **Claim**, for something it answers, with none of its own on it,
     ///   that it can make at the grade in time: up to a day's work.
+    /// - **Release** a claim of its own it's behind on, while that's free
+    ///   (#505).
     /// - **Pass**, always.
     pub fn commission_menu(&self, w: &Wanted) -> Option<Vec<Choice>> {
         let mut menu = Vec::new();
+        let behind = w.behind.filter(|_| w.owed > 0);
         let open = court::deliverable(w.unclaimed, w.owed).min(w.meeting);
-        let ready = w.owed == 0 || w.meeting >= w.owed || w.due_soon;
+        let ready = w.owed == 0 || w.meeting >= w.owed || w.due_soon || behind.is_some();
         if open > 0 && ready {
             menu.push(Choice::Deliver {
                 quantity: Span::new(1, open),
@@ -746,6 +763,12 @@ impl Role {
         if w.owed == 0 && most > 0 && w.can_make && self.answers().contains(&w.item) {
             menu.push(Choice::Claim {
                 quantity: Span::new(1, most),
+            });
+        }
+        if let Some(b) = behind {
+            menu.push(Choice::Release {
+                short: b.short,
+                makes: b.makes,
             });
         }
         if menu.is_empty() {
@@ -1578,6 +1601,7 @@ mod tests {
             day_work: LOT,
             can_make: true,
             due_soon: false,
+            behind: None,
         }
     }
 
@@ -1642,6 +1666,38 @@ mod tests {
         // With the claim nearly out, what it has
         let late = Wanted { due_soon: true, ..owing(4) };
         assert_eq!(role.commission_menu(&late), Some(vec![deliver(4), Choice::Pass]));
+    }
+
+    /// A claim it won't keep (#505) is released, after it brings in what it
+    /// holds; one it has no claim on has nothing to release.
+    #[test]
+    fn a_claim_it_cant_keep_is_released_after_what_it_holds_goes_in() {
+        let role = Role::Gatherer(Gather::Wood);
+        let behind = Some(Behind { short: 6, makes: 2 });
+        let release = Choice::Release { short: 6, makes: 2 };
+        let owing = |meeting| Wanted {
+            owed: 10,
+            unclaimed: 0,
+            meeting,
+            behind,
+            ..wanted("log")
+        };
+        // Nothing in hand: let it go, or not
+        assert_eq!(role.commission_menu(&owing(0)), Some(vec![release.clone(), Choice::Pass]));
+        // Some in hand: bring it, though it's short of all it owes
+        let deliver = Choice::Deliver { quantity: Span::new(1, 4) };
+        assert_eq!(role.commission_menu(&owing(4)), Some(vec![deliver, release, Choice::Pass]));
+        // On time, short: nothing to ask, as before
+        assert_eq!(role.commission_menu(&Wanted { behind: None, ..owing(4) }), None);
+        // No claim of its own: nothing to release
+        let open = Wanted { behind, ..wanted("log") };
+        assert_eq!(role.commission_menu(&open), Some(vec![claim_of(LOT), Choice::Pass]));
+    }
+
+    fn claim_of(most: i32) -> Choice {
+        Choice::Claim {
+            quantity: Span::new(1, most),
+        }
     }
 
     #[test]

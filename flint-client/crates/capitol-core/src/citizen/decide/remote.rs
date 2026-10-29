@@ -526,6 +526,7 @@ pub fn label(c: &Choice) -> String {
         Choice::Road { .. } => "the road in".into(),
         Choice::Claim { .. } => "claim".into(),
         Choice::Deliver { .. } => "deliver".into(),
+        Choice::Release { .. } => "release the claim".into(),
         Choice::Pass => "pass".into(),
         Choice::Post { item, .. } => format!("post for {item}"),
         Choice::TakeWork => "take the work".into(),
@@ -632,6 +633,9 @@ pub fn entry(c: &Choice) -> String {
         Choice::Deliver { quantity } => format!(
             "Deliver {} of them at the hall now, from what you hold at the grade, paid for each",
             count(quantity)
+        ),
+        Choice::Release { short, makes } => format!(
+            "Release your claim now, while there's time: you still have {short} to make, and at your pace you'd make about {makes} in the hours you're on before it runs out. Released now it's no breach and the share goes back on the board; left to run out, it lapses on your record"
         ),
         Choice::Pass => "Leave it".into(),
         Choice::Post {

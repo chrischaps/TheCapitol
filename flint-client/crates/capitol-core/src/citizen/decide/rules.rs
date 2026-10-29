@@ -51,6 +51,8 @@
 //! trade by its margin ([`margin`]: more for the thrifty, less for the
 //! bold), and delivers what it holds to one that pays the books' price,
 //! sooner than promise more.
+//! A claim it can't keep is released while the court's hour of grace is
+//! still ahead ([`release`]), surer the further behind it is.
 //! Passing is a steady [`PASS`]. A crafter posts a commission for an input
 //! its bids haven't filled, at the bid's price and a premium
 //! ([`premium`]: less for the thrifty), the more readily the less thrifty.
@@ -286,7 +288,7 @@ impl Decider for RulesDecider {
                     (0.65 + 0.25 * t.sociability as f64, d)
                 }
                 Choice::Road { .. } => (ROAD, Decision::plain(i)),
-                Choice::Claim { .. } | Choice::Deliver { .. } => commission(s, i, choice),
+                Choice::Claim { .. } | Choice::Deliver { .. } | Choice::Release { .. } => commission(s, i, choice),
                 // Passing is a steady PASS, on the board and a wage alike
                 Choice::Pass => (PASS, Decision::plain(i)),
                 Choice::TakeWork => wage(s, i),
@@ -583,6 +585,8 @@ pub(crate) fn premium(t: &Temperament) -> f64 {
 ///   better.
 /// - **Claim** a commission whose price beats the last trade by its
 ///   [`margin`]. With no trade to go by, the bold take a chance on it.
+/// - **Release** a claim of its own it can't keep, in good time
+///   ([`release`]).
 /// - **Pass** otherwise: a steady [`PASS`] (in [`RulesDecider`]'s pick).
 ///
 /// Each takes as many as its span allows: the menu caps a claim at a day's
@@ -613,8 +617,24 @@ fn commission(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
             };
             (u, most(quantity))
         }
+        Choice::Release { short, makes } => (release(t, *short, *makes), Decision::plain(i)),
         _ => (PASS, Decision::plain(i)),
     }
+}
+
+/// Releasing a claim it can't keep, in good time (#505): clearly better
+/// than letting it lapse, and surer the further behind it is,
+///
+/// ```text
+/// u = min(SURE, 0.75 + 0.15 · (1 − makes / short) − 0.1 · (risk − 0.5))
+/// ```
+///
+/// so the bold hold on a little less surely. It's always under
+/// [`DELIVER`], so what it holds goes in first, and always a clear lead
+/// over [`PASS`].
+fn release(t: &Temperament, short: i32, makes: i32) -> f64 {
+    let behind = 1.0 - (makes.max(0) as f64 / short.max(1) as f64).min(1.0);
+    (0.75 + 0.15 * behind - 0.1 * (t.risk as f64 - 0.5)).min(SURE)
 }
 
 /// What a citizen wants a wage to pay a game hour, over what its own trade
@@ -1236,6 +1256,27 @@ mod tests {
             assert_eq!(d, Decision { pick: 0, price: None, quantity: Some(10) });
             assert!(confidence >= 0.9, "{confidence}");
         }
+    }
+
+    /// A claim it won't keep is let go in good time (#505), by everyone and
+    /// clearly, however far behind; what it holds goes in first.
+    #[test]
+    fn a_claim_it_cant_keep_is_released_once_what_it_holds_is_in() {
+        let let_go = |makes| Choice::Release { short: 10, makes };
+        for t in [Temperament::default(), with(|t| t.risk = 1.0), with(|t| t.risk = 0.0), with(|t| t.thrift = 1.0)] {
+            for makes in [0, 5, 9] {
+                let (d, confidence) = decide(&commission(12, 10, vec![let_go(makes), Choice::Pass], Some(10), t));
+                assert_eq!(d, Decision::plain(0), "makes {makes}");
+                assert!(confidence >= super::super::RULES_THRESHOLD, "makes {makes}: {confidence}");
+            }
+            let (d, _) = decide(&commission(12, 10, vec![deliver(4), let_go(2), Choice::Pass], Some(10), t));
+            assert_eq!(d, Decision { pick: 0, price: None, quantity: Some(4) });
+        }
+        // Surer the further behind, and for the careful
+        let middling = Temperament::default();
+        assert!(release(&middling, 10, 0) > release(&middling, 10, 9));
+        assert!(release(&with(|t| t.risk = 0.0), 10, 5) > release(&with(|t| t.risk = 1.0), 10, 5));
+        assert!(release(&with(|t| t.risk = 0.0), 10, 0) <= SURE);
     }
 
     #[test]

@@ -7,6 +7,13 @@
 //!   all it owes at the grade (or the claim is nearly out), it walks to the
 //!   hall and delivers, before anything else that day. Until then its work
 //!   makes what it owes ([`Holdings::owed`]), and it sells none of it.
+//! - **Letting go in time** (#505). A claim it won't keep, at its pace
+//!   ([`pace`]) in the hours it's on before the claim runs out (its
+//!   habit's, #276), is a question while the court's hour of grace is
+//!   still ahead: it brings what it holds, then releases the rest, which is
+//!   no breach, and the share goes back to the board. It asks again as it
+//!   signs off ([`SimBot::release_on_leaving`]), so a night away never
+//!   lapses a claim it could have let go.
 //! - **Answering.** A commission for something one of its willing jobs
 //!   makes ([`Role::answers`](crate::sim::Role::answers), Callings K1.2:
 //!   its favourite, the job it's at, and those its calling leans to) is a
@@ -15,7 +22,8 @@
 //!   one it passed isn't asked about again for [`ASK_AGAIN`]. A claim it
 //!   takes for another job's goods pulls it toward that job's stint.
 //! - **Making it in time.** A claim is offered only for what it can make at
-//!   the grade where it goes ([`ground`]) in the time a claim runs. Anyone
+//!   the grade where it goes ([`ground`]) in the hours it's on while a
+//!   claim runs. Anyone
 //!   willing to mine counts the wild veins: a grade the rural ring can't
 //!   give, or a price that pays the walk ([`WILD_PAY`]), sends it to the
 //!   ranges, and it gathers only there until the claim is kept.
@@ -37,22 +45,30 @@ use capitol_protocol::rest::{Commission, CommissionClaim, PostCommission};
 use capitol_protocol::rules::court::{self, ClaimStatus, CommissionStatus};
 use capitol_protocol::rules::market::grade_floor;
 use capitol_protocol::rules::{Zone, DAY_LENGTH_SECS};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::super::patron::{self, PATRON_LINE};
 use super::super::plan::Holdings;
 use super::super::report::Entry;
-use super::super::{stint::lot_for, Gather, Role, Trade, Wanted, LOT, POST_DAYS, POST_GRADE};
+use super::super::{stint::lot_for, Behind, Gather, Role, Trade, Wanted, LOT, POST_DAYS, POST_GRADE};
 use super::{stint, Action, SimBot};
 use crate::bot::BotError;
 use crate::catalog::Catalog;
 use crate::citizen::decide::{Choice, Question};
+use crate::citizen::habit::Habit;
 use crate::commissions::{meeting, stacks_for, GRADES};
 
 /// How often a citizen reads the board, at most, in game seconds.
 const READ_EVERY: f64 = 300.0;
 /// Game seconds before a commission it passed is asked about again.
 const ASK_AGAIN: f64 = 3600.0;
+/// Seconds past the court's hour of grace a citizen lets a claim go by at
+/// the latest (#505), so a slow round can't carry a release into the hour.
+const RELEASE_MARGIN_SECS: i64 = 15 * 60;
+/// Game seconds at a claim before its pace is what it made since, not a
+/// day's work in a game day (#505): long enough to walk out to the ranges.
+const TRIAL: f64 = DAY_LENGTH_SECS as f64;
 /// A commission paying this many times the books pays an ore gatherer's
 /// walk to the ranges, where the veins are thicker and better (#336).
 const WILD_PAY: f64 = 1.5;
@@ -127,6 +143,41 @@ fn day_work(made: &VecDeque<(Instant, String, i32)>, item: &str, worked: Duratio
     } else {
         n.max(LOT)
     }
+}
+
+/// Its pace on `item` (#505), in units a second: what it made of it in
+/// `made` since `since` (the claim, or the session's start if that's
+/// later), once it has been at it `trial`; until then, `day_work` in a game
+/// day. A day back at most, as `made` keeps. `made` is this session's only,
+/// so a citizen back from a night away is judged by a day's work again
+/// until it has been at it a game day (#584).
+fn pace(made: &VecDeque<(Instant, String, i32)>, item: &str, since: Instant, trial: Duration, day_work: i32) -> f64 {
+    let day = Duration::from_secs(DAY_LENGTH_SECS as u64);
+    let at = since.elapsed().min(day);
+    if at < trial.min(day) {
+        return day_work as f64 / DAY_LENGTH_SECS as f64;
+    }
+    let n: i32 = made.iter().filter(|(t, i, _)| i == item && t.elapsed() <= at).map(|(_, _, q)| q).sum();
+    n as f64 / at.as_secs_f64()
+}
+
+/// The seconds a citizen keeping `hours` is on between `from` and `to`
+/// (#505): by its habit's sessions (#276), or all of them without one.
+fn hours_on(hours: Option<&Habit>, from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
+    let (from, to) = (from.timestamp_millis(), to.timestamp_millis());
+    let ms = match hours {
+        Some(habit) => habit.online_ms(from, to),
+        None => to - from,
+    };
+    ms.max(0) as f64 / 1000.0
+}
+
+/// Whether a claim still owing `short` beyond what's in hand is behind
+/// (#505): at `pace` units a second, over the `on` seconds it's on before
+/// the claim runs out, it makes less than that.
+fn behind(short: i32, pace: f64, on: f64) -> Option<Behind> {
+    let makes = (pace * on).floor().min(i32::MAX as f64) as i32;
+    (short > 0 && makes < short).then_some(Behind { short, makes })
 }
 
 /// A citizen's view of the board, and its own part in it.
@@ -243,6 +294,9 @@ pub(super) enum BoardAct {
     Claim { id: Uuid, item: String, quantity: i32, wild: bool, pays: i64 },
     /// Walk to the hall and deliver `quantity` of `item` to commission `id`
     Deliver { id: Uuid, item: String, quantity: i32 },
+    /// Give up its claim on commission `id`'s `item` in good time (#505).
+    /// From anywhere
+    Release { id: Uuid, item: String },
 }
 
 impl BoardAct {
@@ -251,6 +305,7 @@ impl BoardAct {
         match self {
             BoardAct::Claim { item, .. } => format!("claim {item}"),
             BoardAct::Deliver { item, .. } => format!("deliver {item}"),
+            BoardAct::Release { item, .. } => format!("release a claim on {item}"),
         }
     }
 }
@@ -294,8 +349,8 @@ impl SimBot {
     }
 
     /// Asks the mind about the board, if there's a question: first its own
-    /// claims, ready to deliver, then the best paid commission it could
-    /// answer. `None`: nothing to do there this round.
+    /// claims, ready to deliver or behind (#505), then the best paid
+    /// commission it could answer. `None`: nothing to do there this round.
     pub(super) fn choose_board(&mut self, holdings: &Holdings) -> Option<BoardAct> {
         let me = self.bot.state().me()?;
         let now = self.bot.state().utc_now();
@@ -304,19 +359,23 @@ impl SimBot {
         let walks = !self.night_shift;
         let pack = self.bot.state().inventory().cloned();
         let worked = self.board.began.elapsed();
-        // Its own claims first, once it holds what they want
+        let catalog = self.bot.state().catalog().clone();
+        // Its own claims first, once it holds what they want, or once it
+        // won't keep one
         let owing: Vec<(CommissionClaim, Commission)> =
             self.board.owing().map(|(claim, c)| (claim.clone(), c.clone())).collect();
         for (claim, c) in owing {
             let due_soon = claim.until - now <= grace;
+            let held = held_at_grade(&c, pack.as_ref());
             let wanted = Wanted {
                 item: &c.item_type,
                 unclaimed: court::unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn),
                 owed: claim.quantity - claim.delivered,
-                meeting: if walks || due_soon { held_at_grade(&c, pack.as_ref()) } else { 0 },
+                meeting: if walks || due_soon { held } else { 0 },
                 day_work: 0,
                 can_make: false,
                 due_soon,
+                behind: self.claim_behind(&catalog, &claim, &c, held, now),
             };
             if let Some(act) = self.ask_commission(&c, &wanted, holdings, false, 0) {
                 return Some(act);
@@ -340,29 +399,27 @@ impl SimBot {
             .cloned()
             .collect();
         open.sort_by_key(|c| std::cmp::Reverse(c.price));
-        let catalog = self.bot.state().catalog().clone();
         for c in open {
             // The willing job that answers for it, whose menu it is
             let Some(job) = self.answerer(&c.item_type) else { continue };
             let unclaimed = court::unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn);
             let ground = ground(job, &catalog, &c.item_type, c.min_quality);
-            // A kit at a time: they don't stack, and a pack has 24 slots
-            let day_work = match catalog.station_for_kit(&c.item_type) {
-                Some(_) => 1,
-                None => day_work(&self.board.made, &c.item_type, worked),
-            };
-            // In time: a day's work is a game day's, and a claim runs a court
-            // day at most, never past the due date
-            let runs = (court::claim_until(now, c.due_at) - now).num_seconds();
-            let takes = unclaimed.min(day_work) as i64 * DAY_LENGTH_SECS / day_work.max(1) as i64;
+            let day_work = self.day_work(&catalog, &c.item_type, worked);
+            // In time: a day's work is a game day's, made in the hours it's
+            // on while a claim runs (#505), a court day at most and never
+            // past the due date
+            let on = self.on_between(now, court::claim_until(now, c.due_at));
+            let in_time = (day_work as f64 * on / DAY_LENGTH_SECS as f64).floor() as i32;
+            let promise = day_work.min(in_time);
             let wanted = Wanted {
                 item: &c.item_type,
                 unclaimed,
                 owed: 0,
                 meeting: if walks { held_at_grade(&c, pack.as_ref()) } else { 0 },
-                day_work,
-                can_make: ground.is_some() && takes <= runs,
+                day_work: promise,
+                can_make: ground.is_some() && promise > 0,
                 due_soon: false,
+                behind: None,
             };
             // Better ore pays the walk to the ranges
             let worth = self.worth(&c.item_type);
@@ -407,6 +464,10 @@ impl SimBot {
                 id: c.id,
                 item: c.item_type.clone(),
                 quantity: d.quantity?,
+            },
+            Some((_, Choice::Release { .. })) => BoardAct::Release {
+                id: c.id,
+                item: c.item_type.clone(),
             },
             _ => {
                 if wanted.owed == 0 {
@@ -459,7 +520,96 @@ impl SimBot {
                 self.bot.collect_market_box()?;
                 self.post_demand()
             }
+            BoardAct::Release { id, item } => {
+                let ended = self.bot.release_claim(*id);
+                self.board.stale();
+                // It couldn't keep it: not claimed again straight away
+                self.board.passed.insert(*id, Instant::now());
+                let ended = ended?;
+                self.board.wild.remove(id);
+                // Released in good time; a late one is heard as a lapse
+                if ended.claim.status == ClaimStatus::Released {
+                    self.entries.push(Entry::Released {
+                        item: item.clone(),
+                        quantity: ended.claim.quantity - ended.claim.delivered,
+                    });
+                }
+                self.board.claims.retain(|c| c.commission_id != *id);
+                self.board.claims.push(ended.claim);
+                if let Some(c) = self.board.commissions.iter_mut().find(|c| c.id == *id) {
+                    *c = ended.commission;
+                }
+                Ok(())
+            }
         }
+    }
+
+    /// As it signs off (#505): a claim it won't keep in the hours it's back
+    /// before the claim runs out is a question now, while letting it go is
+    /// free, rather than one it lapses on overnight. It's going home, so it
+    /// brings nothing in.
+    pub(super) fn release_on_leaving(&mut self) -> Result<(), BotError> {
+        if !self.people {
+            return Ok(());
+        }
+        let now = self.bot.state().utc_now();
+        let pack = self.bot.state().inventory().cloned();
+        let catalog = self.bot.state().catalog().clone();
+        let holdings = self.holdings();
+        let owing: Vec<(CommissionClaim, Commission)> =
+            self.board.owing().map(|(claim, c)| (claim.clone(), c.clone())).collect();
+        for (claim, c) in owing {
+            let held = held_at_grade(&c, pack.as_ref());
+            let Some(behind) = self.claim_behind(&catalog, &claim, &c, held, now) else { continue };
+            let wanted = Wanted {
+                item: &c.item_type,
+                unclaimed: court::unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn),
+                owed: claim.quantity - claim.delivered,
+                meeting: 0,
+                day_work: 0,
+                can_make: false,
+                due_soon: false,
+                behind: Some(behind),
+            };
+            if let Some(act @ BoardAct::Release { .. }) = self.ask_commission(&c, &wanted, &holdings, false, 0) {
+                self.board_act(&act)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// What a claim of its may promise of `item` (S2.5): a day's work
+    /// ([`day_work`]), or a kit at a time, since they don't stack and a pack
+    /// has 24 slots.
+    fn day_work(&self, catalog: &Catalog, item: &str, worked: Duration) -> i32 {
+        match catalog.station_for_kit(item) {
+            Some(_) => 1,
+            None => day_work(&self.board.made, item, worked),
+        }
+    }
+
+    /// The seconds it's on between `from` and `to` (#505).
+    fn on_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
+        hours_on(self.hours.as_ref(), from, to)
+    }
+
+    /// Whether its `claim` on `c` won't be kept, holding `held` at the
+    /// grade, while it may still be let go freely (#505): what's still to
+    /// make, at its [`pace`] since it claimed (this session's part of it),
+    /// over the hours it's on before the claim runs out. `None` when it's on
+    /// time, or with the court's hour of grace and [`RELEASE_MARGIN_SECS`]
+    /// or less left, when a release would be a lapse anyway.
+    fn claim_behind(&self, catalog: &Catalog, claim: &CommissionClaim, c: &Commission, held: i32, now: DateTime<Utc>) -> Option<Behind> {
+        let last = chrono::Duration::seconds(court::CLAIM_GRACE_SECS + RELEASE_MARGIN_SECS);
+        if claim.until - now <= last {
+            return None;
+        }
+        let short = claim.quantity - claim.delivered - held;
+        let ago = (now - claim.claimed_at).to_std().unwrap_or_default();
+        let since = Instant::now().checked_sub(ago).map_or(self.board.began, |at| at.max(self.board.began));
+        let day_work = self.day_work(catalog, &c.item_type, self.board.began.elapsed());
+        let pace = pace(&self.board.made, &c.item_type, since, self.wall(TRIAL), day_work);
+        behind(short, pace, self.on_between(now, claim.until))
     }
 
     /// Delivers up to `quantity` of `item` to commission `id` from its pack,
@@ -686,6 +836,64 @@ mod tests {
         assert_eq!(grade_of(60), "C");
         assert_eq!(grade_of(75), "B");
         assert_eq!(grade_of(100), "A");
+    }
+
+    /// Its pace is a day's work in a game day until it has been at a claim
+    /// a while, then what it made since (#505): a citizen stuck on a claim
+    /// shows it.
+    #[test]
+    fn a_pace_is_what_it_made_since_once_it_has_been_at_it() {
+        let ago = |secs: u64| Instant::now().checked_sub(Duration::from_secs(secs)).unwrap();
+        let day = DAY_LENGTH_SECS as f64;
+        let trial = Duration::from_secs(DAY_LENGTH_SECS as u64);
+        let mut made = VecDeque::new();
+        // Just claimed: a day's work in a day, whatever it made
+        assert_eq!(pace(&made, "log", ago(600), trial, LOT), LOT as f64 / day);
+        // A day at it with nothing to show: stuck
+        assert_eq!(pace(&made, "log", ago(DAY_LENGTH_SECS as u64 + 60), trial, LOT), 0.0);
+        // What it made since, of the claim's good, over the day
+        made.push_back((ago(5000), "log".to_string(), 12));
+        made.push_back((ago(100), "log".to_string(), 6));
+        made.push_back((ago(100), "plank".to_string(), 30));
+        let p = pace(&made, "log", ago(DAY_LENGTH_SECS as u64), trial, LOT);
+        assert!((p - 18.0 / day).abs() < 1e-3 / day, "{p}");
+        // Since the claim only: what came before was for something else
+        let p = pace(&made, "log", ago(3000), Duration::from_secs(1800), LOT);
+        assert!((p - 6.0 / 3000.0).abs() < 1e-4, "{p}");
+    }
+
+    /// A citizen near the end of its session whose next one comes after its
+    /// claim runs out is on for the rest of this one only, and is behind
+    /// on a day's work it would keep with all its hours (#505).
+    #[test]
+    fn a_claim_is_behind_when_the_hours_its_on_wont_make_it() {
+        use crate::citizen::habit::Kind;
+        let habit = Habit::new(Kind::Casual, 0, 7);
+        let day_ms = 24 * 3600 * 1000;
+        // A session whose next comes more than a day after its end
+        let today = (20_000..20_400)
+            .find(|&d| {
+                habit.session(d).is_some_and(|s| {
+                    (d + 1..d + 3).all(|n| habit.session(n).is_none_or(|next| next.start > s.end + day_ms))
+                })
+            })
+            .expect("a casual citizen has a quiet day or two");
+        let session = habit.session(today).unwrap();
+        let at = |ms: i64| DateTime::from_timestamp_millis(ms).unwrap();
+        let now = at(session.end - 30 * 60 * 1000);
+        let until = now + chrono::Duration::seconds(court::CLAIM_SECS);
+        let on = hours_on(Some(&habit), now, until);
+        assert_eq!(on, 30.0 * 60.0, "the rest of this session, and none after");
+        assert_eq!(hours_on(None, now, until), court::CLAIM_SECS as f64);
+        // A day's work at a day's work a game day: a quarter of it in the
+        // half hour it's on
+        let pace = LOT as f64 / DAY_LENGTH_SECS as f64;
+        assert_eq!(behind(LOT, pace, on), Some(Behind { short: LOT, makes: LOT / 4 }));
+        // On all day, it's on time; with all of it in hand, nothing's short
+        assert_eq!(behind(LOT, pace, hours_on(None, now, until)), None);
+        assert_eq!(behind(0, pace, on), None);
+        // Nothing made at all: all of it's short
+        assert_eq!(behind(LOT, 0.0, on), Some(Behind { short: LOT, makes: 0 }));
     }
 
     #[test]

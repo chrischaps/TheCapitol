@@ -2245,6 +2245,25 @@ impl Bot {
         }
     }
 
+    /// Gives up its claim on a commission (S2.2, #505): the share goes back
+    /// to the board, released with more than the court's hour of grace left
+    /// and lapsed after ([`court::release_status`](capitol_protocol::rules::court::release_status)).
+    /// From anywhere.
+    pub fn release_claim(&mut self, commission_id: Uuid) -> Result<capitol_protocol::rest::ClaimResponse, BotError> {
+        match self.call("releasing a claim", RestRequest::ReleaseClaim { commission_id })? {
+            RestResponse::Claim(ended) => {
+                let left = ended.claim.quantity - ended.claim.delivered;
+                self.log(format!(
+                    "let its claim on {left} {} go ({})",
+                    ended.commission.item_type,
+                    ended.claim.status.as_str()
+                ));
+                Ok(ended)
+            }
+            other => Err(unexpected("releasing a claim", &other)),
+        }
+    }
+
     /// Delivers up to `quantity` units from the stack `item_id` to a
     /// commission (S2.1), the lowest that meet its grade, and is paid for
     /// each from its escrow. The bot must be at the Exchange hall.
