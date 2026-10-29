@@ -1671,7 +1671,7 @@ pub async fn run_gazette_loop(db: PgPool, events: broadcast::Sender<GameEvent>, 
         if let Err(e) = super::leaderboards::compute(&db, rules::week_of(today) - 1).await {
             tracing::error!("Leaderboards for week {} failed: {e}", rules::week_of(today) - 1);
         }
-        let addresses = game.read().await.terrain.addresses();
+        let addresses = game.read().await.addresses.clone();
         match publish(&db, today - 1, &addresses).await {
             Ok(Some(edition)) => {
                 tracing::info!("The Gazette, No. {}: {}", edition.number, edition.headline);

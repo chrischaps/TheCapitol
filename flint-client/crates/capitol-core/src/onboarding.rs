@@ -819,6 +819,7 @@ mod tests {
             station_count: 0,
             station_capacity: 25,
             terrain_id: None,
+            address: None,
             corners: Some([(0.0, 0.0), (120.0, 0.0), (120.0, 300.0), (0.0, 300.0)]),
             indoor_room: None,
             yard_room: None,

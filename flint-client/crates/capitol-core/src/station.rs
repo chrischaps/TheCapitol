@@ -649,6 +649,7 @@ mod tests {
             station_count: count,
             station_capacity: 16,
             terrain_id: Some(format!("lot_{id}")),
+            address: None,
             corners: Some([(x, y), (x1, y), (x1, y1), (x, y1)]),
             indoor_room: None,
             yard_room: None,

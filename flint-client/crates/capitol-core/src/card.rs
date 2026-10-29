@@ -174,16 +174,30 @@ pub fn lately_words(card: &PlayerCard) -> Option<String> {
     card.lately.as_ref().filter(|l| !l.is_empty()).map(rules::lately::words)
 }
 
-/// Where someone lives: the zone of their oldest plot.
-pub fn home_words(home: Option<&str>, mine: bool) -> String {
+/// Where someone lives: their oldest plot's address, "Farms at 3 Sheepwash
+/// Lane", "Lives at 7 Larch Close" (#573), or its zone where it has none
+/// (a server from before, or a lot on a street with no name).
+pub fn home_words(home: Option<&str>, address: Option<&str>, mine: bool) -> String {
     let Some(zone) = home else {
         return if mine { "No land of your own yet".into() } else { "No land of their own yet".into() };
     };
-    match Zone::from_str(zone) {
-        Some(Zone::Capitol) => "Lives in the Capitol".into(),
-        Some(Zone::Rural) => "Farms in the Rural Zone".into(),
-        Some(z) => format!("Lives in the {}", z.display_name()),
-        None => format!("Lives in the {zone}"),
+    match (Zone::from_str(zone), address) {
+        (Some(Zone::Capitol), _) => "Lives in the Capitol".into(),
+        (Some(Zone::Rural), Some(address)) => format!("Farms at {address}"),
+        (Some(Zone::Rural), None) => "Farms in the Rural Zone".into(),
+        (_, Some(address)) => format!("Lives at {address}"),
+        (Some(z), None) => format!("Lives in the {}", z.display_name()),
+        (None, None) => format!("Lives in the {zone}"),
+    }
+}
+
+/// The zone their home is in, for under its address: "In the Rural Zone".
+/// `None` without a home, or in the Capitol, which its words already say.
+pub fn home_zone_words(home: Option<&str>) -> Option<String> {
+    match Zone::from_str(home?) {
+        Some(Zone::Capitol) => None,
+        Some(z) => Some(format!("In the {}", z.display_name())),
+        None => Some(format!("In the {}", home?)),
     }
 }
 
@@ -239,6 +253,7 @@ mod tests {
             citizen: false,
             since: 0,
             home: None,
+            home_address: None,
             standing: standing::NEW_IN_TOWN.into(),
             guild: None,
             lately: None,
@@ -352,11 +367,24 @@ mod tests {
 
     #[test]
     fn home_names_the_zone_or_says_there_is_none() {
-        assert_eq!(home_words(Some("suburban"), false), "Lives in the Suburban Zone");
-        assert_eq!(home_words(Some("rural"), false), "Farms in the Rural Zone");
-        assert_eq!(home_words(Some("capitol"), true), "Lives in the Capitol");
-        assert_eq!(home_words(None, false), "No land of their own yet");
-        assert_eq!(home_words(None, true), "No land of your own yet");
+        assert_eq!(home_words(Some("suburban"), None, false), "Lives in the Suburban Zone");
+        assert_eq!(home_words(Some("rural"), None, false), "Farms in the Rural Zone");
+        assert_eq!(home_words(Some("capitol"), None, true), "Lives in the Capitol");
+        assert_eq!(home_words(None, None, false), "No land of their own yet");
+        assert_eq!(home_words(None, None, true), "No land of your own yet");
+    }
+
+    #[test]
+    fn home_says_its_address_where_it_has_one() {
+        assert_eq!(home_words(Some("rural"), Some("3 Sheepwash Lane"), false), "Farms at 3 Sheepwash Lane");
+        assert_eq!(home_words(Some("suburban"), Some("7 Larch Close"), true), "Lives at 7 Larch Close");
+        assert_eq!(
+            home_words(Some("urban"), Some("112 Mercer Street by Tannergate"), false),
+            "Lives at 112 Mercer Street by Tannergate"
+        );
+        assert_eq!(home_zone_words(Some("rural")).as_deref(), Some("In the Rural Zone"));
+        assert_eq!(home_zone_words(Some("capitol")), None);
+        assert_eq!(home_zone_words(None), None);
     }
 
     #[test]

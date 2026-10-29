@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use capitol_protocol::tunables::Tunables;
 use serde::{Deserialize, Serialize};
@@ -149,8 +151,9 @@ pub struct PlotWithJoins {
 
 impl PlotWithJoins {
     /// The plot as the API says it, at the `tunables` now: its deed's price
-    /// and the debt that forecloses it (D6.1)
-    pub fn to_plot_info(&self, tunables: &Tunables) -> PlotInfo {
+    /// and the debt that forecloses it (D6.1), and its address from the
+    /// world's `addresses` (`GameState::addresses`, #573)
+    pub fn to_plot_info(&self, tunables: &Tunables, addresses: &HashMap<String, String>) -> PlotInfo {
         PlotInfo {
             id: self.id,
             zone_id: self.zone_id.clone(),
@@ -179,6 +182,7 @@ impl PlotWithJoins {
             station_count: self.station_count,
             station_capacity: self.station_capacity,
             terrain_id: self.terrain_id.clone(),
+            address: self.terrain_id.as_ref().and_then(|lot| addresses.get(lot).cloned()),
             corners: corners_from_column(self.corners.as_deref()),
             indoor_room: self.indoor_room,
             yard_room: self.yard_room,

@@ -6,7 +6,8 @@
 //! quits on Esc.
 //!
 //! It says what anyone in the city could know: the name, with the lozenge
-//! for a citizen; how long they've been here; where they live; what's said
+//! for a citizen; how long they've been here; where they live, by their
+//! home's address ("Farms at 3 Sheepwash Lane", #573); what's said
 //! of them (standing in words, D8), what they've been busy with lately
 //! (callings K3.1: "Lately felling trees and sawing planks, and selling at
 //! the bazaar", left off for someone who keeps out of the papers) and their
@@ -21,8 +22,10 @@
 //! what's yours. The words are `capitol_core::card`'s.
 
 use capitol_core::card::{
-    history_line, home_words, lately_words, score_words, time_in_city, trend_words, when_words, Hint, Shown, Trend,
+    history_line, home_words, home_zone_words, lately_words, score_words, time_in_city, trend_words, when_words, Hint,
+    Shown, Trend,
 };
+use capitol_core::deeds;
 use capitol_core::catalog::Catalog;
 use capitol_core::protocol::rest::{Correspondent, OwnStanding, PlayerCard};
 use egui::{Align2, Color32, Id, RichText};
@@ -182,7 +185,7 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
         ui.label(RichText::new("A citizen of the Capitol").font(theme::body(size::SMALL)).color(theme::CITIZEN_LANTERN).italics());
     }
     ui.label(theme::text(time_in_city(card.since, view.today)));
-    ui.label(theme::text(home_words(card.home.as_deref(), card.mine)));
+    home(ui, card);
     if let Some(guild) = &card.guild {
         ui.label(theme::text(format!("Of the {guild}")));
     }
@@ -233,6 +236,22 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
         });
     });
     action
+}
+
+/// Where they live: their home's address, its ring street's crossing left
+/// off when the card's too narrow for it, as the Deeds Office's rows do
+/// (#573), and its zone on hover.
+fn home(ui: &mut egui::Ui, card: &PlayerCard) {
+    let words = |address: Option<&str>| home_words(card.home.as_deref(), address, card.mine);
+    let mut line = words(card.home_address.as_deref());
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    if ui.painter().layout_no_wrap(line.clone(), font, TEXT).size().x > ui.available_width() {
+        line = words(card.home_address.as_deref().map(deeds::street_only));
+    }
+    let shown = ui.label(theme::text(line));
+    if let (Some(_), Some(zone)) = (&card.home_address, home_zone_words(card.home.as_deref())) {
+        shown.on_hover_text(zone);
+    }
 }
 
 /// What they've been busy with: a quiet "Lately" and the words after it,
@@ -301,6 +320,7 @@ pub fn sample(which: &str) -> (capitol_core::card::Cards, i64, Catalog) {
                 citizen: false,
                 since: today - 3,
                 home: Some("suburban".into()),
+                home_address: Some("5 Goldfinch Drive".into()),
                 lately: lately(&["cutting reeds", "twisting rope"], &[Venue::Exchange]),
                 muted: which == "muted",
                 ..card
@@ -323,7 +343,9 @@ pub fn sample(which: &str) -> (capitol_core::card::Cards, i64, Catalog) {
             }
             // Busy at the forge: the longest line a card says
             let busy = lately(&["mining ore", "smelting metal", "forging tool heads"], &[Venue::Bazaar, Venue::Exchange]);
-            card = PlayerCard { name: "You".into(), since: today - 4, lately: busy, ..mine }
+            // On a ring street: the longest address, too long for the card with its crossing
+            let address = Some("39 Canal Quay by Shearergate".into());
+            card = PlayerCard { name: "You".into(), since: today - 4, lately: busy, home: Some("urban".into()), home_address: address, ..mine }
         }
         _ => {}
     }

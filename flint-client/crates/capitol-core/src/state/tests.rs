@@ -133,6 +133,7 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
         station_count: 0,
         station_capacity: 2,
         terrain_id: None,
+        address: None,
         corners: None,
         indoor_room: None,
         yard_room: None,

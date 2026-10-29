@@ -331,7 +331,7 @@ impl DeedsOffice {
         };
         let mut galley = place(lot.address.as_deref());
         if galley.size().x > room {
-            galley = place(lot.address.as_deref().map(|a| a.split(" by ").next().unwrap_or(a)));
+            galley = place(lot.address.as_deref().map(deeds::street_only));
         }
         painter.galley(rect.min + egui::vec2(12.0, 8.0), galley, TEXT);
         let detail = format!(

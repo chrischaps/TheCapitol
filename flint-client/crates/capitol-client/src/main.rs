@@ -221,7 +221,8 @@ struct Args {
     /// takes in your pack), `short` (short of it) or `going-up` (the second
     /// floor going up); or on a guild-district lot (#508): `hall` (free, as
     /// its guild's leader sees it at the Exchange) or `hall-held` (a guild's
-    /// hall). Check it at --width 1280 --height 720 at 150%
+    /// hall); or `farm`, a citizen's farm, headed by its address (#573).
+    /// Check it at --width 1280 --height 720 at 150%
     #[arg(long, value_name = "WHICH", requires = "offline")]
     plot_panel_sample: Option<String>,
     /// With --building-sample, place a station from `KIT` (`workbench_kit`,

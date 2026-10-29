@@ -600,6 +600,7 @@ pub(crate) mod tests {
             station_count,
             station_capacity: 9,
             terrain_id: None,
+            address: None,
             corners: Some(corners),
             indoor_room: None,
             yard_room: None,

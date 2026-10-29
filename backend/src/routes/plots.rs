@@ -102,7 +102,8 @@ pub async fn list_plots(
         .fetch_all(&state.db)
         .await?;
 
-    let plots: Vec<PlotInfo> = rows.into_iter().map(|row| row.to_plot_info(&state.tunables.get())).collect();
+    let (tunables, addresses) = (state.tunables.get(), state.game.read().await.addresses.clone());
+    let plots: Vec<PlotInfo> = rows.into_iter().map(|row| row.to_plot_info(&tunables, &addresses)).collect();
 
     // Get total count
     let count_sql = format!(
@@ -225,7 +226,8 @@ async fn plot_info(state: &AppState, plot_id: Uuid) -> Result<PlotInfo, AppError
 
     let row = row.ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
 
-    Ok(row.to_plot_info(&state.tunables.get()))
+    let addresses = state.game.read().await.addresses.clone();
+    Ok(row.to_plot_info(&state.tunables.get(), &addresses))
 }
 
 /// Get the plot at a specific position

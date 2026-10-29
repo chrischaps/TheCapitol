@@ -90,7 +90,7 @@ pub async fn rooms(state: &AppState) -> Result<Arc<Rooms>, sqlx::Error> {
             .iter()
             .find(|l| l.kind == LandmarkKind::ExchangeHall)
             .map_or((terrain.center_x, terrain.center_y), |l| l.door);
-        (version, plots, hall, terrain.addresses())
+        (version, plots, hall, game.addresses.clone())
     };
     let rooms = tokio::task::spawn_blocking(move || Arc::new(pack(version, &plots, hall, &addresses)))
         .await

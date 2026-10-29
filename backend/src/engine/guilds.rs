@@ -1850,8 +1850,8 @@ mod tests {
         assert!(matches!(apply(&db, cy, weavers, at(1)).await, Err(GuildError::InAGuild)));
         // Their card says so (S0.3)
         use crate::routes::players::{card, Who};
-        assert_eq!(card(&db, Uuid::nil(), Who::Id(cy)).await.unwrap().guild.as_deref(), Some("The Rope Walkers"));
-        assert_eq!(card(&db, Uuid::nil(), Who::Id(ada)).await.unwrap().guild.as_deref(), Some("The Rope Walkers"));
+        assert_eq!(card(&db, &Default::default(), Uuid::nil(), Who::Id(cy)).await.unwrap().guild.as_deref(), Some("The Rope Walkers"));
+        assert_eq!(card(&db, &Default::default(), Uuid::nil(), Who::Id(ada)).await.unwrap().guild.as_deref(), Some("The Rope Walkers"));
     }
 
     #[sqlx::test(migrations = "./migrations")]

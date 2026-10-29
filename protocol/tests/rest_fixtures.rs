@@ -49,7 +49,10 @@
 //! hour, a deposit, a buy order's escrow and a sale less its fee, out walking.
 //! `fixtures/rest/player_card.json` is `GET /players/{id}/card` (S0.3): a
 //! citizen with a farm, a week in the city, in no guild, seen by someone else,
-//! lately felling trees and sawing planks and selling at the bazaar (K3.1).
+//! lately felling trees and sawing planks and selling at the bazaar (K3.1),
+//! at home at 11 Hollow Lane (#573).
+//! `fixtures/rest/plot.json` is `GET /plots/{id}`: a citizen's farm, by its
+//! address (#573).
 //! `fixtures/rest/my_card.json` is your own card (S3.1): your standing's
 //! number, its trend and the history under the words, which only you see.
 //! `fixtures/rest/mutes.json` is `GET /player/mutes` (S1.4): a citizen and a
@@ -543,6 +546,7 @@ fn a_card_round_trips_leaving_out_what_isnt_so() {
     let card: PlayerCard = serde_json::from_str(&json).unwrap();
     assert!(card.citizen && !card.mine);
     assert_eq!(card.home.as_deref().and_then(Zone::from_str), Some(Zone::Rural));
+    assert_eq!(card.home_address.as_deref(), Some("11 Hollow Lane"));
     assert_eq!((card.standing.as_str(), card.guild.as_deref()), (standing::NEW_IN_TOWN, None));
     let lately = card.lately.as_ref().expect("what they've been busy with (K3.1)");
     assert_eq!(lately::words(lately), "felling trees and sawing planks, and selling at the bazaar");
@@ -551,6 +555,18 @@ fn a_card_round_trips_leaving_out_what_isnt_so() {
     // A card from before K3.1 has nothing to say of them
     let old: PlayerCard = serde_json::from_str(&json.replace(r#","lately":{"doing":["felling trees","sawing planks"],"sells":["bazaar"]}"#, "")).unwrap();
     assert_eq!(old.lately, None);
+}
+
+#[test]
+fn a_plot_round_trips_with_its_address() {
+    use capitol_protocol::rest::PlotInfo;
+    let json = fixture("plot.json");
+    let plot: PlotInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!((plot.zone_id.as_str(), plot.address.as_deref()), ("rural", Some("11 Hollow Lane")));
+    assert_eq!(serde_json::to_string(&plot).unwrap(), json);
+    // A server from before #573 says no address
+    let old: PlotInfo = serde_json::from_str(&json.replace(r#""address":"11 Hollow Lane","#, "")).unwrap();
+    assert_eq!(old.address, None);
 }
 
 #[test]

@@ -899,6 +899,7 @@ mod tests {
             citizen: false,
             since: 1,
             home: None,
+            home_address: None,
             standing: "new in town".into(),
             guild: None,
             lately: None,

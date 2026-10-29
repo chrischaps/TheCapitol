@@ -4,6 +4,10 @@
 //! closes it, and so does an alt-click on ground with no plot. Not Esc:
 //! Flint's player quits on Esc.
 //!
+//! It's headed by the lot's address, "A farm at 3 Sheepwash Lane" (#573),
+//! its ring street's crossing left off when the panel's too narrow for it,
+//! or "Plot Details" for a lot with none.
+//!
 //! It has React's rows: zone, size, type, stations used of capacity,
 //! owner, and the assessed value once owned. A plot for sale shows its
 //! deed cost with your balance under it, and the Claim button. The deed
@@ -221,7 +225,9 @@ fn body(
     ui.set_width(WIDTH);
     let mut action = None;
     ui.horizontal(|ui| {
-        ui.label(theme::heading("Plot Details").color(GOLD));
+        // Room for the ×
+        let title = header(ui, plot, ui.available_width() - 24.0);
+        ui.label(theme::heading(&title).color(GOLD));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let close = ui.add(
                 egui::Button::new(RichText::new("×").size(size::HEADING).color(DIM)).frame(false),
@@ -330,6 +336,27 @@ fn body(
         theme::error_box(ui, why);
     }
     action
+}
+
+/// The panel's header: where the lot is, "A farm at 3 Sheepwash Lane"
+/// (#573), short of its ring street's crossing when that won't fit in
+/// `room`, as the Deeds Office's rows do; "Plot Details" with no address.
+fn header(ui: &egui::Ui, plot: &PlotInfo, room: f32) -> String {
+    let Some(address) = plot.address.as_deref() else {
+        return "Plot Details".into();
+    };
+    let zone = Zone::from_str(&plot.zone_id).unwrap_or(Zone::Wilderness);
+    let place = |address: &str| {
+        let place = capitol_core::deeds::whereabouts(zone, Some(address), plot.world_x, plot.world_y);
+        format!("{}{}", place[..1].to_uppercase(), &place[1..])
+    };
+    let whole = place(address);
+    let wide = ui.painter().layout_no_wrap(whole.clone(), theme::strong(size::HEADING), TEXT).size().x;
+    if wide > room {
+        place(capitol_core::deeds::street_only(address))
+    } else {
+        whole
+    }
 }
 
 /// The building on a plot of yours (V3.5): its storeys and room indoors,
@@ -681,7 +708,9 @@ pub struct Sample {
 /// takes in your pack; `short`, the same short of planks, ingots and
 /// Strands; `going-up`, the second floor going up, 12 minutes to go;
 /// `hall`, a free guild-district lot as its guild's leader sees it at the
-/// Exchange hall; `hall-held`, a guild's hall (#508).
+/// Exchange hall; `hall-held`, a guild's hall (#508); `farm`, a citizen's
+/// farm, headed by its address (#573). The addresses are the default
+/// world's.
 pub fn sample(which: &str) -> Sample {
     use capitol_core::protocol::rest::{Bounds, FloorBill, SlotItem};
     use capitol_core::protocol::rules::floors;
@@ -717,7 +746,8 @@ pub fn sample(which: &str) -> Sample {
         deed_cost: Some(1000),
         station_count: 6,
         station_capacity: 4 * (1 + floors),
-        terrain_id: Some("urb_sample".into()),
+        terrain_id: Some("urb_0_6_i_1".into()),
+        address: Some("39 Canal Quay by Shearergate".into()),
         corners: None,
         indoor_room: Some(4),
         yard_room: Some(0),
@@ -745,7 +775,8 @@ pub fn sample(which: &str) -> Sample {
                 deed_cost: Some(5000),
                 station_count: 0,
                 station_capacity: 10,
-                terrain_id: Some("guild_plot_in_1_2".into()),
+                terrain_id: Some("guild_plot_in_1_1".into()),
+                address: Some("12 Guild Ring by Quarry Road".into()),
                 indoor_room: None,
                 yard_room: None,
                 floor_ready_at: None,
@@ -756,6 +787,30 @@ pub fn sample(which: &str) -> Sample {
             let offer = if held { Offer::Taken { owner: "Wren Hollis".into() } } else { Offer::Claimable { cost: 5000 } };
             let hall = (!held).then(|| HallOffer::Claim { guild_id: rope, guild: "The Rope Walkers".into(), cost: 5000 });
             (plot, offer, hall)
+        }
+        "farm" => {
+            // A citizen's farm, as anyone else sees it (#573)
+            let plot = PlotInfo {
+                zone_id: "rural".into(),
+                size_category: "large".into(),
+                owner_id: Some(uuid::Uuid::from_u128(0xc1)),
+                owner_name: Some("Citizen Cy".into()),
+                owner_citizen: true,
+                assessed_value: 3000,
+                forecloses_at: Some(240),
+                deed_cost: Some(3000),
+                station_count: 5,
+                station_capacity: 12,
+                terrain_id: Some("farm_2_2_R_7".into()),
+                address: Some("11 Hollow Lane".into()),
+                indoor_room: Some(6),
+                yard_room: Some(6),
+                floor_ready_at: None,
+                floors: 0,
+                next_floor: None,
+                ..plot
+            };
+            (plot, Offer::Taken { owner: "Citizen Cy".into() }, None)
         }
         _ => (plot, Offer::Yours, None),
     };
@@ -821,6 +876,7 @@ mod tests {
             station_count: 1,
             station_capacity: 9,
             terrain_id: None,
+            address: None,
             corners: None,
             indoor_room: None,
             yard_room: None,

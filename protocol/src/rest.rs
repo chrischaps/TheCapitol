@@ -690,6 +690,9 @@ pub struct PlayerCard {
     /// The zone of their oldest plot (`Zone::as_str`), if they hold one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
+    /// That plot's address, "3 Sheepwash Lane" (#573), where it has one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_address: Option<String>,
     /// What the city says of them, in words (D8): `rules::standing`
     pub standing: String,
     /// Their guild's name (S4.1)
@@ -3142,6 +3145,11 @@ pub struct PlotInfo {
     /// on it. `None` only for a plot claimed before B7 that no lot replaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terrain_id: Option<String>,
+    /// The lot's address, "3 Sheepwash Lane" (`TerrainConfig::addresses`,
+    /// #483), for the plot panel's header (#573). `None` for a plot with no
+    /// lot, or a lot on a street with no name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     /// The lot's four corners, as `/terrain` draws them. This is the shape that's
     /// claimed and that station placement tests. `bounds` is its bounding box.
     /// `None` only for a pre-B7 plot, whose shape is `bounds`.

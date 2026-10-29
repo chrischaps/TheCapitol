@@ -107,6 +107,9 @@ pub struct GameState {
     pub terrain: TerrainConfig,
     // `terrain.version()`, kept beside it so `/terrain` doesn't rehash on every request
     pub terrain_version: String,
+    /// Every lot's address, lot id to "3 Sheepwash Lane" (`TerrainConfig::addresses`,
+    /// #483), kept beside the terrain so a plot or a card doesn't work them out again
+    pub addresses: Arc<HashMap<String, String>>,
     /// The terrain's land and wild water, indexed for walking on (W4)
     pub ground: Arc<Ground>,
     // World generation parameters (for admin tweaking)
@@ -139,6 +142,7 @@ impl GameState {
         let (event_sender, _) = broadcast::channel(Self::EVENT_CAPACITY);
         let terrain_version = terrain.version();
         let ground = Arc::new(terrain.ground());
+        let addresses = Arc::new(terrain.addresses());
         Self {
             players: HashMap::new(),
             connections: HashMap::new(),
@@ -175,6 +179,7 @@ impl GameState {
             trade_manager: TradeManager::new(),
             terrain,
             terrain_version,
+            addresses,
             ground,
             world_gen_params: params,
             works: Arc::default(),
@@ -190,9 +195,10 @@ impl GameState {
         self.catalog = Arc::new(super::catalog::build(self));
     }
 
-    /// Replace the terrain, and its version with it
+    /// Replace the terrain, and its version and addresses with it
     pub fn set_terrain(&mut self, terrain: TerrainConfig) {
         self.terrain_version = terrain.version();
+        self.addresses = Arc::new(terrain.addresses());
         self.ground = Arc::new(terrain.ground());
         self.terrain = terrain;
     }
@@ -1543,6 +1549,17 @@ mod tests {
         static TERRAIN: std::sync::OnceLock<TerrainConfig> = std::sync::OnceLock::new();
         let terrain = TERRAIN.get_or_init(TerrainConfig::get_default).clone();
         GameState::with_terrain(WorldGenParams::default(), terrain)
+    }
+
+    #[test]
+    fn a_games_addresses_follow_its_terrain() {
+        let mut game = game();
+        assert_eq!(*game.addresses, game.terrain.addresses());
+        assert_eq!(game.addresses.len(), game.terrain.terrain_plots.len(), "every lot has one (#483)");
+        let mut fewer = game.terrain.clone();
+        fewer.terrain_plots.truncate(10);
+        game.set_terrain(fewer);
+        assert_eq!(game.addresses.len(), 10, "a new terrain brings its own (#573)");
     }
 
     /// A game with two players `gap` units apart, and a receiver subscribed after they joined

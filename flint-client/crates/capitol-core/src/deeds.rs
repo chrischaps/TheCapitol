@@ -101,6 +101,12 @@ pub fn home_noun(zone: Zone) -> &'static str {
     }
 }
 
+/// An address without a ring street's crossing, for a row too narrow for
+/// it: "112 Mercer Street by Tannergate" is "112 Mercer Street" (#483).
+pub fn street_only(address: &str) -> &str {
+    address.split(" by ").next().unwrap_or(address)
+}
+
 /// The eight-point bearing of the server point (x, y) from the tower (y
 /// points south): "south-west".
 pub fn bearing(x: f64, y: f64) -> &'static str {
@@ -188,6 +194,7 @@ mod tests {
             station_count: 0,
             station_capacity: 25,
             terrain_id: None,
+            address: None,
             corners: None,
             indoor_room: None,
             yard_room: None,
@@ -264,6 +271,8 @@ mod tests {
             whereabouts(Zone::Urban, Some("112 Mercer Street by Tannergate"), cx, cy),
             "a yard at 112 Mercer Street by Tannergate"
         );
+        assert_eq!(street_only("112 Mercer Street by Tannergate"), "112 Mercer Street");
+        assert_eq!(street_only("3 Sheepwash Lane"), "3 Sheepwash Lane");
         assert_eq!(home_noun(Zone::Suburban), "house");
     }
 

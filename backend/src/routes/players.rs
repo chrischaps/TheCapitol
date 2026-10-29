@@ -15,6 +15,8 @@ use axum::{
     routing::{get, put},
     Extension, Json, Router,
 };
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -57,7 +59,8 @@ pub async fn get_card(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PlayerCard>, AppError> {
-    let card = card(&state.db, auth_user.account_id, Who::Id(id)).await?;
+    let addresses = state.game.read().await.addresses.clone();
+    let card = card(&state.db, &addresses, auth_user.account_id, Who::Id(id)).await?;
     if !card.mine {
         tutorial::saw_by_account(&state, auth_user.account_id, Did::OpenedCard).await;
     }
@@ -85,7 +88,8 @@ pub async fn get_card_by_name(
     Extension(auth_user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> Result<Json<PlayerCard>, AppError> {
-    let card = card(&state.db, auth_user.account_id, Who::Name(&name)).await?;
+    let addresses = state.game.read().await.addresses.clone();
+    let card = card(&state.db, &addresses, auth_user.account_id, Who::Name(&name)).await?;
     // The Gazette's names open cards this way, and count as any other (#447)
     if !card.mine {
         tutorial::saw_by_account(&state, auth_user.account_id, Did::OpenedCard).await;
@@ -155,19 +159,26 @@ pub enum Who<'a> {
     Name(&'a str),
 }
 
-/// The card of `who`, as the account `viewer` sees it.
-pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard, AppError> {
+/// The card of `who`, as the account `viewer` sees it. Their home's address
+/// is read from the world's `addresses` (`GameState::addresses`, #573).
+pub async fn card(
+    db: &PgPool,
+    addresses: &HashMap<String, String>,
+    viewer: Uuid,
+    who: Who<'_>,
+) -> Result<PlayerCard, AppError> {
     // Their oldest plot is their home; one claimed before claims were dated counts last
     const CARD: &str = "SELECT p.id, p.name, a.kind = 'citizen', a.created_at, p.account_id = $2,
-                (SELECT pl.zone_id FROM plots pl WHERE pl.owner_id = p.id
-                 ORDER BY pl.claimed_at NULLS LAST, pl.id LIMIT 1),
+                home.zone_id, home.terrain_id,
                 EXISTS (SELECT 1 FROM player_mutes m JOIN players me ON me.id = m.player_id
                         WHERE me.account_id = $2 AND m.muted_id = p.id),
                 (SELECT g.name FROM guild_members gm JOIN guilds g ON g.id = gm.guild_id
                  WHERE gm.player_id = p.id),
                 p.gazette_named
-         FROM players p JOIN accounts a ON a.id = p.account_id";
-    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>, bool, Option<String>, bool);
+         FROM players p JOIN accounts a ON a.id = p.account_id
+         LEFT JOIN LATERAL (SELECT pl.zone_id, pl.terrain_id FROM plots pl WHERE pl.owner_id = p.id
+                            ORDER BY pl.claimed_at NULLS LAST, pl.id LIMIT 1) home ON TRUE";
+    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>, Option<String>, bool, Option<String>, bool);
     let row: Option<Row> = match who {
         Who::Id(id) => {
             sqlx::query_as(&format!("{CARD} WHERE p.id = $1"))
@@ -187,7 +198,7 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
             .await?
         }
     };
-    let (id, name, citizen, created, mine, home, muted, guild, named) =
+    let (id, name, citizen, created, mine, home, home_lot, muted, guild, named) =
         row.ok_or_else(|| AppError::NotFound("No one goes by that".into()))?;
     // Anyone sees the words; only you, your number and how it got there (S3.1)
     let now = Utc::now();
@@ -205,6 +216,7 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
         citizen,
         since: rules::day_number(created.timestamp_millis()),
         home,
+        home_address: home_lot.and_then(|lot| addresses.get(&lot).cloned()),
         standing: words,
         guild,
         lately,
@@ -298,20 +310,20 @@ mod tests {
         let bea = player(&db, "Bea", 100).await;
         let (ada_acc, bea_acc) = (account_of(&db, ada).await, account_of(&db, bea).await);
 
-        let seen = card(&db, bea_acc, Who::Id(ada)).await.unwrap();
+        let seen = card(&db, &HashMap::new(), bea_acc, Who::Id(ada)).await.unwrap();
         assert_eq!((seen.id, seen.name.as_str(), seen.citizen, seen.mine), (ada, "Ada", false, false));
         assert_eq!(seen.since, rules::day_number(Utc::now().timestamp_millis()));
         assert_eq!((seen.home, seen.guild), (None, None), "no plot, and no guilds yet");
         assert_eq!(seen.standing, rules::standing::NEW_IN_TOWN);
 
-        let own = card(&db, ada_acc, Who::Id(ada)).await.unwrap();
+        let own = card(&db, &HashMap::new(), ada_acc, Who::Id(ada)).await.unwrap();
         assert!(own.mine && !own.muted);
 
         // Muted by Bea (S1.4): her card of Ada says so, and no one else's
         let (events, _rx) = tokio::sync::broadcast::channel(4);
         crate::mutes::set(&db, &events, bea, ada, true).await.unwrap();
-        assert!(card(&db, bea_acc, Who::Id(ada)).await.unwrap().muted);
-        assert!(!card(&db, ada_acc, Who::Id(bea)).await.unwrap().muted, "a mute is one way");
+        assert!(card(&db, &HashMap::new(), bea_acc, Who::Id(ada)).await.unwrap().muted);
+        assert!(!card(&db, &HashMap::new(), ada_acc, Who::Id(bea)).await.unwrap().muted, "a mute is one way");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -330,13 +342,13 @@ mod tests {
                 .unwrap();
         }
 
-        let seen = card(&db, account_of(&db, bea).await, Who::Id(ada)).await.unwrap();
+        let seen = card(&db, &HashMap::new(), account_of(&db, bea).await, Who::Id(ada)).await.unwrap();
         assert_eq!(seen.standing, rules::standing::DEPENDABLE);
         assert_eq!(seen.own, None, "the number is Ada's alone");
-        let by_name = card(&db, account_of(&db, bea).await, Who::Name("ada")).await.unwrap();
+        let by_name = card(&db, &HashMap::new(), account_of(&db, bea).await, Who::Name("ada")).await.unwrap();
         assert_eq!((by_name.standing.as_str(), by_name.own.is_none()), (rules::standing::DEPENDABLE, true));
 
-        let mine = card(&db, account_of(&db, ada).await, Who::Id(ada)).await.unwrap();
+        let mine = card(&db, &HashMap::new(), account_of(&db, ada).await, Who::Id(ada)).await.unwrap();
         let own = mine.own.expect("your own card has your number");
         assert_eq!((mine.standing.as_str(), own.words.as_str()), (rules::standing::DEPENDABLE, rules::standing::DEPENDABLE));
         assert!((own.score - 5.0).abs() < 1e-9 && own.trend.abs() < 1.0 + 1e-9, "{own:?}");
@@ -345,8 +357,8 @@ mod tests {
         assert!(own.history.windows(2).all(|w| w[0].at >= w[1].at), "newest first");
 
         // Bea, with nothing done yet, is new in town to both
-        assert_eq!(card(&db, account_of(&db, ada).await, Who::Id(bea)).await.unwrap().standing, rules::standing::NEW_IN_TOWN);
-        let hers = card(&db, account_of(&db, bea).await, Who::Id(bea)).await.unwrap().own.unwrap();
+        assert_eq!(card(&db, &HashMap::new(), account_of(&db, ada).await, Who::Id(bea)).await.unwrap().standing, rules::standing::NEW_IN_TOWN);
+        let hers = card(&db, &HashMap::new(), account_of(&db, bea).await, Who::Id(bea)).await.unwrap().own.unwrap();
         assert_eq!((hers.score, hers.records, hers.history.len()), (0.0, 0, 0));
     }
 
@@ -356,12 +368,18 @@ mod tests {
         let at = DateTime::from_timestamp_millis(rules::day_start_ms(rules::GAZETTE_FIRST_DAY + 7) + 1000).unwrap();
         let cy = citizen_since(&db, "Citizen Cy", at).await;
         let ada = player(&db, "Ada", 100).await;
-        plot(&db, Some(cy), 250).await;
+        let home = plot(&db, Some(cy), 250).await;
+        // Its lot's address, as the world's addresses have it (#573)
+        let lot: String = sqlx::query_scalar("SELECT terrain_id FROM plots WHERE id = $1").bind(home).fetch_one(&db).await.unwrap();
+        let addresses = HashMap::from([(lot, "112 Mercer Street by Tannergate".to_owned())]);
 
-        let seen = card(&db, account_of(&db, ada).await, Who::Id(cy)).await.unwrap();
+        let seen = card(&db, &addresses, account_of(&db, ada).await, Who::Id(cy)).await.unwrap();
         assert!(seen.citizen && !seen.mine);
         assert_eq!(seen.since, rules::GAZETTE_FIRST_DAY + 7);
         assert_eq!(seen.home.as_deref(), Some("urban"));
+        assert_eq!(seen.home_address.as_deref(), Some("112 Mercer Street by Tannergate"));
+        let unplaced = card(&db, &HashMap::new(), account_of(&db, ada).await, Who::Id(cy)).await.unwrap();
+        assert_eq!(unplaced.home_address, None, "a lot the world doesn't address has none");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -369,9 +387,9 @@ mod tests {
     async fn a_card_for_an_unknown_id_or_name_is_not_found(db: PgPool) {
         let ada = player(&db, "Ada", 100).await;
         let me = account_of(&db, ada).await;
-        let err = card(&db, me, Who::Id(Uuid::new_v4())).await.unwrap_err();
+        let err = card(&db, &HashMap::new(), me, Who::Id(Uuid::new_v4())).await.unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)), "{err:?}");
-        let err = card(&db, me, Who::Name("Nobody")).await.unwrap_err();
+        let err = card(&db, &HashMap::new(), me, Who::Name("Nobody")).await.unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)), "{err:?}");
     }
 
@@ -380,7 +398,7 @@ mod tests {
     async fn a_card_by_name_ignores_case_and_finds_whoever_took_it_first(db: PgPool) {
         let ada = player(&db, "Ada Reeder", 100).await;
         let me = account_of(&db, ada).await;
-        let found = card(&db, me, Who::Name("  ada REEDER ")).await.unwrap();
+        let found = card(&db, &HashMap::new(), me, Who::Name("  ada REEDER ")).await.unwrap();
         assert_eq!((found.id, found.name.as_str(), found.mine), (ada, "Ada Reeder", true));
 
         // A second Ada, a day later, isn't who the name finds (#428)
@@ -390,7 +408,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        assert_eq!(card(&db, me, Who::Name("Ada Reeder")).await.unwrap().id, ada);
+        assert_eq!(card(&db, &HashMap::new(), me, Who::Name("Ada Reeder")).await.unwrap().id, ada);
     }
 
     #[test]
@@ -456,8 +474,8 @@ mod tests {
         let first = DateTime::from_timestamp_millis(rules::day_start_ms(today - lately::DAYS + 1)).unwrap();
 
         // Nothing done yet: nothing to say
-        assert_eq!(card(&db, bea_acc, Who::Id(ada)).await.unwrap().lately, None);
-        assert_eq!(card(&db, ada_acc, Who::Id(ada)).await.unwrap().lately, None);
+        assert_eq!(card(&db, &HashMap::new(), bea_acc, Who::Id(ada)).await.unwrap().lately, None);
+        assert_eq!(card(&db, &HashMap::new(), ada_acc, Who::Id(ada)).await.unwrap().lately, None);
 
         // Planks most, logs too, a pinch of fiber; a pile of fiber too long ago to count
         made(&db, ada, today, "plank", 30).await;
@@ -478,22 +496,22 @@ mod tests {
         .unwrap();
         sold(&db, ada, bea, first - chrono::Duration::minutes(1)).await;
 
-        let seen = card(&db, bea_acc, Who::Id(ada)).await.unwrap().lately.expect("Ada has been busy");
+        let seen = card(&db, &HashMap::new(), bea_acc, Who::Id(ada)).await.unwrap().lately.expect("Ada has been busy");
         assert_eq!(seen.doing, ["sawing planks", "felling trees"]);
         assert_eq!(seen.sells, [Venue::Bazaar]);
         assert_eq!(lately::words(&seen), "sawing planks and felling trees, and selling at the bazaar");
-        assert_eq!(card(&db, ada_acc, Who::Id(ada)).await.unwrap().lately.as_ref(), Some(&seen), "the same on her own");
+        assert_eq!(card(&db, &HashMap::new(), ada_acc, Who::Id(ada)).await.unwrap().lately.as_ref(), Some(&seen), "the same on her own");
 
         // Bea bought; only a seller sells. Then she sells on the Exchange, at the first moment that counts
-        assert_eq!(card(&db, ada_acc, Who::Id(bea)).await.unwrap().lately, None);
+        assert_eq!(card(&db, &HashMap::new(), ada_acc, Who::Id(bea)).await.unwrap().lately, None);
         sold(&db, bea, ada, first).await;
-        let hers = card(&db, ada_acc, Who::Id(bea)).await.unwrap().lately.expect("Bea has sold");
+        let hers = card(&db, &HashMap::new(), ada_acc, Who::Id(bea)).await.unwrap().lately.expect("Bea has sold");
         assert_eq!((hers.doing.len(), hers.sells.as_slice()), (0, [Venue::Exchange].as_slice()));
 
         // Out of the papers: off everyone's card but her own
         sqlx::query("UPDATE players SET gazette_named = FALSE WHERE id = $1").bind(ada).execute(&db).await.unwrap();
-        assert_eq!(card(&db, bea_acc, Who::Id(ada)).await.unwrap().lately, None);
-        assert_eq!(card(&db, bea_acc, Who::Name("ada")).await.unwrap().lately, None);
-        assert_eq!(card(&db, ada_acc, Who::Id(ada)).await.unwrap().lately, Some(seen));
+        assert_eq!(card(&db, &HashMap::new(), bea_acc, Who::Id(ada)).await.unwrap().lately, None);
+        assert_eq!(card(&db, &HashMap::new(), bea_acc, Who::Name("ada")).await.unwrap().lately, None);
+        assert_eq!(card(&db, &HashMap::new(), ada_acc, Who::Id(ada)).await.unwrap().lately, Some(seen));
     }
 }

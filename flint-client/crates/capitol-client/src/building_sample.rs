@@ -164,6 +164,7 @@ impl Buildings {
                 station_count: 6,
                 station_capacity: 4 * (1 + built) + yard,
                 terrain_id: Some((*id).clone()),
+                address: None,
                 corners: Some(*corners),
                 indoor_room: Some(4),
                 yard_room: Some(yard),
