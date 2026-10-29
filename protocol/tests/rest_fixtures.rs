@@ -715,6 +715,7 @@ fn a_guild_round_trips_as_its_leader_sees_it() {
     assert_eq!(treasury.dissolves_at, guild::dissolves_at(guild.members.len() as u32));
     let hall = guild.hall.as_ref().expect("its hall (S4.3)");
     assert_eq!((hall.terrain_id.as_deref(), hall.tax_owed), (Some("guild_hall_3"), 12));
+    assert_eq!((hall.address.as_deref(), hall.weekly_tax), (Some("14 Guild Ring by Pilgrims' Road"), 100), "where it is and its tax (#582)");
     assert_eq!(serde_json::to_string(&mine).unwrap(), json);
 
     let json = fixture("guild_books.json");

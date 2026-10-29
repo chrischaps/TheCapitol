@@ -367,7 +367,7 @@ impl GuildPanel {
                         ui.label(theme::label("Dues"));
                     });
                 });
-                ui.label(theme::dim(guilds::dues_words(guild.members.len())).size(size::LABEL));
+                ui.label(theme::dim(guilds::dues_words(guild.members.len(), guild.hall.as_ref())).size(size::LABEL));
                 if let Some(words) = guilds::debt_words(t) {
                     ui.add_space(6.0);
                     let near = guilds::debt_share(t);
@@ -786,17 +786,18 @@ fn hall(ui: &mut egui::Ui, guild: &GuildDetail, role: Option<GuildRole>, view: &
     action
 }
 
-/// A hall that stands: its sign's words, when it was taken, its tax. Not
-/// its address or its weekly tax, which `GuildHall` doesn't carry (#582).
+/// A hall that stands: its sign's words and its address, when it was
+/// taken, and its tax a week and any it owes (#582).
 fn standing_hall(ui: &mut egui::Ui, guild: &GuildDetail, hall: &GuildHall, view: &View) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
         ui.label(RichText::new(&guild.name).font(theme::display(size::LARGE)).color(theme::PAPER));
-        ui.label(theme::dim("over the door, in the guild district"));
+        ui.label(theme::dim(guilds::hall_where(hall)));
     });
     let taken = hall.claimed_at.format("%e %B %Y").to_string();
     ui.label(theme::dim(format!("Taken {}", taken.trim())).size(size::LABEL));
     ui.add_space(4.0);
+    ui.label(theme::dim(guilds::hall_tax_words(hall)).size(size::LABEL));
     if hall.tax_owed > 0 {
         ui.label(
             RichText::new(format!(
@@ -806,8 +807,6 @@ fn standing_hall(ui: &mut egui::Ui, guild: &GuildDetail, hall: &GuildHall, view:
             .size(size::SMALL)
             .color(theme::SHORT),
         );
-    } else {
-        ui.label(theme::dim("Its tax comes from the treasury by the hour.").size(size::LABEL));
     }
     ui.add_space(4.0);
     if view.online && theme::link(ui, "Walk to the hall", size::SMALL).clicked() {
@@ -1124,9 +1123,11 @@ pub fn sample(which: &str) -> (Guilds, View, Page, Draft) {
         hall: (which != "nohall").then(|| GuildHall {
             plot_id: Uuid::from_u128(400),
             terrain_id: Some("guild_3_12".into()),
+            address: Some("14 Guild Ring by Pilgrims' Road".into()),
             x: 8_640.0,
             y: 7_910.0,
             claimed_at: at(21),
+            weekly_tax: 100,
             tax_owed: 0,
         }),
     };
