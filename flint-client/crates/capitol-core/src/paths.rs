@@ -164,9 +164,11 @@ pub struct WalkGraph {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoWay {
     /// No way from where the walk starts onto the graph: a pocket of ground
-    /// walled by crests, which a walker can't get into, so only a respawn or
-    /// a regenerate puts one there. Nothing walks it out yet
-    /// ([#522](https://github.com/chrischaps/TheCapitol/issues/522)).
+    /// walled by crests, which a walker can't get into, so only a regenerate
+    /// or a shift of the world puts one there. A walk from it goes straight,
+    /// and when the crest stops it, the server lifts it to the nearest ground
+    /// the land's flood reached, from where there's a way (#522,
+    /// `backend/src/engine/stranded.rs`).
     Stranded,
     /// No way from the graph to where it ends: in such a pocket, where since
     /// #347 no wild node is planted, in a lake, or up a crag.

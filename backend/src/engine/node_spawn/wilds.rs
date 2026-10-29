@@ -352,6 +352,97 @@ impl<'a> Land<'a> {
             .map(|(_, p)| p)
             .collect()
     }
+
+    /// What the flood reached, kept for the game (#522): the land without
+    /// the terrain it borrows.
+    pub fn into_reach(self) -> Reach {
+        Reach {
+            frame: *self.frame(),
+            relief: self.relief,
+            cols: self.cols,
+            reached: self.cells.iter().map(|c| c.reached).collect(),
+        }
+    }
+}
+
+/// How many cells round a walker [`Reach::way_out`] looks for reached ground
+/// it can walk to: a walker who got where it stands on foot has some within
+/// a cell or two.
+const WALK_OUT: i64 = 3;
+/// How far [`Reach::way_out`] looks for reached ground to move a stranded
+/// walker to, in cells: past any pocket of the ranges.
+const LIFT_OUT: i64 = 40;
+
+/// The cells of the wilds a walker can reach from the rural edge, as
+/// [`Land`]'s flood found them, owned so the game can keep them (#522). A
+/// walker past the rural edge who can't walk to any of them is stranded in
+/// a pocket walled by crests, and [`Reach::way_out`] finds it the nearest
+/// reached ground.
+pub struct Reach {
+    relief: Relief,
+    frame: Frame,
+    cols: usize,
+    reached: Vec<bool>,
+}
+
+/// Where a walker stands, as [`Reach::way_out`] finds it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WayOut {
+    /// It can walk out: inside the rural edge, or with a straight line the
+    /// slope lets through to a reached cell's centre near it.
+    Walks,
+    /// Stranded: the centre of the nearest reached cell, to move it to.
+    Lift((f64, f64)),
+    /// Stranded, with no reached ground within [`LIFT_OUT`] cells: off the
+    /// land's grid, or somewhere the flood never got near.
+    Lost,
+}
+
+impl Reach {
+    /// Whether a walker at `at` can walk out to the reached ground, and if
+    /// not, where the nearest is. The line out is tested from `at` (a walk
+    /// may climb down off a crag that it couldn't climb up) to the centres
+    /// of the reached cells within [`WALK_OUT`].
+    pub fn way_out(&self, at: (f64, f64)) -> WayOut {
+        let (cx, cy) = self.frame.center;
+        if (at.0 - cx).stable_hypot(at.1 - cy) < self.frame.rural_edge() {
+            return WayOut::Walks;
+        }
+        let size = self.frame.world_size();
+        if !(0.0..size).contains(&at.0) || !(0.0..size).contains(&at.1) {
+            return WayOut::Lost;
+        }
+        let (i, j) = ((at.0 / CELL) as i64, (at.1 / CELL) as i64);
+        let cols = self.cols as i64;
+        let reached = |(a, b): &(i64, i64)| (0..cols).contains(a) && (0..cols).contains(b) && self.reached[(b * cols + a) as usize];
+        let centre = |(a, b): (i64, i64)| ((a as f64 + 0.5) * CELL, (b as f64 + 0.5) * CELL);
+        let off = |p: (f64, f64)| (p.0 - at.0).stable_hypot(p.1 - at.1);
+        // The cells of the square ring `r` round `at`'s, each once
+        let ring = move |r: i64| {
+            (-r..=r).flat_map(move |d| {
+                let sides = [(d, -r), (d, r), (-r, d), (r, d)];
+                let n = if r == 0 { 1 } else if d.abs() == r { 2 } else { 4 };
+                sides.into_iter().take(n).map(move |(di, dj)| (i + di, j + dj))
+            })
+        };
+        let near: Vec<(f64, f64)> = (0..=WALK_OUT).flat_map(ring).filter(reached).map(centre).collect();
+        if near.iter().any(|&p| ground::slope_lets_through(at, p, |x, y| self.relief.slope(x, y))) {
+            return WayOut::Walks;
+        }
+        let mut best = near.iter().map(|&p| (off(p), p)).min_by(|a, b| a.0.total_cmp(&b.0));
+        for r in WALK_OUT + 1..=LIFT_OUT {
+            // Every cell of this ring and past it is further than this
+            if best.is_some_and(|(d, _)| d <= (r - 1) as f64 * CELL) {
+                break;
+            }
+            for p in ring(r).filter(reached).map(centre) {
+                if best.is_none_or(|(d, _)| off(p) < d) {
+                    best = Some((off(p), p));
+                }
+            }
+        }
+        best.map_or(WayOut::Lost, |(_, p)| WayOut::Lift(p))
+    }
 }
 
 /// A cell's eight neighbours, as steps along the grid.

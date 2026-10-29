@@ -1676,7 +1676,7 @@ impl SimBot {
         let (began, day) = (self.now(), self.day());
         let mut down = 0;
         for (_, s) in moving {
-            self.bot.walk_to(s.x, s.y + 10.0)?;
+            self.bot.walk_to_station(s.x, s.y)?;
             match self.bot.remove_station(s.id) {
                 Ok(()) => {
                     self.stations.remove(&s.id);
@@ -1713,7 +1713,7 @@ impl SimBot {
                         let s = self.bench(kind)?.ok_or_else(|| {
                             BotError::Failed(format!("no {kind} of ours is known"))
                         })?;
-                        self.bot.walk_to(s.x, s.y + 10.0)?;
+                        self.bot.walk_to_station(s.x, s.y)?;
                         Some(s.id)
                     }
                     None => None,
@@ -2153,7 +2153,7 @@ impl SimBot {
     /// Repairs its own `kind` of station, at it (#478).
     fn repair(&mut self, kind: &str) -> Result<(), BotError> {
         let s = self.own(kind).cloned().ok_or_else(|| BotError::Failed(format!("no {kind} of ours is known")))?;
-        self.bot.walk_to(s.x, s.y + 10.0)?;
+        self.bot.walk_to_station(s.x, s.y)?;
         let condition = match self.bot.repair_station(s.id) {
             Ok(condition) => condition,
             Err(e @ BotError::Rest { .. }) => {
@@ -2236,7 +2236,7 @@ impl SimBot {
         let leaving = leaving(known, self.bot.position(), |x, y| plots.iter().any(|p| p.contains(x, y)));
         let mut down = 0;
         for (_, s) in leaving {
-            self.bot.walk_to(s.x, s.y + 10.0)?;
+            self.bot.walk_to_station(s.x, s.y)?;
             match self.bot.remove_station(s.id) {
                 Ok(()) => {
                     self.stations.remove(&s.id);
@@ -2270,7 +2270,7 @@ impl SimBot {
         let began = self.now();
         let mut down = 0;
         for (_, s) in far.into_iter().take(FETCH_A_DAY) {
-            self.bot.walk_to(s.x, s.y + 10.0)?;
+            self.bot.walk_to_station(s.x, s.y)?;
             match self.bot.remove_station(s.id) {
                 Ok(()) => {
                     self.stations.remove(&s.id);

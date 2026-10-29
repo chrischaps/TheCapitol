@@ -43,6 +43,7 @@ pub mod standing;
 pub mod station_placement;
 pub mod station_removal;
 pub mod station_tools;
+mod stranded;
 mod stations;
 mod tick;
 pub mod tools;

@@ -140,6 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize game state with loaded params
     let game_state = Arc::new(RwLock::new(engine::GameState::with_params(world_gen_params)));
+    // The wilds' reach, for lifting a stranded walker out (#522), on a thread
+    // of its own while the rest starts up
+    {
+        let game = game_state.read().await;
+        game.wild_reach.start(&game.terrain);
+    }
 
     // The claimable plots are the terrain's lots (B7). Bring the table up to
     // date with them. An owned plot the terrain no longer matches is left as it

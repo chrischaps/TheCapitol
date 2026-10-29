@@ -17,6 +17,7 @@ use super::load::{Loop, Phase};
 use super::units;
 use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
+use super::stranded::{WayOut, WildReach};
 use super::regeneration::process_regeneration;
 use super::trading::{TradeManager, TRADE_RANGE};
 use super::tutorial::{Did, Judged};
@@ -27,7 +28,7 @@ use crate::state::AppState;
 use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::{CatalogResponse, Subscription, SubscriptionStatus};
 use capitol_protocol::fmath::StableMath;
-use capitol_protocol::rules::ground::Ground;
+use capitol_protocol::rules::ground::{Ground, TOO_STEEP};
 use capitol_protocol::rules::quality;
 use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
@@ -112,6 +113,12 @@ pub struct GameState {
     pub addresses: Arc<HashMap<String, String>>,
     /// The terrain's land and wild water, indexed for walking on (W4)
     pub ground: Arc<Ground>,
+    /// The ground of the wilds a walker can reach from the rural edge, for
+    /// lifting a stranded one out (#522): worked out in the background
+    pub wild_reach: Arc<WildReach>,
+    /// Where each player was last stopped "Too steep" and found able to walk
+    /// out, so a steer held against a cliff is looked at once (#522)
+    walks_out_from: HashMap<Uuid, (f64, f64)>,
     // World generation parameters (for admin tweaking)
     pub world_gen_params: WorldGenParams,
     /// The stations working on their own (E4.3), run by their own task
@@ -181,6 +188,8 @@ impl GameState {
             terrain_version,
             addresses,
             ground,
+            wild_reach: Arc::default(),
+            walks_out_from: HashMap::new(),
             world_gen_params: params,
             works: Arc::default(),
             tunables: Default::default(),
@@ -200,6 +209,7 @@ impl GameState {
         self.terrain_version = terrain.version();
         self.addresses = Arc::new(terrain.addresses());
         self.ground = Arc::new(terrain.ground());
+        self.wild_reach = Arc::default();
         self.terrain = terrain;
     }
 
@@ -354,6 +364,7 @@ impl GameState {
         self.gather_tools.remove(&player_id);
         self.gather_wages.remove(&player_id);
         self.steer_blocked_at.remove(&player_id);
+        self.walks_out_from.remove(&player_id);
         self.walks_from.remove(&player_id);
         // Remove any pending trade requests
         self.trade_manager.pending_requests.remove(&player_id);
@@ -713,7 +724,31 @@ impl GameState {
             if steering || player.dest_x.is_some() {
                 self.walks_from.entry(player.id).or_insert((player.x, player.y));
             }
-            let result = process_movement(player, &self.ground);
+            let dest = (player.dest_x, player.dest_y);
+            let mut result = process_movement(player, &self.ground);
+            // Stopped "Too steep" where there's no walking out: in a pocket
+            // walled by crests, it's lifted to the nearest reached ground,
+            // and its walk goes on from there (#522)
+            if result.blocked.as_ref().is_some_and(|b| b.reason == TOO_STEEP)
+                && self.walks_out_from.get(&player.id) != Some(&(player.x, player.y))
+            {
+                match self.wild_reach.get().map(|reach| reach.way_out((player.x, player.y))) {
+                    None => self.wild_reach.start(&self.terrain),
+                    Some(WayOut::Walks) => {
+                        self.walks_out_from.insert(player.id, (player.x, player.y));
+                    }
+                    Some(WayOut::Lift((x, y))) => {
+                        tracing::info!("{} was stranded at ({:.0}, {:.0}), lifted out to ({x:.0}, {y:.0})", player.name, player.x, player.y);
+                        (player.x, player.y) = (x, y);
+                        (player.dest_x, player.dest_y) = dest;
+                        result.blocked = None;
+                    }
+                    Some(WayOut::Lost) => {
+                        tracing::warn!("{} is stranded at ({:.0}, {:.0}), with no reached ground near", player.name, player.x, player.y);
+                        self.walks_out_from.insert(player.id, (player.x, player.y));
+                    }
+                }
+            }
             // A walk that's over, here or by whatever cleared it since, is
             // judged by how far it ended from where it began
             if player.steer.is_none() && player.dest_x.is_none() {
@@ -1560,6 +1595,68 @@ mod tests {
         fewer.terrain_plots.truncate(10);
         game.set_terrain(fewer);
         assert_eq!(game.addresses.len(), 10, "a new terrain brings its own (#573)");
+    }
+
+    /// A walker in a pocket walled by crests, walking straight for the hall
+    /// as a citizen with no way out does, crosses the pocket until the crest
+    /// stops it, and is lifted to the nearest reached ground with its walk
+    /// still on, without hearing "Too steep" for it (#522).
+    #[test]
+    fn a_walker_stranded_in_a_pocket_is_lifted_out_and_walks_on() {
+        use super::super::stranded::{default_reach, POCKET};
+        let mut game = game();
+        game.wild_reach = default_reach();
+        let mut hazel = player("Hazel", POCKET.0, POCKET.1);
+        (hazel.dest_x, hazel.dest_y) = (Some(CENTER_X), Some(CENTER_Y));
+        let id = hazel.id;
+        game.add_player(hazel);
+        let mut rx = game.subscribe();
+        let at = |game: &GameState| (game.players[&id].x, game.players[&id].y);
+        let lift = (0..600).find_map(|_| {
+            let before = at(&game);
+            let way_out = game.wild_reach.wait().way_out(before);
+            game.process_movement();
+            let after = at(&game);
+            // Nobody walks further than a step in a tick
+            ((after.0 - before.0).stable_hypot(after.1 - before.1) > 20.0).then_some((before, way_out, after))
+        });
+        let Some((from, way_out, to)) = lift else { panic!("never lifted out; at {:?}", at(&game)) };
+        eprintln!("lifted from {from:?} to {to:?}");
+        assert_eq!(way_out, WayOut::Lift(to), "to the nearest reached ground");
+        assert!(game.players[&id].dest_x.is_some(), "its walk goes on");
+        assert_eq!(game.wild_reach.wait().way_out(to), WayOut::Walks);
+        while let Ok(e) = rx.try_recv() {
+            assert!(!matches!(e, GameEvent::MovementBlocked { player_id, .. } if player_id == id), "{e:?}");
+        }
+    }
+
+    /// From the ground the pocket's walker was lifted to, a walk back into
+    /// it is stopped by the crest, and left there: it can walk out.
+    #[test]
+    fn a_walker_held_against_a_crest_it_can_walk_away_from_stays_put() {
+        use super::super::stranded::{default_reach, POCKET};
+        let mut game = game();
+        game.wild_reach = default_reach();
+        let WayOut::Lift(out) = game.wild_reach.wait().way_out(POCKET) else { panic!("{POCKET:?} is in a pocket") };
+        let mut wren = player("Wren", out.0, out.1);
+        (wren.dest_x, wren.dest_y) = (Some(POCKET.0), Some(POCKET.1));
+        let id = wren.id;
+        game.add_player(wren);
+        let mut rx = game.subscribe();
+        for _ in 0..600 {
+            game.process_movement();
+            if game.players[&id].dest_x.is_none() {
+                break;
+            }
+        }
+        let p = &game.players[&id];
+        assert!(p.dest_x.is_none(), "stopped short of the pocket");
+        assert_eq!(game.wild_reach.wait().way_out((p.x, p.y)), WayOut::Walks, "at ({}, {})", p.x, p.y);
+        let mut steep = false;
+        while let Ok(e) = rx.try_recv() {
+            steep |= matches!(e, GameEvent::MovementBlocked { player_id, ref reason, .. } if player_id == id && reason == TOO_STEEP);
+        }
+        assert!(steep, "it hears the crest stop it");
     }
 
     /// A game with two players `gap` units apart, and a receiver subscribed after they joined

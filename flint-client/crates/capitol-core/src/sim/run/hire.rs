@@ -226,7 +226,7 @@ impl SimBot {
                 .find(|s| s.id == *station_id)
                 .cloned()
                 .ok_or_else(|| BotError::Failed(format!("its station {station_id} is gone")))?;
-            self.bot.walk_to(station.x, station.y + 10.0)?;
+            self.bot.walk_to_station(station.x, station.y)?;
             let catalog = self.bot.state().catalog().clone();
             // Whatever goes in comes home after, the offer up or not
             self.hiring.collect.retain(|s| s != station_id);
@@ -270,7 +270,7 @@ impl SimBot {
         let Some(s) = self.stations.get(&station).cloned() else {
             return Ok(());
         };
-        self.bot.walk_to(s.x, s.y + 10.0)?;
+        self.bot.walk_to_station(s.x, s.y)?;
         self.bot.empty_station(station).map(drop)
     }
 

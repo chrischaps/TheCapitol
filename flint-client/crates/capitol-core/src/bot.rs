@@ -789,8 +789,12 @@ impl Bot {
     /// goes round the water, by the bridges and fords ([`WalkGraph::plan`]),
     /// a `move` a leg. Where the graph can't reach `(x, y)` it doesn't set
     /// out: it's [`BotError::Blocked`] where it stands (#280). With no
-    /// terrain, or stranded where the graph can't be reached, it goes
-    /// straight and stops at whatever is in the way.
+    /// terrain it goes straight and stops at whatever is in the way.
+    /// Stranded where the graph can't be reached, in a pocket walled by
+    /// crests, it goes straight too: the server lifts it out to the nearest
+    /// ground it can walk from when the crest stops it, and if the straight
+    /// walk is stopped again out there, the rest is planned from where it
+    /// stopped (#522).
     pub fn walk_to(&mut self, x: f64, y: f64) -> Result<(), BotError> {
         let from = self.position();
         if (x - from.0).hypot(y - from.1) < ARRIVED {
@@ -817,7 +821,14 @@ impl Bot {
             }
             Some(Err(NoWay::Stranded)) => {
                 self.log(format!("no way out from ({:.0}, {:.0}); going straight", from.0, from.1));
-                vec![(x, y)]
+                return match self.walk_straight(x, y, None) {
+                    Err(BotError::Blocked { .. })
+                        if walks.as_ref().is_some_and(|w| w.plan(self.position(), (x, y)).is_ok()) =>
+                    {
+                        self.walk_to(x, y)
+                    }
+                    walked => walked,
+                };
             }
             None => vec![(x, y)],
         };
@@ -826,6 +837,17 @@ impl Bot {
             self.walk_straight(lx, ly, secs)?;
         }
         Ok(())
+    }
+
+    /// Walks to a station at `(x, y)`: to stand in front of it, 10 to the
+    /// south, or where there's no way to that (a bench put down by a face,
+    /// off any lot, where it gathered), to its own spot, where it was put
+    /// down from, so walked to (#522).
+    pub fn walk_to_station(&mut self, x: f64, y: f64) -> Result<(), BotError> {
+        match self.walk_to(x, y + 10.0) {
+            Err(BotError::Blocked { reason, .. }) if reason == NO_WAY => self.walk_to(x, y),
+            walked => walked,
+        }
     }
 
     /// The walk graph of the world's terrain: fetched the first time, then

@@ -378,6 +378,14 @@ fn a_pocket_walled_by_crests_has_no_way_in_or_out() {
     let vein = (15329.1, 11083.0);
     assert_eq!(graph.plan(hall, vein), Err(NoWay::Unreachable));
     assert_eq!(graph.plan(vein, hall), Err(NoWay::Stranded));
+    // A walker in it goes straight, and when the crest stops it the server
+    // lifts it to the nearest reached ground (#522): from the middle, or
+    // where the walk for the hall is stopped
+    // (`engine::tick::tests::a_walker_stranded_in_a_pocket_is_lifted_out_and_walks_on`).
+    // From there the graph walks it home.
+    for out in [(15237.5, 11087.5), (15237.5, 11062.5)] {
+        walk(graph, out, hall);
+    }
 }
 
 #[test]
@@ -637,6 +645,88 @@ fn the_server_walks_every_leg_to_the_wild_nodes() {
     let failed: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
     eprintln!("{} of {} wild nodes there and back", nodes.len() - failed.len(), nodes.len());
     assert!(failed.is_empty(), "{} not: {failed:#?}", failed.len());
+}
+
+/// A citizen with no plot puts its workbench down where it stands, on the
+/// node it was gathering (`off_lot_spots`), and walks to 10 south of it to
+/// craft there (`SimBot::take`). In #527's baseline soak an ore gatherer did
+/// that by these veins of the eastern ranges, and the walk to the bench was
+/// stopped "Too steep" at the same spot 1,755 times, and every walk home
+/// with it (#522): the graph let a leg through over a face the server's step
+/// stops on (#520), where the grid's search was cut short (#521). Now the
+/// graph finds no way to the first vein's front, on the face, so the citizen
+/// stands on the bench's own spot (`Bot::walk_to_station`), and from each it
+/// walks home.
+#[test]
+fn a_bench_beside_a_wild_node_is_walked_to_and_home_from() {
+    let (_, graph) = world();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    let vein = (15664.7, 6192.4);
+    assert_eq!(graph.plan(vein, (vein.0, vein.1 + 10.0)), Err(NoWay::Unreachable));
+    for node in [vein, (16166.1, 5959.8), (16148.0, 5939.8)] {
+        let front = (node.0, node.1 + 10.0);
+        let stand = if graph.plan(node, front).is_ok() { front } else { node };
+        walk(graph, node, stand);
+        walk(graph, stand, hall);
+    }
+}
+
+/// [`a_bench_beside_a_wild_node_is_walked_to_and_home_from`] for every
+/// `WILD_EVERY`th wild node (1 by default): from the node to 10 south of it,
+/// planned and walked by the server's step, or where the graph says there's
+/// no way to it (a bench on the edge of a face), the bench's own spot, as
+/// `Bot::walk_to_station` does, and home from there. At #527's baseline
+/// (a7deb1ae), four of 13,531 were stopped "Too steep" every time; since
+/// #520 and #521, none:
+/// `cargo test -p capitol-core --release --lib print_bench_walks -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn print_bench_walks() {
+    let every: usize = std::env::var("WILD_EVERY").ok().and_then(|n| n.parse().ok()).unwrap_or(1);
+    let (_, graph) = world();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    let nodes = wild_nodes(&wilds_sql(), every);
+    let start = Instant::now();
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let no_way = std::sync::atomic::AtomicUsize::new(0);
+    let no_way = &no_way;
+    let failed: Vec<String> = std::thread::scope(|scope| {
+        let parts: Vec<_> = nodes
+            .chunks(nodes.len().div_ceil(cores).max(1))
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .filter_map(|(kind, node)| {
+                            let front = (node.0, node.1 + 10.0);
+                            let (stand, legs) = match graph.plan(*node, front) {
+                                Ok(legs) => (front, legs),
+                                Err(NoWay::Unreachable) => {
+                                    no_way.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    (*node, Vec::new())
+                                }
+                                Err(e) => return Some(format!("{kind} at {node:?}: to the bench, {e:?}")),
+                            };
+                            let at = server_walk(graph, *node, &legs).err().map(|e| format!("{kind} at {node:?}: to the bench, {e}"));
+                            let home = graph.plan(stand, hall).map_err(|e| format!("{e:?}")).and_then(|legs| server_walk(graph, stand, &legs));
+                            at.or_else(|| home.err().map(|e| format!("{kind} at {node:?}: home from the bench, {e}")))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        parts.into_iter().flat_map(|p| p.join().unwrap()).collect()
+    });
+    for f in failed.iter().take(30) {
+        eprintln!("{f}");
+    }
+    eprintln!(
+        "{} of {} benches beside wild nodes walked to and home from ({} from the bench's own spot), {} not, in {:?}",
+        nodes.len() - failed.len(),
+        nodes.len(),
+        no_way.load(std::sync::atomic::Ordering::Relaxed),
+        failed.len(),
+        start.elapsed()
+    );
 }
 
 /// The wild nodes the grid's search gave up on (#521), far round the crests

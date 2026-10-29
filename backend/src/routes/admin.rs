@@ -206,6 +206,7 @@ pub async fn update_world_params(
     let mut game = state.game.write().await;
 
     game.set_terrain(TerrainConfig::from_params(&params));
+    game.wild_reach.start(&game.terrain);
     game.world_gen_params = params.clone();
     // In memory only, like the terrain. The commit saves where the nodes are (#70).
     let game = &mut *game;
