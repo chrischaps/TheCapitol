@@ -944,7 +944,8 @@ impl CapitolExtension {
     /// `chest`, an empty chest of yours, for the recycling bin, #488;
     /// `hire`, the Hire tab with an offer of yours worked, or `shift`, on a
     /// shift at Ada's workbench, S2.7; `repair`, worn to 18 out on open
-    /// ground with the fiber to mend it, or `worn`, at 0 without, V3.5),
+    /// ground with the fiber to mend it, or `worn`, at 0 without, V3.5;
+    /// `hall`, your guild's hall bench with other members' stacks, #587),
     /// with the inventory and crafting panels open beside it
     /// (`--station-panel-sample`, #235).
     pub fn with_station_panel_sample(mut self, tab: Option<&str>) -> Self {
@@ -954,6 +955,7 @@ impl CapitolExtension {
                 "empty" => ui::station::empty_the_box(&mut state),
                 "chest" => ui::station::chest_of_yours(&mut state),
                 "shift" => ui::station::at_adas_bench(&mut state),
+                "hall" => ui::station::at_the_hall_bench(&mut state),
                 "repair" | "worn" => ui::station::worn_out_there(&mut state, tab),
                 _ => {}
             }

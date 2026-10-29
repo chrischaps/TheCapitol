@@ -1291,11 +1291,8 @@ impl Bot {
             })
             .expect("until stopped on one of these")?;
         match station {
-            // Made at a station, it waits in the station's box (#489): ours
-            // holds only ours, and a guild hall's other members' too (#510)
-            Some(station_id) if self.state.station(station_id).is_some_and(|s| Some(s.owner_id) != self.state.me()) => {
-                self.collect_made_from_station(station_id, &item)?
-            }
+            // Made at a station, it waits in the station's box (#489), with
+            // a guild hall's other members' things too (#510)
             Some(station_id) => self.collect_from_station(station_id, &item.item_type)?,
             None => self.wait_for_items(container_type::CRAFTING_OUTPUT, &item)?,
         }
@@ -1328,8 +1325,9 @@ impl Bot {
 
     /// Takes the `item_type` a craft at `station_id` made out of the
     /// station's box, where it waits (#489), into the inventory. Stand within
-    /// the station's reach. Every stack of that type comes out, so it's for a
-    /// station of our own, whose box holds only ours.
+    /// the station's reach. Only our own stacks of that type come out: the
+    /// box says whose each is (#498), and someone else's may wait there too,
+    /// a guild hall's other members' (#510, #587).
     pub fn collect_from_station(&mut self, station_id: Uuid, item_type: &str) -> Result<(), BotError> {
         let what = "looking in the station's box";
         let RestResponse::StationContainer(the_box) =
@@ -1337,40 +1335,11 @@ impl Bot {
         else {
             return Err(BotError::Failed(format!("{what}: an answer that isn't a box")));
         };
-        let made: Vec<SlotItem> = the_box.slots.into_iter().filter(|i| i.item_type == item_type).collect();
+        let made = ours_of(the_box.slots, item_type, self.state.me());
         let want = self.count(container_type::PLAYER_INVENTORY, item_type) + made.iter().map(|i| i.quantity).sum::<i32>();
         self.move_to_inventory(&made, "collecting from the station's box")?;
         self.wait_until(&format!("{want} {item_type} in the inventory"), |bot| {
             bot.count(container_type::PLAYER_INVENTORY, item_type) >= want
-        })
-    }
-
-    /// Takes what a craft at someone else's station made, `item`, out of its
-    /// box, where other people's may wait too: a guild hall's bench (#510).
-    /// The box doesn't say whose a stack is
-    /// ([#587](https://github.com/chrischaps/TheCapitol/issues/587)), so
-    /// it takes each stack of the type in turn, the server refusing those
-    /// that aren't ours, until the inventory holds what was made.
-    pub fn collect_made_from_station(&mut self, station_id: Uuid, item: &Yield) -> Result<(), BotError> {
-        let what = "looking in the station's box";
-        let RestResponse::StationContainer(the_box) =
-            self.call(what, RestRequest::StationContainer { station_id })?
-        else {
-            return Err(BotError::Failed(format!("{what}: an answer that isn't a box")));
-        };
-        let want = self.count(container_type::PLAYER_INVENTORY, &item.item_type) + item.quantity;
-        for stack in the_box.slots.iter().filter(|i| i.item_type == item.item_type) {
-            if self.count(container_type::PLAYER_INVENTORY, &item.item_type) >= want {
-                break;
-            }
-            match self.move_to_inventory(std::slice::from_ref(stack), "collecting from the station's box") {
-                Ok(()) => {}
-                Err(e) if e.is_final() => return Err(e),
-                Err(_) => {}
-            }
-        }
-        self.wait_until(&format!("{want} {} in the inventory", item.item_type), |bot| {
-            bot.count(container_type::PLAYER_INVENTORY, &item.item_type) >= want
         })
     }
 
@@ -2969,6 +2938,17 @@ fn asked(state: &GameState) -> bool {
     matches!(state.trade(), crate::state::Trade::Incoming { .. })
 }
 
+/// The stacks of `item_type` in a station's box that are `me`'s, as the box
+/// says (#498): a guild hall's holds other members' too (#510), and the
+/// server refuses to move those (#80), so they're left (#587). A stack
+/// that doesn't say whose it is, from a server before #498, is tried.
+fn ours_of(slots: Vec<SlotItem>, item_type: &str, me: Option<Uuid>) -> Vec<SlotItem> {
+    slots
+        .into_iter()
+        .filter(|i| i.item_type == item_type && (i.owner_id.is_none() || i.owner_id == me))
+        .collect()
+}
+
 /// A person (not a citizen) within [`GREET_RANGE`], other than those in
 /// `passed`: their id and where they stand.
 fn passer(state: &GameState, passed: &[Uuid]) -> Option<(Uuid, f64, f64)> {
@@ -3084,6 +3064,27 @@ mod tests {
             "Bot1 walked 1234 units, pulled 4 fiber from 2 nodes, and made 1 × Rope \
              (quality 61, grade C) in 31.3 s"
         );
+    }
+
+    /// At a guild hall's bench the box holds other members' stacks of what
+    /// was made: only ours come out, and one that doesn't say is tried (#587)
+    #[test]
+    fn from_a_shared_box_only_our_stacks_of_the_type_come_out() {
+        let (me, ada) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let stack = |n: u128, item_type: &str, owner: Option<Uuid>| {
+            SlotItem::new(Uuid::from_u128(0x100 + n), item_type.into(), item_type.into(), 70, 2, n as i32).with_owner(owner)
+        };
+        let the_box = vec![
+            stack(0, "rope", Some(ada)),
+            stack(1, "rope", Some(me)),
+            stack(2, "fiber", Some(me)),
+            stack(3, "rope", Some(ada)),
+            stack(4, "rope", None),
+        ];
+        let ids = |slots: Vec<SlotItem>| slots.iter().map(|i| i.slot_index).collect::<Vec<_>>();
+        assert_eq!(ids(ours_of(the_box.clone(), "rope", Some(me))), [1, 4]);
+        assert_eq!(ids(ours_of(the_box.clone(), "rope", Some(ada))), [0, 3, 4]);
+        assert_eq!(ids(ours_of(the_box, "rope", None)), [4], "not signed in: only what doesn't say");
     }
 
     /// A bot whose net goes nowhere: what it hears is fed to [`Bot::watch_link`].

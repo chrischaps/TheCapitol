@@ -83,6 +83,9 @@ pub const SLOT: Color32 = rgba(30, 30, 40, 0.8);
 pub const SLOT_EDGE: Color32 = rgba(80, 80, 100, 0.5);
 /// A slot's edge when something's in it: `rgba(100,100,120,0.7)`.
 pub const SLOT_EDGE_FULL: Color32 = rgba(100, 100, 120, 0.7);
+/// The fold in the corner of a stack that's someone else's, in a station's
+/// box (#587): slate, a little lighter than a full slot's edge.
+pub const THEIRS: Color32 = rgba(148, 163, 184, 0.7);
 /// The dark ring round a grade pip: black at 30%.
 pub const PIP_EDGE: Color32 = rgba(0, 0, 0, 0.3);
 /// The tray a grid of slots sits in: `rgba(20,20,30,0.6)`.

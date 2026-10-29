@@ -213,7 +213,9 @@ struct Args {
     /// `automation` tab, or `empty` (the craft tab, its box empty) or `chest`
     /// (an empty chest of yours), so its recycling bin may be pressed (#488),
     /// or `repair` (worn to 18 by the weather, the fiber to mend it in your
-    /// pack) or `worn` (at 0, short of it), for its condition (V3.5). Check it at --width 1280 --height 720 at 150%
+    /// pack) or `worn` (at 0, short of it), for its condition (V3.5), or
+    /// `hall` (your guild's hall bench, other members' stacks marked, #587).
+    /// Check it at --width 1280 --height 720 at 150%
     #[arg(long, value_name = "TAB", requires = "offline")]
     station_panel_sample: Option<String>,
     /// Offline, open the plot panel on an urban lot of yours with a

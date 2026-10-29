@@ -1244,6 +1244,56 @@ pub fn at_adas_bench(state: &mut GameState) {
     }));
 }
 
+/// `--station-panel-sample hall` (#587): your guild's hall bench, Bram's
+/// as the guild's leader, its box holding your sticks and rope among the
+/// other members' stacks of the same, so theirs are marked.
+pub fn at_the_hall_bench(state: &mut GameState) {
+    use capitol_core::net::RestResponse;
+    use capitol_core::protocol::rest::StationContainerResponse;
+    use capitol_core::protocol::ws::ServerMessage;
+    const ME: Uuid = Uuid::from_u128(0xca9);
+    let (bram, ada, cy) = (Uuid::from_u128(0xb4a), Uuid::from_u128(0xada), Uuid::from_u128(0xc1));
+    let (bench, boxed) = (Uuid::from_u128(0x4a11), Uuid::from_u128(0x4a12));
+    state.apply_ws(&ServerMessage::StationPlaced {
+        station_id: bench,
+        station_type: "workbench".into(),
+        name: "Workbench".into(),
+        owner_id: bram,
+        x: 20.0,
+        y: 0.0,
+        container_id: boxed,
+        quality: 75,
+        floor: 0,
+        indoors: true,
+    });
+    state.apply_ws(&ServerMessage::StationOpened {
+        player_id: ME,
+        station_id: bench,
+        station_type: "workbench".into(),
+        name: "Workbench".into(),
+        container_id: boxed,
+    });
+    let catalog = capitol_core::catalog::Catalog::fallback();
+    let item = |n: u128, slot, kind: &str, quality, quantity, owner| {
+        SlotItem::new(Uuid::from_u128(n), kind.into(), catalog.item_name(kind), quality, quantity, slot).with_owner(Some(owner))
+    };
+    state.apply_rest(&RestResponse::StationContainer(StationContainerResponse {
+        id: boxed,
+        container_type: "station_inventory".into(),
+        slot_count: 16,
+        layout_columns: 4,
+        slots: vec![
+            item(30, 0, "rope", 81, 5, ada),
+            item(31, 1, "sticks", 64, 4, ME),
+            item(32, 2, "sticks", 55, 12, bram),
+            item(33, 3, "rope", 70, 2, ME),
+            item(34, 4, "tool_handle", 63, 3, cy),
+            item(35, 5, "tool_handle", 68, 1, ME),
+            item(36, 6, "plank", 72, 6, bram),
+        ],
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

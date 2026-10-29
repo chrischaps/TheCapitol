@@ -246,8 +246,8 @@ impl<'a> SlotGrid<'a> {
     }
 
     /// A box of several people's things, a station's (#498): a stack that
-    /// says it's someone else's says so in its tooltip, and that a craft
-    /// here won't use it.
+    /// says it's someone else's is marked, its icon set back and its corner
+    /// folded (#587), and says in its tooltip that a craft here won't use it.
     pub fn yours(mut self, me: Option<Uuid>) -> Self {
         self.me = me;
         self
@@ -494,7 +494,8 @@ impl Slot<'_> {
         } else {
             Look::Plain
         };
-        paint_slot(ui.painter(), icons, rect, self.item, look);
+        let whose = if self.item.is_some_and(|i| theirs(i, me)) { Whose::Theirs } else { Whose::Ours };
+        paint_slot(ui.painter(), icons, rect, self.item, look, whose);
         if let Some(tool) = self.item.filter(|i| i.durability.is_some()) {
             remember_tool(ui.ctx(), tool.item_id, rect);
         }
@@ -606,6 +607,7 @@ fn paint_slot(
     rect: Rect,
     item: Option<&SlotItem>,
     look: Look,
+    whose: Whose,
 ) {
     let fade = match look {
         Look::Source => 0.4,
@@ -647,7 +649,14 @@ fn paint_slot(
         rect.center(),
         egui::vec2(theme::SLOT_ICON, theme::SLOT_ICON),
     );
-    icons.paint_on(painter, icon, &item.item_type, fade);
+    let set_back = match whose {
+        Whose::Ours => 1.0,
+        Whose::Theirs => THEIRS_ICON,
+    };
+    icons.paint_on(painter, icon, &item.item_type, fade * set_back);
+    if whose == Whose::Theirs {
+        corner_fold(painter, inner, fade);
+    }
     if quality_grade(item.quality) == "A" && look != Look::Source {
         let time = painter.ctx().input(|i| i.time);
         glint(painter, icon, item.item_id.as_u128(), time, fade);
@@ -664,6 +673,39 @@ fn paint_slot(
             fade,
         );
     }
+}
+
+/// Whose a slot's stack is, as a station's box says (#498).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whose {
+    /// Yours, or a box that doesn't say: everything but a station's.
+    Ours,
+    /// Someone else's, in a box of several people's things (#587).
+    Theirs,
+}
+
+/// How far someone else's stack's icon is set back: enough to read as
+/// not yours at a glance, not so far it reads as disabled.
+const THEIRS_ICON: f32 = 0.5;
+/// The corner fold's legs, in px along the slot's edge.
+const FOLD: f32 = 12.0;
+
+/// Someone else's stack: its top-left corner folded in slate, a page's
+/// dog-ear, clear of the pip, the count and a tool's wear, so a glance
+/// along a hall bench's box finds your own (#587). It sits just inside
+/// the slot's 2 px edge and its rounding.
+fn corner_fold(painter: &Painter, inner: Rect, fade: f32) {
+    let corner = inner.left_top() + egui::vec2(3.0, 3.0);
+    let fold = vec![
+        corner,
+        corner + egui::vec2(FOLD, 0.0),
+        corner + egui::vec2(0.0, FOLD),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        fold,
+        theme::THEIRS.gamma_multiply(fade),
+        Stroke::new(1.0_f32, theme::PIP_EDGE.gamma_multiply(fade)),
+    ));
 }
 
 /// How a tool's wear reads: sound, ember (its work is suffering), or on
