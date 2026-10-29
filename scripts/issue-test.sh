@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/issue.sh against a throwaway bare remote, with no GitHub
+# Tests for scripts/issue.sh and scripts/issue-guard.sh against a throwaway bare remote, with no GitHub
 # calls. Run: bash scripts/issue-test.sh
 set -uo pipefail
 
@@ -92,6 +92,78 @@ grep -q "^agent: taker$" <<<"$body" && grep -q "^stolen-from: holder$" <<<"$body
   && grep -q "^override: Chris closed that session$" <<<"$body" \
   && ok "the claim commit records holder and reason" || bad "the claim commit records holder and reason"
 expect 0 "the new holder can release it" env CLAIM_AGENT_ID=taker bash "$SCRIPT" release 11
+
+# --here claims for the worktree it's run from (one the desktop app made).
+git worktree add -q "$TMP/app-wt" -b claude/some-name master
+cd "$TMP/app-wt"
+expect 0 "claim --here" bash "$SCRIPT" claim 12 --here
+[ "$(sed -n 2p "$REPO/.git/agent-claims/issue-12")" = "$(git rev-parse --show-toplevel)" ] \
+  && ok "the record names this worktree" || bad "the record names this worktree"
+expect 0 "mine from that worktree" bash "$SCRIPT" mine 12
+expect 0 "mine --offline from that worktree" bash "$SCRIPT" mine 12 --offline
+cd "$REPO"
+expect 1 "mine from the main checkout is refused" bash "$SCRIPT" mine 12 --offline
+expect 1 "mine of an unclaimed issue is refused" bash "$SCRIPT" mine 13 --offline
+
+# The guard: a commit or push of issue work this session hasn't claimed is denied.
+GUARD=$(dirname "$SCRIPT")/issue-guard.sh
+mkdir -p "$REPO/scripts" "$TMP/app-wt/scripts"
+cp "$SCRIPT" "$REPO/scripts/issue.sh"; cp "$SCRIPT" "$TMP/app-wt/scripts/issue.sh"
+hook() { # <cwd> <command>: the JSON Claude Code sends a PreToolUse hook
+  local c=${2//\\/\\\\}; c=${c//\"/\\\"}; c=${c//$'\n'/\\n}
+  printf '{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$c" | bash "$GUARD"
+}
+expect 0 "guard: an unrelated command passes" hook "$REPO" "ls -la"
+expect 0 "guard: a commit with no issue passes" hook "$REPO" 'git commit -m "fix a typo"'
+expect 2 "guard: Closes #13, unclaimed, is denied" hook "$REPO" 'git commit -m "$(cat <<'"'"'EOF'"'"'
+do it
+
+Closes #13
+EOF
+)"'
+grep -q "scripts/issue.sh claim 13" "$TMP/out" && ok "the denial says how to claim" || bad "the denial says how to claim"
+expect 0 "guard: Closes #12 from its worktree passes" hook "$TMP/app-wt" 'git commit -m "x
+
+Fixes #12"'
+expect 2 "guard: Closes #12 from the main checkout is denied" hook "$REPO" 'git commit -m "Closes #12"'
+expect 0 "guard: cd into the claiming worktree first passes" hook "$REPO" "cd \"$TMP/app-wt\" && git commit -m 'Closes #12'"
+git worktree add -q "$TMP/repo-14" -b issue-14 master
+mkdir -p "$TMP/repo-14/scripts" && cp "$SCRIPT" "$TMP/repo-14/scripts/issue.sh"
+expect 2 "guard: a commit on an unclaimed issue-14 branch is denied" hook "$TMP/repo-14" 'git commit -m "wip"'
+(cd "$TMP/app-wt" && echo y >g && git add g && git commit -q -m "Closes #12")
+expect 0 "guard: push of claimed work passes" hook "$TMP/app-wt" "git push -u origin HEAD"
+expect 2 "guard: push from a branch with someone else's Closes #13 is denied" \
+  bash -c "cd '$TMP/app-wt' && git commit -q --allow-empty -m 'Closes #13' && $(declare -f hook); GUARD='$GUARD' hook '$TMP/app-wt' 'git push'"
+(cd "$TMP/app-wt" && git reset -q --hard HEAD~1)
+expect 0 "guard: deleting a branch passes" hook "$REPO" "git push origin --delete issue-14"
+git worktree remove -f "$TMP/repo-14"; git branch -q -D issue-14
+
+# Once released, the worktree's push is denied: the claim is gone from origin.
+(cd "$TMP/app-wt" && bash "$SCRIPT" release 12 >/dev/null)
+expect 2 "guard: push after release is denied" hook "$TMP/app-wt" "git push"
+
+# pr mode: land pushes the branch and keeps the claim.
+cd "$TMP/app-wt"
+bash "$SCRIPT" claim 15 --here >/dev/null
+git commit -q --allow-empty -m "Closes #15"
+expect 0 "land in pr mode" env CLAIM_LAND=pr bash "$SCRIPT" land 15 --verify true
+[ -n "$(git ls-remote origin refs/heads/claude/some-name)" ] && ok "pr mode pushed the branch" || bad "pr mode pushed the branch"
+[ -n "$(git ls-remote origin refs/heads/claim/issue-15)" ] && ok "pr mode keeps the claim" || bad "pr mode keeps the claim"
+[ "$(git rev-parse origin/master)" != "$(git rev-parse HEAD)" ] && ok "pr mode leaves master alone" || bad "pr mode leaves master alone"
+bash "$SCRIPT" release 15 >/dev/null
+cd "$REPO"
+
+# accept_issue_branch: an issue-<n> branch on origin (an older claim.py claim)
+# holds the issue, and the session on that branch passes the guard.
+echo "accept_issue_branch=1" >"$REPO/scripts/issue.conf"
+git add scripts && git commit -q -m "conf" && git push -q origin master
+git push -q origin master:refs/heads/issue-16
+expect 2 "claim of an issue-branch-claimed issue exits 2" bash "$SCRIPT" claim 16 --no-worktree
+bash "$SCRIPT" list >"$TMP/out"; grep -q "^#16 .*branch issue-16" "$TMP/out" && ok "list shows the issue-branch claim" || bad "list shows the issue-branch claim"
+git worktree add -q "$TMP/repo-16" -b issue-16 origin/issue-16
+expect 0 "guard: the issue-16 branch's own push passes" hook "$TMP/repo-16" "git push origin issue-16"
+expect 2 "guard: an issue-17 branch without origin/issue-17 is denied" \
+  bash -c "git -C '$REPO' worktree add -q '$TMP/repo-17' -b issue-17 master && $(declare -f hook); GUARD='$GUARD' hook '$TMP/repo-17' 'git push -u origin issue-17'"
 
 echo
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

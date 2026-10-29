@@ -260,12 +260,6 @@ impl SimBot {
         grade::worth_quality(market.book(item), grade::typical_quality(market.trades(item)))
     }
 
-    /// Whether its work keeps the best of `item` for its own crafts, and
-    /// sells its lowest.
-    pub(super) fn keeps_best(&self, item: &str) -> bool {
-        self.job().uses().contains(&item) || self.wants().contains(&item)
-    }
-
     /// Whether an ask of `item` may stand: none stands already, and its
     /// claims want none of it, which stays in hand.
     pub(super) fn may_stand(&self, item: &str) -> bool {
@@ -566,23 +560,42 @@ impl SimBot {
             .collect();
         // The biggest stacks first; of tools, the freshest (K2.1)
         stacks.sort_by_key(|s| std::cmp::Reverse((s.quantity, s.durability.unwrap_or(0))));
+        // A good's price is for the quality its worth was (#578)
+        let tool = is_tool(item);
+        let keeps_best = self.keeps_best(item);
+        let at = self.worth_quality(item);
         let mut left = quantity;
         for stack in stacks {
             if left <= 0 {
                 break;
             }
-            let listings = self.bot.state().bazaar().my_shop().map_or(0, |s| s.listings.len());
-            // A stack to a listing: once the shelf fills, the rest stays in
-            // the pack, unless nothing went up at all (#544)
-            if listings >= MAX_LISTINGS && left < quantity {
-                break;
-            }
             let n = left.min(stack.quantity);
-            let price = worn_price(price, &stack);
-            // The stack's lowest units, at one price for every grade (#578)
-            let listing = bazaar::stock(&stack, n, price, listings).map_err(|e| BotError::Failed(e.message()))?;
-            self.bot.stock(listing)?;
-            left -= n;
+            // A tool to a listing, priced by its wear; a good a grade to a
+            // listing, its units named, each at the grade's price (#578)
+            let lots = if tool {
+                vec![(None, n, worn_price(price, &stack))]
+            } else {
+                let room = MAX_LISTINGS.saturating_sub(self.bot.state().bazaar().my_shop().map_or(0, |s| s.listings.len()));
+                grade::plan_stall(&stack.units, n, price, at, keeps_best, room.max(1))
+                    .into_iter()
+                    .map(|sale| (Some(sale.units.clone()), sale.units.count() as i32, sale.price))
+                    .collect()
+            };
+            for (units, n, price) in lots {
+                let listings = self.bot.state().bazaar().my_shop().map_or(0, |s| s.listings.len());
+                // Once the shelf fills, the rest stays in the pack, unless
+                // nothing went up at all (#544)
+                if listings >= MAX_LISTINGS && left < quantity {
+                    break;
+                }
+                let listing = match &units {
+                    Some(units) => bazaar::stock_units(&stack, units, price, listings),
+                    None => bazaar::stock(&stack, n, price, listings),
+                }
+                .map_err(|e| BotError::Failed(e.message()))?;
+                self.bot.stock(listing)?;
+                left -= n;
+            }
         }
         self.mind.stocked(item);
         self.stall_stocked = Some(now);
