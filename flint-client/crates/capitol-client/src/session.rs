@@ -3318,8 +3318,8 @@ impl Session {
                         self.mail.arrived();
                         self.letter_notes.push(capitol_core::mail::arrived_words(name, *citizen, first_line));
                     }
-                    // The backlog comes again on a new socket
-                    StateEvent::SnapshotStale => self.talk.rejoined(self.talk_time(now)),
+                    // The backlog a new socket is sent again is told by its
+                    // numbers (#430)
                     StateEvent::Said {
                         from,
                         name,
@@ -3328,6 +3328,7 @@ impl Session {
                         text,
                         x,
                         y,
+                        seq,
                     } => {
                         let line = Line {
                             from: *from,
@@ -3338,6 +3339,7 @@ impl Session {
                             x: *x,
                             y: *y,
                             at: self.talk_time(now),
+                            seq: *seq,
                         };
                         // Your own line comes back: it's sent, and not news
                         let mine = self.state.me() == Some(*from);

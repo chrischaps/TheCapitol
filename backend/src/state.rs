@@ -97,7 +97,7 @@ impl AppState {
             tunables,
             samples: Arc::new(Samples::new()),
             town: Arc::new(Town::new()),
-            talk: Arc::new(Talk::new()),
+            talk: Arc::new(Talk::from_clock()),
             day_offset_ms: Arc::default(),
         }
     }
@@ -132,7 +132,8 @@ pub async fn for_tests(db: PgPool) -> AppState {
     };
     let game = Arc::new(RwLock::new(GameState::with_terrain(WorldGenParams::default(), terrain)));
     let market = Arc::new(Market::load(&db).await.unwrap());
-    AppState::new(db, redis, config, game, market, Live::default())
+    // Capitol lines numbered from 1, as the tests count them
+    AppState { talk: Arc::new(Talk::new()), ..AppState::new(db, redis, config, game, market, Live::default()) }
 }
 
 #[cfg(test)]

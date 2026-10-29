@@ -1523,6 +1523,7 @@ fn said_is_reported() {
         text: "Rope, anyone?".into(),
         x: 8300.0,
         y: 8290.5,
+        seq: None,
     };
     assert_eq!(
         state.apply_ws(&said),
@@ -1534,6 +1535,7 @@ fn said_is_reported() {
             text: "Rope, anyone?".into(),
             x: 8300.0,
             y: 8290.5,
+            seq: None,
         }]
     );
 }

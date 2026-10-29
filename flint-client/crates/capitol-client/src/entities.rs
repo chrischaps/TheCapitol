@@ -574,6 +574,7 @@ impl TalkSample {
                 x: pose.x,
                 y: pose.y,
                 at: now,
+                seq: None,
             };
             self.log.heard(line.clone());
             said.push(line);
