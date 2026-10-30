@@ -96,7 +96,9 @@ pub async fn best_tool(db: &PgPool, player_id: Uuid, tool_type: ToolType) -> Res
 /// Take one use's wear off tool `item_id`, deleting it if that was its last. Runs on
 /// `conn`, so a caller can wear the tool in the same transaction as the work it did;
 /// once that commits, it passes a [`Wear::Broke`] to [`announce_broken`]. `None` if
-/// the item is gone or isn't a tool.
+/// the item is gone or isn't a tool. The game wears a tool it holds by
+/// [`wear_held`], and one at a station by [`wear_by`].
+#[cfg(test)]
 pub async fn wear(conn: &mut PgConnection, item_id: Uuid) -> Result<Option<Wear>, sqlx::Error> {
     wear_by(conn, item_id, tools::WEAR_PER_USE).await
 }
@@ -104,7 +106,7 @@ pub async fn wear(conn: &mut PgConnection, item_id: Uuid) -> Result<Option<Wear>
 /// [`wear`], taking `amount` durability: an installed tool outdoors wears
 /// more than one use's (V3.2, `rules::weather::tool_wear`)
 pub async fn wear_by(conn: &mut PgConnection, item_id: Uuid, amount: i32) -> Result<Option<Wear>, sqlx::Error> {
-    let worn: Option<(i32, Option<Uuid>, Option<Uuid>, String, String)> = sqlx::query_as(
+    let worn: Option<Worn> = sqlx::query_as(
         "UPDATE items i SET durability = GREATEST(i.durability - $2, 0)
          FROM item_types it
          WHERE i.id = $1 AND it.id = i.item_type AND i.durability IS NOT NULL
@@ -114,7 +116,16 @@ pub async fn wear_by(conn: &mut PgConnection, item_id: Uuid, amount: i32) -> Res
     .bind(amount)
     .fetch_optional(&mut *conn)
     .await?;
+    settle(conn, item_id, worn).await
+}
 
+/// A worn tool's row as the wear's `RETURNING` gives it: its durability left,
+/// owner, container, type and name
+type Worn = (i32, Option<Uuid>, Option<Uuid>, String, String);
+
+/// What a wear that wrote `worn` (`None`: it matched no tool) comes to,
+/// deleting the tool if that was its last use
+async fn settle(conn: &mut PgConnection, item_id: Uuid, worn: Option<Worn>) -> Result<Option<Wear>, sqlx::Error> {
     let Some((durability, owner_id, container_id, item_type, item_name)) = worn else {
         return Ok(None);
     };
@@ -133,21 +144,24 @@ pub async fn wear_by(conn: &mut PgConnection, item_id: Uuid, amount: i32) -> Res
 /// or craft wears the tool it started with, and one that has since been dropped,
 /// stashed or traded away isn't theirs to wear. `None` if it isn't there. The row is
 /// locked, so a move at the same moment waits for the caller's transaction.
+///
+/// One statement, where it was a lock and then the wear (#524): the update
+/// locks the row, and a move that commits first is seen, as the lock saw it,
+/// when the update checks the row again.
 pub async fn wear_held(conn: &mut PgConnection, item_id: Uuid, player_id: Uuid) -> Result<Option<Wear>, sqlx::Error> {
-    let held: Option<Uuid> = sqlx::query_scalar(
-        "SELECT i.id FROM items i
-         JOIN containers c ON c.id = i.container_id
-         WHERE i.id = $1 AND c.owner_id = $2 AND c.container_type = 'player_inventory'
-         FOR UPDATE OF i",
+    let worn: Option<Worn> = sqlx::query_as(
+        "UPDATE items i SET durability = GREATEST(i.durability - $3, 0)
+         FROM item_types it, containers c
+         WHERE i.id = $1 AND it.id = i.item_type AND i.durability IS NOT NULL
+           AND c.id = i.container_id AND c.owner_id = $2 AND c.container_type = 'player_inventory'
+         RETURNING i.durability, i.owner_id, i.container_id, i.item_type, it.name",
     )
     .bind(item_id)
     .bind(player_id)
+    .bind(tools::WEAR_PER_USE)
     .fetch_optional(&mut *conn)
     .await?;
-    if held.is_none() {
-        return Ok(None);
-    }
-    wear(conn, item_id).await
+    settle(conn, item_id, worn).await
 }
 
 /// The best tool `player_id` holds for gathering `node_id`, of the type its resource

@@ -931,12 +931,17 @@ impl Finished {
     }
 }
 
-/// Lanes the writer saves in side by side (#407). A gather is about 14
-/// statements, each a round trip, and a commit's flush: about 5 ms on an idle
-/// database and 10 in a loaded town, nearly all of it waiting. One lane was
-/// about 40% busy at 200 citizens. On the local Postgres, four lanes wrote
-/// 2.4 times as many gathers a second as one, about 550, and eight no more
-/// than four: past that the database's commits are the ceiling (#524).
+/// Lanes the writer saves in side by side (#407). A gather was about 11
+/// round trips (the pool's ping, `BEGIN`, seven statements and `COMMIT`)
+/// and a commit's flush: about 5 ms on an idle database and 10 in a loaded
+/// town, nearly all of it waiting. One lane was about 40% busy at 200
+/// citizens. On the local Postgres, four lanes wrote 2.4 times as many
+/// gathers a second as one, about 550, and eight no more than four: past
+/// that the database's commits are the ceiling. Since #524 a gather is two
+/// statements between its `BEGIN` and `COMMIT` (the tool's wear, and the
+/// units placed with the Gazette's tally), and in the same A/B on a busier
+/// machine one took 3.5 ms where it took 6, and four lanes wrote about 590
+/// a second where they wrote 385 (`the_writers_lanes_gathers_a_second`).
 const WRITERS: usize = 4;
 
 /// The writer's lane for saves into `key`'s box: a player's inventory, an
@@ -1412,8 +1417,12 @@ async fn write_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadca
             Some((container_id, news)) => {
                 wage_news = Some(news);
                 box_owner = item.wage.as_ref().map(|w| w.employer_id);
+                super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity)
+                    .await
+                    .map_err(unsaved("tallying it for the Gazette"))?;
                 container_id
             }
+            // Tallied for the Gazette as it's placed
             None => match place_gathered(&mut tx, &item).await.map_err(unsaved("placing it"))? {
                 Some(container_id) => container_id,
                 None => return Ok(false),
@@ -1430,9 +1439,6 @@ async fn write_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadca
                 }
             }
         }
-        super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity)
-            .await
-            .map_err(unsaved("tallying it for the Gazette"))?;
         flows.add(&item.item_type, UnitFlow::Gathered, item.quantity as i64);
         Some(container_id)
     };
@@ -1505,49 +1511,90 @@ async fn inventory_of(conn: &mut sqlx::PgConnection, player_id: Uuid) -> Result<
 }
 
 /// Put a gathered item in its gatherer's inventory: onto the first stack of its
-/// type, whatever its grade (`units::join_first_stack`: every unit keeps its
+/// type, whatever its grade (as `units::join_first_stack`: every unit keeps its
 /// quality), or into the first free slot. Its units carry the gatherer's mark
-/// (#231). Returns the
+/// (#231), and it's tallied for the Gazette (as `gazette::tally`). Returns the
 /// container, or `None` if there's no room (the item is lost, as before).
+///
+/// All of it is one statement (#524): the inventory, the stack locked and
+/// joined, or a free slot and a new stack, and the tally. They were five to
+/// seven, each a round trip. A stack too full to take them (`i32::MAX`
+/// units) is passed over for a free slot, as `Units::merge` refused it.
 async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Result<Option<Uuid>, sqlx::Error> {
-    let Some((container_id, slot_count)) = inventory_of(conn, item.player_id).await? else {
+    // The statement's sub-statements all see one snapshot, so each one that
+    // depends on another reads what it wrote from its RETURNING
+    let (container_id, joined, slot_index): (Option<Uuid>, Option<Uuid>, Option<i32>) = sqlx::query_as(
+        "WITH inv AS (
+             SELECT c.id, ct.slot_count FROM containers c
+             JOIN container_types ct ON c.container_type = ct.id
+             WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
+             LIMIT 1
+         ),
+         stack AS (
+             SELECT i.id, i.quantity FROM items i JOIN inv ON i.container_id = inv.id
+             WHERE i.item_type = $2
+             ORDER BY i.slot_index NULLS LAST, i.id
+             LIMIT 1
+             FOR UPDATE OF i
+         ),
+         joined AS (
+             INSERT INTO item_units (item_id, quality, maker_id, count)
+             SELECT id, $3::SMALLINT, $1, $4 FROM stack WHERE stack.quantity::BIGINT + $4 <= 2147483647
+             ON CONFLICT ON CONSTRAINT item_units_key DO UPDATE SET count = item_units.count + EXCLUDED.count
+             RETURNING item_id
+         ),
+         slot AS (
+             SELECT s FROM inv, generate_series(0, inv.slot_count - 1) AS s
+             WHERE NOT EXISTS (SELECT 1 FROM joined)
+               AND NOT EXISTS (SELECT 1 FROM items WHERE container_id = inv.id AND slot_index = s)
+             ORDER BY s
+             LIMIT 1
+         ),
+         -- At quantity 0 the new stack seeds no units of its own: the
+         -- summaries' trigger sets them from new_units, at the statement's end
+         new_stack AS (
+             INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             SELECT $5, $2, $3, 0, $1, inv.id, slot.s FROM inv, slot
+             RETURNING id
+         ),
+         new_units AS (
+             INSERT INTO item_units (item_id, quality, maker_id, count)
+             SELECT id, $3::SMALLINT, $1, $4 FROM new_stack
+         ),
+         tally AS (
+             INSERT INTO production_tally (day, player_id, item_type, quantity)
+             SELECT $6, $1, $2, $4::BIGINT FROM (SELECT item_id FROM joined UNION ALL SELECT id FROM new_stack) placed
+             ON CONFLICT (day, player_id, item_type) DO UPDATE SET quantity = production_tally.quantity + EXCLUDED.quantity
+         )
+         SELECT (SELECT id FROM inv), (SELECT item_id FROM joined), (SELECT s FROM slot)",
+    )
+    .bind(item.player_id)
+    .bind(&item.item_type)
+    .bind(item.quality)
+    .bind(item.quantity)
+    .bind(Uuid::new_v4())
+    .bind(capitol_protocol::rules::day_number(chrono::Utc::now().timestamp_millis()))
+    .fetch_one(&mut *conn)
+    .await?;
+
+    let Some(container_id) = container_id else {
         tracing::error!("No player_inventory container for player {}", item.player_id);
         return Ok(None);
     };
-
-    let gathered = units::Marked::by(Some(item.player_id), &Units::uniform(item.quantity, item.quality));
-    if units::join_first_stack(conn, container_id, &item.item_type, &gathered).await? {
-        tracing::info!(
+    match (joined, slot_index) {
+        (Some(_), _) => tracing::info!(
             "Merged {} x{} (quality {}) into existing stack for player {}",
             item.item_type, item.quantity, item.quality, item.player_id
-        );
-        return Ok(Some(container_id));
+        ),
+        (None, Some(slot_index)) => tracing::info!(
+            "Created {} x{} (quality {}) in slot {} for player {}",
+            item.item_type, item.quantity, item.quality, slot_index, item.player_id
+        ),
+        (None, None) => {
+            tracing::warn!("Inventory full for player {}, item lost!", item.player_id);
+            return Ok(None);
+        }
     }
-
-    // Find first empty slot
-    let used: Vec<(i32,)> = sqlx::query_as(
-        "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"
-    )
-    .bind(container_id)
-    .fetch_all(&mut *conn)
-    .await?;
-    let Some(slot_index) = (0..slot_count).find(|s| !used.iter().any(|(u,)| u == s)) else {
-        tracing::warn!("Inventory full for player {}, item lost!", item.player_id);
-        return Ok(None);
-    };
-
-    let stack = units::NewStack {
-        item_type: &item.item_type,
-        owner_id: Some(item.player_id),
-        container_id: Some(container_id),
-        slot_index: Some(slot_index),
-        durability: None,
-    };
-    units::insert_stack(conn, stack, &gathered).await?;
-    tracing::info!(
-        "Created {} x{} (quality {}) in slot {} for player {}",
-        item.item_type, item.quantity, item.quality, slot_index, item.player_id
-    );
     Ok(Some(container_id))
 }
 
@@ -2453,6 +2500,138 @@ mod tests {
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ToolBroke { item_id, .. } if item_id == sickle.item_id));
     }
 
+    /// The statements sqlx logs (its `sqlx::query` events), by their
+    /// summary, its first words
+    #[derive(Clone, Default)]
+    struct Statements(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Statements {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Statements {
+        fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            struct Summary(String);
+            impl tracing::field::Visit for Summary {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        self.0 = value.to_string();
+                    }
+                }
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if field.name() == "summary" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            if event.metadata().target() == "sqlx::query" {
+                let mut summary = Summary(String::new());
+                event.record(&mut summary);
+                self.0.lock().unwrap().push(summary.0);
+            }
+        }
+    }
+
+    /// A gather onto a stack it joins, wearing its tool, is two statements
+    /// and its transaction's: the tool's wear, and the units placed with the
+    /// Gazette's tally (#524). It was seven. Prints how long one takes on
+    /// one lane, which #524 measured at 5.4 ms on an idle database.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_gather_is_two_statements_and_a_commit(db: sqlx::PgPool) {
+        use tracing_subscriber::layer::SubscriberExt;
+        const GATHERS: usize = 200;
+        let (ada, inventory, sickle) = gatherer(&db, 10_000).await;
+        let (events, _heard) = broadcast::channel(4 * GATHERS);
+        let statements = Statements::default();
+        let _default = tracing::subscriber::set_default(tracing_subscriber::registry().with(statements.clone()));
+        // The first makes the stack the rest join, and hits sqlx's callsites
+        // so they can be asked again with this thread's subscriber (#412)
+        assert!(persist_gather(&db, sickle_gather(ada, &sickle), &events).await);
+        tracing::callsite::rebuild_interest_cache();
+        statements.take();
+
+        assert!(persist_gather(&db, sickle_gather(ada, &sickle), &events).await);
+        let one = statements.take();
+        eprintln!("A gather sends {one:?}");
+        let began = Instant::now();
+        for _ in 0..GATHERS {
+            assert!(persist_gather(&db, sickle_gather(ada, &sickle), &events).await);
+        }
+        let took = began.elapsed();
+        let sent = statements.take().len();
+        eprintln!(
+            "{GATHERS} gathers on one lane: {:.2} ms a gather, {:.1} statements a gather",
+            took.as_secs_f64() * 1000.0 / GATHERS as f64,
+            sent as f64 / GATHERS as f64,
+        );
+        assert_eq!(fiber(&db, inventory).await.map(|f| f.0), Some(5 * (GATHERS as i32 + 2)), "every one written");
+        assert_eq!(one.len(), 3, "{one:?}");
+        assert!(one[0].starts_with("UPDATE items i") && one[1].starts_with("WITH inv AS"), "{one:?}");
+        assert_eq!(sent, one.len() * GATHERS, "each the same");
+    }
+
+    /// #524's other measure: 1000 gathers by 200 players, each wearing a
+    /// sickle, saved on one of the writer's lanes and then on [`WRITERS`].
+    /// Prints the gathers a second each managed. Nothing to assert: it's a
+    /// measure of the machine as much as the code.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_writers_lanes_gathers_a_second(db: sqlx::PgPool) {
+        const PLAYERS: usize = 200;
+        const EACH: usize = 5;
+        let (_, _, first) = gatherer(&db, 10_000).await;
+        let mut sickles = Vec::new();
+        for n in 0..PLAYERS {
+            let p = crate::engine::market::tests::player(&db, &format!("p{n}"), 0).await;
+            let item_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index, durability)
+                 VALUES ($1, 'stone_sickle', 50, 1, $2, $3, 0, 10000)",
+            )
+            .bind(item_id)
+            .bind(p.id)
+            .bind(p.inventory)
+            .execute(&db)
+            .await
+            .unwrap();
+            sickles.push((p.id, HeldTool { item_id, ..first.clone() }));
+        }
+        let (events, _heard) = broadcast::channel(16);
+        // Each makes its stack first, so every lane timed joins one
+        for (p, s) in &sickles {
+            assert!(persist_gather(&db, sickle_gather(*p, s), &events).await);
+        }
+        let gathers = || -> Vec<PendingItem> {
+            (0..EACH).flat_map(|_| sickles.iter().map(|(p, s)| sickle_gather(*p, s))).collect()
+        };
+        for lanes in [1, WRITERS] {
+            let writers: Vec<_> = (0..lanes)
+                .map(|_| {
+                    let (to_writer, from_tick) = mpsc::unbounded_channel();
+                    (to_writer, tokio::spawn(run_writer(db.clone(), events.clone(), from_tick)))
+                })
+                .collect();
+            let began = Instant::now();
+            for (lane, finished) in Finished::dealt(gathers(), Vec::new(), Vec::new()) {
+                writers[lane % lanes].0.send(finished).unwrap();
+            }
+            for (to_writer, writer) in writers {
+                drop(to_writer);
+                writer.await.unwrap();
+            }
+            let took = began.elapsed().as_secs_f64();
+            eprintln!(
+                "{} gathers on {lanes} lane(s): {:.2} ms a gather, {:.0} gathers a second",
+                PLAYERS * EACH,
+                took * 1000.0 / (PLAYERS * EACH) as f64,
+                (PLAYERS * EACH) as f64 / took,
+            );
+        }
+    }
+
     /// The writer saves the tick's gathers in order, off the tick, and tells the
     /// gatherer only once each is written (#304)
     #[sqlx::test(migrations = "./migrations")]
@@ -2803,6 +2982,65 @@ mod tests {
         place_gathered(&mut conn, &gathered(70)).await.unwrap();
         drop(conn);
         assert_eq!(all_marked(&db, ada, "fiber").await, Marked::by(Some(ada), &Units::uniform(10, 70)));
+    }
+
+    /// A gather passes over a stack too full to take it for the first free
+    /// slot, is tallied for the Gazette once wherever it goes, and with no
+    /// slot free is lost and tallied nowhere (#524: all one statement now)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_gather_passes_over_a_full_stack_and_is_tallied_where_it_goes(db: sqlx::PgPool) {
+        use crate::engine::units::test_units::{stack_of, units};
+        let (ada, inventory, _) = gatherer(&db, 10).await; // the sickle is in slot 0
+        let full = stack_of(&db, ada, inventory, 1, "fiber", &Units::uniform(i32::MAX - 2, 40)).await;
+        let gathered = PendingItem {
+            player_id: ada,
+            node_id: Uuid::new_v4(),
+            item_type: "fiber".into(),
+            item_name: "Plant Fiber".into(),
+            quantity: 5,
+            quality: 60,
+            tool: None,
+            wage: None,
+        };
+        let tallied = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(quantity), 0)::BIGINT FROM production_tally WHERE player_id = $1")
+                .bind(ada)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        };
+        let mut conn = db.acquire().await.unwrap();
+        assert_eq!(place_gathered(&mut conn, &gathered).await.unwrap(), Some(inventory));
+        drop(conn);
+        assert_eq!(units(&db, full).await, Units::uniform(i32::MAX - 2, 40), "the full stack is left alone");
+        let (slot, placed): (i32, Uuid) =
+            sqlx::query_as("SELECT slot_index, id FROM items WHERE container_id = $1 AND item_type = 'fiber' AND id <> $2")
+                .bind(inventory)
+                .bind(full)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!((slot, units(&db, placed).await), (2, Units::uniform(5, 60)), "a stack of its own in the first free slot");
+        assert_eq!(tallied().await, 5);
+
+        // With every slot taken there's nowhere to put it
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             SELECT gen_random_uuid(), 'stone_sickle', 50, 1, $1, $2, s
+             FROM generate_series(3, (SELECT ct.slot_count - 1 FROM container_types ct WHERE ct.id = 'player_inventory')) s",
+        )
+        .bind(ada)
+        .bind(inventory)
+        .execute(&db)
+        .await
+        .unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        let mut more = gathered.clone();
+        more.item_type = "sticks".into();
+        assert_eq!(place_gathered(&mut conn, &more).await.unwrap(), None);
+        drop(conn);
+        assert_eq!(tallied().await, 5, "nothing tallied for what was lost");
     }
 
     /// Rope from fiber, by hand
