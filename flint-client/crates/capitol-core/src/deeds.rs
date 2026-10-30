@@ -164,6 +164,7 @@ pub fn grant_state(grant: Grant, office_seen: bool) -> &'static str {
         Grant::Open if office_seen => "Yours to spend: choose a lot here, or claim from any lot's panel.",
         Grant::Open => "Yours to spend: choose a lot here.",
         Grant::Spent => "Spent. The land is yours, and on the city's books.",
+        Grant::Off => "The city isn't granting deeds just now: a lot is bought with Strands, from its own panel.",
     }
 }
 

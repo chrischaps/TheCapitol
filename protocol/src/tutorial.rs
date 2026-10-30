@@ -367,6 +367,10 @@ pub enum Grant {
     /// Spent on a lot, held or foreclosed. A retired lot hands it back,
     /// and it's open again.
     Spent,
+    /// The city grants no deeds now (the `deed_grant_enabled` knob, #451):
+    /// the road in earns none, one not yet spent can't be, and a home is
+    /// bought. Never said of a spent one, which stays spent.
+    Off,
 }
 
 impl Grant {
@@ -537,6 +541,7 @@ mod tests {
         assert_eq!(Grant::Unearned.after(Steps::from_iter([Step::Walk])), Grant::Unearned);
         assert_eq!(Grant::Unearned.after(road), Grant::Open);
         assert_eq!(Grant::Spent.after(road), Grant::Spent);
+        assert_eq!(Grant::Off.after(road), Grant::Off, "off, the road earns none");
         // Unearned is left off the wire, so an older server's reads the same
         let p = TutorialProgress { done: Steps::from_iter([Step::Walk]), ..Default::default() };
         assert_eq!(serde_json::to_string(&p).unwrap(), r#"{"done":["walk"]}"#);

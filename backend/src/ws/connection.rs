@@ -2809,7 +2809,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
     async fn the_grants_switching_tells_each_socket_its_grant(db: sqlx::PgPool) {
-        use crate::engine::deed_grants::tests::{the_road, walked};
+        use crate::engine::deed_grants::tests::{grants_on, the_road, walked};
         use capitol_protocol::tutorial::Grant;
         let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
         let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
@@ -2822,6 +2822,11 @@ mod tests {
         assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Unearned);
         walked(&db, ada, the_road()).await;
         assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Open, "read again, not kept");
+        // Switched off (#451), the open grant reads as off, and back on as open
+        grants_on(&db, false).await;
+        assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Off);
+        grants_on(&db, true).await;
+        assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Open);
     }
 
     /// A line said at (`x`, `y`) by `from`: a Capitol one numbered 1, as the

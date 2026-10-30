@@ -109,6 +109,11 @@ pub struct Ledger {
     /// when one is spent. A ledger from before reads with none.
     #[serde(default)]
     pub grants: DeedGrants,
+    /// The land as it stands, by zone (#451): what the free choice of the
+    /// road in's deed does to where people live. Every zone with lots. A
+    /// ledger from before reads with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub land: BTreeMap<String, ZoneLand>,
     /// Gathers the server refused since it started (#562), by resource type
     /// then why: `spent` (the node is regrowing), `taken` (someone else is
     /// gathering it), `lot` (it's on a lot the gatherer may not gather on),
@@ -132,6 +137,22 @@ pub struct DeedGrants {
     /// What the granted plots held now are assessed at: the zone's deed
     /// price when each was claimed (D4), and what their tax is on
     pub granted_value: i64,
+}
+
+/// One zone's lots as they stand, on a [`Ledger`] (#451).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ZoneLand {
+    /// Its lots, claimed or free
+    pub lots: u64,
+    /// Those someone holds
+    pub owned: u64,
+    /// Of those, the ones claimed with the road in's deed
+    pub granted: u64,
+    /// The accounts that hold one there or more: its homes
+    pub owners: u64,
+    /// What the held lots are assessed at, all together
+    pub assessed: i64,
 }
 
 /// Crafts of one recipe: since the server started on a [`Ledger`], over the
@@ -879,6 +900,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            land: Default::default(),
             refused: Default::default(),
             held_flows: BTreeMap::new(),
             load: Load::default(),

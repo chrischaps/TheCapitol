@@ -72,6 +72,15 @@ pub const BATCH: usize = 6;
 /// only as wide as the connections it can have at once (#237).
 const SPARE_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// How long a fill waits on a row someone else holds before it gives up
+/// (#621). A batch's fills commit together, so one prepared fill holds its
+/// rows until the rest are; a writer that takes many players' rows at once
+/// (the tick's positions flush) can wait on that fill while a sibling waits
+/// on the writer. Postgres can't see the matcher's own wait, so it never
+/// breaks that cycle; this does. The blocked fill fails, the ones before it
+/// commit, and the next cycle tries it again.
+const FILL_LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '2s'";
+
 /// The market: the book, shared by the matcher and the routes that place and
 /// cancel (E3.3), and each item's depth as last published.
 #[derive(Debug, Default)]
@@ -518,6 +527,7 @@ async fn prepare_fill<'c>(
     fill: &Fill,
 ) -> Result<(Transaction<'c, Postgres>, Executed), MarketError> {
     let mut tx = conn.begin().await?;
+    sqlx::query(FILL_LOCK_TIMEOUT).execute(&mut *tx).await?;
     let (buy, sell) = lock_pair(&mut tx, fill).await?;
 
     // What the sell's escrow keeps
@@ -1206,6 +1216,51 @@ mod tests {
             }
         }
         assert_eq!(trades, 3);
+    }
+
+    /// A writer that holds one fill's seller and waits on another's, as the
+    /// tick's positions flush does over every walker at once, can't freeze
+    /// the market (#621). Without a lock timeout the fill that got its rows
+    /// sat idle in its transaction, waiting for its sibling, the sibling
+    /// waited on the writer, and the writer on the idle fill, for ever.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_writer_between_two_fills_of_a_batch_doesnt_hang_the_market(db: PgPool) {
+        let (events, _heard) = broadcast::channel(64);
+        let market = Arc::new(Market::default());
+        let mut sellers = Vec::new();
+        for i in 0..2 {
+            let seller = player(&db, &format!("seller{i}"), 100).await;
+            let stack = stack_of(&db, seller.id, seller.inventory, 0, "rope", &Units::uniform(2, 60)).await;
+            placed(&db, &market, seller.id, &sell("rope", stack, 10 + i, 2, None)).await;
+            sellers.push(seller.id);
+        }
+        for i in 0..2 {
+            let bidder = player(&db, &format!("bidder{i}"), 1000).await;
+            placed(&db, &market, bidder.id, &buy("rope", 20, 2, None)).await;
+        }
+
+        // The writer takes the second seller's row first
+        let mut writer = db.begin().await.unwrap();
+        let touch = "UPDATE players SET position_x = position_x WHERE id = $1";
+        sqlx::query(touch).bind(sellers[1]).execute(&mut *writer).await.unwrap();
+        let matching = tokio::spawn({
+            let (market, db, events) = (market.clone(), db.clone(), events.clone());
+            async move { run_cycle(&market, &db, &events, Utc::now()).await }
+        });
+        // Let the first seller's fill pay them, then reach for that row too
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let reach = sqlx::query(touch).bind(sellers[0]).execute(&mut *writer);
+        tokio::time::timeout(std::time::Duration::from_secs(10), reach)
+            .await
+            .expect("the writer waited for ever on a prepared fill")
+            .unwrap();
+        writer.commit().await.unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), matching).await.expect("the cycle hung").unwrap();
+
+        // What gave way trades on the next cycle
+        let second = run_cycle(&market, &db, &events, Utc::now()).await;
+        assert_eq!(first.fills + second.fills, 2, "{first:?} then {second:?}");
     }
 
     /// A fill that waits on a sell's lock sees its escrow as the holder left

@@ -20,6 +20,9 @@
 //! Since D2.5 the watches' thresholds are knobs too ([`WatchThresholds`]):
 //! when the Gini, a price off its target, the tax an hour and the tick's p95
 //! warn (`crate::watch`).
+//!
+//! Since #451 one knob is a [`Unit::Switch`]: `deed_grant_enabled`, whether
+//! the road in earns its deed, so a balance run can hold grants against none.
 
 use std::collections::BTreeMap;
 
@@ -140,6 +143,8 @@ pub enum Unit {
     Multiplier,
     /// A plain number, such as a Gini: 0.7 is "0.7"
     Ratio,
+    /// On (1) or off (0)
+    Switch,
 }
 
 impl Unit {
@@ -151,6 +156,8 @@ impl Unit {
             Unit::Strands => format!("{} Strands", trim(value)),
             Unit::Multiplier => format!("×{}", trim(value)),
             Unit::Ratio => trim(value),
+            Unit::Switch if value == 0.0 => "off".to_string(),
+            Unit::Switch => "on".to_string(),
         }
     }
 }
@@ -317,6 +324,17 @@ pub const KNOBS: &[Knob] = &[
         family: None,
     },
     Knob {
+        key: "deed_grant_enabled",
+        label: "The road in's deed grant",
+        unit: Unit::Switch,
+        min: 0.0,
+        max: 1.0,
+        step: 1.0,
+        default: 1.0,
+        chart: "sinks",
+        family: None,
+    },
+    Knob {
         key: "watch_gini",
         label: "Watch: wealth's Gini over",
         unit: Unit::Ratio,
@@ -432,6 +450,9 @@ pub struct Tunables {
     pub outdoor_tool_wear: f64,
     /// A floor's permit, times `rules::floors::cost`'s (V3.3)
     pub floor_permit_scale: f64,
+    /// Whether walking the road in earns a free deed (#440). Off, a deed is
+    /// bought as before it, so a balance run can hold the two up (#451).
+    pub deed_grant_enabled: bool,
 }
 
 impl Default for Tunables {
@@ -447,6 +468,7 @@ impl Default for Tunables {
             weather_wear_public: weather::WEAR_PUBLIC,
             outdoor_tool_wear: weather::OUTDOOR_TOOL_WEAR,
             floor_permit_scale: 1.0,
+            deed_grant_enabled: true,
         }
     }
 }
@@ -523,6 +545,7 @@ impl Tunables {
             ("weather_wear_public", None) => self.weather_wear_public,
             ("outdoor_tool_wear", None) => self.outdoor_tool_wear,
             ("floor_permit_scale", None) => self.floor_permit_scale,
+            ("deed_grant_enabled", None) => f64::from(u8::from(self.deed_grant_enabled)),
             ("deed_price", Some(zone)) => self.deed_multiplier(zone),
             ("yield", Some(resource)) => self.yield_multiplier(resource),
             _ => return None,
@@ -561,6 +584,7 @@ impl Tunables {
             ("weather_wear_public", None) => self.weather_wear_public = value,
             ("outdoor_tool_wear", None) => self.outdoor_tool_wear = value,
             ("floor_permit_scale", None) => self.floor_permit_scale = value,
+            ("deed_grant_enabled", None) => self.deed_grant_enabled = value != 0.0,
             ("deed_price", Some(zone)) => family_map(&mut self.deed_price, zone),
             ("yield", Some(resource)) => family_map(&mut self.yields, resource),
             _ => return Err(TunableError::UnknownKey),
@@ -797,6 +821,21 @@ mod tests {
         assert_eq!(Unit::Strands.format(20.0), "20 Strands");
         assert_eq!(Unit::Multiplier.format(1.5), "×1.5");
         assert_eq!(Unit::Ratio.format(0.7), "0.7");
+        assert_eq!(Unit::Switch.format(1.0), "on");
+        assert_eq!(Unit::Switch.format(0.0), "off");
+    }
+
+    #[test]
+    fn the_deed_grant_switches_off_and_on() {
+        let mut t = Tunables::default();
+        assert!(t.deed_grant_enabled);
+        assert_eq!(t.set("deed_grant_enabled", 0.0, anything), Ok(0.0));
+        assert!(!t.deed_grant_enabled);
+        assert_eq!(t.overrides()["deed_grant_enabled"], 0.0);
+        assert_eq!(t.set("deed_grant_enabled", 0.4, anything), Ok(0.0), "a switch rounds to off or on");
+        assert_eq!(t.set("deed_grant_enabled", 2.0, anything), Err(TunableError::OutOfRange { min: 0.0, max: 1.0 }));
+        assert_eq!(t.set("deed_grant_enabled", 1.0, anything), Ok(1.0));
+        assert_eq!(t, Tunables::default());
     }
 
     #[test]
@@ -806,7 +845,7 @@ mod tests {
         let zones = vec!["urban".to_string(), "rural".to_string()];
         let resources = vec!["clay".to_string(), "grass".to_string()];
         let list = TunablesResponse::list(&t, &zones, &resources);
-        assert_eq!(list.knobs.len(), 13 + 2 + 2);
+        assert_eq!(list.knobs.len(), 14 + 2 + 2);
         let clay = list.knobs.iter().find(|k| k.key == "yield.clay").unwrap();
         assert_eq!((clay.value, clay.default, clay.label.as_str()), (3.0, 1.0, "Gather yield: clay"));
         assert!(list.knobs.iter().all(|k| k.base_strands.is_none()));

@@ -298,6 +298,35 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
   - **Progress.** `protocol::metrics::RoadInReport` (`done`, `of`, `next`, `chapter`, `grant`) on each `CitizenReport` as `road_in`, so `/admin/town` carries it, and the console's roster has a *Road in* column and a line in its headline. The health line says `road in n/30` until it's walked. `capitol-town road-in --roster …` asks the server for each citizen's progress with its own key, by REST only, so a running town plays on.
   - **`capitol-bot --tutorial`** (plan §10): one bot walks the whole road on its account through the same code, as a fiber gatherer with a seeded persona, saying each step as it's done, and fails if it ended without a claim.
 - **O3.4 Balance** (#451, M): `deed_grant.enabled`, balance runs with grants against none, and what the 100 starting Strands are for now.
+
+  *As built:*
+  - **The switch.** The knob is `deed_grant_enabled` (`Unit::Switch`, 1 on and 0 off, default on), not `deed_grant.enabled`: a dot in a key names a family's knob (`yield.grass`). Off, the road in opens no grant, one not yet spent can't be spent ("The city isn't granting deeds just now: a lot is bought with Strands", `Refused::Off`), and a spent one stays spent. The client hears `Grant::Off` on `tutorial` (a new state: the Deeds Office's slip says so with an outline seal, and the claim step's card says to buy a lot), and a citizen buys its home as before #450 (`road_deed` is `None`, so the planner saves for the deed), which any claim counts for the step. The server reads the switch from the `tunables` table where a grant is opened, spent or reported (`deed_grants::enabled`), so the road's judge and a socket's progress need no live set, and a claim reads it in its own transaction. Switched back on, a grant the steps earned meanwhile opens at the claim. Since #617 a connected client hears the switch at once: every socket reads its player's grant again and sends `tutorial`.
+  - **Land on the books.** `Ledger.land` (`protocol::ledger::ZoneLand`, `/admin/ledger`): each zone's lots, those held, those granted, the owners (its homes) and what the held ones are assessed at (`deed_grants::land`). A balance keeps the end's (`Balance.land`), and `capitol-town compare` has a *Land and homes* section: each home zone's lots held, granted, homes and share of the homes, then the Exchange's fiber in, the Strands paid for deeds and the property tax.
+  - **The Observatory.** The economy page's *Land given* story has four figures (earned, on lots, handed back, assessed at, with a week's tax at the live rate) and a chart of the deeds earned and those on lots over the range (`chart-grants`). Its headline says when the switch is off.
+  - **The presets.** `scripts/presets/grants-on.toml` (every default) and `grants-off.toml` (`deed_grant_enabled = 0`).
+
+  *The run* ([`docs/road-in/deed-grant/`](docs/road-in/deed-grant/balance.md): the comparison, both balances, both soak reports and the citizen-day CSVs). `scripts\balance.ps1 grants-on.toml grants-off.toml -Hours 12 -Citizens 30 -Merchants 2 -StartAt 6`: two fresh towns of 32 citizens at once, `--always-on`, at 10×, game 06:00 to 18:00 (10 hours of ticks). Both books held to the Strand and the unit. A first run froze town A's market two hours in: the matcher's batched fills deadlocked with the tick's positions flush, so it was fixed (#621) and run again. The figures are the second run's.
+
+  | | Grants on (A) | Grants off (B) |
+  |---|---:|---:|
+  | Homes at 07:00 / 09:00 / 12:00 / 18:00 | 32 / 32 / 32 / 32 | 0 / 12 / 16 / 25 |
+  | The Exchange's fiber in, as Strands, by 09:00 and by 18:00 | 6,454 and 23,543 | 13,197 and 34,246 (+45%) |
+  | Fiber work, hours | 35.8 | 46.3 (+29%) |
+  | Strands paid for deeds | 0 | 12,500 (25 × 500) |
+  | Faucets and sinks | +23,543, −6,855 | +34,246, −18,037 |
+  | The citizens' Strands at the end, and in escrow | 17,023 and 2,865 | 15,860 and 3,549 |
+  | Gini at the end (counting escrow), the richest tenth's share | 0.62 (0.53), 44% | 0.65 (0.57), 51% |
+  | Wages paid a game hour | 284 | 26 |
+  | Steps that failed a citizen-hour | 5.0 | 9.8 |
+  | Homes: rural / suburban / urban | 15 / 12 / 5 (47% / 38% / 16%) | 12 / 9 / 4 (48% / 36% / 16%) |
+  | Property tax | 0 | 0 |
+
+  - **The demand at the Exchange.** The deed was most of the early demand for Strands, as feared: without it, the citizens deposited twice the fiber by 09:00 and 45% more by 18:00, spent 29% more of their work on fiber, and failed twice as many steps, most of them over grass that was spent or that someone else was cutting (2,588 of B's failures, against 1,028 of A's). With it, every citizen was housed an hour in. Without it, a quarter of the town (7 of 32) still had no home at the end of a working day.
+  - **Where the money goes instead.** With the grant the faucet is smaller (the deed sink takes nothing, so the net is the same, +16.7k against +16.2k), and the Strands not spent on a deed went to work: wages were eleven times as much, since a citizen with a home and its float early hires on the lot (#538). The Gini and the richest tenth's share were a little lower.
+  - **Does the free choice tilt the city?** Not in this run: the shares by zone are the same with the grant and without, 47 / 38 / 16 against 48 / 36 / 16. A citizen claims in its persona's home zone (`claim_deed`) with the grant as without, so this measures the personas' spread, not a free choice. A person's choice is the open question (§9's risk), and the ledger's `land` will show it on a live world. Urban is under a sixth either way.
+  - **#335, tax doesn't bite.** Property tax took 0 Strands in both runs, with the grant's lots assessed at 16,000 between them: a 500 deed at 2% is 10 a week, one Strand every 16.8 hours once the hourly carry adds up (`property_tax::charge_hour`), and the run's 10 hours of ticks never reached the first. The grant doesn't make it worse (D4 holds: a granted lot is taxed as a bought one), but at these prices tax is a sink of a Strand or so a lot a day.
+  - **#292, one price for every home.** Rural is the most taken home zone at 500 with the grant and without, by the personas, so the run gives no sign that the equal price tilts it. It's 1.6% of the rural lots held.
+  - **The starting 100 Strands** (Chris's call). They were for the first deed, but a deed is 500 and they were never most of it. With the grant they're the hall chapter's money: a bid for one fiber, the listing fees, and a first tool or input (a stone axe's target is 50). In the run they were 3,200 of A's 26,743 Strands in, 12%. **Recommended: keep 100, as the market money the road in's hall chapter and a first tool need.** Cutting them to 25 would still cover the hall chapter's steps but not a first tool, and would take away the only Strands a newcomer has before their first deposit. Not close, so not `needs-decision`; the call is Chris's on #451.
 - **O3.5 The docs** (#452, S): GDD §4, §8.4 and §8.7, the milestones, and P8.3 marked superseded.
 
   *As built:*
@@ -337,7 +366,7 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
 
 ## 9. Risks
 
-- **The free choice tilts the city.** If every new player picks the same zone, the grant spends that zone's free lots. #451 measures it. Shrinking a zone's lots (#420) makes it more likely.
+- **The free choice tilts the city.** If every new player picks the same zone, the grant spends that zone's free lots. #451 measured it for citizens, who claim in their personas' home zones: the shares were the same with the grant and without (O3.4). A person's choice is still untested, and `/admin/ledger`'s `land` shows it on a live world. Shrinking a zone's lots (#420) makes it more likely.
 - **The reset re-tutors veterans.** Every account walks the road again (D3). The card can be hidden, but the deed waits behind it. Experienced players will fly through it: most steps are things they do anyway.
 - **An empty market.** Waived steps (D10) keep the road clear, but the lesson is weaker when nobody's there. Citizens on the road (#450) help. A new town's book is empty for its first hours, merchants or not: producers sell only into bids, and merchants bank a 600-Strand float before they quote. A town minted at 20:39 had its first citizen order at 00:32 (#501, with #410).
 - **The spawn's nodes.** A crowd of new players can strip the spawn's branches and outcrops. #443 checks counts for a crowd.
@@ -348,5 +377,5 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
 - **Per package:** each issue's tests. Every step judged on the server has one. The grant has claim, refusal, foreclosure and retired-lot tests, plus `conservation`.
 - **End to end:** `capitol-bot --tutorial` walks the whole road on a fresh account against a town and claims with the grant. #450 then does it with citizens.
 - **In the client:** a play-through on a fresh account (`flint-client\play.bat`), with captures of each chapter's card, the zone card at each stop, the Deeds Office and the claim.
-- **The economy:** #451's balance runs, linked here.
+- **The economy:** #451's balance run, grants on against off, in [`docs/road-in/deed-grant/`](docs/road-in/deed-grant/balance.md) (O3.4).
 - **Every land:** `scripts/ci.sh`. Packages with a migration (#438, #440) also run `ci.sh full`.

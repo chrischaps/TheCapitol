@@ -385,12 +385,18 @@ const WAIVE_AFTER: Duration = Duration::from_secs(7);
 /// takes a bid, so the step never waits on a seller (plan D10).
 pub const BID_FOR: &str = "stone";
 
+/// The claim step's words while the city grants no deeds (`Grant::Off`,
+/// #451): a home is bought, and the step is done by any claim.
+const CLAIM_BOUGHT: &str = "The city isn't granting deeds just now, so a home is bought: Alt-click a free lot in the three rings and pay its deed from the lot's panel.";
+
 /// A step's words on its card: [`words_in`] how you play (`play`), but for
-/// the market box once it's known empty (`box_goods`, `Some(false)`), and
-/// Settle in's for your own lot (`home`, [`home_words`]).
-fn body(step: Step, box_goods: Option<bool>, home: Option<&Home>, play: Play) -> Cow<'static, str> {
+/// the market box once it's known empty (`box_goods`, `Some(false)`), the
+/// claim while deeds aren't granted (`grant_off`), and Settle in's for your
+/// own lot (`home`, [`home_words`]).
+fn body(step: Step, box_goods: Option<bool>, home: Option<&Home>, play: Play, grant_off: bool) -> Cow<'static, str> {
     match (step, box_goods) {
         (Step::CollectBox, Some(false)) => BOX_EMPTY.into(),
+        (Step::ClaimHome, _) if grant_off => CLAIM_BOUGHT.into(),
         _ => home_words(step, home).map_or(words_in(step, play).1.into(), Cow::Owned),
     }
 }
@@ -683,6 +689,11 @@ impl Hints {
         self.tour.map(Tour::progress)
     }
 
+    /// Whether the city grants no deeds now (#451), so the claim is bought
+    fn grant_off(&self) -> bool {
+        self.progress().is_some_and(|p| p.grant == Grant::Off)
+    }
+
     /// The step whose card is up, shown and not yet done: what the card
     /// may lead to, when the extension has a place for it that
     /// `onboarding::target` can't name (the lot the Deeds Office showed
@@ -809,7 +820,7 @@ impl Hints {
                         Face::Step(step) => {
                             let done = matches!(card, Card::Done(..));
                             let lead = lead.filter(|_| !done);
-                            let body = body(step, self.box_goods, self.home.as_ref(), self.play());
+                            let body = body(step, self.box_goods, self.home.as_ref(), self.play(), self.grant_off());
                             let asked = step_card(ui, step, &body, done, spot.compact, lead, self.play());
                             hide = asked.hide;
                             noted = asked.noted;
@@ -834,7 +845,7 @@ impl Hints {
         // the area's own response isn't hovered while a child widget is.
         if spot.compact && shown.response.contains_pointer() {
             let (title, body) = match face {
-                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods, self.home.as_ref(), self.play())),
+                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods, self.home.as_ref(), self.play(), self.grant_off())),
                 Face::Chapter(c) => (chapter_done_title(c), chapter_close(c).into()),
                 Face::Closing => (CLOSING.0.to_owned(), CLOSING.1.into()),
                 Face::Lesson => (super::quality_card::TITLE.to_owned(), super::quality_card::WORDS.into()),
@@ -1463,14 +1474,14 @@ mod tests {
         hints.market_box(None, t0);
         assert_eq!(hints.waive(later), None, "not fetched: nothing's known");
         hints.market_box(Some(true), t0);
-        assert_eq!(body(Step::CollectBox, hints.box_goods, None, Play::Click), words(Step::CollectBox).1);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None, Play::Click, false), words(Step::CollectBox).1);
         assert_eq!(hints.waive(later), None, "something waits: collect it");
 
         // Known empty from t1: it says so, and moves on once it's been read
         let t1 = t0 + Duration::from_secs(2);
         hints.market_box(Some(false), t1);
         hints.market_box(Some(false), t1 + Duration::from_secs(1));
-        assert_eq!(body(Step::CollectBox, hints.box_goods, None, Play::Click), BOX_EMPTY);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None, Play::Click, false), BOX_EMPTY);
         assert_eq!(hints.waive(t1 + WAIVE_AFTER - Duration::from_millis(10)), None, "still being read");
         hints.hide();
         hints.card = Some(Card::Step(Step::CollectBox, t0));
@@ -1488,7 +1499,10 @@ mod tests {
         hints.card = next_card(None, hints.tour.unwrap(), t0);
         hints.market_box(Some(false), t0);
         assert_eq!(hints.waive(later), None);
-        assert_eq!(body(Step::BuyOrder, Some(false), None, Play::Click), words(Step::BuyOrder).1);
+        assert_eq!(body(Step::BuyOrder, Some(false), None, Play::Click, false), words(Step::BuyOrder).1);
+        // While the city grants no deeds (#451), the claim is bought
+        assert_eq!(body(Step::ClaimHome, None, None, Play::Click, true), CLAIM_BOUGHT);
+        assert_eq!(body(Step::ClaimHome, None, None, Play::Click, false), words(Step::ClaimHome).1);
     }
 
     /// The bid step leads the market to stone once (#494), and says a bid
@@ -1520,22 +1534,22 @@ mod tests {
     #[test]
     fn settling_in_speaks_of_your_own_lot() {
         let farm = sample_home();
-        let station = body(Step::PlaceAtHome, None, Some(&farm), Play::Click);
+        let station = body(Step::PlaceAtHome, None, Some(&farm), Play::Click, false);
         assert!(station.contains("Your farm fits 12 stations, though its deed allows 25"), "{station}");
-        let tax = body(Step::ReadTax, None, Some(&farm), Play::Click);
+        let tax = body(Step::ReadTax, None, Some(&farm), Play::Click, false);
         assert!(tax.contains("assessed at 500 Strands") && tax.contains("10 a week"), "{tax}");
         assert!(tax.contains("Four weeks unpaid (40 Strands)") && !tax.contains("owes"), "{tax}");
         let owing = Home { owed: 3, ..farm.clone() };
-        assert!(body(Step::ReadTax, None, Some(&owing), Play::Click).contains("It owes 3 now."));
+        assert!(body(Step::ReadTax, None, Some(&owing), Play::Click, false).contains("It owes 3 now."));
         let untaxed = Home { weekly_tax: None, ..farm.clone() };
-        assert!(body(Step::ReadTax, None, Some(&untaxed), Play::Click).contains("owes none"));
+        assert!(body(Step::ReadTax, None, Some(&untaxed), Play::Click, false).contains("owes none"));
         // A yard that fits all its deed allows says nothing of the deed
         let yard = Home { zone: capitol_core::protocol::rules::Zone::Urban, fits: 4, capacity: 4, ..farm.clone() };
-        let yard = body(Step::PlaceAtHome, None, Some(&yard), Play::Click);
+        let yard = body(Step::PlaceAtHome, None, Some(&yard), Play::Click, false);
         assert!(yard.contains("Your yard fits 4 stations:") && !yard.contains("allows"), "{yard}");
         // No home yet: the plain words; other steps keep theirs
-        assert_eq!(body(Step::ReadTax, None, None, Play::Click), words(Step::ReadTax).1);
-        assert_eq!(body(Step::SetAutomation, None, Some(&farm), Play::Click), words(Step::SetAutomation).1);
+        assert_eq!(body(Step::ReadTax, None, None, Play::Click, false), words(Step::ReadTax).1);
+        assert_eq!(body(Step::SetAutomation, None, Some(&farm), Play::Click, false), words(Step::SetAutomation).1);
         // The settle_in samples stand on a farm, the others on none
         let mut hints = Hints::default();
         hints.with_sample("read_tax");
@@ -1578,11 +1592,11 @@ mod tests {
     /// words
     #[test]
     fn the_walk_step_speaks_of_the_mode() {
-        assert!(body(Step::Walk, None, None, Play::Keys).contains("Walk with WASD"));
+        assert!(body(Step::Walk, None, None, Play::Keys, false).contains("Walk with WASD"));
         assert!(words_in(Step::Walk, Play::Keys).2.contains("[W]"));
-        assert!(body(Step::Walk, None, None, Play::Pad).contains("Walk with the left stick"));
+        assert!(body(Step::Walk, None, None, Play::Pad, false).contains("Walk with the left stick"));
         assert!(words_in(Step::Walk, Play::Pad).2.contains("{LS}"));
-        assert_eq!(body(Step::Walk, None, None, Play::Click), words(Step::Walk).1);
+        assert_eq!(body(Step::Walk, None, None, Play::Click, false), words(Step::Walk).1);
         for play in [Play::Keys, Play::Pad] {
             assert_eq!(words_in(Step::Walk, play).0, words(Step::Walk).0);
             for step in Step::ALL.into_iter().filter(|s| *s != Step::Walk) {

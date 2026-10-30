@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use capitol_protocol::ledger::{Ledger, StrandFlow, TRANSACTION_TYPES};
+use capitol_protocol::ledger::{Ledger, StrandFlow, ZoneLand, TRANSACTION_TYPES};
 use capitol_protocol::metrics::{gini, top_tenth_share, Earning};
 use capitol_protocol::tunables::{Knob, TunableError, TunablesResponse, TunablesUpdate, Unit};
 use serde::{Deserialize, Serialize};
@@ -179,6 +179,10 @@ pub struct Balance {
     /// against fiber's. Empty in a file from before.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub earning: BTreeMap<String, Earning>,
+    /// Every zone's lots at the end, by the ledger (#451): held, granted
+    /// and by how many owners. Empty in a file from before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub land: BTreeMap<String, ZoneLand>,
 }
 
 /// A trade's Strands, all its citizens together.
@@ -308,6 +312,7 @@ impl Balance {
             wages_paid: Some(report.sim.wages.earned),
             callings: if report.citizens.iter().any(|c| c.calling.is_some()) { report.callings() } else { Vec::new() },
             earning: BTreeMap::new(),
+            land: soak.end.land.clone(),
         })
     }
 
@@ -473,6 +478,7 @@ pub fn compare(a: &Balance, b: &Balance) -> String {
     }
     knobs_md(&mut md, a, b);
     books_md(&mut md, a, b);
+    land_md(&mut md, a, b);
     trades_md(&mut md, a, b);
     spread_md(&mut md, a, b);
     money_md(&mut md, a, b);
@@ -691,6 +697,69 @@ fn books_md(md: &mut String, a: &Balance, b: &Balance) {
     let _ = writeln!(md, "|---|---|---|");
     let _ = writeln!(md, "| Books | {} | {} |", a.books_word(), b.books_word());
     let _ = writeln!(md, "| Deeds claimed | {} | {} |", a.deeds, b.deeds);
+    md.push('\n');
+}
+
+/// The home zones, in the order the road in meets them
+const HOMES: [&str; 3] = ["rural", "suburban", "urban"];
+
+/// Where the citizens made their homes (#451): each home zone's lots held at
+/// the end, how many with the road in's deed, by how many owners, and each
+/// zone's share of the homes; then what the Exchange took in and what the
+/// deeds cost, the two the free deed moves first.
+fn land_md(md: &mut String, a: &Balance, b: &Balance) {
+    let _ = writeln!(md, "## Land and homes\n");
+    if a.land.is_empty() && b.land.is_empty() {
+        let _ = writeln!(md, "Neither run kept the land by zone: both are from before it was kept (#451).\n");
+    } else {
+        let homes = |run: &Balance| HOMES.iter().map(|z| run.land.get(*z).map_or(0, |l| l.owners)).sum::<u64>();
+        let share = |run: &Balance, zone: &str| {
+            let all = homes(run);
+            let mine = run.land.get(zone).map_or(0, |l| l.owners);
+            if all == 0 { "—".to_string() } else { format!("{:.0}%", 100.0 * mine as f64 / all as f64) }
+        };
+        let tilt = |run: &Balance| {
+            HOMES
+                .iter()
+                .map(|z| run.land.get(*z).map_or(0, |l| l.owners))
+                .max()
+                .filter(|_| homes(run) > 0)
+                .map(|most| most as f64 / homes(run) as f64)
+        };
+        let pct = |x: Option<f64>| x.map_or("—".to_string(), |x| format!("{:.0}%", x * 100.0));
+        let _ = writeln!(
+            md,
+            "Homes are the owners of a lot in each home zone at the end: {} in A and {} in B. The zone with the most held {} of them in A and {} in B; an even city is a third each.\n",
+            homes(a),
+            homes(b),
+            pct(tilt(a)),
+            pct(tilt(b))
+        );
+        let _ = writeln!(md, "| Zone | Lots | A: held | A: granted | A: homes | A: share | B: held | B: granted | B: homes | B: share |");
+        let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+        for zone in HOMES {
+            let (la, lb) = (a.land.get(zone).copied().unwrap_or_default(), b.land.get(zone).copied().unwrap_or_default());
+            let _ = writeln!(
+                md,
+                "| {zone} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                la.lots.max(lb.lots),
+                la.owned,
+                la.granted,
+                la.owners,
+                share(a, zone),
+                lb.owned,
+                lb.granted,
+                lb.owners,
+                share(b, zone)
+            );
+        }
+        md.push('\n');
+    }
+    let _ = writeln!(md, "| | A | B |");
+    let _ = writeln!(md, "|---|---:|---:|");
+    let _ = writeln!(md, "| The Exchange's fiber in, as Strands paid out | {} | {} |", a.flow("exchange_deposit"), b.flow("exchange_deposit"));
+    let _ = writeln!(md, "| Strands paid for deeds | {} | {} |", -a.flow("deed_purchase"), -b.flow("deed_purchase"));
+    let _ = writeln!(md, "| Property tax | {} | {} |", -(a.flow("property_tax") + a.flow("tax_payment")), -(b.flow("property_tax") + b.flow("tax_payment")));
     md.push('\n');
 }
 
@@ -974,7 +1043,31 @@ mod tests {
             wages_paid: None,
             callings: Vec::new(),
             earning: BTreeMap::new(),
+            land: BTreeMap::new(),
         }
+    }
+
+    /// #451: where the homes went, each zone's share, and what the Exchange
+    /// and the deeds took; a file from before reads with no land
+    #[test]
+    fn two_runs_compare_their_land_and_homes() {
+        let land = |lots, owned, granted, owners| ZoneLand { lots, owned, granted, owners, assessed: owned as i64 * 500 };
+        let mut a = run("grants-on.toml", 0.02, 1);
+        a.land = [("rural".to_string(), land(900, 4, 4, 4)), ("urban".to_string(), land(1016, 4, 4, 4)), ("suburban".to_string(), land(980, 2, 2, 2))].into();
+        let mut b = run("grants-off.toml", 0.02, 1);
+        b.land = [("rural".to_string(), land(900, 9, 0, 8))].into();
+        b.flows.insert("deed_purchase".into(), -4500);
+        let md = compare(&a, &b);
+        assert!(md.contains("Homes are the owners of a lot in each home zone at the end: 10 in A and 8 in B. The zone with the most held 40% of them in A and 100% in B"), "{md}");
+        assert!(md.contains("| rural | 900 | 4 | 4 | 4 | 40% | 9 | 0 | 8 | 100% |"), "{md}");
+        assert!(md.contains("| suburban | 980 | 2 | 2 | 2 | 20% | 0 | 0 | 0 | 0% |"), "{md}");
+        assert!(md.contains("| The Exchange's fiber in, as Strands paid out | 900 | 900 |"), "{md}");
+        assert!(md.contains("| Strands paid for deeds | 500 | 4500 |"), "{md}");
+
+        let old = run("old", 0.02, 1);
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("\"land\""), "{json}");
+        assert!(compare(&old, &old).contains("Neither run kept the land by zone"));
     }
 
     fn money(role: &str, citizens: usize, start: i64, end: i64) -> TradeMoney {
