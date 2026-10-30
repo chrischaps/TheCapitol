@@ -22,10 +22,11 @@
 use std::collections::VecDeque;
 
 use capitol_protocol::rest::{
-    Bounds, OfferWages, PlayerCard, ResourceNodeInfo, ShiftEnded, WageOffer, WageShift, WagesResponse,
+    OfferWages, PlayerCard, ResourceNodeInfo, ShiftEnded, WageOffer, WageShift, WagesResponse,
 };
 use capitol_protocol::rules::court;
 use capitol_protocol::rules::wages::{self, OfferStatus, ShiftEnd, Work};
+use capitol_protocol::terrain::quad_contains;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -599,13 +600,13 @@ pub fn work_words(work: &Work, catalog: &Catalog) -> String {
     }
 }
 
-/// The resources that grow on a lot of `bounds`, by id, each once: what
-/// gathering work there may be for. The server checks the same box, not
-/// the lot's outline (#435).
-pub fn resources_on<'a>(bounds: &Bounds, nodes: impl IntoIterator<Item = &'a ResourceNodeInfo>) -> Vec<String> {
+/// The resources that grow on a lot of `corners` (`sim::lot::corners`), by
+/// id, each once: what gathering work there may be for. The server checks
+/// the same outline (#435).
+pub fn resources_on<'a>(corners: &[(f64, f64); 4], nodes: impl IntoIterator<Item = &'a ResourceNodeInfo>) -> Vec<String> {
     let mut found: Vec<String> = nodes
         .into_iter()
-        .filter(|n| (bounds.min_x..=bounds.max_x).contains(&n.x) && (bounds.min_y..=bounds.max_y).contains(&n.y))
+        .filter(|n| quad_contains(corners, n.x, n.y))
         .map(|n| n.resource_type.clone())
         .collect();
     found.sort();
@@ -1004,9 +1005,17 @@ mod tests {
             state: "available".into(),
             base_quality: None,
         };
-        let bounds = Bounds { min_x: 0.0, min_y: 0.0, max_x: 100.0, max_y: 100.0 };
-        let nodes = [node(1, "grass", 10.0, 10.0), node(2, "oak_tree", 50.0, 90.0), node(3, "grass", 60.0, 60.0), node(4, "iron_vein", 150.0, 10.0)];
-        assert_eq!(resources_on(&bounds, &nodes), ["grass", "oak_tree"]);
+        // A lot that isn't a rectangle: its box is 0 to 100 each way, but its
+        // top side runs down from (0, 100) to (100, 50)
+        let corners = [(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 100.0)];
+        let nodes = [
+            node(1, "grass", 10.0, 10.0),
+            node(2, "oak_tree", 40.0, 70.0),
+            node(3, "grass", 60.0, 60.0),
+            node(4, "iron_vein", 150.0, 10.0),
+            node(5, "clay_bank", 90.0, 90.0),
+        ];
+        assert_eq!(resources_on(&corners, &nodes), ["grass", "oak_tree"], "the clay is in the box, off the lot");
         let catalog = Catalog::fallback();
         assert!(rate_for(&bench(), &catalog) >= 1);
         assert_eq!(rate_for(&Work::Gather { plot_id: Uuid::nil(), resource: "no_such".into() }, &catalog), 1);

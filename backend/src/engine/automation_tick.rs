@@ -1655,7 +1655,7 @@ mod tests {
                 term_days: 1,
                 worker_id: None,
             };
-            let (offer, _) = wages::offer(&db, ada, &handles, now).await.unwrap();
+            let (offer, _) = wages::offer(&db, ada, &handles, true, now).await.unwrap();
             wages::take(&db, bo, offer.id, now).await.unwrap();
 
             assert_eq!(world.cycle().await.paused, 1);
