@@ -622,9 +622,6 @@ impl TownReport {
                 talk.nothing,
             );
         }
-        if talk.book_only > 0 {
-            let _ = writeln!(md, "\n{} lines were the {PHRASEBOOK}'s by rule, where a model is never asked (a guild's channel).", talk.book_only);
-        }
         let citizens = self.citizens.len().max(1) as f64;
         let _ = writeln!(
             md,
@@ -855,18 +852,15 @@ mod tests {
         assert!(quiet.contains("## What citizens said\n\nNobody said anything."), "{quiet}");
         let book = Talk {
             by: BTreeMap::from([(PHRASEBOOK.to_string(), 12)]),
-            book_only: 2,
             ..Talk::default()
         };
         let md = TownReport::build(&runs(), 3600.0, 10.0, None).with_talk(book).to_markdown();
         assert!(md.contains("| phrasebook | 12 | 100.0% |"), "{md}");
         assert!(md.contains("No model was asked for a line"), "{md}");
-        assert!(md.contains("2 lines were the phrasebook's by rule"), "{md}");
         let haiku = Talk {
             by: BTreeMap::from([("claude-haiku".to_string(), 30), (PHRASEBOOK.to_string(), 10)]),
             late: 6,
             nothing: 2,
-            book_only: 2,
             cents: 0.25,
             most_a_life: 0.15,
         };

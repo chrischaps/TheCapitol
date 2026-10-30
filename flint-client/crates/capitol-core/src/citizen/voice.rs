@@ -285,6 +285,7 @@ pub fn read(reply: &Value, occasion: Occasion) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::citizen::phrases::To;
 
     fn ada() -> Who {
         Who {
@@ -401,7 +402,7 @@ mod tests {
         let mut said = Vec::new();
         while said.is_empty() && start.elapsed() < wait {
             std::thread::sleep(std::time::Duration::from_millis(16));
-            said = voice.due(std::time::Instant::now());
+            said = voice.due(std::time::Instant::now()).into_iter().map(|(_, line)| line).collect();
         }
         said
     }
@@ -412,7 +413,7 @@ mod tests {
         let speaker = ClaudeSpeaker::new(Tier::haiku(), &url, Some("k".into()), &ada());
         let mut voice = Voice::new(Box::new(speaker), &ada().temperament, 1);
         let start = std::time::Instant::now();
-        assert_eq!(voice.speak(Occasion::Greeting, &moment(None), start), None, "the world doesn't wait");
+        assert_eq!(voice.speak(Occasion::Greeting, To::Near, &moment(None), start), None, "the world doesn't wait");
         let said = heard(&mut voice, start, std::time::Duration::from_secs(5));
         assert_eq!(said, ["Afternoon, Bram. Busy day?"]);
         assert!(start.elapsed() < super::super::phrases::TALK_WAIT, "it came before the phrasebook's turn");
@@ -426,7 +427,7 @@ mod tests {
         let speaker = ClaudeSpeaker::new(Tier::haiku(), &url, Some("k".into()), &ada());
         let mut voice = Voice::new(Box::new(speaker), &ada().temperament, 1);
         let start = std::time::Instant::now();
-        assert_eq!(voice.speak(Occasion::Sale, &moment(None), start), None);
+        assert_eq!(voice.speak(Occasion::Sale, To::Near, &moment(None), start), None);
         let said = heard(&mut voice, start, std::time::Duration::from_secs(5));
         let book = super::super::phrases::Phrasebook::new(&ada().temperament, 1);
         assert_eq!(said, [book.say(Occasion::Sale, &moment(None))]);
