@@ -1371,13 +1371,14 @@ impl SimBot {
 
     /// Writes its entries since it last did down to its town (C1.7), with
     /// what they earned each job (#560): the job of the moment's, for its
-    /// buys.
+    /// buys. And what it said, and what its words cost (#433).
     fn write_down(&mut self, town: &Tether) {
         let entries = std::mem::take(&mut self.entries);
         let rulings = self.mind.take_rulings();
+        let talk = self.bot.take_talk();
         let catalog = self.bot.state().catalog();
         let earned = report::earned(&entries, |item| Activity::of_item(catalog, item), Activity::of_role(self.job()));
-        town.record(entries, rulings, &earned);
+        town.record(entries, rulings, &talk, &earned);
     }
 
     /// Turns what the bot saw into entries.

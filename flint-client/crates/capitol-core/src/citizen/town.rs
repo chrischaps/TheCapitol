@@ -65,6 +65,7 @@ use super::calling::{self, Calling, Style, NO_FAVOURITE};
 use super::habit::{Habit, Kind, Mix, Presence};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
+use super::phrases::Talk;
 use super::voice;
 use crate::bot::{Bot, BotError, Bound};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
@@ -1043,17 +1044,20 @@ pub struct Book {
     pub entries: Vec<Entry>,
     /// How its questions were settled ([`By::label`](super::decide::By::label))
     pub rulings: BTreeMap<String, u64>,
+    /// What it said, and what its words cost (#433)
+    pub talk: Talk,
     /// Its Strands when the town first saw them, and last
     pub strands_first: Option<i64>,
     pub strands_last: Option<i64>,
 }
 
 impl Book {
-    fn record(&mut self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>) {
+    fn record(&mut self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>, talk: &Talk) {
         self.entries.extend(entries);
         for (by, n) in rulings {
             *self.rulings.entry(by).or_insert(0) += n;
         }
+        self.talk.add(talk);
     }
 
     fn saw_strands(&mut self, strands: Option<i64>) {
@@ -1120,14 +1124,14 @@ impl Tether<'_> {
     }
 
     /// Writes down what the citizen did since it last did, for the report,
-    /// and its time and what it `earned` each job for the report to the
-    /// server.
-    pub(crate) fn record(&self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>, earned: &BTreeMap<Activity, i64>) {
+    /// with what it said (#433), and its time and what it `earned` each job
+    /// for the report to the server.
+    pub(crate) fn record(&self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>, talk: &Talk, earned: &BTreeMap<Activity, i64>) {
         let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
         health.spent(&entries);
         health.earned(earned);
         drop(health);
-        self.book.lock().unwrap_or_else(|e| e.into_inner()).record(entries, rulings);
+        self.book.lock().unwrap_or_else(|e| e.into_inner()).record(entries, rulings, talk);
     }
 
     /// Its stints as last kept (Callings K1.2).
@@ -1273,6 +1277,16 @@ impl Town {
                 (run, book.rulings)
             })
             .collect()
+    }
+
+    /// What every citizen said so far, and what their words cost (#433),
+    /// for [`TownReport::with_talk`](super::report::TownReport::with_talk).
+    pub fn talk(&self) -> Talk {
+        let mut talk = Talk::default();
+        for book in &self.books {
+            talk.add(&book.lock().unwrap_or_else(|e| e.into_inner()).talk);
+        }
+        talk
     }
 
     /// Each citizen's calling, by name, as the console's roster says it
@@ -2090,6 +2104,23 @@ key = "j"
         assert_eq!((walking.to, walking.why.as_str()), ([7400.0, 6100.3], "gather clay"));
         *bound.lock().unwrap() = None;
         assert_eq!(h.report(None, Vec::new()).walking, None, "arrived");
+    }
+
+    #[test]
+    fn a_book_keeps_what_was_said_across_lives() {
+        let mut book = Book::default();
+        let life = |cents: f64| Talk {
+            by: BTreeMap::from([("claude-haiku".to_string(), 3)]),
+            late: 1,
+            cents,
+            most_a_life: cents,
+            ..Talk::default()
+        };
+        book.record(Vec::new(), BTreeMap::new(), &life(0.02));
+        book.record(Vec::new(), BTreeMap::new(), &life(0.05));
+        assert_eq!((book.talk.by["claude-haiku"], book.talk.late), (6, 2));
+        assert!((book.talk.cents - 0.07).abs() < 1e-9);
+        assert_eq!(book.talk.most_a_life, 0.05, "the dearest life, not the sum");
     }
 
     #[test]
