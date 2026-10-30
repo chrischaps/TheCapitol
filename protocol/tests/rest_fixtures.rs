@@ -42,6 +42,9 @@
 //! citizen walking to its next leg, bound past it for its bench (#414), a
 //! person gathering, one crafting. It's
 //! also what `GET /admin/positions` (D1.3) sends, for every player.
+//! `fixtures/rest/admin_work.json` is `GET /admin/work` (#572): two five-minute
+//! bins of the tick's work, the first with the lock's p95 past the last
+//! bucket and a loop that never ran.
 //! `fixtures/rest/admin_map.json` is `GET /admin/map` (D1.3): two zones, a citizen's farm
 //! and a person's lot, their stations, and an hour's fills at the hall and two stalls.
 //! `fixtures/rest/admin_books.json` is `GET /admin/books` (D2.1): every transaction
@@ -516,6 +519,30 @@ fn walkers_round_trip() {
     assert!(matches!(walkers[1].doing, Doing::Extracting { .. }));
     assert_eq!(walkers[2].doing, Doing::Crafting { recipe_id: "rope".into() });
     assert_eq!(serde_json::to_string(&walkers).unwrap(), json);
+}
+
+#[test]
+fn the_tick_work_in_bins_round_trips() {
+    use capitol_protocol::metrics::{WorkSeries, WorkTotal};
+    let json = fixture("admin_work.json");
+    let work: WorkSeries = serde_json::from_str(&json).unwrap();
+    assert_eq!(work.bins.len(), 2);
+    assert!(work.bins.iter().all(|b| b.at_ms % work.bin_ms == 0));
+    let first = &work.bins[0];
+    // Past the last bucket though it ran, and never run: both without a p95
+    assert_eq!((first.phases["lock"].runs, first.phases["lock"].p95_ms), (3000, None));
+    assert_eq!((first.loops["tax"].runs, first.loops["tax"].p95_ms), (0, None));
+    assert_eq!(serde_json::to_string(&work).unwrap(), json);
+
+    // Summed, the worst p95 holds, and one past the last bucket beats it
+    let mut total = WorkTotal::default();
+    total.add(0, 0.0, None, 0);
+    total.add(10, 0.5, Some(2.0), 1);
+    total.add(10, 0.5, Some(1.0), 0);
+    assert_eq!(total, WorkTotal { runs: 20, secs: 1.0, p95_ms: Some(2.0), slow_statements: 1 });
+    total.add(10, 0.5, None, 0);
+    total.add(10, 0.5, Some(9.0), 0);
+    assert_eq!((total.runs, total.p95_ms), (40, None));
 }
 
 #[test]

@@ -28,6 +28,10 @@
 //! ([`grass`]): fiber's one source, so the faucet's. The gathers the server
 //! refused over the window come with the ledger (`Ledger::refused`).
 //!
+//! Since #572 [`work`] sums the tick's phases and the loops beside it over a
+//! range in bins, for `/admin/work`: a day of them is a few kB, where every
+//! sample's was about 17 MB.
+//!
 //! It runs beside the tick, as a loop of its own (`load::Loop::Sampler`). It
 //! takes the game's lock only to read, twice a sample: the ledger's count of
 //! the players, and its own.
@@ -38,8 +42,8 @@ use std::time::Duration;
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    Book, Buckets, Channel, Distribution, EventBus, Feed, Flows, Grass, Paid, Players, Sample, Trades, KEEP_DAYS,
-    RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
+    Book, Buckets, Channel, Distribution, EventBus, Feed, Flows, Grass, Paid, Players, Sample, Trades, WorkBin,
+    WorkSeries, WorkTotal, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -449,6 +453,75 @@ fn merge(into: &mut serde_json::Value, part: serde_json::Value) {
     }
 }
 
+/// What [`work`] reads of each sample: its ticks and its work (#572)
+const WORK_FIELDS: [&str; 4] = ["load.ticks", "load.ticks_over", "load.phases", "load.loops"];
+
+/// The tick's phases and the loops beside it after `from_ms` and up to
+/// `to_ms` (Unix ms), summed in bins `bin_ms` long, for `/admin/work`
+/// (#572). It reads what [`series`] does, so a range past the ring reads
+/// the stored minutes.
+pub async fn work(
+    ring: &Samples,
+    db: &PgPool,
+    from_ms: i64,
+    to_ms: i64,
+    bin_ms: i64,
+) -> Result<WorkSeries, sqlx::Error> {
+    let fields: Vec<String> = WORK_FIELDS.iter().map(|f| f.to_string()).collect();
+    Ok(bin_work(&series(ring, db, from_ms, to_ms, Some(&fields)).await?, bin_ms))
+}
+
+/// `samples`, partial or whole, summed into the bins their `at_ms` fall in.
+/// A sample stored before a field was reads as without it.
+fn bin_work(samples: &[serde_json::Value], bin_ms: i64) -> WorkSeries {
+    #[derive(serde::Deserialize)]
+    struct Part {
+        at_ms: i64,
+        #[serde(default)]
+        load: PartLoad,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct PartLoad {
+        #[serde(default)]
+        ticks: u64,
+        #[serde(default)]
+        ticks_over: u64,
+        #[serde(default)]
+        phases: BTreeMap<String, Run>,
+        #[serde(default)]
+        loops: BTreeMap<String, Run>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Run {
+        #[serde(default)]
+        runs: u64,
+        #[serde(default)]
+        secs: f64,
+        #[serde(default)]
+        p95_ms: Option<f64>,
+        #[serde(default)]
+        slow_statements: u64,
+    }
+    let add = |into: &mut BTreeMap<String, WorkTotal>, runs: BTreeMap<String, Run>| {
+        for (name, r) in runs {
+            into.entry(name).or_default().add(r.runs, r.secs, r.p95_ms, r.slow_statements);
+        }
+    };
+    let mut bins: BTreeMap<i64, WorkBin> = BTreeMap::new();
+    let mut to_ms = None;
+    for sample in samples {
+        let Ok(part) = <Part as serde::Deserialize>::deserialize(sample) else { continue };
+        let at_ms = part.at_ms.div_euclid(bin_ms) * bin_ms;
+        let bin = bins.entry(at_ms).or_insert_with(|| WorkBin { at_ms, ..WorkBin::default() });
+        bin.ticks += part.load.ticks;
+        bin.ticks_over += part.load.ticks_over;
+        add(&mut bin.phases, part.load.phases);
+        add(&mut bin.loops, part.load.loops);
+        to_ms = to_ms.max(Some(part.at_ms));
+    }
+    WorkSeries { bin_ms, to_ms, bins: bins.into_values().collect() }
+}
+
 /// The keys of `path` before its first `*`: as far as the database can
 /// reach for it.
 fn plain_prefix(path: &[String]) -> String {
@@ -681,6 +754,83 @@ mod tests {
         assert!(tick * 8 < whole, "{tick} against {whole}");
         assert!(phase * 8 < whole, "{phase} against {whole}");
         assert!(secs * 2 < whole, "{secs} against {whole}");
+    }
+
+    /// A day of the tick's work in the console's hour bins is a few kB, where
+    /// four numbers of every phase and loop in every sample was about 17 MB
+    /// (#572), and each bin is its samples summed
+    #[test]
+    fn a_day_of_work_in_bins_is_a_few_kb() {
+        let busy = busy_sample();
+        let day: Vec<serde_json::Value> = (1..=RING_SAMPLES as i64)
+            .map(|i| {
+                let mut s = busy.clone();
+                s["at_ms"] = (i * 10_000).into();
+                s
+            })
+            .collect();
+        let mut keep = paths(&SERIES_TIMES);
+        keep.extend(paths(&["load.phases.*.runs", "load.phases.*.secs", "load.phases.*.p95_ms", "load.phases.*.slow_statements"]));
+        keep.extend(paths(&["load.loops.*.runs", "load.loops.*.secs", "load.loops.*.p95_ms", "load.loops.*.slow_statements"]));
+        let before = serde_json::to_vec(&project(&busy, &keep)).unwrap().len() * RING_SAMPLES;
+
+        let work = bin_work(&day, 3_600_000);
+        let after = serde_json::to_vec(&work).unwrap().len();
+        println!("a day of the phase table: every sample's work {before} B, in hour bins {after} B");
+        assert!(after < 64_000, "{after} B");
+        assert!(after * 200 < before, "{after} against {before}");
+
+        // The day's 86,400 s start at 10 s, so the first and last hours are part ones
+        assert_eq!(work.bins.len(), 25);
+        assert_eq!(work.to_ms, Some(RING_SAMPLES as i64 * 10_000));
+        assert!(work.bins.iter().all(|b| b.at_ms % 3_600_000 == 0));
+        let hour = &work.bins[1];
+        assert_eq!(hour.at_ms, 3_600_000);
+        assert_eq!(hour.ticks, 360 * busy["load"]["ticks"].as_u64().unwrap());
+        assert_eq!(hour.phases.len(), 12);
+        assert_eq!(hour.loops.len(), 8);
+        let one = &busy["load"]["phases"]["movement"];
+        let movement = &hour.phases["movement"];
+        assert_eq!(movement.runs, 360 * one["runs"].as_u64().unwrap());
+        assert!((movement.secs - 360.0 * one["secs"].as_f64().unwrap()).abs() < 1e-9);
+        assert_eq!(movement.p95_ms, one["p95_ms"].as_f64());
+        assert_eq!(movement.slow_statements, 360 * one["slow_statements"].as_u64().unwrap());
+        // Every sample is counted once
+        let runs: u64 = work.bins.iter().map(|b| b.phases["movement"].runs).sum();
+        assert_eq!(runs, RING_SAMPLES as u64 * one["runs"].as_u64().unwrap());
+    }
+
+    /// A bin's p95 is its worst sample's, a p95 past the last bucket is the
+    /// worst of all, and a sample where a phase didn't run says nothing of it
+    #[test]
+    fn a_bins_p95_is_its_worst_samples() {
+        let at = |at_ms: i64, runs: u64, p95: Option<f64>| {
+            serde_json::json!({
+                "at_ms": at_ms,
+                "load": { "ticks": 100, "phases": { "movement": { "runs": runs, "secs": 0.1, "p95_ms": p95 } } },
+            })
+        };
+        let work = bin_work(
+            &[
+                at(10_000, 0, None),
+                at(20_000, 5, Some(2.0)),
+                at(30_000, 5, Some(4.0)),
+                at(40_000, 0, None),
+                at(70_000, 5, Some(1.0)),
+                at(80_000, 5, None),
+                at(90_000, 5, Some(9.0)),
+                // An old sample with no load, and one that isn't a sample
+                serde_json::json!({ "at_ms": 100_000 }),
+                serde_json::json!({ "strands": 3 }),
+            ],
+            60_000,
+        );
+        let p95: Vec<_> = work.bins.iter().map(|b| (b.at_ms, b.phases.get("movement").and_then(|m| m.p95_ms))).collect();
+        assert_eq!(p95, [(0, Some(4.0)), (60_000, None)]);
+        assert_eq!(work.bins[0].phases["movement"].runs, 10);
+        assert_eq!(work.bins[1].ticks, 300);
+        assert_eq!(work.to_ms, Some(100_000));
+        assert_eq!(bin_work(&[], 60_000), WorkSeries { bin_ms: 60_000, to_ms: None, bins: vec![] });
     }
 
     mod db {

@@ -55,6 +55,9 @@
     sorted: null,
     // How far back each set of fields has been read, as Unix ms
     covered: { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity },
+    // The tick's phases and the loops beside it, summed in the range's bins
+    // by `/admin/work` (#572) up to `to`, the newest sample it summed
+    work: { binMs: 0, first: 0, to: null, bins: [] },
     annotations: new Map(),
     wire: [],
     wireKind: "all",
@@ -211,6 +214,7 @@
     state.samples.clear();
     state.sorted = null;
     state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity };
+    state.work = { binMs: 0, first: 0, to: null, bins: [] };
     state.annotations.clear();
     state.wire = [];
     mapStop();
@@ -285,23 +289,18 @@
   // The fields each set of charts reads, as paths into a sample (#411). The
   // base has the few numbers of the tick the overview's tiles and the tick's
   // chart draw. The rest of `load` that's drawn, the queues, sockets and
-  // pool, and four numbers of each phase and loop for their table (about
-  // 17 MB a day, #572), is read only for the performance tab, with the event bus's backlog beside it
-  // (D3.1); the money's flows and trades, and the wealth by trade, only for
-  // the economy tab, and the units and crafts too (D2.4)
+  // pool, is read only for the performance tab, with the event bus's backlog
+  // beside it (D3.1); its phases and loops come summed in bins from
+  // `/admin/work` (#572). The money's flows and trades, and the wealth by
+  // trade, are read only for the economy tab, and the units and crafts too (D2.4)
   const TICK_FIELDS = ["ticks", "secs", "tick_mean_ms", "tick_p95_ms", "tick_p99_ms", "tick_period_ms", "ticks_over", "sockets_open"];
   const LOAD_FIELDS = [
     "commands", "command_queue_p99", "writer_queued", "writer_lag_ms", "events_lagged", "socket_resyncs",
     "sockets_opened", "sockets_dropped", "players_in_world", "db_pool_size", "db_pool_idle", "db_transactions_per_sec",
   ];
-  const WORK_FIELDS = ["runs", "secs", "p95_ms", "slow_statements"];
   const FIELDS = {
     base: ["players", "strands", "drift", ...TICK_FIELDS.map((f) => `load.${f}`)].join(","),
-    load: [
-      ...LOAD_FIELDS.map((f) => `load.${f}`),
-      ...["phases", "loops"].flatMap((part) => WORK_FIELDS.map((f) => `load.${part}.*.${f}`)),
-      "events",
-    ].join(","),
+    load: [...LOAD_FIELDS.map((f) => `load.${f}`), "events"].join(","),
     money: "strand_flows,new_accounts,grants,market,bazaar,distribution,books,flows,grass,refused",
     making: "units,unit_flows,crafts",
     town: "town",
@@ -333,6 +332,7 @@
         // ten-second samples held inside them (`addSample`, #600)
         if (state.lastSampleAt) {
           state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity };
+          state.work.binMs = 0;
           await Promise.all([
             readSeries("base"),
             state.tab === "performance" ? readSeries("load") : null,
@@ -2702,42 +2702,79 @@
   const bound = (v) => (v == null || v === Infinity ? `over ${ms(1000)}` : ms(v));
   const say = (name, words = WORK) => words[name]?.say ?? item(name);
 
-  /** The range's samples with a load, in bins: ticks, ticks over, and each phase's time */
-  function binLoad(shown) {
+  let workReading = null;
+
+  /** The range's work from `/admin/work` (#572), read again when the range
+   * starts in a new bin, so its first bin holds no more than the range did
+   * then. The stream's samples after it are added as they come (`binLoad`) */
+  function readWork() {
+    const binMs = BIN_MINUTES[state.hours] * 60_000;
+    const from = rangeFrom();
+    const first = Math.floor(from / binMs) * binMs;
+    if (state.work.binMs === binMs && state.work.first === first) return null;
+    if (workReading?.binMs === binMs && workReading.first === first) return workReading.done;
+    const reading = { binMs, first };
+    reading.done = getJson(`/admin/work?from_ms=${from}&bin_ms=${binMs}`)
+      .then((got) => { if (workReading === reading) state.work = { binMs, first, to: got.to_ms, bins: got.bins }; })
+      .finally(() => { if (workReading === reading) workReading = null; });
+    workReading = reading;
+    return reading.done;
+  }
+
+  /** A sample's or a bin's phases or loops, added to a bin's by name: runs,
+   * time, slow statements and the worst p95, where one past the last bucket
+   * is null though it ran, and the worst of all */
+  function addWork(into, part) {
+    for (const [name, p] of Object.entries(part ?? {})) {
+      const w = (into[name] ??= { name, runs: 0, secs: 0, p95: null, slow: 0 });
+      if (p.runs > 0) w.p95 = Math.max(w.p95 ?? 0, p.p95_ms ?? Infinity);
+      w.runs += p.runs;
+      w.secs += p.secs;
+      w.slow += p.slow_statements ?? 0;
+    }
+  }
+
+  /** The range in bins: ticks, ticks over, and each phase's and loop's work,
+   * the server's sums and the stream's samples since */
+  function binLoad() {
     const binMs = BIN_MINUTES[state.hours] * 60_000;
     const first = Math.floor(rangeFrom() / binMs) * binMs;
-    const bins = Array.from({ length: Math.ceil((Date.now() - first) / binMs) }, (_, k) => ({ at: first + k * binMs, ticks: 0, over: 0, secs: {} }));
-    for (const s of shown) {
-      const b = bins[Math.floor((s.at_ms - first) / binMs)];
-      if (!b) continue;
-      b.ticks += s.load.ticks;
-      b.over += s.load.ticks_over ?? 0;
-      for (const [name, p] of Object.entries(s.load.phases ?? {})) b.secs[name] = (b.secs[name] ?? 0) + p.secs;
-    }
+    const bins = Array.from({ length: Math.ceil((Date.now() - first) / binMs) }, (_, k) => ({ at: first + k * binMs, ticks: 0, over: 0, phases: {}, loops: {} }));
+    const add = (at, ticks, over, phases, loops) => {
+      const b = bins[Math.floor((at - first) / binMs)];
+      if (!b) return;
+      b.ticks += ticks;
+      b.over += over ?? 0;
+      addWork(b.phases, phases);
+      addWork(b.loops, loops);
+    };
+    const read = state.work.binMs === binMs;
+    if (read) for (const b of state.work.bins) add(b.at_ms, b.ticks, b.ticks_over, b.phases, b.loops);
+    const after = read ? (state.work.to ?? -Infinity) : Infinity;
+    for (const s of inRange((s) => s.at_ms > after && s.load?.phases)) add(s.at_ms, s.load.ticks, s.load.ticks_over, s.load.phases, s.load.loops);
     return { binMs, bins };
   }
 
-  /** Each phase or loop over the range: its runs, time, slow statements, and the worst sample's p95 */
-  function workOver(shown, part) {
-    const out = new Map();
-    for (const s of shown) {
-      for (const [name, p] of Object.entries(s.load[part] ?? {})) {
-        const w = out.get(name) ?? { name, runs: 0, secs: 0, p95: null, slow: 0 };
-        w.runs += p.runs;
-        w.secs += p.secs;
-        w.slow += p.slow_statements ?? 0;
-        // A p95 past the last bucket is null though it ran: the worst of all
-        if (p.runs > 0) w.p95 = p.p95_ms == null || w.p95 === Infinity ? Infinity : Math.max(w.p95 ?? 0, p.p95_ms);
-        out.set(name, w);
+  /** Each phase or loop over the range: its runs, time, slow statements, and the worst p95 */
+  function workOver(bins, part) {
+    const out = {};
+    for (const b of bins) {
+      for (const w of Object.values(b[part])) {
+        const t = (out[w.name] ??= { name: w.name, runs: 0, secs: 0, p95: null, slow: 0 });
+        t.runs += w.runs;
+        t.secs += w.secs;
+        t.slow += w.slow;
+        if (w.p95 != null) t.p95 = Math.max(t.p95 ?? 0, w.p95);
       }
     }
-    return [...out.values()];
+    return Object.values(out);
   }
 
   async function performance() {
-    if (state.covered.load > rangeFrom()) {
+    const reads = [state.covered.load > rangeFrom() ? readSeries("load") : null, readWork()].filter(Boolean);
+    if (reads.length) {
       $("tick-headline").textContent = "Reading the tick's history.";
-      try { await readSeries("load"); } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
+      try { await Promise.all(reads); } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
     }
     chart("tick");
     const shown = inRange((s) => s.load);
@@ -2758,9 +2795,9 @@
   }
 
   function phases(shown) {
-    const { binMs, bins } = binLoad(shown);
-    const ticks = shown.reduce((a, s) => a + s.load.ticks, 0);
-    const work = workOver(shown, "phases").filter((w) => w.secs > 0).sort((a, b) => b.secs - a.secs);
+    const { binMs, bins } = binLoad();
+    const ticks = bins.reduce((a, b) => a + b.ticks, 0);
+    const work = workOver(bins, "phases").filter((w) => w.secs > 0).sort((a, b) => b.secs - a.secs);
     const tickSecs = work.reduce((a, w) => a + w.secs, 0);
 
     // The biggest phases each have a bar; the rest share one
@@ -2778,7 +2815,7 @@
     for (const b of bins) {
       let up = 0;
       for (const line of lines) {
-        const v = b.ticks ? (line.names.reduce((a, n) => a + (b.secs[n] ?? 0), 0) * 1000) / b.ticks : null;
+        const v = b.ticks ? (line.names.reduce((a, n) => a + (b.phases[n]?.secs ?? 0), 0) * 1000) / b.ticks : null;
         ownValues[line.key].push(v);
         values[line.key].push(v ? (up += v) : null);
       }
@@ -2795,7 +2832,7 @@
     if (rebuild) state.charts.phases?.rebuild();
     chart("phases");
 
-    const loops = workOver(shown, "loops").filter((w) => w.runs > 0).sort((a, b) => b.secs - a.secs);
+    const loops = workOver(bins, "loops").filter((w) => w.runs > 0).sort((a, b) => b.secs - a.secs);
     const rangeSecs = shown.reduce((a, s) => a + s.since_ms, 0) / 1000;
     workTable(work, tickSecs, loops, rangeSecs);
 

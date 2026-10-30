@@ -783,6 +783,84 @@ pub struct SeriesQuery {
 pub const SERIES_TIMES: [&str; 3] = ["at_ms", "booted_ms", "since_ms"];
 
 // ---------------------------------------------------------------------------
+// The tick's work, in bins (#572)
+
+/// The bin `GET /admin/work` sums in when it isn't asked for one: five minutes
+pub const WORK_BIN_MS: i64 = 5 * 60_000;
+/// The most bins `GET /admin/work` sums a range in
+pub const WORK_MAX_BINS: i64 = 2_000;
+
+/// `GET /admin/work`'s query (#572).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkQuery {
+    /// Unix ms, exclusive; the default is an hour before `to_ms`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_ms: Option<i64>,
+    /// Unix ms, inclusive; the default is now
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_ms: Option<i64>,
+    /// Each bin's length, in ms: at least a sample's, and the default
+    /// [`WORK_BIN_MS`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_ms: Option<i64>,
+}
+
+/// The tick's phases and the loops beside it over a range, summed in bins
+/// (#572): what the console's **Where the time goes** draws and tables, a
+/// row a bin rather than four numbers of every phase in every sample.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WorkSeries {
+    pub bin_ms: i64,
+    /// The newest sample summed, by the server's clock (Unix ms); `None`
+    /// with none. A reader adds the samples after it as they come.
+    pub to_ms: Option<i64>,
+    /// Oldest first, only the bins a sample fell in
+    pub bins: Vec<WorkBin>,
+}
+
+/// The samples whose `at_ms` falls in one bin, summed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WorkBin {
+    /// The bin's start (Unix ms), a whole number of `bin_ms`
+    pub at_ms: i64,
+    pub ticks: u64,
+    pub ticks_over: u64,
+    pub phases: BTreeMap<String, WorkTotal>,
+    pub loops: BTreeMap<String, WorkTotal>,
+}
+
+/// One phase or loop over a bin's samples.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WorkTotal {
+    pub runs: u64,
+    pub secs: f64,
+    /// The worst p95 of the samples it ran in; `None` when one of them was
+    /// past the last bucket, or it never ran
+    pub p95_ms: Option<f64>,
+    pub slow_statements: u64,
+}
+
+impl WorkTotal {
+    /// A sample's window of it added in: a p95 past the last bucket (`None`
+    /// with runs) is the worst of all, and a window with no runs has none
+    pub fn add(&mut self, runs: u64, secs: f64, p95_ms: Option<f64>, slow_statements: u64) {
+        if runs > 0 {
+            self.p95_ms = match (self.runs, self.p95_ms, p95_ms) {
+                (0, _, p95) => p95,
+                (_, Some(had), Some(p95)) => Some(had.max(p95)),
+                _ => None,
+            };
+        }
+        self.runs += runs;
+        self.secs += secs;
+        self.slow_statements += slow_statements;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The town's report (D4.1)
 // ---------------------------------------------------------------------------
 
