@@ -53,7 +53,8 @@ pub async fn progress(db: &PgPool, player: Uuid) -> Result<TutorialProgress, sql
 
 /// `progress` with `player`'s deed grant as it stands: open or spent from
 /// its row, and open with none when the steps have earned it, as a claim
-/// would open it then (`deed_grants::take_in`).
+/// would open it then (`deed_grants::take_in`). Off while the city grants
+/// none (#451), unless it's spent.
 async fn with_grant(db: &PgPool, player: Uuid, progress: TutorialProgress) -> Result<TutorialProgress, sqlx::Error> {
     let used: Option<bool> = sqlx::query_scalar(
         "SELECT g.used_at IS NOT NULL FROM deed_grants g JOIN players p ON p.account_id = g.account_id
@@ -62,8 +63,10 @@ async fn with_grant(db: &PgPool, player: Uuid, progress: TutorialProgress) -> Re
     .bind(player)
     .fetch_optional(db)
     .await?;
+    let on = deed_grants::enabled(db).await?;
     let grant = match used {
         Some(true) => Grant::Spent,
+        _ if !on => Grant::Off,
         Some(false) => Grant::Open,
         None => Grant::Unearned.after(progress.done),
     };

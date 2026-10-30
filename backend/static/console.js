@@ -106,6 +106,7 @@
       case "percent": return `${trim(v)}%`;
       case "strands": return `${trim(v)} Strands`;
       case "multiplier": return `×${trim(v)}`;
+      case "switch": return v === 0 ? "off" : "on";
       default: return trim(v);
     }
   }
@@ -677,6 +678,17 @@
     axis: short,
     legend: (v) => `${count(v)} Strands`,
     series: [{ label: "Escrow", color: "--fl-escrow", value: (s) => s.strands.escrow }],
+  });
+  // The road in's deeds (#451): earned, and spent on lots, over the range
+  CHARTS.grants = () => lineChart($("chart-grants"), {
+    has: (s) => s.grants,
+    height: 160,
+    axis: short,
+    legend: (v) => count(v),
+    series: [
+      { label: "Earned", color: "--s3", value: (s) => s.grants.opened, step: true },
+      { label: "On lots", color: "--fl-grants", width: 2, value: (s) => s.grants.used, step: true },
+    ],
   });
   CHARTS.velocity = () => lineChart($("chart-velocity"), {
     rows: () => money.velocity,
@@ -2412,16 +2424,48 @@
   /** The road in's deed grants (#440): land given, not bought, outside the Strands' books */
   function grants() {
     const h = $("grants-headline");
+    chart("grants");
     const s = latest((s) => s.grants);
-    if (!s) return void (h.textContent = "Waiting for the first sample.");
+    // Switched off for a balance run (#451): the road earns none
+    const off = knobOf("deed_grant_enabled")?.value === 0 ? "The deed grant is switched off, so the road in earns none and homes are bought. " : "";
+    if (!s) {
+      $("grants-tiles").replaceChildren();
+      return void (h.textContent = off || "Waiting for the first sample.");
+    }
     const { opened, used, returned, granted_value: value } = s.grants;
-    if (opened === 0) return void (h.textContent = "Nobody has walked the road in to their deed yet.");
+    grantTiles(s.grants);
+    if (opened === 0) return void (h.textContent = off || "Nobody has walked the road in to their deed yet.");
     let line = `${plural(opened, "deed has", "deeds have")} been earned on the road in`;
     line += used === 0
       ? ", and none is spent yet."
       : `, and ${nf.format(used)} ${used === 1 ? "holds a lot" : "hold lots"} assessed at ${plural(value, "Strand", "Strands")}.`;
     if (returned) line += ` ${plural(returned, "was", "were")} handed back by a retired lot.`;
-    h.textContent = line;
+    h.textContent = off + line;
+  }
+
+  /** The grants' four figures (#451): earned, spent, handed back, and what the lots are assessed at */
+  function grantTiles({ opened, used, returned, granted_value: value }) {
+    const tile = (label, value, unit, sub) => {
+      const el = document.createElement("div");
+      el.className = "tile";
+      const l = text("p", label);
+      l.className = "label";
+      const v = text("p", value);
+      v.className = "value";
+      if (unit) v.append(text("small", ` ${unit}`));
+      const s = text("p", sub);
+      s.className = "sub";
+      el.append(l, v, s);
+      return el;
+    };
+    const rate = knobOf("property_tax_rate")?.value;
+    const waiting = opened - used;
+    $("grants-tiles").replaceChildren(
+      tile("Earned", nf.format(opened), "", "Deeds the road in has opened, one an account at most."),
+      tile("On lots", nf.format(used), "", waiting > 0 ? `${plural(waiting, "waits", "wait")} to be spent.` : opened ? "Every one earned is spent." : "None earned yet."),
+      tile("Handed back", nf.format(returned), "", returned ? "By lots retired since they were claimed." : "No granted lot has been retired."),
+      tile("Assessed at", nf.format(value), "Strands", rate == null ? "What their tax is on." : `Taxed ${plural(Math.round(value * rate), "Strand", "Strands")} a week at ${unit("fraction", rate)}.`),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -4062,6 +4106,7 @@
     weather_wear_public: "--uf-repaired",
     outdoor_tool_wear: "--uf-worn_out",
     floor_permit_scale: "--fl-deeds",
+    deed_grant_enabled: "--fl-grants",
   };
   // The knobs as the server last said, and each one's row by key
   let knobs = null;
@@ -4070,7 +4115,7 @@
   // A fraction is typed as the percent it reads as
   const typed = (k, v) => (k.unit === "fraction" ? Number((v * 100).toFixed(6)) : v);
   const untyped = (k, v) => (k.unit === "fraction" ? v / 100 : v);
-  const AFFIX = { fraction: ["", "%"], percent: ["", "%"], strands: ["", "Strands"], multiplier: ["×", ""], ratio: ["", ""] };
+  const AFFIX = { fraction: ["", "%"], percent: ["", "%"], strands: ["", "Strands"], multiplier: ["×", ""], ratio: ["", ""], switch: ["", "1 on, 0 off"] };
   const knobOf = (key) => knobs?.find((k) => k.key === key);
 
   async function loadKnobs() {

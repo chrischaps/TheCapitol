@@ -126,6 +126,7 @@ fn ready(step: Lesson, progress: &TutorialProgress, builds: bool, home: Option<&
         // Both orders on the book first: the box is theirs (#446)
         Lesson::CollectBox => done.has(Lesson::SellOrder) && done.has(Lesson::BuyOrder),
         // The Registrar writes as People opens (#447), which chapter_open says
+        // Off (#451), any claim does it: the planner's, once it's saved
         Lesson::ClaimHome => progress.grant == Grant::Open,
         // A calling that builds on its lot sets its own stations there
         Lesson::PlaceAtHome => home.is_some_and(|h| h.room > 0) && !builds,
@@ -167,14 +168,18 @@ impl SimBot {
 
     /// Whether its first plot waits on the road's deed: it walks the road
     /// and hasn't spent the deed (#450). It doesn't buy a home meanwhile.
+    /// While the city grants none (#451) nothing waits: it buys, as a
+    /// citizen did before the road in.
     pub(super) fn awaits_road_deed(&self) -> bool {
-        self.road.is_some() && self.bot.state().tutorial().is_none_or(|t| t.grant != Grant::Spent)
+        self.road.is_some() && self.bot.state().tutorial().is_none_or(|t| !matches!(t.grant, Grant::Spent | Grant::Off))
     }
 
-    /// The deed, as the planner sees it ([`Holdings::road_deed`]).
+    /// The deed, as the planner sees it ([`Holdings::road_deed`]). `None`
+    /// while the city grants none (#451), so the planner saves for a deed
+    /// and buys it, and the road's claim step is done by that.
     pub(super) fn road_deed(&self) -> Option<Grant> {
         self.road.as_ref()?;
-        Some(self.bot.state().tutorial().map_or(Grant::Unearned, |t| t.grant))
+        Some(self.bot.state().tutorial().map_or(Grant::Unearned, |t| t.grant)).filter(|g| *g != Grant::Off)
     }
 
     /// The next step on the road it can take now: the first not done, in
@@ -756,6 +761,7 @@ mod tests {
         let walked = chapters(&[Chapter::Arrival, Chapter::RoadIn, Chapter::Hall, Chapter::People]);
         assert!(ready(Lesson::ClaimHome, &road(walked.clone(), Grant::Open), GATHERER, None));
         assert!(!ready(Lesson::ClaimHome, &road(walked.clone(), Grant::Spent), GATHERER, None));
+        assert!(!ready(Lesson::ClaimHome, &road(walked.clone(), Grant::Off), GATHERER, None), "off, the planner buys it");
         // One step short of the road, and the office is shut to it
         let short: Vec<Lesson> = walked.iter().copied().filter(|s| *s != Lesson::OpenCard).collect();
         assert!(!ready(Lesson::OpenOffice, &road(short, Grant::Unearned), GATHERER, None));

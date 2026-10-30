@@ -979,6 +979,7 @@ mod tests {
             units_settled: true,
             crafts: BTreeMap::new(),
             grants: Default::default(),
+            land: Default::default(),
             refused: Default::default(),
             held_flows: Default::default(),
             load,

@@ -1,0 +1,4 @@
+# The road in's deed grant switched off (#451): the road earns no deed, and
+# a home is bought with Strands as before #440. Every other knob at its
+# default. The B side of #451's balance run, against grants-on.toml.
+deed_grant_enabled = 0

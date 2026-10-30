@@ -1,0 +1,1871 @@
+{
+  "preset": "grants-off.toml",
+  "tunables": {
+    "deed_grant_enabled": 0.0
+  },
+  "citizens": 32,
+  "day_hours": 12.030128798,
+  "tick_hours": 10.025107331666668,
+  "scale": 10.0,
+  "started_ms": 1793326671553,
+  "ended_ms": 1793330285506,
+  "day_offset_ms": 728517,
+  "trades": [
+    {
+      "role": "all-rounder",
+      "citizens": 4,
+      "start": 400,
+      "end": 327,
+      "escrow_start": 0,
+      "escrow_end": 258,
+      "time": {
+        "hours": {
+          "building": 4.956217931944422,
+          "commons": 0.08485931777777789,
+          "detour": 1.50016225361111,
+          "fiber": 3.7950656911111142,
+          "free": 5.636250564444449,
+          "ingots": 3.9997490044444097,
+          "ore": 3.833164634444457,
+          "planks": 1.6478865402777982,
+          "road_in": 0.7893775188888885,
+          "tools": 3.936745165833334,
+          "trading": 4.536981415555555,
+          "wood": 3.55418755000003
+        },
+        "setup": 0.6158192569444457,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          },
+          {
+            "jobs": 8,
+            "activities": 11
+          },
+          {
+            "jobs": 6,
+            "activities": 8
+          },
+          {
+            "jobs": 7,
+            "activities": 9
+          }
+        ]
+      },
+      "failed_steps": 366,
+      "stuck": 0
+    },
+    {
+      "role": "builder",
+      "citizens": 3,
+      "start": 300,
+      "end": 347,
+      "escrow_start": 0,
+      "escrow_end": 247,
+      "time": {
+        "hours": {
+          "building": 9.567910231944449,
+          "detour": 1.4720521549999996,
+          "fiber": 2.8017577630555266,
+          "free": 5.731517304999991,
+          "ingots": 0.7774095816666753,
+          "planks": 2.3016322727777814,
+          "road_in": 0.4460059888888911,
+          "tools": 0.629367387222219,
+          "trading": 1.4172741419444468,
+          "wood": 3.7117206097222137
+        },
+        "setup": 0.24820608583333678,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          },
+          {
+            "jobs": 5,
+            "activities": 6
+          },
+          {
+            "jobs": 5,
+            "activities": 7
+          }
+        ]
+      },
+      "failed_steps": 350,
+      "stuck": 0
+    },
+    {
+      "role": "crafter-ingots",
+      "citizens": 3,
+      "start": 300,
+      "end": 1517,
+      "escrow_start": 0,
+      "escrow_end": 842,
+      "time": {
+        "hours": {
+          "building": 3.5830028500000113,
+          "commons": 0.10305536750000233,
+          "detour": 1.0982909552777786,
+          "fiber": 2.532971072500013,
+          "free": 5.3096930363888974,
+          "ingots": 9.523317243611112,
+          "ore": 1.954761156944441,
+          "planks": 1.0582360347222162,
+          "road_in": 0.6058486797222218,
+          "tools": 1.77061910611111,
+          "trading": 0.6955766336111127
+        },
+        "setup": 0.3177055983333361,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 10
+          },
+          {
+            "jobs": 6,
+            "activities": 9
+          },
+          {
+            "jobs": 5,
+            "activities": 7
+          }
+        ]
+      },
+      "failed_steps": 222,
+      "stuck": 0
+    },
+    {
+      "role": "crafter-planks",
+      "citizens": 3,
+      "start": 300,
+      "end": 1324,
+      "escrow_start": 0,
+      "escrow_end": 106,
+      "time": {
+        "hours": {
+          "building": 1.2685087508333324,
+          "commons": 0.009501358333333876,
+          "detour": 0.8811537027777776,
+          "fiber": 1.5203016658333204,
+          "free": 6.12813250222222,
+          "ingots": 0.09854240805555836,
+          "planks": 10.752114578611105,
+          "road_in": 0.2527079369444445,
+          "tools": 3.501106511666663,
+          "trading": 0.6342782911111133,
+          "wood": 3.8283696711111412
+        },
+        "setup": 0.24721749222221834,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 9
+          },
+          {
+            "jobs": 6,
+            "activities": 7
+          },
+          {
+            "jobs": 7,
+            "activities": 9
+          }
+        ]
+      },
+      "failed_steps": 302,
+      "stuck": 0
+    },
+    {
+      "role": "crafter-tools",
+      "citizens": 3,
+      "start": 300,
+      "end": 82,
+      "escrow_start": 0,
+      "escrow_end": 162,
+      "time": {
+        "hours": {
+          "building": 1.1057814205555554,
+          "commons": 0.0945285208333333,
+          "detour": 1.75011554722222,
+          "fiber": 2.961356101111098,
+          "free": 5.0213358405555635,
+          "ingots": 0.6834141327777792,
+          "ore": 0.16988120861111256,
+          "planks": 2.840680188055536,
+          "road_in": 0.42077111583333365,
+          "tools": 12.988666665277858,
+          "trading": 0.3753466008333475,
+          "wood": 0.7930826799999906
+        },
+        "setup": 0.4106328447222218,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 8
+          },
+          {
+            "jobs": 6,
+            "activities": 9
+          },
+          {
+            "jobs": 6,
+            "activities": 9
+          }
+        ]
+      },
+      "failed_steps": 271,
+      "stuck": 0
+    },
+    {
+      "role": "gatherer-fiber",
+      "citizens": 4,
+      "start": 400,
+      "end": 5756,
+      "escrow_start": 0,
+      "escrow_end": 439,
+      "time": {
+        "hours": {
+          "commons": 0.12096585527778148,
+          "detour": 2.6096015127777763,
+          "fiber": 14.965482079444396,
+          "free": 4.996286220277774,
+          "ore": 3.620333106111115,
+          "road_in": 0.6526749152777782,
+          "trading": 8.391842873333339,
+          "wood": 3.577638755000004
+        },
+        "setup": 0.20158336138889177,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 6
+          },
+          {
+            "jobs": 4,
+            "activities": 7
+          },
+          {
+            "jobs": 3,
+            "activities": 5
+          },
+          {
+            "jobs": 4,
+            "activities": 7
+          }
+        ]
+      },
+      "failed_steps": 564,
+      "stuck": 0
+    },
+    {
+      "role": "gatherer-ore",
+      "citizens": 5,
+      "start": 500,
+      "end": 4608,
+      "escrow_start": 0,
+      "escrow_end": 616,
+      "time": {
+        "hours": {
+          "building": 0.11411574388888601,
+          "commons": 0.17130078083333178,
+          "detour": 3.30424132388889,
+          "fiber": 1.798014121388896,
+          "free": 8.704642213055553,
+          "ingots": 3.0447311244444526,
+          "ore": 18.180342106388913,
+          "road_in": 0.9135501927777758,
+          "tools": 4.619186346388878,
+          "trading": 2.218241239444442,
+          "wood": 4.846951453055546
+        },
+        "setup": 0.7247645294444365,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 7
+          },
+          {
+            "jobs": 6,
+            "activities": 9
+          },
+          {
+            "jobs": 6,
+            "activities": 7
+          },
+          {
+            "jobs": 6,
+            "activities": 9
+          },
+          {
+            "jobs": 4,
+            "activities": 6
+          }
+        ]
+      },
+      "failed_steps": 243,
+      "stuck": 0
+    },
+    {
+      "role": "gatherer-wood",
+      "citizens": 5,
+      "start": 500,
+      "end": 1077,
+      "escrow_start": 0,
+      "escrow_end": 186,
+      "time": {
+        "hours": {
+          "building": 2.486069391666655,
+          "commons": 0.05821726805555549,
+          "detour": 2.5002186097222205,
+          "fiber": 8.518696678333313,
+          "free": 8.078946184444437,
+          "ore": 0.6465534149999907,
+          "planks": 2.8078714174999853,
+          "road_in": 0.7084368847222204,
+          "tools": 0.7523632219444458,
+          "trading": 2.7037882266666657,
+          "wood": 18.71692424361104
+        },
+        "setup": 0.9331434277777775,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          },
+          {
+            "jobs": 3,
+            "activities": 6
+          },
+          {
+            "jobs": 5,
+            "activities": 6
+          },
+          {
+            "jobs": 5,
+            "activities": 7
+          },
+          {
+            "jobs": 5,
+            "activities": 7
+          }
+        ]
+      },
+      "failed_steps": 539,
+      "stuck": 0
+    },
+    {
+      "role": "merchant",
+      "citizens": 2,
+      "start": 200,
+      "end": 822,
+      "escrow_start": 0,
+      "escrow_end": 693,
+      "time": {
+        "hours": {
+          "building": 0.03369484388888999,
+          "commons": 0.04583388861111182,
+          "detour": 1.0001158111111113,
+          "fiber": 7.4526027427777635,
+          "free": 1.2695493255555466,
+          "ingots": 0.42399349388888297,
+          "road_in": 0.25186572166666865,
+          "trading": 9.32869508638889
+        },
+        "setup": 0.02234767777777691,
+        "days": [
+          {
+            "jobs": 2,
+            "activities": 4
+          },
+          {
+            "jobs": 4,
+            "activities": 7
+          }
+        ]
+      },
+      "failed_steps": 297,
+      "stuck": 0
+    }
+  ],
+  "gini_start": 0.0,
+  "gini_end": 0.6518324401008827,
+  "top_tenth_end": 0.5105296343001261,
+  "gini_end_with_escrow": 0.5690095445411922,
+  "flows": {
+    "bazaar_rent": -1080,
+    "court_escrow": -1496,
+    "court_fee": -98,
+    "court_payout": 765,
+    "court_refund": 675,
+    "deed_purchase": -12500,
+    "exchange_deposit": 34246,
+    "market_escrow": -56854,
+    "market_fee": -4359,
+    "market_refund": 17949,
+    "market_sale": 35412,
+    "trade_received": 174,
+    "trade_sent": -174
+  },
+  "faucets": 34246,
+  "sinks": -18037,
+  "deeds": 25,
+  "prices": [
+    {
+      "item": "anvil_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 320
+    },
+    {
+      "item": "brick",
+      "traded": 273,
+      "mean": 4.336996336996337,
+      "target": 8
+    },
+    {
+      "item": "charcoal",
+      "traded": 2,
+      "mean": 6.0,
+      "target": 5
+    },
+    {
+      "item": "chest_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 12
+    },
+    {
+      "item": "clay",
+      "traded": 0,
+      "mean": null,
+      "target": 4
+    },
+    {
+      "item": "fiber",
+      "traded": 0,
+      "mean": null,
+      "target": 1
+    },
+    {
+      "item": "forge_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 150
+    },
+    {
+      "item": "iron_axe",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_axe_head",
+      "traded": 0,
+      "mean": null,
+      "target": 110
+    },
+    {
+      "item": "iron_hammer",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_hammer_head",
+      "traded": 0,
+      "mean": null,
+      "target": 110
+    },
+    {
+      "item": "iron_ingot",
+      "traded": 234,
+      "mean": 42.47863247863248,
+      "target": 50
+    },
+    {
+      "item": "iron_nails",
+      "traded": 0,
+      "mean": null,
+      "target": 6
+    },
+    {
+      "item": "iron_ore",
+      "traded": 524,
+      "mean": 19.893129770992367,
+      "target": 20
+    },
+    {
+      "item": "iron_pickaxe",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_pickaxe_head",
+      "traded": 0,
+      "mean": null,
+      "target": 110
+    },
+    {
+      "item": "iron_sickle",
+      "traded": 0,
+      "mean": null,
+      "target": 130
+    },
+    {
+      "item": "iron_sickle_blade",
+      "traded": 0,
+      "mean": null,
+      "target": 60
+    },
+    {
+      "item": "kiln_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 90
+    },
+    {
+      "item": "knapped_stone",
+      "traded": 0,
+      "mean": null,
+      "target": 13
+    },
+    {
+      "item": "log",
+      "traded": 7776,
+      "mean": 1.3342335390946503,
+      "target": 8
+    },
+    {
+      "item": "plank",
+      "traded": 1512,
+      "mean": 1.6296296296296295,
+      "target": 5
+    },
+    {
+      "item": "rope",
+      "traded": 0,
+      "mean": null,
+      "target": 3
+    },
+    {
+      "item": "sawbench_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 150
+    },
+    {
+      "item": "sticks",
+      "traded": 0,
+      "mean": null,
+      "target": 3
+    },
+    {
+      "item": "stone",
+      "traded": 1,
+      "mean": 5.0,
+      "target": 5
+    },
+    {
+      "item": "stone_axe",
+      "traded": 15,
+      "mean": 49.266666666666666,
+      "target": 50
+    },
+    {
+      "item": "stone_hammer",
+      "traded": 0,
+      "mean": null,
+      "target": 50
+    },
+    {
+      "item": "stone_pickaxe",
+      "traded": 6,
+      "mean": 31.833333333333332,
+      "target": 50
+    },
+    {
+      "item": "stone_sickle",
+      "traded": 0,
+      "mean": null,
+      "target": 50
+    },
+    {
+      "item": "tool_handle",
+      "traded": 0,
+      "mean": null,
+      "target": 13
+    },
+    {
+      "item": "workbench_kit",
+      "traded": 0,
+      "mean": null,
+      "target": 12
+    }
+  ],
+  "strand_drift": 0,
+  "strands_hold": true,
+  "units_hold": true,
+  "units_void": false,
+  "unit_drift": [],
+  "commissions_paid": 508,
+  "wages_paid": 257,
+  "callings": [
+    {
+      "name": "Ada Rushton",
+      "style": "specialist",
+      "favourite": "gatherer-fiber",
+      "time": {
+        "hours": {
+          "detour": 0.7500290980555546,
+          "fiber": 2.9708535433333414,
+          "free": 2.0302682761111184,
+          "ore": 1.0042568272222265,
+          "road_in": 0.09524965666666671,
+          "trading": 2.077582215833333,
+          "wood": 1.054314806388887
+        },
+        "setup": 0.04271554805555833,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 6
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood",
+        "fiber",
+        "ore"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 2,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Leonard Forester",
+      "style": "leaner",
+      "favourite": "gatherer-wood",
+      "time": {
+        "hours": {
+          "building": 0.12136940722221823,
+          "detour": 1.0001162347222219,
+          "fiber": 1.29867997861111,
+          "free": 1.6792687080555573,
+          "ore": 0.6465534149999907,
+          "planks": 0.9413551908333258,
+          "road_in": 0.049501413888889324,
+          "tools": 0.7523632219444458,
+          "trading": 0.15644939333333374,
+          "wood": 3.2392809608333226
+        },
+        "setup": 0.2980474241666642,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood",
+        "tools"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Doris Miner",
+      "style": "specialist",
+      "favourite": "gatherer-ore",
+      "time": {
+        "hours": {
+          "building": 0.0169627133333341,
+          "commons": 0.025273481666667763,
+          "detour": 1.0001350319444464,
+          "free": 1.823275034444448,
+          "ingots": 0.9444741397222245,
+          "ore": 4.088568183611109,
+          "road_in": 0.13480361388888715,
+          "wood": 1.4684173966666674
+        },
+        "setup": 0.20143327805555414,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood",
+        "ore",
+        "ingots"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 3,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Phyllis Joiner",
+      "style": "specialist",
+      "favourite": "crafter-planks",
+      "time": {
+        "hours": {
+          "building": 0.03163903472222218,
+          "commons": 0.009501358333333876,
+          "detour": 0.13109616333333252,
+          "fiber": 0.09117233083333387,
+          "free": 2.2093312944444388,
+          "planks": 4.798936611944445,
+          "road_in": 0.053839039999999824,
+          "tools": 1.1551407558333366,
+          "trading": 0.13797180583333413,
+          "wood": 0.912130866944457
+        },
+        "setup": 0.08058920944444378,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "planks",
+        "wood"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 1,
+        "declined": 0,
+        "ended": 3,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Harold Ironside",
+      "style": "leaner",
+      "favourite": "crafter-ingots",
+      "time": {
+        "hours": {
+          "building": 1.2075274963888927,
+          "commons": 0.0586722880555568,
+          "detour": 0.500021059722223,
+          "fiber": 0.9917492172222309,
+          "free": 1.4883706625000084,
+          "ingots": 2.228003212500006,
+          "ore": 0.634524869999999,
+          "planks": 1.0582360347222162,
+          "road_in": 0.23622265944444476,
+          "tools": 0.3411846055555552,
+          "trading": 0.6702120188888898
+        },
+        "setup": 0.08811386833333446,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 10
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ore",
+        "ingots",
+        "fiber"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Agnes Toller",
+      "style": "specialist",
+      "favourite": "crafter-tools",
+      "time": {
+        "hours": {
+          "building": 0.1105617983333338,
+          "detour": 0.750076969444442,
+          "fiber": 0.45774928666666814,
+          "free": 1.3616385869444478,
+          "ore": 0.16988120861111256,
+          "planks": 1.7044138055555393,
+          "road_in": 0.0966542955555554,
+          "tools": 5.047177682222264,
+          "trading": 0.23733894722223026
+        },
+        "setup": 0.13403870638888882,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 8
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "tools",
+        "planks"
+      ],
+      "asks": {
+        "let_be": 2,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Lillian Mason",
+      "style": "leaner",
+      "favourite": "builder",
+      "time": {
+        "hours": {
+          "building": 2.324574728611108,
+          "detour": 1.222019279722222,
+          "fiber": 0.6557916147222294,
+          "free": 2.257276211666662,
+          "ingots": 0.7774095816666753,
+          "planks": 0.47484403166665956,
+          "road_in": 0.15373703861111226,
+          "tools": 0.629367387222219,
+          "trading": 0.08802942861111296,
+          "wood": 1.3567740497222205
+        },
+        "setup": 0.10216889777777871,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood",
+        "tools"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 1,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Dorothy Reeder",
+      "style": "all-rounder",
+      "time": {
+        "hours": {
+          "building": 1.380850981666673,
+          "commons": 0.048555758611110056,
+          "fiber": 1.5590028727777803,
+          "free": 1.5202096663888884,
+          "ingots": 1.458221577499966,
+          "ore": 1.7393774525000043,
+          "planks": 0.2847334347222228,
+          "road_in": 0.16195796388888856,
+          "trading": 0.08932755138888915,
+          "wood": 1.2003289411111218
+        },
+        "setup": 0.3160794311111075,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 0,
+      "lately": [
+        "ore",
+        "ingots",
+        "wood"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Reginald Ashby",
+      "style": "specialist",
+      "favourite": "gatherer-wood",
+      "time": {
+        "hours": {
+          "commons": 0.05821726805555549,
+          "detour": 0.5000438624999997,
+          "fiber": 1.5301931713888863,
+          "free": 0.43415915333332755,
+          "road_in": 0.13129073611111058,
+          "trading": 2.0025262844444427,
+          "wood": 4.918460261111123
+        },
+        "setup": 0.11312538083333623,
+        "days": [
+          {
+            "jobs": 3,
+            "activities": 6
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Hazel Leadbetter",
+      "style": "leaner",
+      "favourite": "gatherer-ore",
+      "time": {
+        "hours": {
+          "building": 0.04761038500000003,
+          "commons": 0.11800990027777569,
+          "detour": 0.5539533463888864,
+          "fiber": 1.798014121388896,
+          "free": 1.420122263333338,
+          "ingots": 1.6271264091666735,
+          "ore": 2.294419334999999,
+          "road_in": 0.1289530447222217,
+          "tools": 1.7951855930555527,
+          "trading": 0.07457810833333145
+        },
+        "setup": 0.07616582111111009,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ore",
+        "ingots",
+        "fiber"
+      ],
+      "asks": {
+        "let_be": 6,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Albert Turner",
+      "style": "leaner",
+      "favourite": "crafter-planks",
+      "time": {
+        "hours": {
+          "building": 0.02463599861111132,
+          "fiber": 1.1774772752777753,
+          "free": 2.023528236111115,
+          "planks": 3.0975416088888847,
+          "road_in": 0.05843696222222278,
+          "tools": 1.5643520755555531,
+          "trading": 0.27521677583333193,
+          "wood": 1.6336499000000106
+        },
+        "setup": 0.08250839194444261,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 0,
+      "lately": [
+        "planks",
+        "wood",
+        "fiber"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Lionel Furness",
+      "style": "all-rounder",
+      "time": {
+        "hours": {
+          "building": 0.6901799838888767,
+          "commons": 0.012820496944445203,
+          "detour": 0.500070044722221,
+          "fiber": 1.0199853569444441,
+          "free": 1.6540996825000054,
+          "ingots": 1.1681740877777802,
+          "ore": 0.06736256722222578,
+          "planks": 0.7455822102777754,
+          "road_in": 0.17827331444444408,
+          "tools": 1.0683827563888952,
+          "trading": 0.0812856680555547,
+          "wood": 2.3418231247222425
+        },
+        "setup": 0.13274853000000109,
+        "days": [
+          {
+            "jobs": 8,
+            "activities": 11
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood",
+        "ingots"
+      ],
+      "asks": {
+        "let_be": 8,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Edith Wright",
+      "style": "leaner",
+      "favourite": "crafter-tools",
+      "time": {
+        "hours": {
+          "building": 0.7871058691666655,
+          "commons": 0.04307613888888984,
+          "detour": 0.5000188338888888,
+          "fiber": 1.8703907072222168,
+          "free": 1.6194226533333413,
+          "planks": 0.39232805555555217,
+          "road_in": 0.17764274611111164,
+          "tools": 3.2079478513889024,
+          "trading": 0.11540807888889404,
+          "wood": 0.7930826799999906
+        },
+        "setup": 0.1071274097222219,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "tools",
+        "planks",
+        "wood"
+      ],
+      "asks": {
+        "let_be": 1,
+        "traded": 0,
+        "declined": 0,
+        "ended": 3,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Rose Thatcher",
+      "style": "specialist",
+      "favourite": "builder",
+      "time": {
+        "hours": {
+          "building": 4.357805277222228,
+          "fiber": 0.5281233758333337,
+          "free": 1.9414409072222236,
+          "planks": 0.8549657333333336,
+          "road_in": 0.13592066888888954,
+          "trading": 0.24156432527777794,
+          "wood": 1.4257395269444353
+        },
+        "setup": 0.09349388805555756,
+        "days": [
+          {
+            "jobs": 5,
+            "activities": 6
+          }
+        ]
+      },
+      "detour_days": 0,
+      "lately": [
+        "wood",
+        "planks",
+        "building"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Herbert Flaxman",
+      "style": "specialist",
+      "favourite": "gatherer-fiber",
+      "time": {
+        "hours": {
+          "commons": 0.06183057027778016,
+          "detour": 0.35944612166666623,
+          "fiber": 3.455841192499981,
+          "free": 0.982435239999992,
+          "ore": 1.5720056000000024,
+          "road_in": 0.13332365027777818,
+          "trading": 2.1213253933333363,
+          "wood": 0.8456386191666725
+        },
+        "setup": 0.13235202166666804,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ore",
+        "wood",
+        "fiber"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Alice Hewitt",
+      "style": "leaner",
+      "favourite": "gatherer-wood",
+      "time": {
+        "hours": {
+          "building": 1.1036637633333353,
+          "fiber": 1.7908260725000038,
+          "free": 1.9549562511111054,
+          "planks": 0.9505082722222067,
+          "road_in": 0.12440288444444421,
+          "trading": 0.2338621172222206,
+          "wood": 3.3421340713888665
+        },
+        "setup": 0.1899865955555557,
+        "days": [
+          {
+            "jobs": 5,
+            "activities": 6
+          }
+        ]
+      },
+      "detour_days": 0,
+      "lately": [
+        "wood",
+        "planks"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 1,
+        "declined": 1,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Mabel Delve",
+      "style": "specialist",
+      "favourite": "gatherer-ore",
+      "time": {
+        "hours": {
+          "building": 0.006118699166664854,
+          "free": 2.1495234897222195,
+          "ingots": 0.3135277905555558,
+          "ore": 4.512713443888872,
+          "road_in": 0.23451639722222253,
+          "tools": 0.9909571227777745,
+          "trading": 0.13109412944444543,
+          "wood": 1.1995406450000017
+        },
+        "setup": 0.108083700277774,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 0,
+      "lately": [
+        "ore",
+        "wood"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Edwin Sawyer",
+      "style": "leaner",
+      "favourite": "crafter-planks",
+      "time": {
+        "hours": {
+          "building": 1.2122337174999989,
+          "detour": 0.7500575394444451,
+          "fiber": 0.25165205972221116,
+          "free": 1.8952729716666665,
+          "ingots": 0.09854240805555836,
+          "planks": 2.8556363577777746,
+          "road_in": 0.1404319347222219,
+          "tools": 0.7816136802777729,
+          "trading": 0.22108970944444728,
+          "wood": 1.2825889041666736
+        },
+        "setup": 0.08411989083333195,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "planks",
+        "wood"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Ruth Furness",
+      "style": "leaner",
+      "favourite": "crafter-ingots",
+      "time": {
+        "hours": {
+          "building": 1.0666887013888966,
+          "commons": 0.04438307944444553,
+          "detour": 0.4364862819444446,
+          "fiber": 1.1595242644444426,
+          "free": 1.9030380541666636,
+          "ingots": 2.7614958274999917,
+          "ore": 0.3967164041666651,
+          "road_in": 0.17110150638888832,
+          "tools": 1.4294345005555549,
+          "trading": 0.02226947222222253
+        },
+        "setup": 0.1461586622222235,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ingots",
+        "ore",
+        "fiber"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Hilda Arkwright",
+      "style": "specialist",
+      "favourite": "crafter-tools",
+      "time": {
+        "hours": {
+          "building": 0.20811375305555613,
+          "commons": 0.05145238194444346,
+          "detour": 0.5000197438888891,
+          "fiber": 0.6332161072222129,
+          "free": 2.0402746002777743,
+          "ingots": 0.6834141327777792,
+          "planks": 0.7439383269444444,
+          "road_in": 0.14647407416666663,
+          "tools": 4.733541131666691,
+          "trading": 0.02259957472222318
+        },
+        "setup": 0.16946672861111106,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "tools"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Arthur Mason",
+      "style": "all-rounder",
+      "time": {
+        "hours": {
+          "building": 1.3670335847222181,
+          "detour": 1.000092208888889,
+          "free": 0.9519216736111114,
+          "ingots": 0.7162823655555544,
+          "ore": 0.8542295063888936,
+          "planks": 0.6175708952778001,
+          "road_in": 0.258368903333333,
+          "tools": 1.5869081044444395,
+          "trading": 2.1196115983333312
+        },
+        "setup": 0.10928882916667038,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 8
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ore",
+        "ingots",
+        "planks"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Maud Roper",
+      "style": "specialist",
+      "favourite": "gatherer-fiber",
+      "time": {
+        "hours": {
+          "detour": 0.7500639013888888,
+          "fiber": 4.079080704444397,
+          "free": 1.9835827041666638,
+          "ore": 0.8611420527777724,
+          "road_in": 0.19711107222222224,
+          "trading": 2.0350248241666664
+        },
+        "setup": 0.006936803611111042,
+        "days": [
+          {
+            "jobs": 3,
+            "activities": 5
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "fiber",
+        "ore"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Elsie Underwood",
+      "style": "specialist",
+      "favourite": "gatherer-wood",
+      "time": {
+        "hours": {
+          "building": 0.5307957133333296,
+          "detour": 0.25000186138888886,
+          "fiber": 1.616788124166658,
+          "free": 1.85296612777777,
+          "planks": 0.05111919083333483,
+          "road_in": 0.15151150694444238,
+          "trading": 0.1118198469444458,
+          "wood": 4.943762470833284
+        },
+        "setup": 0.16807022027777685,
+        "days": [
+          {
+            "jobs": 5,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Sidney Miner",
+      "style": "leaner",
+      "favourite": "gatherer-ore",
+      "time": {
+        "hours": {
+          "building": 0.043423946388887025,
+          "commons": 0.028017398888888323,
+          "detour": 1.2501236208333357,
+          "free": 1.374353339722223,
+          "ingots": 0.1596027849999988,
+          "ore": 2.7519966633333617,
+          "road_in": 0.21177606638888857,
+          "tools": 1.380592983333329,
+          "trading": 0.8720231752777767,
+          "wood": 1.4135107152777646
+        },
+        "setup": 0.18950011749999995,
+        "days": [
+          {
+            "jobs": 6,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ore",
+        "wood",
+        "tools"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Ida Ironmonger",
+      "style": "specialist",
+      "favourite": "crafter-ingots",
+      "time": {
+        "hours": {
+          "building": 1.308786652222222,
+          "detour": 0.16178361361111104,
+          "fiber": 0.3816975908333393,
+          "free": 1.9182843197222255,
+          "ingots": 4.533818203611114,
+          "ore": 0.9235198827777769,
+          "road_in": 0.19852451388888867,
+          "trading": 0.003095142500000314
+        },
+        "setup": 0.08343306777777817,
+        "days": [
+          {
+            "jobs": 5,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ingots",
+        "ore"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Beatrice Builder",
+      "style": "leaner",
+      "favourite": "builder",
+      "time": {
+        "hours": {
+          "building": 2.885530226111114,
+          "detour": 0.2500328752777776,
+          "fiber": 1.6178427724999636,
+          "free": 1.5328001861111051,
+          "planks": 0.9718225077777882,
+          "road_in": 0.1563482813888893,
+          "trading": 1.087680388055556,
+          "wood": 0.9292070330555582
+        },
+        "setup": 0.052543300000000515,
+        "days": [
+          {
+            "jobs": 5,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood",
+        "fiber",
+        "planks"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Mildred Flaxman",
+      "style": "all-rounder",
+      "time": {
+        "hours": {
+          "building": 1.5181533816666537,
+          "commons": 0.023483062222222628,
+          "fiber": 1.21607746138889,
+          "free": 1.5100195419444438,
+          "ingots": 0.6570709736111091,
+          "ore": 1.1721951083333335,
+          "road_in": 0.19077733722222273,
+          "tools": 1.2814543049999993,
+          "trading": 2.2467565977777797,
+          "wood": 0.012035484166665888
+        },
+        "setup": 0.057702466666666785,
+        "days": [
+          {
+            "jobs": 7,
+            "activities": 9
+          }
+        ]
+      },
+      "detour_days": 0,
+      "lately": [
+        "ore",
+        "fiber",
+        "ingots"
+      ],
+      "asks": {
+        "let_be": 1,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Ernest Ashby",
+      "style": "leaner",
+      "favourite": "gatherer-wood",
+      "time": {
+        "hours": {
+          "building": 0.730240507777772,
+          "detour": 0.7500566511111104,
+          "fiber": 2.2822093316666563,
+          "free": 2.157595944166676,
+          "planks": 0.864888763611118,
+          "road_in": 0.2517303433333339,
+          "trading": 0.1991305847222229,
+          "wood": 2.2732864794444456
+        },
+        "setup": 0.16391380694444457,
+        "days": [
+          {
+            "jobs": 5,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "wood",
+        "fiber",
+        "planks"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 1,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Stanley Quarry",
+      "style": "specialist",
+      "favourite": "gatherer-ore",
+      "time": {
+        "hours": {
+          "detour": 0.5000293247222214,
+          "free": 1.9373680858333264,
+          "ore": 4.532644480555573,
+          "road_in": 0.20350107055555594,
+          "tools": 0.45245064722222117,
+          "trading": 1.1405458263888884,
+          "wood": 0.7654826961111119
+        },
+        "setup": 0.14958161249999824,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 6
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "ore"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Iris Fielding",
+      "style": "specialist",
+      "favourite": "gatherer-fiber",
+      "time": {
+        "hours": {
+          "commons": 0.059135285000001314,
+          "detour": 0.7500623916666668,
+          "fiber": 4.459706639166675,
+          "ore": 0.1829286261111136,
+          "road_in": 0.22699053611111103,
+          "trading": 2.1579104400000024,
+          "wood": 1.677685329444445
+        },
+        "setup": 0.01957898805555436,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "fiber",
+        "wood"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Bernard Spicer",
+      "style": "specialist",
+      "favourite": "merchant",
+      "time": {
+        "hours": {
+          "detour": 0.5001090438888891,
+          "fiber": 4.075426716666654,
+          "road_in": 0.1199442447222225,
+          "trading": 5.230687538611112
+        },
+        "setup": 0.0,
+        "days": [
+          {
+            "jobs": 2,
+            "activities": 4
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "fiber"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "Nora Draper",
+      "style": "specialist",
+      "favourite": "merchant",
+      "time": {
+        "hours": {
+          "building": 0.03369484388888999,
+          "commons": 0.04583388861111182,
+          "detour": 0.5000067672222221,
+          "fiber": 3.377176026111109,
+          "free": 1.2695493255555466,
+          "ingots": 0.42399349388888297,
+          "road_in": 0.13192147694444614,
+          "trading": 4.098007547777779
+        },
+        "setup": 0.02234767777777691,
+        "days": [
+          {
+            "jobs": 4,
+            "activities": 7
+          }
+        ]
+      },
+      "detour_days": 1,
+      "lately": [
+        "fiber"
+      ],
+      "asks": {
+        "let_be": 0,
+        "traded": 0,
+        "declined": 0,
+        "ended": 0,
+        "failed": 0
+      }
+    }
+  ],
+  "earning": {
+    "building": {
+      "hours": 23.115301164722204,
+      "strands": -1138
+    },
+    "commons": {
+      "hours": 0.688262357222228,
+      "strands": 0
+    },
+    "detour": {
+      "hours": 16.115951871388887,
+      "strands": 0
+    },
+    "fiber": {
+      "hours": 46.34624791555544,
+      "strands": 33371
+    },
+    "free": {
+      "hours": 50.87635319194443,
+      "strands": 0
+    },
+    "ingots": {
+      "hours": 18.55115698888887,
+      "strands": -910
+    },
+    "ore": {
+      "hours": 28.40503562750003,
+      "strands": 7373
+    },
+    "planks": {
+      "hours": 21.40842103194442,
+      "strands": -66
+    },
+    "road_in": {
+      "hours": 5.041238954722221,
+      "strands": 0
+    },
+    "tools": {
+      "hours": 28.198054404444505,
+      "strands": -1185
+    },
+    "trading": {
+      "hours": 30.302024508888906,
+      "strands": -7799
+    },
+    "wood": {
+      "hours": 39.02887496249996,
+      "strands": 5324
+    }
+  },
+  "land": {
+    "guild_district": {
+      "lots": 72,
+      "owned": 0,
+      "granted": 0,
+      "owners": 0,
+      "assessed": 0
+    },
+    "rural": {
+      "lots": 912,
+      "owned": 12,
+      "granted": 0,
+      "owners": 12,
+      "assessed": 6000
+    },
+    "suburban": {
+      "lots": 977,
+      "owned": 9,
+      "granted": 0,
+      "owners": 9,
+      "assessed": 4500
+    },
+    "urban": {
+      "lots": 1016,
+      "owned": 4,
+      "granted": 0,
+      "owners": 4,
+      "assessed": 2000
+    }
+  }
+}

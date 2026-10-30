@@ -470,7 +470,7 @@ fn slip(ui: &mut egui::Ui, view: &View, taxes: Vec<(Zone, i64)>) {
                         ui.painter().circle_filled(seal.center(), 15.0, theme::INK_DOWN.gamma_multiply(0.35));
                         theme::tick(ui.painter(), seal.shrink(9.0), theme::PAPER);
                     }
-                    Grant::Unearned => {
+                    Grant::Unearned | Grant::Off => {
                         ui.painter().circle_stroke(seal.center(), 14.0, Stroke::new(1.0_f32, theme::INK_DIM.gamma_multiply(0.6)));
                     }
                 }

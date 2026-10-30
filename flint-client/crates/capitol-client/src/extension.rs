@@ -825,13 +825,15 @@ impl CapitolExtension {
     /// Offline, open the Deeds Office (#448) on sample facts and a sample
     /// register (`--deeds-sample`): `compare` (the default), `lots` (the
     /// farms, the deed open), `shown` (the first farm shown on the ground),
-    /// `unearned`, `spent` or `confirm` (the claim asked once).
+    /// `unearned`, `spent`, `off` (no deeds granted, #451) or `confirm`
+    /// (the claim asked once).
     pub fn with_deeds_sample(mut self, which: Option<&str>) -> Self {
         use capitol_core::protocol::tutorial::Grant;
         if let (Some(which), None) = (which, &self.session) {
             let grant = match which {
                 "unearned" => Grant::Unearned,
                 "spent" => Grant::Spent,
+                "off" => Grant::Off,
                 _ => Grant::Open,
             };
             let lots = ui::deeds::sample_lots(rules::Zone::Rural);

@@ -28,7 +28,8 @@
 //!
 //! Land has books of its own: the road in's deed grants (#440), land given
 //! with no Strand moving, are counted as they stand (`deed_grants::books`),
-//! with what their plots are assessed at.
+//! with what their plots are assessed at, and since #451 every zone's lots,
+//! held, granted and by how many owners (`deed_grants::land`).
 //!
 //! A craft also counts itself by recipe (D2.4): its outputs and their
 //! quality, in [`Flows::crafted`], counted with its units, so the
@@ -277,6 +278,7 @@ pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
     let mut escrow = escrow_by_player(&mut tx).await?;
     let held_flows = super::guilds::held_flows(&mut tx).await?;
     let grants = super::deed_grants::books(&mut tx).await?;
+    let land = super::deed_grants::land(&mut tx).await?;
     tx.commit().await?;
 
     let mut flows: BTreeMap<Uuid, BTreeMap<String, i64>> = BTreeMap::new();
@@ -305,6 +307,7 @@ pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
         units_settled,
         crafts,
         grants,
+        land,
         refused: BTreeMap::new(),
         held_flows,
         load: Default::default(),
