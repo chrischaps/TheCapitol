@@ -1259,6 +1259,10 @@ pub fn level(
             response.mark_changed();
         }
     }
+    // A slider to a screen reader, and to the pad's ring, which holds it to
+    // step it (#517)
+    let now = f64::from(*value);
+    response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), now, ""));
     let t = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
     let hot = response.hovered() || response.dragged() || response.has_focus();
     let painter = ui.painter();

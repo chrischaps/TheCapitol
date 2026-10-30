@@ -130,7 +130,7 @@ const PANELS: Group = (
         ("[?] or [F1]", "{Select}", "This list"),
         // Inside a panel, the pad's alone (#331): Click's card leaves these out
         ("", "{DPad}", "In a panel, move round it"),
-        ("", "{A}", "Press, or pick up and put down"),
+        ("", "{A}", "Press, pick up, or hold a field or level"),
         ("", "{X}", "Pick up half a stack"),
         ("", "{LB} {RB}", "The next panel along"),
     ],

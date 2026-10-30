@@ -20,11 +20,28 @@
 //! Slots take the d-pad as a grid without anything of their own, since the
 //! cone finds the next cell. A press on one picks its stack up, and a press
 //! on another puts it there (`slots`, its `Carry`); X picks up half, as a
-//! shift-drag does. Fields still want the keys: the pad has no way to type
-//! (#517).
+//! shift-drag does.
+//!
+//! Some parts want more than a press (#517), and A takes hold of them
+//! instead ([`Hold`]). What a part is comes from what egui tells a screen
+//! reader as it takes the focus ([`kind_of`]):
+//! - **A level** (`theme::level`, Settings' volumes and sensitivities): left
+//!   and right step it while it's held, as the arrow keys do; A, B, up or
+//!   down let go.
+//! - **A field**, text or a number (a `DragValue` is a field while it has
+//!   the focus): the pad's keys come up beside it ([`super::pad_keys`]),
+//!   and the d-pad walks them. A types, X deletes, the shoulders move the
+//!   caret, and B or Done puts them away.
+//!
+//! A long list drawn a row at a time (the Deeds Office's free lots) is shown
+//! with [`FollowFocus::show_rows_following`], which lays a row out past each
+//! edge of the view, so the ring has somewhere to go and the list scrolls
+//! on to it.
 
+use super::pad_keys::{Field, Keyboard, Typed};
 use super::theme::{GOLD, GOLD_LIGHT};
-use egui::{Context, Id, LayerId, Order, Rect, Stroke, Ui, Vec2};
+use egui::output::OutputEvent;
+use egui::{Context, Id, LayerId, Order, Rect, Stroke, Ui, Vec2, WidgetType};
 use std::collections::HashMap;
 
 /// A d-pad direction.
@@ -82,6 +99,30 @@ pub struct PadNav {
     frame: u64,
     /// The widget the ring lent egui's focus to this pass.
     lent: Option<Id>,
+    /// What the ring is on, as egui told it when the ring got there.
+    ringed: Option<(Id, Kind)>,
+    /// A level or a field the ring has hold of (#517).
+    hold: Option<Hold>,
+    /// The keys typed into the held field this pass.
+    typed: bool,
+}
+
+/// What a widget the ring is on wants from A.
+#[derive(Debug, Clone, PartialEq)]
+enum Kind {
+    /// A press: a button, a tab, a slot.
+    Press,
+    /// Held, to step with left and right.
+    Level,
+    /// Held, to type into.
+    Field(Field),
+}
+
+/// What the ring has hold of.
+#[derive(Debug, Clone, PartialEq)]
+enum Hold {
+    Level(Id),
+    Keys(Keyboard),
 }
 
 /// The scroll bars drawn last frame, which take clicks and drags but are no
@@ -126,19 +167,28 @@ impl PadNav {
         });
         let spots = spots(ctx);
         let newest = self.note_layers(&spots);
-        let asked = std::mem::take(&mut self.asked);
+        let mut asked = std::mem::take(&mut self.asked);
         self.lent = None;
+        self.typed = false;
         let was = std::mem::replace(&mut self.active, active);
+        let typing = matches!(self.hold, Some(Hold::Keys(_)));
         ctx.data_mut(|d| {
             d.insert_temp(Self::active_id(), active);
-            d.insert_temp(Self::half_id(), active && asked.half);
+            d.insert_temp(Self::half_id(), active && asked.half && !typing);
         });
         if !active {
+            self.hold = None;
             if was {
                 super::slots::drop_carry(ctx);
                 self.last = None;
             }
             return;
+        }
+        if self.type_keys(ctx, &asked) {
+            return;
+        }
+        if let Some(Hold::Level(_)) = self.hold {
+            asked = self.step_level(ctx, asked);
         }
         let find = |id: Option<Id>| id.and_then(|id| spots.iter().find(|s| s.id == id).copied());
         let focused = ctx.memory(|m| m.focused());
@@ -172,17 +222,90 @@ impl PadNav {
             }
         }
         self.last = at.map(|s| s.id);
-        if (asked.press || asked.half) && at.is_some() {
-            // What a focused widget answers as a click
-            ctx.input_mut(|i| {
-                i.events.push(egui::Event::Key {
-                    key: egui::Key::Enter,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                })
-            });
+        if let (true, Some(spot)) = (asked.press || asked.half, at) {
+            self.take(ctx, spot.id);
+        }
+    }
+
+    /// A or X on `id`: a field brings up the keys, a level is held, and
+    /// anything else is pressed, with the Enter a focused widget answers as
+    /// a click.
+    fn take(&mut self, ctx: &Context, id: Id) {
+        let kind = self.ringed.as_ref().filter(|(on, _)| *on == id).map(|(_, kind)| kind.clone());
+        match kind {
+            Some(Kind::Field(holds)) => self.hold = Some(Hold::Keys(Keyboard::open(id, &holds))),
+            Some(Kind::Level) => self.hold = Some(Hold::Level(id)),
+            _ => push_key(ctx, egui::Key::Enter),
+        }
+    }
+
+    /// A held level: left and right step it, as the arrow keys do. Up or
+    /// down let go and go on; A, X or a shoulder let go.
+    fn step_level(&mut self, ctx: &Context, mut asked: Asked) -> Asked {
+        match asked.dir {
+            Some(Dir::Left) => push_key(ctx, egui::Key::ArrowLeft),
+            Some(Dir::Right) => push_key(ctx, egui::Key::ArrowRight),
+            Some(_) => self.hold = None,
+            None => {}
+        }
+        if matches!(asked.dir, Some(Dir::Left | Dir::Right)) {
+            asked.dir = None;
+        }
+        if asked.press || asked.half || asked.hop != 0 {
+            self.hold = None;
+            asked.press = false;
+            asked.half = false;
+        }
+        asked
+    }
+
+    /// The keys up over a field: the d-pad walks them, A types, X deletes
+    /// and the shoulders move the caret, into the field, which has the
+    /// focus for the pass to take it. False with no keys up, or when their
+    /// field's gone.
+    fn type_keys(&mut self, ctx: &Context, asked: &Asked) -> bool {
+        let Some(Hold::Keys(keys)) = &mut self.hold else { return false };
+        let field = keys.field;
+        if ctx.read_response(field).is_none() {
+            self.hold = None;
+            return false;
+        }
+        if let Some(dir) = asked.dir {
+            keys.go(dir);
+        }
+        let mut events = keys.caret(asked.hop);
+        let mut done = false;
+        for typed in [asked.half.then(|| keys.delete()), asked.press.then(|| keys.press())].into_iter().flatten() {
+            match typed {
+                Typed::Events(e) => events.extend(e),
+                Typed::Done => done = true,
+            }
+        }
+        if done {
+            self.hold = None;
+        }
+        ctx.memory_mut(|m| m.request_focus(field));
+        self.lent = Some(field);
+        self.last = Some(field);
+        self.typed = !events.is_empty();
+        ctx.input_mut(|i| i.events.extend(events));
+        true
+    }
+
+    /// B: lets go of what the ring holds, a level or a field's keys. True
+    /// if it held one, and B goes no further.
+    pub fn let_go(&mut self) -> bool {
+        self.hold.take().is_some()
+    }
+
+    /// What the widget in focus is, from what egui told a screen reader as
+    /// it took the focus or changed. A widget that keeps the focus says
+    /// nothing more, so what it said is kept.
+    fn note_kind(&mut self, ctx: &Context, id: Id) {
+        match ctx.output(|o| kind_of(&o.events)) {
+            Some(kind) => self.ringed = Some((id, kind)),
+            None if self.ringed.as_ref().is_none_or(|(on, _)| *on != id) => self.ringed = Some((id, Kind::Press)),
+            None => {}
         }
     }
 
@@ -197,7 +320,20 @@ impl PadNav {
         if !self.active {
             return;
         }
-        let Some(id) = ctx.memory(|m| m.focused()) else { return };
+        let focused = ctx.memory(|m| m.focused());
+        if let Some(id) = focused {
+            self.note_kind(ctx, id);
+        }
+        if let Some(Hold::Keys(keys)) = &mut self.hold {
+            if focused != Some(keys.field) {
+                // A line that took Return lets the focus go, and the keys go
+                // with it
+                self.hold = None;
+            } else if let (false, Some((_, Kind::Field(holds)))) = (self.typed, &self.ringed) {
+                keys.saw(holds);
+            }
+        }
+        let Some(id) = focused else { return };
         let typing = egui::TextEdit::load_state(ctx, id).is_some();
         if self.lent == Some(id) || !typing {
             // A press can move the focus on: the ring follows it
@@ -207,8 +343,22 @@ impl PadNav {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }
         let Some(response) = ctx.read_response(id) else { return };
-        if response.interact_rect.is_positive() {
-            ring(ctx, response.interact_rect, ctx.input(|i| i.time));
+        let (rect, time) = (response.interact_rect, ctx.input(|i| i.time));
+        if !rect.is_positive() {
+            return;
+        }
+        match &self.hold {
+            Some(Hold::Keys(keys)) => {
+                // The field holds still, and the ring goes round the keys
+                let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("capitol_pad_ring")));
+                painter.rect_stroke(rect.expand(3.0), 6.0, Stroke::new(2.0_f32, GOLD));
+                keys.show(ctx, rect, time);
+            }
+            Some(Hold::Level(_)) => {
+                ring(ctx, rect, time);
+                held(ctx, rect);
+            }
+            None => ring(ctx, rect, time),
         }
     }
 
@@ -275,8 +425,9 @@ pub fn taking_half(ctx: &Context) -> bool {
 /// Every widget last frame that can take the focus and is drawn somewhere,
 /// on a layer that's showing, and not under another panel. Not the panel
 /// itself (an area takes clicks as a whole, to come to the front), and not
-/// what only drags: a list's surface for a drag to scroll, or a slider,
-/// which wants keys the pad hasn't (#517), nor a scroll bar.
+/// what only drags: a list's surface for a drag to scroll, or egui's own
+/// slider (the panels draw theirs with `theme::level`, which takes a
+/// click, so the ring goes to it), nor a scroll bar.
 pub fn spots(ctx: &Context) -> Vec<Spot> {
     let showing = ctx.memory(|m| m.areas().visible_layer_ids());
     let bars = ctx.data_mut(|d| d.get_temp_mut_or_default::<Bars>(Bars::id()).last.clone());
@@ -295,7 +446,14 @@ pub fn spots(ctx: &Context) -> Vec<Spot> {
             })
             .collect()
     });
-    spots.retain(|s| ctx.layer_id_at(s.rect.center()).is_none_or(|top| top == s.layer));
+    spots.retain(|s| {
+        // A widget scrolled out past its panel's edge (a list's next row) is
+        // over whatever lies beyond, the world as like as not, so it's
+        // judged at the edge nearest it (#517)
+        let panel = ctx.memory(|m| m.area_rect(s.layer.id)).map(|p| p.shrink(1.0));
+        let at = panel.filter(|p| p.is_positive()).map_or(s.rect.center(), |p| s.rect.center().clamp(p.min, p.max));
+        ctx.layer_id_at(at).is_none_or(|top| top == s.layer)
+    });
     spots
 }
 
@@ -361,9 +519,46 @@ pub fn hop(spots: &[Spot], at: Option<Spot>, by: i32) -> Option<Spot> {
     first_of(spots, panels[to as usize].0)
 }
 
+/// What the widget that took the focus or changed is, from this pass's
+/// events: a `DragValue`'s number, a level, a field's text, or a press.
+fn kind_of(events: &[OutputEvent]) -> Option<Kind> {
+    let mut kind = None;
+    for event in events {
+        let info = event.widget_info();
+        match info.typ {
+            // A DragValue with the focus is a field inside: what it says of
+            // itself wins over what its field says
+            WidgetType::DragValue => return Some(Kind::Field(Field::Number(info.value))),
+            WidgetType::Slider => return Some(Kind::Level),
+            WidgetType::TextEdit => kind = Some(Kind::Field(Field::Text(info.current_text_value.clone().unwrap_or_default()))),
+            _ if matches!(event, OutputEvent::FocusGained(_)) => kind = kind.or(Some(Kind::Press)),
+            _ => {}
+        }
+    }
+    kind
+}
+
+fn push_key(ctx: &Context, key: egui::Key) {
+    ctx.input_mut(|i| {
+        i.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE })
+    });
+}
+
+/// A held level's marks: a gold chevron each side, for the way the d-pad
+/// steps it.
+fn held(ctx: &Context, rect: Rect) {
+    let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("capitol_pad_ring")));
+    let y = rect.center().y;
+    for (x, way) in [(rect.left() - 10.0, -1.0), (rect.right() + 10.0, 1.0)] {
+        let tip = egui::pos2(x + 4.0 * way, y);
+        let points = vec![tip, egui::pos2(x - 3.0 * way, y - 6.0), egui::pos2(x - 3.0 * way, y + 6.0)];
+        painter.add(egui::Shape::convex_polygon(points, GOLD_LIGHT, Stroke::NONE));
+    }
+}
+
 /// The ring: gold, a hair outside the widget, breathing a little so the eye
 /// finds it, with a glow under it.
-fn ring(ctx: &Context, rect: Rect, time: f64) {
+pub(super) fn ring(ctx: &Context, rect: Rect, time: f64) {
     let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("capitol_pad_ring")));
     let breath = 0.5 + 0.5 * (time * std::f64::consts::TAU / 1.6).sin() as f32;
     let outer = rect.expand(3.0);
@@ -376,6 +571,20 @@ pub trait FollowFocus {
     /// `ScrollArea::show`, then scrolled to the widget the ring just moved
     /// to, if it's in this area: in view by a margin, from the next frame.
     fn show_following<R>(self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R>;
+
+    /// `ScrollArea::show_rows` for the ring (#517): `total` rows of
+    /// `row_height`, each drawn by `add_row` with its index, only those in
+    /// view and one more past each edge, so the ring can step on to a row
+    /// out of view and the list scrolls it in. Each row is a scope of its
+    /// own, so its widgets keep their ids as the list scrolls and the ring
+    /// stays on the one it was on.
+    fn show_rows_following(
+        self,
+        ui: &mut Ui,
+        row_height: f32,
+        total: usize,
+        add_row: impl FnMut(&mut Ui, usize),
+    ) -> egui::scroll_area::ScrollAreaOutput<()>;
 }
 
 impl FollowFocus for egui::ScrollArea {
@@ -385,6 +594,46 @@ impl FollowFocus for egui::ScrollArea {
         keep_in_view(ui, &out);
         out
     }
+
+    fn show_rows_following(
+        self,
+        ui: &mut Ui,
+        row_height: f32,
+        total: usize,
+        mut add_row: impl FnMut(&mut Ui, usize),
+    ) -> egui::scroll_area::ScrollAreaOutput<()> {
+        let gap = ui.spacing().item_spacing.y;
+        let step = row_height + gap;
+        let out = self.show_viewport(ui, |ui, viewport| {
+            ui.set_height((step * total as f32 - gap).max(0.0));
+            let rows = rows_around(viewport.y_range(), step, total);
+            let top = ui.max_rect().top();
+            let span = egui::Rangef::new(top + rows.start as f32 * step, top + rows.end as f32 * step);
+            let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), span);
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                // One id a row, as egui's own `show_rows` skips
+                ui.skip_ahead_auto_ids(rows.start);
+                for i in rows {
+                    ui.scope(|ui| add_row(ui, i));
+                }
+            });
+        });
+        note_scroll_bars(ui.ctx(), out.id);
+        keep_in_view(ui, &out);
+        out
+    }
+}
+
+/// The rows of a list of `total` rows `step` apart to lay out for `view`
+/// (the list's own y, from its top): those in view, and one more past each
+/// edge.
+pub fn rows_around(view: egui::Rangef, step: f32, total: usize) -> std::ops::Range<usize> {
+    if step <= 0.0 || total == 0 {
+        return 0..0;
+    }
+    let first = ((view.min / step).floor().max(0.0) as usize).saturating_sub(1);
+    let last = ((view.max / step).ceil().max(0.0) as usize + 1).min(total);
+    first.min(last)..last
 }
 
 fn keep_in_view<R>(ui: &Ui, out: &egui::scroll_area::ScrollAreaOutput<R>) {
@@ -425,6 +674,7 @@ pub fn scrolled_to(offset: f32, view: egui::Rangef, target: egui::Rangef, height
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
 
     fn spot(n: u64, layer: &str, x: f32, y: f32) -> Spot {
         Spot {
@@ -552,5 +802,155 @@ mod tests {
         frame(&mut nav, Asked::default(), &mut clicked);
         nav.begin(&ctx, false);
         assert!(!active(&ctx));
+    }
+
+    /// One pass through egui with `panel` in an area, as the extension
+    /// drives the ring.
+    fn pass(ctx: &Context, nav: &mut PadNav, asked: Asked, mut panel: impl FnMut(&mut Ui)) {
+        nav.ask(asked);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            nav.begin(ctx, true);
+            egui::Area::new(Id::new("panel")).fixed_pos(egui::pos2(100.0, 100.0)).show(ctx, |ui| panel(ui));
+            nav.end(ctx);
+        });
+    }
+
+    fn go(dir: Dir) -> Asked {
+        Asked { dir: Some(dir), ..Default::default() }
+    }
+
+    const A: Asked = Asked { dir: None, press: true, half: false, hop: 0 };
+    const X: Asked = Asked { dir: None, press: false, half: true, hop: 0 };
+
+    #[test]
+    fn a_has_hold_of_a_level_and_left_and_right_step_it() {
+        let ctx = super::super::theme::test_context();
+        let mut nav = PadNav::default();
+        let (volume, pressed) = (Cell::new(0.5_f32), Cell::new(0));
+        let mut panel = |ui: &mut Ui| {
+            ui.set_width(300.0);
+            let mut v = volume.get();
+            super::super::theme::level(ui, &mut v, 0.0..=1.0, |v| format!("{v:.2}"));
+            volume.set(v);
+            if ui.button("Done").clicked() {
+                pressed.set(pressed.get() + 1);
+            }
+        };
+        for _ in 0..3 {
+            pass(&ctx, &mut nav, Asked::default(), &mut panel);
+        }
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert!(matches!(nav.hold, Some(Hold::Level(_))), "A takes hold of the level");
+        pass(&ctx, &mut nav, go(Dir::Right), &mut panel);
+        pass(&ctx, &mut nav, go(Dir::Right), &mut panel);
+        pass(&ctx, &mut nav, go(Dir::Left), &mut panel);
+        assert!((volume.get() - 0.55).abs() < 1e-5, "two steps up and one down: {}", volume.get());
+        assert!(nav.let_go(), "B lets go");
+        pass(&ctx, &mut nav, go(Dir::Right), &mut panel);
+        assert!((volume.get() - 0.55).abs() < 1e-5, "let go, right steps it no more");
+        pass(&ctx, &mut nav, go(Dir::Down), &mut panel);
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert_eq!(pressed.get(), 1, "and the ring goes on to press what's under it");
+    }
+
+    #[test]
+    fn a_field_takes_the_pads_keys_and_b_puts_them_away() {
+        let ctx = super::super::theme::test_context();
+        let mut nav = PadNav::default();
+        let name = RefCell::new(String::new());
+        let mut panel = |ui: &mut Ui| {
+            ui.text_edit_singleline(&mut *name.borrow_mut());
+        };
+        for _ in 0..3 {
+            pass(&ctx, &mut nav, Asked::default(), &mut panel);
+        }
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert!(matches!(nav.hold, Some(Hold::Keys(_))), "A brings the keys up");
+        // The ring starts on q: the first letter of an empty field is a capital
+        pass(&ctx, &mut nav, A, &mut panel);
+        pass(&ctx, &mut nav, go(Dir::Right), &mut panel);
+        pass(&ctx, &mut nav, A, &mut panel);
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert_eq!(*name.borrow(), "Qww");
+        pass(&ctx, &mut nav, X, &mut panel);
+        assert_eq!(*name.borrow(), "Qw", "X deletes");
+        assert_eq!(ctx.memory(|m| m.focused()), None, "the field gives the focus back each pass, so the pad stays the game's (#516)");
+        assert!(nav.let_go());
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert!(matches!(nav.hold, Some(Hold::Keys(_))), "the ring stayed on the field, and A brings them back");
+        assert_eq!(*name.borrow(), "Qw");
+    }
+
+    #[test]
+    fn a_whole_number_dragged_by_tenths_is_typed_over_and_steps_by_one() {
+        let ctx = super::super::theme::test_context();
+        let mut nav = PadNav::default();
+        let count = Cell::new(12_u32);
+        let mut panel = |ui: &mut Ui| {
+            let mut n = count.get();
+            ui.add(egui::DragValue::new(&mut n).range(1..=50).speed(0.1));
+            count.set(n);
+        };
+        for _ in 0..3 {
+            pass(&ctx, &mut nav, Asked::default(), &mut panel);
+        }
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert!(matches!(&nav.hold, Some(Hold::Keys(k)) if k.layout() == super::super::pad_keys::Layout::Numbers));
+        // From 7 down to the steps' row, and right to +1
+        for dir in [Dir::Down, Dir::Down, Dir::Down, Dir::Right, Dir::Right] {
+            pass(&ctx, &mut nav, go(dir), &mut panel);
+        }
+        pass(&ctx, &mut nav, A, &mut panel);
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert_eq!(count.get(), 14, "+1 twice, where egui's own arrow adds a tenth and rounds it away");
+        // Up to the 3: the first digit typed replaces the number
+        pass(&ctx, &mut nav, go(Dir::Up), &mut panel);
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert_eq!(count.get(), 3);
+        pass(&ctx, &mut nav, A, &mut panel);
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert_eq!(count.get(), 50, "333 is past its most");
+        pass(&ctx, &mut nav, Asked::default(), &mut panel);
+        pass(&ctx, &mut nav, X, &mut panel);
+        assert_eq!(count.get(), 5, "the pad took up the 50 it held, and X took its 0");
+    }
+
+    #[test]
+    fn a_list_lays_out_a_row_past_each_edge() {
+        assert_eq!(rows_around(egui::Rangef::new(0.0, 100.0), 33.0, 50), 0..5);
+        assert_eq!(rows_around(egui::Rangef::new(330.0, 430.0), 33.0, 50), 9..15);
+        assert_eq!(rows_around(egui::Rangef::new(1500.0, 1650.0), 33.0, 50), 44..50);
+        assert_eq!(rows_around(egui::Rangef::new(0.0, 100.0), 33.0, 0), 0..0);
+    }
+
+    #[test]
+    fn the_ring_walks_down_a_list_drawn_by_rows_past_its_foot() {
+        let ctx = egui::Context::default();
+        let mut nav = PadNav::default();
+        let clicked = RefCell::new(Vec::new());
+        let mut panel = |ui: &mut Ui| {
+            egui::ScrollArea::vertical().max_height(200.0).show_rows_following(ui, 30.0, 100, |ui, i| {
+                if ui.add_sized([200.0, 30.0], egui::Button::new(format!("Lot {i}"))).clicked() {
+                    clicked.borrow_mut().push(i);
+                }
+            });
+        };
+        for _ in 0..3 {
+            pass(&ctx, &mut nav, Asked::default(), &mut panel);
+        }
+        for _ in 0..12 {
+            pass(&ctx, &mut nav, go(Dir::Down), &mut panel);
+        }
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert_eq!(*clicked.borrow(), vec![12], "twelve rows down, well past the six in view");
+        for _ in 0..12 {
+            pass(&ctx, &mut nav, go(Dir::Up), &mut panel);
+        }
+        pass(&ctx, &mut nav, A, &mut panel);
+        assert_eq!(*clicked.borrow(), vec![12, 0], "and back up to the head");
     }
 }
