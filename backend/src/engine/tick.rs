@@ -23,7 +23,7 @@ use super::trading::{TradeManager, TRADE_RANGE};
 use super::tutorial::{Did, Judged};
 use super::wages::{self, ShiftWork};
 use crate::models::{ActionState, ContainerType, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
-use crate::state::AppState;
+use crate::state::{AppState, DB_POOL_SIZE};
 
 use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::{CatalogResponse, Subscription, SubscriptionStatus};
@@ -942,6 +942,9 @@ impl Finished {
 /// units placed with the Gazette's tally), and in the same A/B on a busier
 /// machine one took 3.5 ms where it took 6, and four lanes wrote about 590
 /// a second where they wrote 385 (`the_writers_lanes_gathers_a_second`).
+/// Since #622 the pool doesn't ping a connection that was just busy, so a
+/// gather is one round trip shorter: taken in turns on a busy machine, 3.3
+/// to 4.2 ms where it took 3.6 to 4.7 (`a_gather_waits_a_round_trip_less`).
 const WRITERS: usize = 4;
 
 /// The writer's lane for saves into `key`'s box: a player's inventory, an
@@ -1317,6 +1320,12 @@ async fn persist_positions(db: &sqlx::PgPool, positions: &[SavedPosition]) -> Re
 /// writer's lanes (#407) taking its inputs from it. A gather that loses the
 /// race for a free slot, or a lock, is rolled back and tried again
 /// ([`raced`]), up to [`GATHER_TRIES`] times, where before it was lost.
+///
+/// The pool hands out a connection that's been busy without pinging it
+/// first (#622), so after the database restarts one can be dead. A gather
+/// that finds its connection broken before it commits is tried again on
+/// another ([`broken`]): the dead one is closed as it goes back, so with one
+/// try more than the pool holds, one is sure to be new.
 pub(crate) async fn persist_gather(db: &sqlx::PgPool, item: PendingItem, events: &broadcast::Sender<GameEvent>) -> bool {
     let mut tries = 1;
     loop {
@@ -1324,6 +1333,11 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, item: PendingItem, events:
             Ok(gathered) => return gathered,
             Err(Unsaved { doing, cause }) if tries < GATHER_TRIES && raced(&cause) => {
                 tracing::debug!("A gather by {} lost a race {doing} and is tried again: {cause}", item.player_id);
+                tries += 1;
+            }
+            // A broken COMMIT may have been written, so it isn't tried again
+            Err(Unsaved { doing, cause }) if tries <= DB_POOL_SIZE as usize && doing != COMMITTING && broken(&cause) => {
+                tracing::info!("A gather by {} found its connection broken {doing} and is tried again: {cause}", item.player_id);
                 tries += 1;
             }
             Err(Unsaved { doing, cause }) => {
@@ -1351,6 +1365,23 @@ struct Unsaved {
 fn raced(e: &sqlx::Error) -> bool {
     match e {
         sqlx::Error::Database(db) => db.is_unique_violation() || matches!(db.code().as_deref(), Some("40P01" | "40001")),
+        _ => false,
+    }
+}
+
+/// What a gather's [`Unsaved`] says it was doing when its `COMMIT` failed
+const COMMITTING: &str = "committing";
+
+/// Whether `e` says the connection is gone, so nothing it was doing in its
+/// transaction was kept: its socket failed (an I/O error), the server ended
+/// it (57P01 or 57P02, as a restart or `pg_terminate_backend` does), or it was
+/// lost (class 08). Another connection can succeed. (#622)
+fn broken(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::Io(_) => true,
+        sqlx::Error::Database(db) => {
+            db.code().is_some_and(|code| code.starts_with("08") || matches!(code.as_ref(), "57P01" | "57P02"))
+        }
         _ => false,
     }
 }
@@ -1442,7 +1473,7 @@ async fn write_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadca
         flows.add(&item.item_type, UnitFlow::Gathered, item.quantity as i64);
         Some(container_id)
     };
-    ledger::commit(tx, flows).await.map_err(unsaved("committing"))?;
+    ledger::commit(tx, flows).await.map_err(unsaved(COMMITTING))?;
 
     let _ = events.send(GameEvent::ExtractionCompleted {
         player_id: item.player_id,
@@ -1606,6 +1637,7 @@ mod tests {
     use crate::models::{ActionState, NodeState};
     use capitol_protocol::rules::{CENTER_X, CENTER_Y};
     use capitol_protocol::ws::PresenceHolder;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     fn player(name: &str, x: f64, y: f64) -> PlayerState {
         PlayerState {
@@ -2573,13 +2605,101 @@ mod tests {
         assert_eq!(sent, one.len() * GATHERS, "each the same");
     }
 
+    /// #622: the pool hands out a connection that was just busy without a
+    /// ping, so after the database restarts it can be dead. A gather that
+    /// finds it so is tried again on a new one, where before it was lost.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_gather_on_a_dead_connection_is_tried_again(pool: PgPoolOptions, connect: PgConnectOptions) {
+        use crate::state::tests::{kill, one_connection};
+        let db = pool.connect_with(connect.clone()).await.unwrap();
+        let (ada, inventory, sickle) = gatherer(&db, 2).await;
+        let (events, mut heard) = broadcast::channel(16);
+        let (writer, pid) = one_connection(&connect, Duration::from_secs(60)).await;
+        kill(&db, pid).await;
+
+        assert!(persist_gather(&writer, sickle_gather(ada, &sickle), &events).await, "not written");
+        assert_eq!(fiber(&db, inventory).await, Some((5, 52)), "written once");
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { quantity: 5, .. }), "told once");
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
+        assert!(heard.try_recv().is_err());
+    }
+
+    /// Only a connection lost before anything was committed is worth another
+    /// try: a broken socket, a server that ended the session, a lost one.
+    /// Not a statement that failed on a live connection (#622).
+    #[test]
+    fn a_broken_connection_is_told_from_a_failed_statement() {
+        assert!(broken(&sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset))));
+        assert!(broken(&sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))));
+        assert!(!broken(&sqlx::Error::RowNotFound));
+        assert!(!broken(&sqlx::Error::PoolTimedOut), "a database that's down isn't helped by trying at once");
+        assert!(!broken(&sqlx::Error::Protocol("unexpected message".into())));
+    }
+
+    /// #622's measure: a `SELECT 1`, then a gather, on each pool in turn, so
+    /// the machine's load falls on both alike. Prints each one's median: the
+    /// server's pool should save a round trip on each, about 0.26 ms on an
+    /// idle database. Nothing to assert, as for the lanes below.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_gather_waits_a_round_trip_less(pool: PgPoolOptions, connect: PgConnectOptions) {
+        const EACH: usize = 400;
+        let db = pool.connect_with(connect.clone()).await.unwrap();
+        let (ada, _, sickle) = gatherer(&db, 100_000).await;
+        let (events, _heard) = broadcast::channel(4 * EACH);
+        let pinging = PgPoolOptions::new().max_connections(DB_POOL_SIZE).connect_with(connect.clone()).await.unwrap();
+        let idle = crate::state::db_pool_options(crate::state::PING_AFTER_IDLE).connect_with(connect).await.unwrap();
+        let pools = [("pinging every acquire", &pinging), ("pinging after idle", &idle)];
+        // The stack the rest join, and each pool's connections opened
+        for (_, pool) in pools {
+            assert!(persist_gather(pool, sickle_gather(ada, &sickle), &events).await);
+        }
+        let ms = |began: Instant| began.elapsed().as_secs_f64() * 1000.0;
+        let (mut selects, mut gathers) = ([Vec::new(), Vec::new()], [Vec::new(), Vec::new()]);
+        for _ in 0..EACH {
+            for (i, (_, pool)) in pools.iter().enumerate() {
+                let began = Instant::now();
+                sqlx::query("SELECT 1").execute(*pool).await.unwrap();
+                selects[i].push(ms(began));
+                let began = Instant::now();
+                assert!(persist_gather(pool, sickle_gather(ada, &sickle), &events).await);
+                gathers[i].push(ms(began));
+            }
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        for (i, (name, _)) in pools.iter().enumerate() {
+            eprintln!(
+                "{name}: a SELECT 1 in {:.3} ms, a gather in {:.3} ms (medians of {EACH})",
+                median(selects[i].clone()),
+                median(gathers[i].clone()),
+            );
+        }
+    }
+
     /// #524's other measure: 1000 gathers by 200 players, each wearing a
     /// sickle, saved on one of the writer's lanes and then on [`WRITERS`].
     /// Prints the gathers a second each managed. Nothing to assert: it's a
     /// measure of the machine as much as the code.
+    ///
+    /// Since #622 it's an A/B of the pool, taken in turns at each count of
+    /// lanes: sqlx's default, which pings every connection on its way out,
+    /// and the server's, which pings only one that waited.
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn the_writers_lanes_gathers_a_second(db: sqlx::PgPool) {
+    async fn the_writers_lanes_gathers_a_second(pool: PgPoolOptions, connect: PgConnectOptions) {
+        let db = pool.connect_with(connect.clone()).await.unwrap();
+        let pools = [
+            ("pinging every acquire", PgPoolOptions::new().max_connections(DB_POOL_SIZE)),
+            ("pinging after idle", crate::state::db_pool_options(crate::state::PING_AFTER_IDLE)),
+        ];
+        let mut writers_pools = Vec::new();
+        for (name, options) in pools {
+            writers_pools.push((name, options.connect_with(connect.clone()).await.unwrap()));
+        }
         const PLAYERS: usize = 200;
         const EACH: usize = 5;
         let (_, _, first) = gatherer(&db, 10_000).await;
@@ -2608,27 +2728,29 @@ mod tests {
             (0..EACH).flat_map(|_| sickles.iter().map(|(p, s)| sickle_gather(*p, s))).collect()
         };
         for lanes in [1, WRITERS] {
-            let writers: Vec<_> = (0..lanes)
-                .map(|_| {
-                    let (to_writer, from_tick) = mpsc::unbounded_channel();
-                    (to_writer, tokio::spawn(run_writer(db.clone(), events.clone(), from_tick)))
-                })
-                .collect();
-            let began = Instant::now();
-            for (lane, finished) in Finished::dealt(gathers(), Vec::new(), Vec::new()) {
-                writers[lane % lanes].0.send(finished).unwrap();
+            for (name, writers_db) in &writers_pools {
+                let writers: Vec<_> = (0..lanes)
+                    .map(|_| {
+                        let (to_writer, from_tick) = mpsc::unbounded_channel();
+                        (to_writer, tokio::spawn(run_writer(writers_db.clone(), events.clone(), from_tick)))
+                    })
+                    .collect();
+                let began = Instant::now();
+                for (lane, finished) in Finished::dealt(gathers(), Vec::new(), Vec::new()) {
+                    writers[lane % lanes].0.send(finished).unwrap();
+                }
+                for (to_writer, writer) in writers {
+                    drop(to_writer);
+                    writer.await.unwrap();
+                }
+                let took = began.elapsed().as_secs_f64();
+                eprintln!(
+                    "{} gathers on {lanes} lane(s), {name}: {:.2} ms a gather, {:.0} gathers a second",
+                    PLAYERS * EACH,
+                    took * 1000.0 / (PLAYERS * EACH) as f64,
+                    (PLAYERS * EACH) as f64 / took,
+                );
             }
-            for (to_writer, writer) in writers {
-                drop(to_writer);
-                writer.await.unwrap();
-            }
-            let took = began.elapsed().as_secs_f64();
-            eprintln!(
-                "{} gathers on {lanes} lane(s): {:.2} ms a gather, {:.0} gathers a second",
-                PLAYERS * EACH,
-                took * 1000.0 / (PLAYERS * EACH) as f64,
-                (PLAYERS * EACH) as f64 / took,
-            );
         }
     }
 

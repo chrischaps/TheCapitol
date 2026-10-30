@@ -2,7 +2,7 @@ use axum::{
     routing::get,
     Router,
 };
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::PgConnectOptions;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
@@ -57,11 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting The Capitol backend server...");
 
-    // Database connection. The automation tick holds WORKERS connections
-    // through a busy cycle and the market one through its fills (#212), so
-    // there are enough besides for the tick and the routes
-    let db_pool = PgPoolOptions::new()
-        .max_connections(16)
+    // Database connection: DB_POOL_SIZE of them, pinged on the way out only
+    // after sitting idle (#622)
+    let db_pool = state::db_pool_options(state::PING_AFTER_IDLE)
         .connect_with(engine::slow_work::statement_logging(
             config.database_url.parse::<PgConnectOptions>()?,
             config.slow_statement,
