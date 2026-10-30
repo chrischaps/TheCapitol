@@ -3197,7 +3197,7 @@ impl PlayerExtension for CapitolExtension {
                     hire: picked.filter(|p| p.owner_id.is_some() && p.owner_id == state.me()).map(|p| ui::plot::Hire {
                         wages: session.wages(),
                         me: state.me(),
-                        resources: capitol_core::wages::resources_on(&p.bounds, state.nodes().values())
+                        resources: capitol_core::wages::resources_on(&capitol_core::sim::lot::corners(p), state.nodes().values())
                             .into_iter()
                             .map(|id| {
                                 let name = state.catalog().resource_type(&id).map_or_else(|| id.replace('_', " "), |r| r.name.clone());
