@@ -12,6 +12,8 @@
 //!   (`property_tax::foreclose`), and a retired lot hands the grant back
 //!   unused rather than paying out ([`hand_back_in`], from `plot_sync`) (D5).
 //! - The books count grants as land given, outside the Strands' ([`books`]).
+//! - When the [`KNOB`] that switches them off or on moves, every socket reads
+//!   its player's grant again and sends `tutorial` (`tunables::update`, #617).
 
 use capitol_protocol::ledger::DeedGrants;
 use capitol_protocol::rules::Zone;
@@ -44,6 +46,9 @@ impl Refused {
 pub fn home_zone(zone: Zone) -> bool {
     matches!(zone, Zone::Rural | Zone::Suburban | Zone::Urban)
 }
+
+/// The knob that switches grants off (#451)
+pub const KNOB: &str = "deed_grant_enabled";
 
 /// Open `player`'s account's grant, if it hasn't one. True if this opened it.
 pub async fn open(conn: &mut PgConnection, player: Uuid) -> Result<bool, sqlx::Error> {

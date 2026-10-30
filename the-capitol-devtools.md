@@ -358,6 +358,7 @@ The first set:
       - regrowth when a node is spent, so a node already spent keeps its time;
       - yield on each gather, rounded at random so that its mean is exact.
     - The client hears the fees on `auth_ok` (`fees`) and in `fees_changed`, which goes to every socket when a fee moves. `GameState::fees` feeds the exchange, market and shop panels' previews and labels, and the bots' and sim's budgets (`Holdings::fees`, the market makers' `quotes`). The frozen React panel still says 0.5%.
+    - The road in's grant switch, `deed_grant_enabled` (#451), is read where a grant is opened, spent or reported, not from the live set. When it moves, `tunables::update` sends `GrantsSwitched`, and every socket reads its player's road in again and sends `tutorial`, so the Deeds Office and a citizen's plans follow at once, not at the next step. A socket that lagged past it hears its `tutorial` in its resync (#617).
 - **D6.2 The tuning tab.**
   - Each knob with its default, current value and reset, next to its chart. Presets export and import as TOML.
   - **As built (#376):**

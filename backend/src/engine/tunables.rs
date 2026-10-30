@@ -12,6 +12,8 @@
 //! every value before setting any, writes the rows and a `tunable_changed`
 //! annotation per knob in one transaction, then swaps the new set in. When a
 //! fee moved, every socket hears `fees_changed`, so a client's previews follow.
+//! When the deed grants were switched off or on, every socket sends its
+//! player's `tutorial` again, so the grant a client shows follows (#617).
 //!
 //! [`preset`] writes and reads the knobs as TOML, for the console's tuning tab
 //! (D6.2) and the balance runs (D6.3).
@@ -25,7 +27,7 @@ use capitol_protocol::tunables::{Family, Knob, TunableError, Tunables, TunablesR
 use sqlx::PgPool;
 use tokio::sync::{broadcast, Mutex};
 
-use super::annotations;
+use super::{annotations, deed_grants};
 use super::events::GameEvent;
 
 /// The world's tunables. Clones share one value.
@@ -159,8 +161,8 @@ fn describe(change: &Change) -> String {
 
 /// Set the knobs in `update`, all of them or none. Writes what changed to
 /// `tunables` with an annotation each, swaps the new values in, and tells every
-/// socket if a fee moved. Returns what changed: a value set to what it already
-/// was isn't a change.
+/// socket if a fee moved or the deed grants switched. Returns what changed: a
+/// value set to what it already was isn't a change.
 pub async fn update(
     db: &PgPool,
     live: &Live,
@@ -222,7 +224,17 @@ pub async fn update(
     if fees != before.fees {
         let _ = events.send(GameEvent::FeesChanged { fees });
     }
+    if switches_grants(&changes) {
+        let _ = events.send(GameEvent::GrantsSwitched);
+    }
     Ok(changes)
+}
+
+/// Whether `changes` switched the deed grants off or on (#617). A grant is
+/// read from the `tunables` row, committed above, so a socket that hears it
+/// reads the new one.
+fn switches_grants(changes: &[Change]) -> bool {
+    changes.iter().any(|c| c.key == deed_grants::KNOB)
 }
 
 /// A preset: every knob as TOML, to export, edit and import (D6.2).
@@ -322,6 +334,15 @@ mod tests {
         assert_eq!(describe(&change), "Property tax a week: 2% → 5%");
         let change = Change { key: "yield.grass".into(), from: 1.0, to: 1.5 };
         assert_eq!(describe(&change), "Gather yield: grass: ×1 → ×1.5");
+    }
+
+    /// Only the grants' knob has every socket tell its road in again (#617)
+    #[test]
+    fn the_grants_knob_alone_switches_grants() {
+        let change = |key: &str| Change { key: key.into(), from: 1.0, to: 0.0 };
+        assert!(switches_grants(&[change("yield.clay"), change(deed_grants::KNOB)]));
+        assert!(!switches_grants(&[change("listing_fee_percent"), change("yield.clay")]));
+        assert!(!switches_grants(&[]));
     }
 
     #[test]
