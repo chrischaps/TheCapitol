@@ -282,6 +282,10 @@ pub enum GameEvent {
     GuildChanged { guild_id: Uuid, players: Vec<Uuid> },
     /// D6.1: an admin moved a fee (to everyone)
     FeesChanged { fees: capitol_protocol::tunables::Fees },
+    /// #617: an admin switched the city's deed grants off or on
+    /// (`deed_grants::KNOB`). Each socket reads its player's road in again
+    /// and sends `tutorial`, so the grant it shows follows at once.
+    GrantsSwitched,
     /// Commons S2.1: a commission went up on the hall's board, was delivered
     /// to, or came down (to everyone, so the board stays live)
     Board { change: BoardChange, commission: Commission },
