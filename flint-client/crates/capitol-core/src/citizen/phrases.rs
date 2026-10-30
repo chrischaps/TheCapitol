@@ -477,13 +477,33 @@ pub const TALK_WAIT: Duration = Duration::from_secs(2);
 /// conversation.
 pub const LETTER_WAIT: Duration = Duration::from_secs(60);
 
+/// Where a line goes (#511): out loud, in a guild's channel, or in a
+/// letter. A model's words come late, so a line waiting on them keeps where
+/// it was meant for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum To {
+    /// Out loud, to whoever stands near
+    Near,
+    /// In the channel of the guild with this id
+    Guild(Uuid),
+    /// In a letter to them: a reply to theirs
+    Letter(Uuid),
+}
+
+impl To {
+    /// A line said in the chat, out loud or in a guild's channel, which the
+    /// window counts; a letter isn't.
+    fn talk(self) -> bool {
+        !matches!(self, To::Letter(_))
+    }
+}
+
 /// A line on its way: when it may be said, until when a model's is waited
-/// for, and to whom.
+/// for, and where it goes.
 struct Due {
     at: Instant,
     until: Instant,
-    /// `None` out loud; a letter's sender for a reply.
-    to: Option<Uuid>,
+    to: To,
     words: Coming,
 }
 
@@ -507,9 +527,6 @@ pub struct Talk {
     /// And those it said because the model had nothing: no key, its budget
     /// spent, a refusal or a ramble.
     pub nothing: u64,
-    /// And those it said where a model is never asked, such as a guild's
-    /// channel ([`Voice::from_the_book`]).
-    pub book_only: u64,
     /// What the model's lines cost, in US cents.
     pub cents: f64,
     /// The most one life spent on its words, in US cents, against
@@ -525,7 +542,6 @@ impl Talk {
         }
         self.late += other.late;
         self.nothing += other.nothing;
-        self.book_only += other.book_only;
         self.cents += other.cents;
         self.most_a_life = self.most_a_life.max(other.most_a_life);
     }
@@ -601,12 +617,15 @@ impl Voice {
             return None;
         }
         self.greeted.insert(who, hour);
-        self.speak(Occasion::Greeting, moment, now)
+        self.speak(Occasion::Greeting, To::Near, moment, now)
     }
 
-    /// A line for `occasion` now, if the window has room for it. `None`
-    /// while a model finds the words: they come from [`due`](Self::due).
-    pub fn speak(&mut self, occasion: Occasion, moment: &Moment, now: Instant) -> Option<String> {
+    /// A line for `occasion` now, to say `to` (out loud or in a guild's
+    /// channel), if the window has room for it. `None` while a model finds
+    /// the words: they come from [`due`](Self::due), still bound `to`. A
+    /// letter's reply goes by [`letter`](Self::letter).
+    pub fn speak(&mut self, occasion: Occasion, to: To, moment: &Moment, now: Instant) -> Option<String> {
+        debug_assert!(to.talk(), "a letter's reply goes by Voice::letter");
         if !self.room(now) {
             return None;
         }
@@ -619,7 +638,7 @@ impl Voice {
                 self.due.push(Due {
                     at: now,
                     until: now + TALK_WAIT,
-                    to: None,
+                    to,
                     words,
                 });
                 None
@@ -641,42 +660,37 @@ impl Voice {
         self.due.push(Due {
             at,
             until: at.max(now + TALK_WAIT),
-            to: None,
+            to: To::Near,
             words,
         });
         true
     }
 
-    /// The phrasebook's line for `occasion` now, if the window has room for
-    /// it: never a model's, for what's said where a model's late words
-    /// couldn't follow, such as a guild's channel (S4.5).
-    pub fn from_the_book(&mut self, occasion: Occasion, moment: &Moment, now: Instant) -> Option<String> {
-        if !self.room(now) {
-            return None;
-        }
-        self.spoken.push_back(now);
-        self.count(PHRASEBOOK);
-        self.talk.book_only += 1;
-        Some(self.book.say(occasion, moment))
-    }
-
-    /// The lines whose moment has come, as far as the window has room. One
-    /// the window has no room for waits.
-    pub fn due(&mut self, now: Instant) -> Vec<String> {
+    /// The lines whose moment has come, each with where it goes (out loud
+    /// or a guild's channel), as far as the window has room. One the window
+    /// has no room for waits. Letters' replies come from
+    /// [`replies`](Self::replies).
+    pub fn due(&mut self, now: Instant) -> Vec<(To, String)> {
         self.settle(now);
         let mut out = Vec::new();
         self.due.sort_by_key(|d| d.at);
-        while let Some(i) = self.due.iter().position(|d| d.to.is_none() && d.at <= now && matches!(d.words, Coming::Ready(_))) {
+        while let Some(i) = self.due.iter().position(|d| d.to.talk() && d.at <= now && matches!(d.words, Coming::Ready(_))) {
             if !self.room(now) {
                 break;
             }
-            let Coming::Ready(line) = self.due.remove(i).words else {
+            let Due { to, words: Coming::Ready(line), .. } = self.due.remove(i) else {
                 unreachable!("found ready");
             };
             self.spoken.push_back(now);
-            out.push(line);
+            out.push((to, line));
         }
         out
+    }
+
+    /// Drops the lines waiting to go `to`: a guild's, once it's out of the
+    /// guild.
+    pub fn forget(&mut self, to: To) {
+        self.due.retain(|d| d.to != to);
     }
 
     /// Whether any line is waiting, out loud or by letter.
@@ -701,7 +715,7 @@ impl Voice {
         self.due.push(Due {
             at: now,
             until: now + LETTER_WAIT,
-            to: Some(from),
+            to: To::Letter(from),
             words,
         });
         true
@@ -712,12 +726,12 @@ impl Voice {
         self.settle(now);
         let (ready, waiting) = std::mem::take(&mut self.due)
             .into_iter()
-            .partition::<Vec<_>, _>(|d| d.to.is_some() && matches!(d.words, Coming::Ready(_)));
+            .partition::<Vec<_>, _>(|d| !d.to.talk() && matches!(d.words, Coming::Ready(_)));
         self.due = waiting;
         ready
             .into_iter()
             .filter_map(|d| match (d.to, d.words) {
-                (Some(to), Coming::Ready(line)) => Some((to, line)),
+                (To::Letter(to), Coming::Ready(line)) => Some((to, line)),
                 _ => None,
             })
             .collect()
@@ -958,17 +972,53 @@ mod tests {
         }
     }
 
+    /// A line said out loud, as [`Voice::due`] hands it back.
+    fn near(line: &str) -> (To, String) {
+        (To::Near, line.to_string())
+    }
+
     #[test]
     fn a_guild_hears_the_phrasebook_at_once_within_the_window() {
         let mut voice = Voice::phrasebook(&temper(0.5), 5);
         let now = Instant::now();
-        let guild = moment("The Ore Guild", Uuid::from_u128(7), NOON);
-        let line = voice.from_the_book(Occasion::Joined, &guild, now).expect("room for it");
+        let ore = Uuid::from_u128(7);
+        let guild = moment("The Ore Guild", ore, NOON);
+        let line = voice.speak(Occasion::Joined, To::Guild(ore), &guild, now).expect("room for it");
         assert!(lines(Occasion::Joined, Band::Even).iter().any(|l| fill(l, &guild) == line), "{line}");
         // Nothing waits for later, and it counts against the window
         assert!(!voice.has_due());
-        let said = (0..LINES_PER_WINDOW * 2).filter(|_| voice.from_the_book(Occasion::Joined, &guild, now).is_some()).count();
+        let said = (0..LINES_PER_WINDOW * 2).filter(|_| voice.speak(Occasion::Joined, To::Guild(ore), &guild, now).is_some()).count();
         assert_eq!(said, LINES_PER_WINDOW - 1);
+    }
+
+    #[test]
+    fn a_models_guild_line_comes_to_the_guild() {
+        let (mut voice, asked) = slow();
+        let now = Instant::now();
+        let (ore, iron) = (Uuid::from_u128(7), Uuid::from_u128(8));
+        let guild = moment("The Ore Guild", ore, NOON);
+        assert_eq!(voice.speak(Occasion::Joined, To::Guild(ore), &guild, now), None, "the world doesn't wait");
+        answer(&asked, 0, Words::Line("Glad to be among the Ore Guild.".into()));
+        assert_eq!(
+            voice.due(now + Duration::from_millis(900)),
+            [(To::Guild(ore), "Glad to be among the Ore Guild.".to_string())],
+            "said in the guild's channel, not out loud (#511)"
+        );
+        assert_eq!(voice.tally().get("slow"), Some(&1));
+        // Late, the phrasebook's line still goes to the guild
+        let book = Phrasebook::new(&temper(0.5), 7);
+        assert_eq!(voice.speak(Occasion::Joined, To::Guild(ore), &guild, now), None);
+        assert_eq!(voice.due(now + TALK_WAIT), [(To::Guild(ore), book.say(Occasion::Joined, &guild))]);
+        // A guild it's out of hears nothing, and another guild's line stays
+        let other = moment("The Iron Guild", iron, NOON);
+        let later = now + TALK_WAIT;
+        assert_eq!(voice.speak(Occasion::Joined, To::Guild(ore), &guild, later), None);
+        assert_eq!(voice.speak(Occasion::Joined, To::Guild(iron), &other, later), None);
+        voice.forget(To::Guild(ore));
+        answer(&asked, 2, Words::Line("Too late.".into()));
+        answer(&asked, 3, Words::Line("Hello, Iron Guild.".into()));
+        assert_eq!(voice.due(later + Duration::from_millis(900)), [(To::Guild(iron), "Hello, Iron Guild.".to_string())]);
+        assert!(!voice.has_due());
     }
 
     #[test]
@@ -981,7 +1031,7 @@ mod tests {
         let mut said: Vec<Instant> = Vec::new();
         for step in 0..600u32 {
             let now = start + Duration::from_millis(100) * step;
-            if voice.speak(Occasion::Opening, &ada, now).is_some() {
+            if voice.speak(Occasion::Opening, To::Near, &ada, now).is_some() {
                 said.push(now);
             }
             voice.spoken_to(Uuid::from_u128(step as u128 + 10), &ada, now);
@@ -1054,7 +1104,7 @@ mod tests {
         assert!(voice.has_due());
         assert!(voice.due(now + Duration::from_millis(500)).is_empty(), "not yet come");
         answer(&asked, 0, Words::Line("Well met, Ada.".into()));
-        assert_eq!(voice.due(now + Duration::from_millis(900)), ["Well met, Ada."]);
+        assert_eq!(voice.due(now + Duration::from_millis(900)), [near("Well met, Ada.")]);
         assert!(!voice.has_due());
         assert_eq!(voice.tally().get("slow"), Some(&1));
         // A greeting waiting on the model is still a greeting this hour
@@ -1069,21 +1119,21 @@ mod tests {
         let ada = moment("Ada", ADA, NOON);
         let book = Phrasebook::new(&temper(0.5), 7);
         // Late: the phrasebook's own line, at the end of the wait
-        assert_eq!(voice.speak(Occasion::Accepting, &ada, now), None);
+        assert_eq!(voice.speak(Occasion::Accepting, To::Near, &ada, now), None);
         assert!(voice.due(now + TALK_WAIT - Duration::from_millis(1)).is_empty());
-        assert_eq!(voice.due(now + TALK_WAIT), [book.say(Occasion::Accepting, &ada)]);
+        assert_eq!(voice.due(now + TALK_WAIT), [near(&book.say(Occasion::Accepting, &ada))]);
         // An answer past its wait is dropped, not said twice
         answer(&asked, 0, Words::Line("Too late.".into()));
         assert!(voice.due(now + TALK_WAIT * 2).is_empty());
         // Nothing (a refusal, a ramble): the phrasebook, at once
         let later = now + LINE_WINDOW;
-        assert_eq!(voice.speak(Occasion::Declining, &ada, later), None);
+        assert_eq!(voice.speak(Occasion::Declining, To::Near, &ada, later), None);
         answer(&asked, 1, Words::Nothing);
-        assert_eq!(voice.due(later), [book.say(Occasion::Declining, &ada)]);
+        assert_eq!(voice.due(later), [near(&book.say(Occasion::Declining, &ada))]);
         assert_eq!(voice.tally().get(PHRASEBOOK), Some(&2));
         // The town's report hears why (#433)
         let talk = voice.take_talk();
-        assert_eq!((talk.by.get(PHRASEBOOK), talk.late, talk.nothing, talk.book_only), (Some(&2), 1, 1, 0));
+        assert_eq!((talk.by.get(PHRASEBOOK), talk.late, talk.nothing), (Some(&2), 1, 1));
         assert_eq!(talk.asked_of_a_model(), 2);
     }
 
@@ -1094,17 +1144,19 @@ mod tests {
         let ada = moment("Ada", ADA, NOON);
         assert_eq!(voice.greet(ADA, &ada, NOON, now), None);
         answer(&asked, 0, Words::Line("Well met.".into()));
-        assert_eq!(voice.due(now), ["Well met."]);
-        assert!(voice.from_the_book(Occasion::Joined, &ada, now).is_some());
+        assert_eq!(voice.due(now), [near("Well met.")]);
+        let guild = moment("The Ore Guild", Uuid::from_u128(7), NOON);
+        assert_eq!(voice.speak(Occasion::Joined, To::Guild(Uuid::from_u128(7)), &guild, now), None);
+        assert_eq!(voice.due(now + TALK_WAIT).len(), 1, "the phrasebook's, late");
         let first = voice.take_talk();
         assert_eq!(first.by, BTreeMap::from([("slow".to_string(), 1), (PHRASEBOOK.to_string(), 1)]));
-        assert_eq!((first.late, first.nothing, first.book_only), (0, 0, 1));
-        assert_eq!(first.asked_of_a_model(), 1, "the guild's line was never the model's to find");
+        assert_eq!((first.late, first.nothing), (1, 0));
+        assert_eq!(first.asked_of_a_model(), 2, "the guild's line is the model's to find too (#511)");
         assert_eq!(voice.take_talk(), Talk::default(), "taken once");
         let mut town = Talk::default();
         town.add(&first);
         town.add(&first);
-        assert_eq!((town.lines(), town.book_only), (4, 2));
+        assert_eq!((town.lines(), town.late), (4, 2));
     }
 
     #[test]
@@ -1116,7 +1168,7 @@ mod tests {
         assert!(voice.spoken_to(ADA, &ada, now));
         answer(&asked, 0, Words::Line("Not today, Ada.".into()));
         assert!(voice.due(now + Duration::from_millis(1999)).is_empty(), "too soon, though it's come");
-        assert_eq!(voice.due(now + Duration::from_secs(5)), ["Not today, Ada."]);
+        assert_eq!(voice.due(now + Duration::from_secs(5)), [near("Not today, Ada.")]);
     }
 
     #[test]

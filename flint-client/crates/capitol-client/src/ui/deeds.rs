@@ -25,6 +25,7 @@ use capitol_core::zone_card as words;
 use egui::{Align2, Id, Pos2, Rect, RichText, Sense, Stroke};
 use uuid::Uuid;
 
+use super::pad_nav::FollowFocus;
 use super::theme::{self, size, DIM, GOLD, TEXT};
 use super::zone_card::{columns_width, Plans};
 
@@ -292,20 +293,17 @@ impl DeedsOffice {
         ui.add_space(2.0);
         ui.scope(|ui| {
             ui.spacing_mut().scroll.dormant_handle_opacity = 0.5;
-            let lots = egui::ScrollArea::vertical()
+            // Rows out of view aren't laid out, but for one past each edge,
+            // which the pad's ring steps on to and the list scrolls in (#517)
+            egui::ScrollArea::vertical()
                 .id_salt("capitol_deeds_lots")
                 .max_height(room - 44.0)
                 .drag_to_scroll(false)
-                .show_rows(ui, ROW, rows.len(), |ui, range| {
-                    for lot in &rows[range] {
-                        if let Some(a) = self.row(ui, lot, zone, view, claims) {
-                            action = Some(a);
-                        }
+                .show_rows_following(ui, ROW, rows.len(), |ui, i| {
+                    if let Some(a) = self.row(ui, rows[i], zone, view, claims) {
+                        action = Some(a);
                     }
                 });
-            // Rows out of view aren't laid out, so the pad's ring can't
-            // scroll this list (#517); it does pass its bar by
-            super::pad_nav::note_scroll_bars(ui.ctx(), lots.id);
         });
         action
     }

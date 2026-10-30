@@ -1166,7 +1166,15 @@ mod tests {
         // #483 named the roads (`road_names`): every road but the wild spurs
         // has a `name`, which the hash covers. No road, lot, park, water or
         // node moved, and no id changed.
-        assert_eq!(TerrainConfig::default_world().version(), "415fdfde7a60fb1d");
+        //
+        // #470 wrapped the pies on round a bulb whose stem has no lot near
+        // it, to 135° from the stem's line, not 90°. Five bulbs in sectors 5
+        // and 6 changed: 1 pie gone, 11 pies and 8 row lots reshaped, 4 new
+        // pies, 2980 lots. Nothing outside the suburb moved. Those 20 rows are
+        // renamed `rewrap_` and released by startup's sync, and 155 of the
+        // suburb's planned nodes are re-planned (`20270108_001_pie_wrap.sql`
+        // and its post-content nodes).
+        assert_eq!(TerrainConfig::default_world().version(), "97dbd930e4c153b6");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

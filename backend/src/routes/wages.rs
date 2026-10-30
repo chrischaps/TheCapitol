@@ -56,7 +56,9 @@ pub async fn offer(
     Json(req): Json<OfferWages>,
 ) -> Result<Json<WageOffer>, AppError> {
     let employer = player_of(&state.db, auth_user.account_id).await?;
-    let (offered, news) = wages::offer(&state.db, employer, &req, Utc::now()).await.map_err(refused)?;
+    // Whether it grows on the lot is the terrain's to say, from game state (#435)
+    let grows = wages::grows(&state.db, &state.game, &req.work).await?;
+    let (offered, news) = wages::offer(&state.db, employer, &req, grows, Utc::now()).await.map_err(refused)?;
     tell(&state, news).await;
     Ok(Json(offered))
 }

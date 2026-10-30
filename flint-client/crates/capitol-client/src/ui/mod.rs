@@ -47,7 +47,10 @@
 //! - [`hints`]: the first-session hints, once per account (P8.3).
 //! - [`shortcuts`]: every control on one card, on `?` or F1 (P8.3).
 //! - [`pad_nav`]: the pad inside a panel (#331): a gold ring the d-pad
-//!   moves between the panels' widgets, and A to press.
+//!   moves between the panels' widgets, and A to press, or to take hold
+//!   of a level or a field.
+//! - [`pad_keys`]: the pad's keyboard and number pad, for a field the ring
+//!   holds (#517).
 //! - [`dev_overlay`]: the dev overlay on F7 (D5.2): frame times, the net,
 //!   the prediction, the store's counts and the interest cell.
 
@@ -72,6 +75,7 @@ pub mod login;
 pub mod mail;
 pub mod market;
 pub mod market_chart;
+pub mod pad_keys;
 pub mod pad_nav;
 pub mod plot;
 pub mod quality_card;

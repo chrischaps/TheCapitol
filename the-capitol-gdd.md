@@ -134,7 +134,7 @@ Past the rural ring the land rises into the wilds: the Wilderness zone, from r38
 
 #### Plots
 
-- Owned via deeds (bureaucratic system at Capitol Tower)
+- Owned via deeds, recorded at the Deeds Office in the Exchange hall's forecourt (§8.4). A player's first deed is the road in's reward (§4)
 - Confer privacy and building rights
 - Owners control access permissions (private, friends, guild, public)
 - Raw resources on a plot belong to it: once claimed, only the owner may gather them, unless they open the plot's station use to the public (the same setting governs its stations)
@@ -328,21 +328,30 @@ Layered system for meaningful competition at all levels:
 ### Phase 1: Arrival (First Session)
 
 - Spawn on the rural edge, on the south arterial: the tower ahead down the road, the wilds behind. *(The spawn was once the wilderness at the world's edge. B1 moved it, because a newcomer out there has every resource at hand and no reason to go in. The first trip out into the wilds is better as a choice made with a tool in hand.)*
-- Minimal tutorial: gather basic resources, craft a simple tool
-- Earn small amount of currency through menial tasks
-- Goal: earn enough to acquire a deed and travel to The Capitol to claim it
+- **The road in** is the first session (`the-capitol-road-in.md`, #437): a tutorial in the live world, beside everyone else, that walks the south road from the spawn to the hall. It's the game in miniature, in six chapters:
+  1. **Arrival:** make things among the farms, from a handful of grass to rope, a workbench by the road and a stone axe that fells a tree your hands couldn't. The quality card shows the cascade with your own fiber's numbers.
+  2. **The road in:** a stop in each home zone (a farm, a suburban street, an urban yard), each with the zone card: the stations a lot fits, the walk to the market, what grows nearby, the price and the tax, told honestly.
+  3. **The hall:** fiber into Strands at the Exchange, a price left on the order book each way, the market box, a bazaar stall and the Gazette.
+  4. **People:** a word to whoever's near, a stranger's card, and a letter from the Registrar.
+  5. **The Deeds Office:** the zones side by side, the free lots, and **a deed of your choice**: one free claim on any free lot in the rural, suburban or urban rings, the reward for the road.
+  6. **Settle in:** a station at home, a job that runs while you're away, and what tax asks.
+- **The deed is earned by the road, not bought with fiber.** There's no "earn enough to acquire a deed" any more. The grant is one an account, isn't an item, and can't be traded or sold. It's assessed at the zone's price and taxed as a bought deed is, and a granted home that's foreclosed refunds nothing, so free land never becomes Strands (§8.4).
+- **The server judges it.** Each step that does something in the world counts where the action succeeds, so the reward is real. The tour can be hidden but never skipped for good: the deed comes only with the finish.
+- **Everyone walks it:** every account, old ones included, and citizens, who earn the same deed.
+- **The voice is the bureaucracy's.** Cards, a letter and a desk speak for the city: no NPCs, no guides.
+- *Until the road in (2026-10), the first session was four hint cards (walk, gather, the pack, a rope), then the better part of an hour pulling grass to buy a deed, and a choice of lot made with no idea what it meant.*
 
 ### Phase 2: The Journey Inward
 
-- Travel from the rural edge toward The Capitol
-- Pass through Rural → Suburban → Urban → Guild District → Trade District → Capitol Tower
-- Witness the spectrum of player activity and infrastructure
+- The road in's walk, chapters 2 to 5: up the south arterial from the rural edge to the Exchange hall in the Trade District, about 3500 and 70 seconds' walk
+- Pass through Rural → Suburban → Urban → Guild District → Trade District, with the Capitol Tower ahead
+- Witness the spectrum of player activity and infrastructure, with a stop in each home zone to read what living there is like
 - Experience the geography firsthand
-- Claim deed at Capitol bureaucracy, choose plot location (first major decision)
+- Choose a home at the Deeds Office with the zones side by side, and claim it with the road's deed: the first major decision, made with what the road showed. The claim needs no trip back: once you've looked in at the office, any free lot's plot panel takes the deed
 
 ### Phase 3: Establishment (First Week)
 
-- Set up basic workshop on claimed plot
+- Set up basic workshop on claimed plot (the road in's last chapter places its first station and sets it a job)
 - Learn core loop: gather → craft → sell
 - Experiment with quality optimization
 - Make first market transactions
@@ -726,6 +735,7 @@ This creates a **logistics layer**: currency is instant, but the commodity backi
 - **Labor-limited:** Extraction rate bounded by time, not scarcity
 - **Automation scales it:** Fiber farms are valid, but still require infrastructure
 - **No NPC faucets:** All currency enters through player labor
+- **One faucet of land:** the road in's deed (§4) gives each account a home, not Strands. It's kept on the ledger's own books (`Ledger::grants`: opened, used, returned and the granted plots' value), never pays out in Strands, and the Observatory shows it as *Land given*
 
 #### The Sinks: Bureaucratic Fees
 
@@ -739,14 +749,19 @@ The Capitol provides services that maintain economic infrastructure and social o
 
 Issues and manages property rights.
 
+**The office** is a clerk's desk under a wax-red awning in the Exchange hall's forecourt, beside the Gazette's board (#448). It's a desk, not a clerk: the bureaucracy's voice, never a character. Its panel shows the three home zones side by side, at one scale, with what a typical lot fits, the walk to the hall, what grows, the price and the tax; each zone's free lots by address ("A farm at 3 Sheepwash Lane"), sorted by the walk or by room, each with "Show me"; and your deed, and where it stands. The office is where the deed is explained and the zones compared, not a toll. Claims have no range check, so any free lot's plot panel claims in Strands, and once you've looked in at the office, with your deed.
+
 | Service | Fee | Frequency |
 |---------|-----|-----------|
-| Initial deed claim (Rural, Suburban or Urban) | 500 Strands | One-time |
+| First deed (Rural, Suburban or Urban), the road in's reward | Free | Once an account |
+| Deed claim (Rural, Suburban or Urban) | 500 Strands | One-time |
 | Property tax | 2% of assessed plot value | Weekly, charged hourly in exact fractions |
 | Deed transfer | 2% of sale price | Per transaction |
 | Plot upgrade permit | 500-2,000 Strands | One-time |
 
 *Property tax is the primary recurring sink, scaling with economy size.*
+
+*The road in's deed (#440, #448) is one an account, earned by finishing the road in (§4) and spent on any free lot in a home zone, never the guild district. It isn't an item and can't be traded, sold or given. A granted plot is assessed at the zone's live deed price, so it's taxed exactly as a bought one: a free home doesn't mean free upkeep. Foreclosing a granted plot refunds no Strands, and a granted plot the terrain takes back (a retired lot, a forced commit) hands the deed back to spend again rather than paying out. Buying still works beside it: a player can buy a second home and keep the deed, or buy first and spend the deed later. Before the road in, every first deed was bought.*
 
 *The three home zones cost the same (#292). On balance they're of equal value, each with pros and cons that might draw a player to one: a farm's room against the walk to the market, a yard's nearness against its four stations. If one draws far more players than the others, the fix is its pros and cons, not its price. Until #292 the deeds were 250 rural, 500 suburban and 1000 urban.*
 
@@ -886,15 +901,18 @@ These interventions are rare, predictable, and transparent - safety nets, not ma
 
 ### 8.7 New Player Economic Path
 
-A new player's economic journey:
+A new player's economic journey, which the road in (§4) walks with them:
 
-1. **Spawn on the rural edge** - No currency, no property
-2. **Gather Fiber** - 10-15 minutes of gathering = ~500-1000 Fiber
-3. **Travel to Capitol** - Experience the world, use Fiber for canal tolls
-4. **Exchange Fiber for Strands** - Establish account at Capitol Exchange
-5. **Claim Deed** - Spend 500 Strands, the same in every home zone (or the deed the road in grants)
-6. **Establish Workshop** - Begin crafting/gathering loop
-7. **Earn through labor** - Take contracts, sell goods, or continue gathering
+1. **Spawn on the rural edge** - 100 Strands at registration, no property
+2. **Make things** - grass to fiber and rope, a workbench by the road, a stone axe: the first goods, and the quality cascade in their own numbers
+3. **Walk in to the hall** - Experience the world, and read each home zone's price, tax and room at its stop
+4. **Exchange Fiber for Strands** - at the Exchange, 1:1 less the fee, then a sell order and a buy order on the book, a stall and the Gazette. No step costs more than an order's escrow and the fees
+5. **Claim the road in's deed** - a home of your choice in the rural, suburban or urban rings, free, then taxed as any deed is (10 Strands a week on a home zone's 500)
+6. **Establish Workshop** - a station at home and a job that runs, then the crafting and gathering loop
+7. **Earn through labor** - sell goods, take commissions and wages from the hall's board, or keep gathering. The tax is the first bill, so the first week's work pays for the home it happens in
+8. **A second home is bought** - 500 Strands, the same in every home zone
+
+*The grant replaces "gather 500 to 1000 Fiber" (#440). Before the road in, step 2 was 10 to 15 minutes of gathering (in practice the better part of an hour of pulling grass), the deed was bought with it, and the choice of lot was made blind. The fiber that bought first deeds was most of the early demand at the Exchange; what a free first deed does to the economy, and what the 100 starting Strands are for now that they don't go toward a deed, is #451's balance run.*
 
 The commodity standard ensures new players can always earn currency through simple labor - no barriers to entry.
 

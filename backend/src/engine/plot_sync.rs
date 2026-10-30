@@ -82,7 +82,10 @@ pub enum OnOwned {
 ///
 /// `repack_` is the farms the monotone packing rule reshaped or dropped
 /// (#467, `20270106_001_packing_rows.sql`): the new ones keep their ids.
-pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_", "urban_plot_", "rw2_", "repack_"];
+///
+/// `rewrap_` is the suburban lots the pies wrapping on round a bulb reshaped
+/// or dropped (#470, `20270108_001_pie_wrap.sql`), on the same terms.
+pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_", "urban_plot_", "rw2_", "repack_", "rewrap_"];
 
 fn retired(terrain_id: &str) -> bool {
     RETIRED_LOTS.iter().any(|prefix| terrain_id.starts_with(prefix))

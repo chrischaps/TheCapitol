@@ -240,7 +240,8 @@ mod tests {
         // replaces every planned node again with its own rows, and
         // Arrival's commons (#443) adds its own round the spawn. The wilds'
         // re-plans (#340, #347) swap rows one for one. The monotone packing
-        // rule's farms (#467) re-plan the rural ring's, one fewer. The first
+        // rule's farms (#467) re-plan the rural ring's, one fewer, and the
+        // pies wrapped round their bulbs (#470) swap 155 one for one. The first
         // set's nodes (the seeded grass) stay.
         assert!(seeds > 0);
         let rows = |sql: &str, prefix: &str| sql.lines().filter(|l| l.trim_start().starts_with(prefix)).count() as i64;

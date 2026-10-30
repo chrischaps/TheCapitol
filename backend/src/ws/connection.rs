@@ -1456,6 +1456,12 @@ impl Socket {
                 let msg = ServerMessage::FeesChanged { fees };
                 out.push(Outgoing::Message(msg));
             }
+            // #617: the deed grants switched off or on: their grant as it
+            // stands now, so the Deeds Office doesn't offer one a claim refuses
+            GameEvent::GrantsSwitched => match crate::engine::tutorial::progress(&state.db, player_id).await {
+                Ok(progress) => out.push(Outgoing::Message(crate::engine::tutorial::message(progress))),
+                Err(e) => tracing::error!("Failed to read {}'s tutorial for the grants: {:?}", player_id, e),
+            },
             // Commons S2.1: the hall's board, to everyone
             GameEvent::Board { change, commission } => {
                 let msg = change.message(commission);
@@ -1490,7 +1496,8 @@ impl Socket {
 /// What a socket that fell `missed` events behind is sent before it carries on
 /// (C0.3): `resync`, which tells the client to refetch what it fetches over
 /// REST, then afresh what the server only pushes: the positions near it, the
-/// player's balance, the depth of each item it watches, and, if it holds the
+/// player's balance, where they are on the road in (#617), the depth of each
+/// item it watches, and, if it holds the
 /// avatar, the notices waiting. A holder's trade and trade requests end first
 /// ([`GameState::socket_lagged`](crate::engine::GameState::socket_lagged)),
 /// and the cancels follow on the event stream.
@@ -1517,6 +1524,12 @@ async fn resync(
     {
         Ok(new_balance) => out.push(ServerMessage::CurrencyChanged { new_balance }),
         Err(e) => tracing::error!("Failed to read {}'s balance to resync: {:?}", player_id, e),
+    }
+    // Where they are on the road in: a step, or the grants switching, may be
+    // among what it missed (#617)
+    match crate::engine::tutorial::progress(db, player_id).await {
+        Ok(progress) => out.push(crate::engine::tutorial::message(progress)),
+        Err(e) => tracing::error!("Failed to read {}'s tutorial to resync: {:?}", player_id, e),
     }
     let mut watched: Vec<&String> = market_items.iter().collect();
     watched.sort();
@@ -2442,12 +2455,13 @@ mod tests {
 
         let sent = resync(&db, &game, &market, ada, socket, missed, &watched).await;
         let tags: Vec<&str> = sent.iter().map(ServerMessage::type_name).collect();
-        assert_eq!(tags, ["resync", "positions", "currency_changed", "market_depth", "plot_foreclosed"]);
+        assert_eq!(tags, ["resync", "positions", "currency_changed", "tutorial", "market_depth", "plot_foreclosed"]);
         assert_eq!(sent[0], ServerMessage::Resync { missed: 100 });
         assert!(matches!(&sent[1], ServerMessage::Positions { players } if players.iter().any(|p| p.id == ada)));
         assert_eq!(sent[2], ServerMessage::CurrencyChanged { new_balance: 1234 });
-        assert!(matches!(&sent[3], ServerMessage::MarketDepth { item_type, full: true, .. } if item_type == "plank"));
-        assert_eq!(sent[4], gone);
+        assert!(matches!(&sent[3], ServerMessage::Tutorial { grant: capitol_protocol::tutorial::Grant::Unearned, .. }));
+        assert!(matches!(&sent[4], ServerMessage::MarketDepth { item_type, full: true, .. } if item_type == "plank"));
+        assert_eq!(sent[5], gone);
         assert!(crate::engine::notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty(), "the notice was left to go again");
 
         // Skipped ahead: what the channel still holds, then what comes next
@@ -2788,6 +2802,31 @@ mod tests {
         let back = socket.send(ClientMessage::Steer { heading: 0, throttle: 255, at: None }).await;
         assert_eq!(back, vec![ServerMessage::Error { message: presence::NOT_HOLDING.into(), command: "steer".into() }]);
         assert!(socket.queued().await.is_empty());
+    }
+
+    /// When the deed grants switch off or on, a socket sends its player's
+    /// grant as it stands then, read afresh each time (#617)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn the_grants_switching_tells_each_socket_its_grant(db: sqlx::PgPool) {
+        use crate::engine::deed_grants::tests::{grants_on, the_road, walked};
+        use capitol_protocol::tutorial::Grant;
+        let ada = crate::engine::plot_sync::tests::player(&db, "Ada", 0).await;
+        let mut socket = Harness::signed_in(crate::state::for_tests(db.clone()).await, ada).await;
+        socket.send(ClientMessage::Subscribe { channel: "position".into() }).await;
+        let grant = |sent: Vec<ServerMessage>| match sent.as_slice() {
+            [ServerMessage::Tutorial { grant, .. }] => *grant,
+            other => panic!("sent {other:?}, not one tutorial"),
+        };
+
+        assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Unearned);
+        walked(&db, ada, the_road()).await;
+        assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Open, "read again, not kept");
+        // Switched off (#451), the open grant reads as off, and back on as open
+        grants_on(&db, false).await;
+        assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Off);
+        grants_on(&db, true).await;
+        assert_eq!(grant(socket.hears(GameEvent::GrantsSwitched).await), Grant::Open);
     }
 
     /// A line said at (`x`, `y`) by `from`: a Capitol one numbered 1, as the

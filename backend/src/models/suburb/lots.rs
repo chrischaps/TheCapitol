@@ -28,6 +28,10 @@
 //!   (Plots v2's suburb, #468), each pie's rays then reach at least that far
 //!   from its front, where the ground allows: past the rear line it shares
 //!   with the lots behind, which give the ground back in the overlap pass.
+//!   A side of the stem with no lot near the bulb gives no last ray. The
+//!   pies swept only a right angle from the stem's line there, and three
+//!   came out as slivers. With a `pie_depth` they wrap on to 135°, short
+//!   of the back of that side's nearest stem lot (#470).
 //! - **Overlap pass.** Pies first, then through roads, then cul-de-sac
 //!   stems. A lot that overlaps one placed before it (`quads_overlap_strict`),
 //!   or isn't clear of every road, shrinks by bisection down to 60% depth, or
@@ -47,7 +51,7 @@
 
 use capitol_protocol::fmath::StableMath;
 use std::collections::HashMap;
-use std::f64::consts::{FRAC_PI_2, TAU};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 use capitol_protocol::terrain::{RoadSegment, TerrainPlot};
 
@@ -93,6 +97,13 @@ const PIE_PUSH: f64 = 40.0;
 /// however far out its other end goes (#422). Under `BULB_REACH`, or the stem
 /// keeps its last ray and the pies lose their side.
 const STEM_SHORT: f64 = 30.0;
+/// With a `pie_depth`, how far round from the stem's line a side with no
+/// lot near the bulb lets the pies reach (#470). At a right angle, as
+/// before, three pies share half the round and come out as slivers about
+/// 25 across the front.
+const PIE_WRAP: f64 = 3.0 * FRAC_PI_4;
+/// The wrap steps back by this towards the right angle until its ray stands.
+const PIE_WRAP_STEP: f64 = FRAC_PI_2 / 6.0;
 
 /// The suburb's lots: as wide and deep as the neighbourhood params say, off
 /// the road's edge, short of an edge they back onto and of the line they
@@ -201,8 +212,12 @@ impl Street<'_> {
 
         let mut out = Vec::new();
         let mut last = [None, None];
+        // Each fronted side's stem lot nearest the bulb, by its far ray,
+        // however far back it ends (#470). `None` for a side with no lots.
+        let mut tail = [Some(None), Some(None)];
         for (si, fronted) in [self.meta.fronted.0, self.meta.fronted.1].into_iter().enumerate() {
             if !fronted {
+                tail[si] = None;
                 continue;
             }
             let side = [1.0, -1.0][si];
@@ -213,6 +228,9 @@ impl Street<'_> {
                     out.push(self.candidate(class, ["L", "R"][si], k, quad(&w[0], &w[1])));
                     k += 1;
                 }
+                if rays.len() >= 2 {
+                    tail[si] = Some(rays.last().copied());
+                }
                 if s1 >= hi - BULB_REACH {
                     last[si] = rays.last().copied();
                 }
@@ -220,7 +238,7 @@ impl Street<'_> {
         }
         if let Some(centre) = self.meta.bulb {
             let stem_tip = pts[stem_end];
-            out.extend(self.pies(centre, stem_tip, last));
+            out.extend(self.pies(centre, stem_tip, last, tail));
         }
         out
     }
@@ -409,20 +427,14 @@ impl Street<'_> {
     }
 
     /// Pie lots round a bulb at `centre`, whose stem ends at `tip`, between
-    /// the last rays of the stem's left and right runs.
-    fn pies(&self, centre: P, tip: P, last: [Option<Ray>; 2]) -> Vec<(u8, Candidate)> {
+    /// the last rays of the stem's left and right runs. A side whose runs
+    /// end short of the bulb gives no last ray: with a `pie_depth`, the pies
+    /// wrap on round towards the stem there (#470), as far as `tail`, that
+    /// side's stem lot nearest the bulb, allows.
+    fn pies(&self, centre: P, tip: P, last: [Option<Ray>; 2], tail: [Option<Option<Ray>>; 2]) -> Vec<(u8, Candidate)> {
         let toward = (centre.1 - tip.1).stable_atan2(centre.0 - tip.0);
-        let angle = |r: &Ray| {
-            let m = r.mid();
-            (m.1 - centre.1).stable_atan2(m.0 - centre.0)
-        };
-        let from = last[0].as_ref().map_or(toward + FRAC_PI_2, angle);
-        let to = last[1].as_ref().map_or(toward - FRAC_PI_2, angle);
-        // Clockwise from the left round the bulb's far side to the right.
-        let sweep = (from - to).rem_euclid(TAU);
-        if sweep < 1e-3 {
-            return Vec::new();
-        }
+        let bearing = |p: P| (p.1 - centre.1).stable_atan2(p.0 - centre.0);
+        let angle = |r: &Ray| bearing(r.mid());
         let f = self.bulb_radius + self.half() + self.p.front_gap;
         let radial = |phi: f64| -> Option<Ray> {
             let d = (phi.stable_cos(), phi.stable_sin());
@@ -433,6 +445,32 @@ impl Street<'_> {
             let b = self.world.back_from(&self.region, centre, d, f, self.half() + self.p.front_gap, self.p.depth_max, self.p);
             (b - f >= MIN_DEPTH * self.p.depth).then_some(Ray { o: centre, d, f, b, fixed: false })
         };
+        // How far round from `toward` a side with no last ray reaches: a
+        // right angle, or with a `pie_depth` up to `PIE_WRAP`, short of the
+        // back of the side's nearest stem lot, which a pie's ray mustn't
+        // cross, and as far as a pie's ray still stands.
+        let wrap = |si: usize| -> f64 {
+            let Some(tail) = tail[si].filter(|_| self.pie_depth > 0.0) else {
+                return FRAC_PI_2;
+            };
+            let sign = [1.0, -1.0][si];
+            let most = tail.map_or(PIE_WRAP, |r| match ((bearing(r.back()) - toward) * sign).rem_euclid(TAU) {
+                a if a > PI => FRAC_PI_2,
+                a => a.min(PIE_WRAP),
+            });
+            let steps = ((most - FRAC_PI_2) / PIE_WRAP_STEP).floor().max(0.0) as usize;
+            (0..=steps)
+                .map(|i| FRAC_PI_2 + (most - FRAC_PI_2) * (steps - i) as f64 / steps.max(1) as f64)
+                .find(|&a| a <= FRAC_PI_2 || radial(toward + sign * a).is_some())
+                .unwrap_or(FRAC_PI_2)
+        };
+        let from = last[0].as_ref().map_or_else(|| toward + wrap(0), angle);
+        let to = last[1].as_ref().map_or_else(|| toward - wrap(1), angle);
+        // Clockwise from the left round the bulb's far side to the right.
+        let sweep = (from - to).rem_euclid(TAU);
+        if sweep < 1e-3 {
+            return Vec::new();
+        }
         let fixed = |r: Option<Ray>| r.map(|r| Ray { fixed: true, ..r });
         let fan = |count: usize| -> Vec<Option<Ray>> {
             (0..=count)

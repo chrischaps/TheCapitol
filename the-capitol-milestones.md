@@ -547,7 +547,7 @@ Create static data for:
 #### Backend - Deeds
 - [ ] Deed as item type *(claim charges the deed cost in Strands directly; no deed item)*
 - [x] `POST /plots/{id}/claim` - Claim unclaimed plot (requires deed purchase)
-- [ ] Deed purchase from Capitol bureaucracy (Strand cost by zone)
+- [x] Deed purchase from Capitol bureaucracy (Strand cost by zone) *(a claim charges the zone's deed price, `zones.deed_cost` × the `deed_price.<zone>` tunable, as `DeedPurchase`, the same 500 in each home zone since #292. Since the road in, the Deeds Office in the hall's forecourt (#448) compares the zones and lists their free lots, and the first deed is the road in's grant (#440); a bought one is a second home. No deed item: see the line above.)*
 - [ ] `POST /plots/{id}/transfer` - Transfer ownership
 
 #### Backend - Plot Permissions
@@ -771,7 +771,7 @@ Create static data for:
 - [ ] Error messages (user-friendly)
 - [ ] Responsive layout
 - [ ] Keyboard shortcuts
-- [ ] Tutorial/onboarding hints
+- [x] Tutorial/onboarding hints *(Flint only. First P8.3's four hint cards (#54), then the road in (`the-capitol-road-in.md`, #437): 30 steps in 6 chapters up the south road from the spawn to the hall, judged on the server, ending with a deed of the player's choice, and walked by citizens too.)*
 
 #### Client - Performance
 - [ ] Render optimization (large item lists)

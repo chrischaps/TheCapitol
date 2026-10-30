@@ -31,6 +31,7 @@ use std::time::Instant;
 
 use capitol_protocol::rest::WageOffer;
 use capitol_protocol::rules::wages::{OfferStatus, Work};
+use capitol_protocol::terrain::quad_contains;
 use uuid::Uuid;
 
 use super::super::plan::Holdings;
@@ -158,12 +159,12 @@ impl SimBot {
             .collect();
         let state = self.bot.state();
         // What grows on its lot, and how many nodes of each, of all it has
-        // seen: the server's own test is the lot's bounding box (#435)
+        // seen: inside the lot's outline, the server's own test (#435)
         let lot = state.plots().first().map(|plot| {
-            let b = &plot.bounds;
+            let corners = super::super::lot::corners(plot);
             let mut seen: HashMap<uuid::Uuid, &str> = HashMap::new();
             for n in self.atlas.values().map(|s| &s.node).chain(state.nodes().values()) {
-                if (b.min_x..=b.max_x).contains(&n.x) && (b.min_y..=b.max_y).contains(&n.y) {
+                if quad_contains(&corners, n.x, n.y) {
                     seen.insert(n.id, &n.resource_type);
                 }
             }

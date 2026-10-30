@@ -39,6 +39,7 @@ use capitol_protocol::rules::wages::{
     offer_value, payable, validate_offer, OfferError, OfferStatus, ShiftEnd, Work, AWAY_SECS, DAY_SECS,
     MAX_OPEN_OFFERS,
 };
+use capitol_protocol::terrain::quad_contains;
 use capitol_protocol::ws::ServerMessage;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgConnection, PgPool};
@@ -187,8 +188,15 @@ pub fn announce(events: &broadcast::Sender<GameEvent>, news: News) {
 
 /// Offer `req` for `employer_id` at `now`: check the work is theirs to offer,
 /// take its escrow and the court's fee, and put it on the board. Nothing
-/// changes unless all of it does.
-pub async fn offer(db: &PgPool, employer_id: Uuid, req: &OfferWages, now: DateTime<Utc>) -> Result<(WageOffer, News), WageError> {
+/// changes unless all of it does. `grows` is [`grows`]' answer for its work:
+/// a gather of something that doesn't grow on the lot is refused.
+pub async fn offer(
+    db: &PgPool,
+    employer_id: Uuid,
+    req: &OfferWages,
+    grows: bool,
+    now: DateTime<Utc>,
+) -> Result<(WageOffer, News), WageError> {
     validate_offer(req.rate, req.cap, req.term_days).map_err(WageError::Rules)?;
     if req.worker_id == Some(employer_id) {
         return Err(WageError::OwnOffer);
@@ -207,7 +215,7 @@ pub async fn offer(db: &PgPool, employer_id: Uuid, req: &OfferWages, now: DateTi
     if open >= MAX_OPEN_OFFERS {
         return Err(WageError::TooMany);
     }
-    let what = check_work(&mut tx, employer_id, &req.work).await?;
+    let what = check_work(&mut tx, employer_id, &req.work, grows).await?;
     if let Some(worker) = req.worker_id {
         let known: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM players WHERE id = $1)")
             .bind(worker)
@@ -275,8 +283,42 @@ pub async fn offer(db: &PgPool, employer_id: Uuid, req: &OfferWages, now: DateTi
     Ok((offered, news))
 }
 
-/// Check `work` is `employer_id`'s to offer, and say what it is in a few words.
-async fn check_work(conn: &mut PgConnection, employer_id: Uuid, work: &Work) -> Result<String, WageError> {
+/// Whether `work` can be done where it's offered, for [`offer`]: for a gather,
+/// whether a node of its resource stands on the lot, by the lot's outline, as
+/// `container_access::gathering_terms` finds a worker's lot. The outline is
+/// the terrain's, in game state, not the database's (#435), so the route asks
+/// this before the offer's transaction. Work at a station always can.
+pub async fn grows(db: &PgPool, game: &RwLock<GameState>, work: &Work) -> Result<bool, sqlx::Error> {
+    let Work::Gather { plot_id, resource } = work else {
+        return Ok(true);
+    };
+    let lot: Option<Option<String>> = sqlx::query_scalar("SELECT terrain_id FROM plots WHERE id = $1")
+        .bind(plot_id)
+        .fetch_optional(db)
+        .await?;
+    // No such lot, or one with no outline, which nobody can gather on
+    let Some(Some(lot)) = lot else {
+        return Ok(false);
+    };
+    Ok(grows_on(&*game.read().await, &lot, resource))
+}
+
+/// Whether a node of `resource` stands on the lot `lot_id`: inside its
+/// outline, and on no other lot first, as `TerrainConfig::lot_at` finds it.
+fn grows_on(game: &GameState, lot_id: &str, resource: &str) -> bool {
+    let Some(lot) = game.terrain.terrain_plots.iter().find(|lot| lot.id == lot_id) else {
+        return false;
+    };
+    game.resource_nodes.values().any(|node| {
+        node.resource_type == resource
+            && quad_contains(&lot.corners, node.x, node.y)
+            && game.terrain.lot_at(node.x, node.y).is_some_and(|at| at.id == lot_id)
+    })
+}
+
+/// Check `work` is `employer_id`'s to offer, and say what it is in a few
+/// words. `grows` is [`grows`]' answer for it.
+async fn check_work(conn: &mut PgConnection, employer_id: Uuid, work: &Work, grows: bool) -> Result<String, WageError> {
     match work {
         Work::Craft { station_id, recipe_id } => {
             let station: Option<(Uuid, String)> = sqlx::query_as("SELECT owner_id, station_type FROM stations WHERE id = $1")
@@ -317,21 +359,6 @@ async fn check_work(conn: &mut PgConnection, employer_id: Uuid, work: &Work) -> 
             if !known {
                 return Err(WageError::UnknownResource);
             }
-            // Within the lot's bounds: a lot that isn't a rectangle may admit
-            // a node just over its edge, never refuse one on it. The outline
-            // is the terrain's, not the database's (#435)
-            let grows: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                     SELECT 1 FROM resource_nodes n JOIN plots p ON p.id = $1
-                     WHERE n.resource_type = $2
-                       AND n.position_x BETWEEN p.bounds_min_x AND p.bounds_max_x
-                       AND n.position_y BETWEEN p.bounds_min_y AND p.bounds_max_y
-                 )",
-            )
-            .bind(plot_id)
-            .bind(resource)
-            .fetch_one(&mut *conn)
-            .await?;
             if !grows {
                 return Err(WageError::NothingToGather);
             }
@@ -1012,6 +1039,73 @@ mod tests {
         crate::content::sync(db, &crate::content::load().unwrap()).await.unwrap();
     }
 
+    /// [`super::offer`] of work that grows where it's offered, as the route
+    /// finds it for these tests' lot (`grows_on` has its own test)
+    async fn offer(db: &PgPool, employer_id: Uuid, req: &OfferWages, now: DateTime<Utc>) -> Result<(WageOffer, News), WageError> {
+        super::offer(db, employer_id, req, true, now).await
+    }
+
+    /// A lot that isn't a rectangle: a node inside its bounding box but over
+    /// its edge doesn't grow on it, on a neighbour's ground or on none (#435)
+    #[test]
+    fn what_grows_on_a_lot_is_inside_its_outline() {
+        use crate::models::{NodeState, ResourceNodeState, TerrainConfig, TerrainPlot, WorldGenParams};
+        let plot = |id: &str, corners| TerrainPlot {
+            id: id.into(),
+            corners,
+            street_facing_edge: (0, 1),
+            area: TerrainPlot::calculate_area(&corners),
+            adjacent_street_id: String::new(),
+            zone: "suburban".into(),
+        };
+        // A diamond round the origin, its bounding box ±10, and a neighbour
+        // across its north-east edge, in that corner of the box
+        let diamond = plot(LOT, [(0.0, -10.0), (10.0, 0.0), (0.0, 10.0), (-10.0, 0.0)]);
+        let neighbour = plot("next_door", [(5.0, 5.0), (10.0, 0.0), (20.0, 10.0), (10.0, 20.0)]);
+        let terrain = TerrainConfig {
+            world_size: capitol_protocol::rules::WORLD_SIZE,
+            center_x: capitol_protocol::rules::CENTER_X,
+            center_y: capitol_protocol::rules::CENTER_Y,
+            water_rings: Vec::new(),
+            roads: Vec::new(),
+            terrain_plots: vec![neighbour, diamond],
+            parks: Vec::new(),
+            landmarks: Vec::new(),
+            land: Default::default(),
+            rivers: Vec::new(),
+            streams: Vec::new(),
+            lakes: Vec::new(),
+            fords: Vec::new(),
+        };
+        let with = |nodes: &[(&str, f64, f64)]| {
+            let mut game = GameState::with_terrain(WorldGenParams::default(), terrain.clone());
+            for &(resource_type, x, y) in nodes {
+                let id = Uuid::new_v4();
+                game.resource_nodes.insert(id, ResourceNodeState {
+                    id,
+                    resource_type: resource_type.into(),
+                    x,
+                    y,
+                    base_quality: 50,
+                    state: NodeState::Available,
+                    harvested_by: None,
+                    regenerates_at_tick: None,
+                });
+            }
+            game
+        };
+
+        assert!(grows_on(&with(&[("grass", 2.0, 3.0)]), LOT, "grass"), "inside the diamond");
+        // In the box's corners, off the diamond: on the neighbour's lot, and on none
+        assert!(!grows_on(&with(&[("clay", 9.0, 9.0)]), LOT, "clay"), "next door");
+        assert!(!grows_on(&with(&[("clay", -9.0, -9.0)]), LOT, "clay"), "on no lot");
+        // On the corner they share, a node is the lot's that `lot_at` finds first
+        assert!(!grows_on(&with(&[("clay", 10.0, 0.0)]), LOT, "clay"), "the neighbour's, as a worker finds it");
+        assert!(grows_on(&with(&[("clay", 9.0, 9.0), ("clay", -1.0, 0.0)]), LOT, "clay"), "one on it is enough");
+        assert!(!grows_on(&with(&[("grass", 2.0, 3.0)]), LOT, "clay"), "another resource");
+        assert!(!grows_on(&with(&[("grass", 2.0, 3.0)]), "no_such_lot", "grass"));
+    }
+
     /// A workbench of `owner`'s at `x`, quality 50: (station, its box)
     async fn bench(db: &PgPool, owner: Uuid, x: f64) -> (Uuid, Uuid) {
         let id = Uuid::new_v4();
@@ -1192,8 +1286,10 @@ mod tests {
         assert!(matches!(offer(&db, ada.id, &unknown, now).await, Err(WageError::UnknownRecipe)));
         assert!(matches!(offer(&db, bo.id, &handles_at(station, 1, 1), now).await, Err(WageError::NotYourStation)));
         assert!(matches!(offer(&db, bo.id, &grass_on(plot, 1, 1), now).await, Err(WageError::NotYourLot)));
-        let clay = OfferWages { work: Work::Gather { plot_id: plot, resource: "clay".into() }, ..grass_on(plot, 1, 1) };
-        assert!(matches!(offer(&db, ada.id, &clay, now).await, Err(WageError::NothingToGather | WageError::UnknownResource)));
+        let clay = OfferWages { work: Work::Gather { plot_id: plot, resource: "clay_bank".into() }, ..grass_on(plot, 1, 1) };
+        assert!(matches!(super::offer(&db, ada.id, &clay, false, now).await, Err(WageError::NothingToGather)));
+        let mud = OfferWages { work: Work::Gather { plot_id: plot, resource: "mud".into() }, ..grass_on(plot, 1, 1) };
+        assert!(matches!(offer(&db, ada.id, &mud, now).await, Err(WageError::UnknownResource)));
         assert!(matches!(offer(&db, ada.id, &handles_at(station, 0, 1), now).await, Err(WageError::Rules(_))));
         let long = OfferWages { term_days: 8, ..handles_at(station, 1, 1) };
         assert!(matches!(offer(&db, ada.id, &long, now).await, Err(WageError::Rules(OfferError::BadTerm))));

@@ -47,11 +47,11 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rules::{self, steer, Zone};
 use capitol_protocol::terrain::{Landmark, LandmarkKind};
-use capitol_protocol::ws::{Channel, ClientMessage, ServerMessage};
+use capitol_protocol::ws::{Channel, ClientMessage, GuildNoticeKind, ServerMessage};
 use uuid::Uuid;
 
 use crate::bazaar;
-use crate::citizen::phrases::{self, Moment, Occasion, Voice};
+use crate::citizen::phrases::{self, Moment, Occasion, To, Voice};
 use crate::catalog::container_type;
 use crate::net::{
     auth_error_is_final, ConnectionState, Net, NetConfig, NetEvent, NetStats, RestError, RestRequest, RestResponse, Tag,
@@ -2695,7 +2695,7 @@ impl Bot {
         };
         let line = match occasion {
             Occasion::Greeting => voice.greet(to, &moment, ms, now),
-            _ => voice.speak(occasion, &moment, now),
+            _ => voice.speak(occasion, To::Near, &moment, now),
         };
         match line {
             Some(line) => {
@@ -2706,15 +2706,14 @@ impl Bot {
         }
     }
 
-    /// Says the phrasebook's line for `occasion` to our guild, `guild`
+    /// Says the voice's line for `occasion` to our guild, `guild`
     /// (`guild_id`), in its channel (S4.5), if the bot has a voice and its
-    /// window has room. A model's words come late and out loud, so a guild
-    /// line is always the phrasebook's
+    /// window has room. A model's words come later, still to the guild
     /// ([#511](https://github.com/chrischaps/TheCapitol/issues/511)). True if
-    /// it spoke.
+    /// it spoke now.
     pub fn speak_to_guild(&mut self, occasion: Occasion, guild: &str, guild_id: Uuid) -> bool {
         let moment = Moment::with(guild, guild_id, self.state.server_time_ms());
-        let line = self.voice.as_mut().and_then(|v| v.from_the_book(occasion, &moment, Instant::now()));
+        let line = self.voice.as_mut().and_then(|v| v.speak(occasion, To::Guild(guild_id), &moment, Instant::now()));
         match line {
             Some(line) => {
                 self.say(Channel::Guild, line);
@@ -2768,7 +2767,8 @@ impl Bot {
     }
 
     /// What the voice hears in a frame's `changes`: a person naming it, a
-    /// sale at its stall. Then it says the answers that are due.
+    /// sale at its stall, a guild it's out of. Then it says the lines that
+    /// are due, each where it was meant for.
     fn answer_talk(&mut self, changes: &[StateEvent]) {
         let now = Instant::now();
         let ms = self.state.server_time_ms();
@@ -2795,6 +2795,17 @@ impl Bot {
                     }
                 }
                 StateEvent::BazaarSale { buyer_name, .. } => buyers.push(buyer_name.clone()),
+                // A guild it's out of hears nothing more from it
+                StateEvent::GuildNotice {
+                    guild_id,
+                    kind: GuildNoticeKind::Expelled,
+                    ..
+                }
+                | StateEvent::GuildDissolved { guild_id, .. } => {
+                    if let Some(voice) = self.voice.as_mut() {
+                        voice.forget(To::Guild(*guild_id));
+                    }
+                }
                 _ => {}
             }
         }
@@ -2812,9 +2823,12 @@ impl Bot {
             _ => return,
         };
         // Whoever spoke may have walked off: then nobody hears it
-        if self.heard() {
-            for line in due {
-                self.say(Channel::Local, line);
+        let heard = self.heard();
+        for (to, line) in due {
+            match to {
+                To::Near if heard => self.say(Channel::Local, line),
+                To::Guild(_) => self.say(Channel::Guild, line),
+                _ => {}
             }
         }
     }
@@ -3258,6 +3272,55 @@ mod tests {
         assert!(bot.speak(Occasion::Greeting, ada));
         assert!(!bot.speak(Occasion::Greeting, ada), "once a game hour");
         assert!(bot.speak(Occasion::Opening, ada));
+    }
+
+    /// A model that never answers in a test's time: every line pends.
+    struct Pending;
+
+    impl phrases::Speaker for Pending {
+        fn name(&self) -> &str {
+            "pending"
+        }
+
+        fn line(&mut self, _: Occasion, _: &Moment) -> phrases::Words {
+            phrases::Words::Pending(crate::citizen::decide::Ticket(0))
+        }
+    }
+
+    #[test]
+    fn a_guild_hears_its_line_with_nobody_near_and_a_guild_left_hears_none() {
+        use capitol_protocol::ws::PlayerPosition;
+        let (me, guild) = (Uuid::from_u128(1), Uuid::from_u128(7));
+        let mut bot = offline_bot(false);
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        bot.state.apply_ws(&ServerMessage::AuthOk {
+            player_id: me,
+            server_time_ms: now_ms,
+            subscription: Default::default(),
+            fees: Default::default(),
+            is_admin: false,
+            day_offset_ms: 0,
+        });
+        bot.state.apply_ws(&ServerMessage::Positions {
+            players: vec![PlayerPosition { id: me, name: "Wren Cooper".into(), x: 6800.0, y: 6800.0, citizen: true, tag: None }],
+        });
+        assert!(!bot.speak_to_guild(Occasion::Joined, "The Ore Guild", guild), "a bot without a voice says nothing");
+        bot.speak_with(Voice::phrasebook(&Default::default(), 1));
+        assert!(bot.speak_to_guild(Occasion::Joined, "The Ore Guild", guild), "a guild's channel needs nobody near");
+        // A model's words come later, still bound for the guild: until the
+        // guild is gone, and then never
+        bot.speak_with(Voice::new(Box::new(Pending), &Default::default(), 1));
+        assert!(!bot.speak_to_guild(Occasion::Joined, "The Ore Guild", guild), "the world doesn't wait");
+        assert!(bot.voice.as_ref().is_some_and(Voice::has_due));
+        bot.answer_talk(&[StateEvent::GuildDissolved {
+            guild_id: guild,
+            guild: "The Ore Guild".into(),
+            owed: 0,
+            share: 0,
+            impounded: Vec::new(),
+            lost: Vec::new(),
+        }]);
+        assert!(!bot.voice.as_ref().is_some_and(Voice::has_due), "a dissolved guild hears nothing more");
     }
 
     #[test]

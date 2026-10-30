@@ -900,7 +900,9 @@ mod db_tests {
 
         let now = chrono::Utc::now();
         let grass = OfferWages { work: Work::Gather { plot_id: plot, resource: "grass".into() }, rate: 1, cap: 5, term_days: 1, worker_id: None };
-        let (offer, _) = wages::offer(&db, owner, &grass, now).await.unwrap();
+        let grows = wages::grows(&db, &game, &grass.work).await.unwrap();
+        assert!(grows, "the grass on the lot");
+        let (offer, _) = wages::offer(&db, owner, &grass, grows, now).await.unwrap();
         wages::take(&db, worker, offer.id, now).await.unwrap();
         let Ok(Some(work)) = terms(worker).await.unwrap() else { panic!("on a shift for it") };
         assert_eq!((work.offer_id, work.employer_id), (offer.id, owner));

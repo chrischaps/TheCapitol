@@ -10,7 +10,9 @@ use axum::{
     Json, Router,
 };
 use capitol_protocol::annotation::{AnnotationKind, AnnotationsQuery};
-use capitol_protocol::metrics::{Feed, SeriesQuery, TownLatest, TownReport};
+use capitol_protocol::metrics::{
+    Feed, SeriesQuery, TownLatest, TownReport, WorkQuery, WorkSeries, SAMPLE_SECS, WORK_BIN_MS, WORK_MAX_BINS,
+};
 use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use capitol_protocol::rest::{
@@ -54,6 +56,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/annotations", get(get_annotations))
         .route("/stream", get(stream))
         .route("/series", get(get_series))
+        .route("/work", get(get_work))
         .route("/tunables", get(get_tunables).put(put_tunables))
         .route("/clock", get(get_clock).put(put_clock))
         .route("/tunables/preset", get(get_tunables_preset).put(put_tunables_preset))
@@ -437,6 +440,32 @@ pub async fn get_series(
         .filter(|a| a.at_ms <= to_ms)
         .collect();
     Ok(Json(serde_json::json!({ "samples": samples, "annotations": annotations })))
+}
+
+/// The tick's phases and the loops beside it between two times, summed in
+/// bins (#572), as `capitol_protocol::metrics::WorkSeries`: what the
+/// console's **Where the time goes** draws and tables. A day of it is a few
+/// kB, where every sample's four numbers a phase in `/admin/series` were
+/// about 17 MB.
+pub async fn get_work(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<WorkQuery>,
+) -> Result<Json<WorkSeries>, AppError> {
+    require_admin(&user)?;
+    let to_ms = query.to_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
+    let from_ms = query.from_ms.unwrap_or(to_ms - 3_600_000);
+    let bin_ms = query.bin_ms.unwrap_or(WORK_BIN_MS);
+    if from_ms >= to_ms {
+        return Err(AppError::BadRequest("from_ms must be before to_ms".into()));
+    }
+    if bin_ms < SAMPLE_SECS as i64 * 1000 {
+        return Err(AppError::BadRequest(format!("bin_ms must be at least a sample's {} ms", SAMPLE_SECS * 1000)));
+    }
+    if (to_ms - from_ms) / bin_ms > WORK_MAX_BINS {
+        return Err(AppError::BadRequest(format!("that's over {WORK_MAX_BINS} bins: ask for wider ones")));
+    }
+    Ok(Json(sampler::work(&state.samples, &state.db, from_ms, to_ms, bin_ms).await?))
 }
 
 /// The zones and resources the tunables' families may name, as the world has them now

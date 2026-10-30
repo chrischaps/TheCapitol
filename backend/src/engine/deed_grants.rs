@@ -16,8 +16,8 @@
 //!   run ([`enabled`]): the road in then opens none, one not yet spent can't
 //!   be, the client hears `Grant::Off`, and a home is bought as before.
 //!   Switched back on, a grant the steps earned meanwhile opens at the claim.
-//!   A client connected as it flips hears so only at its next step or
-//!   reconnect (#617).
+//! - When the [`KNOB`] that switches them off or on moves, every socket reads
+//!   its player's grant again and sends `tutorial` (`tunables::update`, #617).
 
 use std::collections::BTreeMap;
 

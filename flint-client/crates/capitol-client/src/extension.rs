@@ -1721,7 +1721,9 @@ impl CapitolExtension {
     /// shoulder, it never frees the cursor, which a pad has no use for.
     fn back(&mut self) {
         let egui = self.shared.egui.lock().ok().and_then(|e| e.clone());
-        if egui.is_some_and(|ctx| ui::slots::drop_carry(&ctx)) {
+        if self.pad_nav.let_go() {
+            // A level or a field's keys the ring holds lets go first (#517)
+        } else if egui.is_some_and(|ctx| ui::slots::drop_carry(&ctx)) {
             // A stack picked up in a panel (#331) goes back first
         } else if self.shortcuts.open {
             self.shortcuts.open = false;
@@ -3199,7 +3201,7 @@ impl PlayerExtension for CapitolExtension {
                     hire: picked.filter(|p| p.owner_id.is_some() && p.owner_id == state.me()).map(|p| ui::plot::Hire {
                         wages: session.wages(),
                         me: state.me(),
-                        resources: capitol_core::wages::resources_on(&p.bounds, state.nodes().values())
+                        resources: capitol_core::wages::resources_on(&capitol_core::sim::lot::corners(p), state.nodes().values())
                             .into_iter()
                             .map(|id| {
                                 let name = state.catalog().resource_type(&id).map_or_else(|| id.replace('_', " "), |r| r.name.clone());
