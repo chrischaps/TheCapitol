@@ -74,6 +74,7 @@ pub(crate) mod tests {
 
     use super::metrics;
     use super::neighbourhood::{ENTRANCE_OFFSET, ENTRANCE_SPACING};
+    use crate::models::station_room;
     use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
 
     /// The suburb as it ships: every pattern, mixed by the default weights.
@@ -138,6 +139,12 @@ pub(crate) mod tests {
             // 90% take 6 stations, a whole workshop (#468): 92 to 93%.
             metrics::Lots { takes_six: 0.90, area_max: 19000.0, depth_min: 120.0, green_max: 0.25 }.assert_lots(&m, &why);
             assert!(m.stations_median.unwrap() >= 8.0, "{why}");
+            // No pie is a sliver: each takes 4, as the plots plan wants of
+            // any suburban lot. A stem with no lot near its bulb made pies
+            // that took 3 (#470).
+            for l in world.terrain.terrain_plots.iter().filter(|l| l.zone == "suburban" && l.id.contains("_B_")) {
+                assert!(station_room::takes(&l.corners, 4), "{seed}: {} takes fewer than 4", l.id);
+            }
             let least = 0.5 * 140.0 * 134.0;
             assert!(m.parks > 0 && m.park_area_min.is_none_or(|a| a >= least - 1e-6), "{why}");
         }
