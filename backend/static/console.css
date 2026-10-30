@@ -92,7 +92,7 @@
   --m-lot: rgba(35, 30, 23, 0.1);
   --m-road: #b3a27e;
   --m-arterial: #9a8660;
-  --m-trail: #9a8763;
+  --m-trail: #6f5c3c; /* dark enough to hold over the relief (#415) */
   --m-landmark: #8a7a5c;
   --m-owned-citizen: rgba(138, 106, 18, 0.42);
   --m-owned-person: rgba(43, 76, 126, 0.42);
@@ -112,7 +112,7 @@
   --m-relief-lit: #fcf7ea;
   --m-relief-shadow: #5f4f3b;
   --m-contour: #6b5232;
-  --m-contour-alpha: 0.16;
+  --m-contour-alpha: 0.3;
   /* nodes by what grows there: plants, wood, stone, clay, the three metals */
   --n-grass: #6f9a4a;
   --n-reed_bed: #8fae5a;
@@ -213,7 +213,7 @@
     --m-lot: rgba(140, 140, 170, 0.12);
     --m-road: #3a3a4e;
     --m-arterial: #6a6a80;
-    --m-trail: #4a4a5e;
+    --m-trail: #7a7a96;
     --m-landmark: #5a5040;
     --m-owned-citizen: rgba(201, 162, 39, 0.32);
     --m-owned-person: rgba(59, 130, 246, 0.32);
@@ -232,7 +232,7 @@
     --m-relief-lit: #a7b0d6;
     --m-relief-shadow: #040407;
     --m-contour: #c9a227;
-    --m-contour-alpha: 0.14;
+    --m-contour-alpha: 0.2;
     --n-grass: #7dbb55;
     --n-reed_bed: #a6c96a;
     --n-tree: #4f9a45;
@@ -304,7 +304,7 @@
   --m-lot: rgba(140, 140, 170, 0.12);
   --m-road: #3a3a4e;
   --m-arterial: #6a6a80;
-  --m-trail: #4a4a5e;
+  --m-trail: #7a7a96;
   --m-landmark: #5a5040;
   --m-owned-citizen: rgba(201, 162, 39, 0.32);
   --m-owned-person: rgba(59, 130, 246, 0.32);
@@ -323,7 +323,7 @@
   --m-relief-lit: #a7b0d6;
   --m-relief-shadow: #040407;
   --m-contour: #c9a227;
-  --m-contour-alpha: 0.14;
+  --m-contour-alpha: 0.2;
   --n-grass: #7dbb55;
   --n-reed_bed: #a6c96a;
   --n-tree: #4f9a45;

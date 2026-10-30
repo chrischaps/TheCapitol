@@ -124,7 +124,7 @@ fn answer(version: &str, size: u32, drawn: Drawn, headers: &HeaderMap) -> Respon
         // Stored, but always revalidated, so a regenerated terrain is seen at once
         (header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache")),
         (HeaderName::from_static("x-relief-peak"), peak),
-        (HeaderName::from_static("x-relief-flat"), HeaderValue::from(FLAT_SHADE)),
+        (HeaderName::from_static("x-relief-flat"), HeaderValue::from(u16::from(FLAT_SHADE))),
     ];
     let unchanged = headers
         .get(header::IF_NONE_MATCH)
