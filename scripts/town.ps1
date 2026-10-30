@@ -92,9 +92,7 @@ function New-TownCitizens([hashtable]$admin, [int]$online, [int]$merchants) {
 }
 
 function Invoke-Up {
-    if (-not (Test-Path -LiteralPath (Join-Path $root "backend\.env"))) {
-        Die "backend/.env is missing: copy backend/.env.example (the town reads its JWT_SECRET)"
-    }
+    Assert-BackendEnv
     if (Test-Healthy) {
         Die "something already answers on $server`: another town? Stop it, or set TOWN_PORT"
     }

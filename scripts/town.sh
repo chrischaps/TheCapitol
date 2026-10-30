@@ -121,13 +121,33 @@ stop() {
   exit 0
 }
 
+# The server reads backend/.env (its JWT_SECRET) from its working directory.
+# A worktree has none: it's git-ignored. Then start_backend hands the main
+# checkout's to the server, as ci.sh's main_env does (#580), and nothing is
+# copied. Dies when neither has one.
+main_env=
+find_backend_env() {
+  [[ -f "$root/backend/.env" ]] && return 0
+  local main
+  main=$(dirname "$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)" && pwd)")
+  [[ -f "$main/backend/.env" ]] || die "backend/.env is missing here and in the main checkout ($main): copy backend/.env.example there (the town reads its JWT_SECRET)"
+  main_env="$main/backend/.env"
+  say "this worktree has no backend/.env: the server reads the main checkout's ($main_env)"
+}
+
 start_backend() {
   build_copy "$root" capitol-backend capitol-backend "$root/target/town"
   mkdir -p "$dir"
   local log="$dir/backend.log"
   say "starting the town's server on $server (its log: flint-client/town/backend.log)"
   # The variables set here win over backend/.env's: dotenvy fills only what's unset.
+  # A worktree's server takes the main checkout's (#580), under these.
   (cd "$root/backend" && \
+    if [[ -n "$main_env" ]]; then
+      while IFS='=' read -r name value; do
+        export "$name=${value%$'\r'}"
+      done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$main_env")
+    fi && \
     DATABASE_URL="postgres://capitol:capitol_dev@localhost:5433/$db" \
     REDIS_URL="redis://localhost:6379/$redis_db" \
     HOST=127.0.0.1 PORT="$port" \
@@ -191,7 +211,7 @@ up() {
       *) die "up takes --online <n>, --merchants <m> and --always-on, not $1" ;;
     esac
   done
-  [[ -f "$root/backend/.env" ]] || die "backend/.env is missing: copy backend/.env.example (the town reads its JWT_SECRET)"
+  find_backend_env
   if healthy; then
     die "something already answers on $server: another town? Stop it, or set TOWN_PORT"
   fi
