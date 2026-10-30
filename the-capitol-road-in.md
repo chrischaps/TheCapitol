@@ -2,6 +2,8 @@
 
 *2026-10-22. Plan issue #437. Work packages #438 to #452. Issues are labelled `tutorial`, with phase labels `tu:O0-groundwork` to `tu:O3-home`.*
 
+*Status (2026-10-29): built, all but O3.4's balance run (#451). The GDD tells the story now (§4, §8.4, §8.7; O3.5, #452).*
+
 ## 1. Vision
 
 A new player lands on the south road among the farms, with the tower far ahead. Today they learn four things (walk, gather, look in the pack, twist rope), then they're on their own. Their first deed then comes from pulling grass for the better part of an hour, and when they have one they choose a lot with no idea what the choice means.
@@ -297,6 +299,17 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
   - **`capitol-bot --tutorial`** (plan §10): one bot walks the whole road on its account through the same code, as a fiber gatherer with a seeded persona, saying each step as it's done, and fails if it ended without a claim.
 - **O3.4 Balance** (#451, M): `deed_grant.enabled`, balance runs with grants against none, and what the 100 starting Strands are for now.
 - **O3.5 The docs** (#452, S): GDD §4, §8.4 and §8.7, the milestones, and P8.3 marked superseded.
+
+  *As built:*
+  - **The GDD** (`the-capitol-gdd.md`) tells the new story:
+    - §4's *Phase 1: Arrival* is the road in, chapter by chapter, with the deed as its reward, and no "earn enough to acquire a deed". *Phase 2* is the walk, ending in the choice at the Deeds Office. *Phase 3* starts from Settle in.
+    - §8.4's Deeds Office is the desk in the hall's forecourt, with the grant's row in the fee table and its rules (D4 to D6) under it.
+    - §8.7's new player's path has the grant in place of "gather 500 to 1000 fiber", and the canal tolls are gone: there were never any.
+    - §8.3 names the grant as a faucet of land on its own books. §3.1's plots are recorded at the office, not "at Capitol Tower".
+  - **The milestones:** M7's "Deed purchase from Capitol bureaucracy" and M10's "Tutorial/onboarding hints" are checked, each with a line on how. "Deed as item type" stays open: neither a bought deed nor the grant is an item.
+  - **The Flint plan's P8.3** is marked superseded by this plan, with what replaced what.
+  - **CLAUDE.md**'s line for this plan says it's built. The current focus is Callings, so it doesn't change.
+  - **Differs from the issue:** "Close this last" held for everything but O3.4 (#451), which was still running when this landed. The GDD's §8.7 points at #451 for what the free deed does to the Exchange and what the 100 starting Strands are for now, and #451's write-up goes in its own entry above.
 
 ## 7. Dependency graph and estimate
 
