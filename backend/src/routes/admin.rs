@@ -572,25 +572,32 @@ pub struct ServerStats {
 
 /// The players near a point as the server is moving them (D5.3): where each
 /// stands, where it's walking to and what it's doing, for the Flint client's
-/// admin layers. A citizen's destination is its next leg.
+/// admin layers. A citizen's destination is its next leg; since #414 its
+/// `heading` is where the whole walk is bound for, and why, from the town.
 pub async fn get_walkers(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Query(query): Query<WalkersQuery>,
 ) -> Result<Json<Vec<Walker>>, AppError> {
     require_admin(&user)?;
-    Ok(Json(walkers_near(&state.game.read().await.players, query)))
+    let headings = state.town.headings();
+    Ok(Json(walkers_near(&state.game.read().await.players, &headings, query)))
 }
 
 fn walkers_near(
     players: &std::collections::HashMap<uuid::Uuid, crate::models::PlayerState>,
+    headings: &Headings,
     query: WalkersQuery,
 ) -> Vec<Walker> {
     let radius = query.radius.clamp(0.0, WALKERS_MAX_RADIUS);
-    walkers(players.values().filter(|p| (p.x - query.x).powi(2) + (p.y - query.y).powi(2) <= radius * radius))
+    let near = players.values().filter(|p| (p.x - query.x).powi(2) + (p.y - query.y).powi(2) <= radius * radius);
+    walkers(near, headings)
 }
 
-fn walkers<'a>(players: impl Iterator<Item = &'a crate::models::PlayerState>) -> Vec<Walker> {
+/// Each walking citizen's heading, by name, from the town's newest report
+type Headings = std::collections::HashMap<String, capitol_protocol::rest::Heading>;
+
+fn walkers<'a>(players: impl Iterator<Item = &'a crate::models::PlayerState>, headings: &Headings) -> Vec<Walker> {
     let mut out: Vec<Walker> = players
         .map(|p| Walker {
             player_id: p.id,
@@ -604,6 +611,9 @@ fn walkers<'a>(players: impl Iterator<Item = &'a crate::models::PlayerState>) ->
                 ActionState::Extracting { node_id, .. } => Doing::Extracting { node_id: *node_id },
                 ActionState::Crafting { recipe_id, .. } => Doing::Crafting { recipe_id: recipe_id.clone() },
             },
+            // The report can be five seconds behind: a citizen the server
+            // has standing has arrived, whatever the town last said
+            heading: (p.citizen && p.dest_x.is_some()).then(|| headings.get(&p.name).cloned()).flatten(),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -618,7 +628,8 @@ pub async fn get_positions(
     Extension(user): Extension<AuthUser>,
 ) -> Result<Json<Vec<Walker>>, AppError> {
     require_admin(&user)?;
-    Ok(Json(walkers(state.game.read().await.players.values())))
+    let headings = state.town.headings();
+    Ok(Json(walkers(state.game.read().await.players.values(), &headings)))
 }
 
 /// One player by name (D4.3), for the console's page of one citizen: their
@@ -633,7 +644,8 @@ pub async fn get_player(
     let mut detail = player_detail(&state.db, &query.name, from)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("No player is called {}", query.name)))?;
-    detail.walker = walkers(state.game.read().await.players.get(&detail.player_id).into_iter()).pop();
+    let headings = state.town.headings();
+    detail.walker = walkers(state.game.read().await.players.get(&detail.player_id).into_iter(), &headings).pop();
     Ok(Json(detail))
 }
 
@@ -907,16 +919,44 @@ mod tests {
         let players: std::collections::HashMap<Uuid, PlayerState> =
             [ada, bram, far].into_iter().map(|p| (p.id, p)).collect();
 
-        let near = walkers_near(&players, WalkersQuery { x: 6800.0, y: 6800.0, radius: 150.0 });
+        let near = walkers_near(&players, &Headings::new(), WalkersQuery { x: 6800.0, y: 6800.0, radius: 150.0 });
         let names: Vec<&str> = near.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, ["Ada", "Bram"]);
         assert_eq!(near[0].dest, Some([6900.0, 6750.0]));
         assert!(near[0].citizen);
+        assert_eq!(near[0].heading, None, "no town, no heading");
         assert_eq!(near[1].doing, Doing::Crafting { recipe_id: "rope".into() });
         assert_eq!(near[1].dest, None);
         // The radius is held to the most it looks
-        let all = walkers_near(&players, WalkersQuery { x: 6800.0, y: 6800.0, radius: 1e9 });
+        let all = walkers_near(&players, &Headings::new(), WalkersQuery { x: 6800.0, y: 6800.0, radius: 1e9 });
         assert_eq!(all.len(), 2);
+    }
+
+    /// #414: a citizen out walking carries its town's heading past its leg;
+    /// one the server has standing, or a person, carries none
+    #[test]
+    fn a_walking_citizen_carries_its_heading() {
+        use capitol_protocol::rest::Heading;
+        let mut ada = player("Ada", 6800.0, 6800.0, true);
+        ada.dest_x = Some(6900.0);
+        ada.dest_y = Some(6750.0);
+        let cora = player("Cora", 6820.0, 6800.0, true);
+        let mut bram = player("Bram", 6810.0, 6800.0, false);
+        bram.dest_x = Some(6700.0);
+        bram.dest_y = Some(6700.0);
+        let players: std::collections::HashMap<Uuid, PlayerState> =
+            [ada, bram, cora].into_iter().map(|p| (p.id, p)).collect();
+        let to_clay = Heading { to: [7400.0, 6100.0], why: "gather clay".into() };
+        let headings: Headings = ["Ada", "Bram", "Cora"]
+            .into_iter()
+            .map(|name| (name.to_string(), to_clay.clone()))
+            .collect();
+
+        let near = walkers_near(&players, &headings, WalkersQuery { x: 6800.0, y: 6800.0, radius: 150.0 });
+        let heading = |name: &str| near.iter().find(|w| w.name == name).unwrap().heading.clone();
+        assert_eq!(heading("Ada"), Some(to_clay), "past its leg, to the clay");
+        assert_eq!(heading("Cora"), None, "standing: it has arrived, whatever the town last said");
+        assert_eq!(heading("Bram"), None, "a person's walk is their own");
     }
 
     /// These need the local Postgres (`docker-compose up -d`).

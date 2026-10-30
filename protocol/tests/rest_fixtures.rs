@@ -39,7 +39,8 @@
 //! the one away an all-rounder last at ore, each with its time by activity
 //! (Callings K3.3); the merchant is in the shape from before callings.
 //! `fixtures/rest/admin_walkers.json` is `GET /admin/walkers` (D5.3): a
-//! citizen walking to its next leg, a person gathering, one crafting. It's
+//! citizen walking to its next leg, bound past it for its bench (#414), a
+//! person gathering, one crafting. It's
 //! also what `GET /admin/positions` (D1.3) sends, for every player.
 //! `fixtures/rest/admin_map.json` is `GET /admin/map` (D1.3): two zones, a citizen's farm
 //! and a person's lot, their stations, and an hour's fills at the hall and two stalls.
@@ -460,6 +461,9 @@ fn a_town_report_round_trips_with_its_decisions() {
     assert_eq!(calling.leanings[0].job, "crafter-planks");
     assert_eq!(ada.doing.as_ref().unwrap().job, "crafter-planks");
     assert_eq!(ada.time.values().sum::<f64>(), 5.25);
+    // #414: where its walk is bound for, and why
+    assert_eq!(ada.walking.as_ref().unwrap().why, "craft plank");
+    assert!(report.citizens[1..].iter().all(|c| c.walking.is_none()));
     let cora = &report.citizens[2];
     assert_eq!(cora.role, ROLE_ALL_ROUNDER);
     assert_eq!(cora.calling.as_ref().unwrap().favourite, None);
@@ -505,6 +509,10 @@ fn walkers_round_trip() {
     let walkers: Vec<Walker> = serde_json::from_str(&json).unwrap();
     assert_eq!(walkers.len(), 3);
     assert!(walkers[0].citizen && walkers[0].dest.is_some());
+    // #414: the citizen's walk goes on past its leg
+    let heading = walkers[0].heading.as_ref().unwrap();
+    assert_eq!((heading.to, heading.why.as_str()), ([7120.5, 6488.0], "craft plank"));
+    assert!(walkers[1..].iter().all(|w| w.heading.is_none()));
     assert!(matches!(walkers[1].doing, Doing::Extracting { .. }));
     assert_eq!(walkers[2].doing, Doing::Crafting { recipe_id: "rope".into() });
     assert_eq!(serde_json::to_string(&walkers).unwrap(), json);

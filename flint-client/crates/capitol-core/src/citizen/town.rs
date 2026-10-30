@@ -51,7 +51,7 @@ use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
     CallingReport, CitizenReport, DecisionBrief, Earning, RoadInReport, StintReport, TownFailure, TownReport, TOWN_FAILURES,
 };
-use capitol_protocol::rest::{ClockResponse, CreateCitizenRequest, LoginRequest, SetClockRequest};
+use capitol_protocol::rest::{ClockResponse, CreateCitizenRequest, Heading, LoginRequest, SetClockRequest};
 use capitol_protocol::rules::lately::Lately;
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
@@ -66,7 +66,7 @@ use super::habit::{Habit, Kind, Mix, Presence};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
 use super::voice;
-use crate::bot::{Bot, BotError};
+use crate::bot::{Bot, BotError, Bound};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
 use crate::sim::report::{BotRun, Entry, Motive};
 use crate::sim::patron;
@@ -877,6 +877,10 @@ pub struct Health {
     pub restarts: u32,
     /// Where it is on the road in (#450), as it last heard
     pub road_in: Option<RoadInReport>,
+    /// Where the walk it's on is bound for (#414), kept by its bot as it
+    /// walks ([`Bot::share_bound`](crate::bot::Bot::share_bound)), each life's
+    /// in turn
+    pub bound: Bound,
 }
 
 impl Health {
@@ -898,6 +902,7 @@ impl Health {
             failures: 0,
             restarts: 0,
             road_in: None,
+            bound: Bound::default(),
         }
     }
 
@@ -976,7 +981,16 @@ impl Health {
                 .map(|(a, s)| (a.slug().to_string(), *s))
                 .collect(),
             minted: self.minted.iter().filter(|(_, s)| **s != 0).map(|(m, s)| (m.slug().to_string(), *s)).collect(),
+            walking: self.walking(),
         }
+    }
+
+    /// Where its walk is bound for and why (#414): the walk's end, to a
+    /// tenth, and what it's doing, which is what it set out to do.
+    fn walking(&self) -> Option<Heading> {
+        let tenth = |v: f64| (v * 10.0).round() / 10.0;
+        let (x, y) = (*self.bound.lock().unwrap_or_else(|e| e.into_inner()))?;
+        Some(Heading { to: [tenth(x), tenth(y)], why: self.activity.clone() })
     }
 
     /// One line: who, what role and calling, where its life stands and
@@ -1090,6 +1104,11 @@ impl Tether<'_> {
         } else {
             Ended::Away
         }
+    }
+
+    /// Its health's [`Bound`] (#414), for the bot of this life to keep.
+    pub(crate) fn bound(&self) -> Bound {
+        self.health.lock().unwrap_or_else(|e| e.into_inner()).bound.clone()
     }
 
     pub(crate) fn health(&self, change: impl FnOnce(&mut Health)) {
@@ -2055,6 +2074,22 @@ key = "j"
         assert!(!tether.town_stopped(), "the town lives on");
         stop.store(true, Ordering::Relaxed);
         assert_eq!(tether.ended(), Ended::Stopped);
+    }
+
+    /// #414: while its bot walks, the report says where the walk is bound
+    /// for and why; standing, it says nothing
+    #[test]
+    fn a_citizen_out_walking_reports_where_its_walk_is_bound() {
+        let mut h = Health::new("Ada Reeder", Role::Gatherer(Gather::Fiber));
+        assert_eq!(h.report(None, Vec::new()).walking, None, "standing");
+        // What its bot keeps as it walks: a life's, then the next life's
+        let bound = h.bound.clone();
+        h.doing(Standing::Working, "gather clay");
+        *bound.lock().unwrap() = Some((7400.04, 6100.26));
+        let walking = h.report(None, Vec::new()).walking.unwrap();
+        assert_eq!((walking.to, walking.why.as_str()), ([7400.0, 6100.3], "gather clay"));
+        *bound.lock().unwrap() = None;
+        assert_eq!(h.report(None, Vec::new()).walking, None, "arrived");
     }
 
     #[test]

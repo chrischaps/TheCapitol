@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
@@ -313,7 +313,16 @@ pub struct Bot {
     letters: Vec<Arrived>,
     /// Calls nothing waits on, by tag.
     posted: Vec<(Tag, Posted)>,
+    /// Where its walk is bound for, for whoever shares it
+    /// ([`Bot::share_bound`], #414).
+    bound: Option<Bound>,
 }
+
+/// Where a bot's walk is bound for while it walks ([`Bot::walk_to`]): the
+/// walk's end, past every leg. A town shares one with each citizen's health
+/// (#414), so its report can say where the citizen is going, which the
+/// server, seeing a leg at a time, can't.
+pub type Bound = Arc<Mutex<Option<(f64, f64)>>>;
 
 impl Bot {
     /// Logs in, or registers if the account doesn't exist, then connects and
@@ -398,6 +407,7 @@ impl Bot {
             hails: None,
             letters: Vec::new(),
             posted: Vec::new(),
+            bound: None,
         })
     }
 
@@ -796,6 +806,26 @@ impl Bot {
     /// walk is stopped again out there, the rest is planned from where it
     /// stopped (#522).
     pub fn walk_to(&mut self, x: f64, y: f64) -> Result<(), BotError> {
+        self.set_bound(Some((x, y)));
+        let walked = self.walk_planned(x, y);
+        self.set_bound(None);
+        walked
+    }
+
+    /// Keeps where its walk is bound for in `bound` from now on (#414):
+    /// `Some` while [`walk_to`](Self::walk_to) walks, `None` otherwise.
+    pub fn share_bound(&mut self, bound: Bound) {
+        self.bound = Some(bound);
+    }
+
+    fn set_bound(&self, to: Option<(f64, f64)>) {
+        if let Some(bound) = &self.bound {
+            *bound.lock().unwrap_or_else(|e| e.into_inner()) = to;
+        }
+    }
+
+    /// [`walk_to`](Self::walk_to)'s walk.
+    fn walk_planned(&mut self, x: f64, y: f64) -> Result<(), BotError> {
         let from = self.position();
         if (x - from.0).hypot(y - from.1) < ARRIVED {
             return Ok(());
@@ -825,7 +855,7 @@ impl Bot {
                     Err(BotError::Blocked { .. })
                         if walks.as_ref().is_some_and(|w| w.plan(self.position(), (x, y)).is_ok()) =>
                     {
-                        self.walk_to(x, y)
+                        self.walk_planned(x, y)
                     }
                     walked => walked,
                 };
@@ -3339,6 +3369,7 @@ mod tests {
             hails: None,
             letters: Vec::new(),
             posted: Vec::new(),
+            bound: None,
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));

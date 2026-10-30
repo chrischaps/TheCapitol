@@ -660,6 +660,15 @@ fn debug_map(mark: &crate::debug_layers::Mark) -> rhai::Map {
             walker.insert("name".into(), w.name.clone().into());
             walker.insert("citizen".into(), w.citizen.into());
             walker.insert("doing".into(), w.doing.clone().into());
+            let goal = w.goal.as_ref().map_or(rhai::Dynamic::UNIT, |g| {
+                let mut goal = rhai::Map::new();
+                goal.insert("x".into(), f(g.at[0]));
+                goal.insert("z".into(), f(g.at[1]));
+                goal.insert("words".into(), g.words.clone().into());
+                goal.insert("last_leg".into(), g.last_leg.into());
+                goal.into()
+            });
+            walker.insert("goal".into(), goal);
             walker.into()
         })
         .collect();
@@ -1766,7 +1775,7 @@ mod tests {
 
     #[test]
     fn the_debug_layers_reach_the_scripts_only_while_on() {
-        use crate::debug_layers::{Cell, Mark, NodeMark, WalkerMark};
+        use crate::debug_layers::{Cell, GoalMark, Mark, NodeMark, WalkerMark};
         let shared = Shared::default();
         let mut engine = rhai::Engine::new();
         register(&mut engine, &shared);
@@ -1777,8 +1786,15 @@ mod tests {
             nodes: vec![NodeMark { at: [4.0, 5.0], kind: "iron_vein".into(), ground: "h 120".into(), available: true, fit: Some(crate::debug_layers::Fit { suits: false, words: "wrong ground: h 120, wants 380 to 900".into() }) }],
             edges: vec![[1.0, 2.0, 3.0, 4.0]],
             walkers: vec![
-                WalkerMark { at: [6.0, 7.0], dest: Some([8.0, 9.0]), name: "Ada".into(), citizen: true, doing: String::new() },
-                WalkerMark { at: [1.0, 1.0], dest: None, name: "Bram".into(), citizen: false, doing: "crafting rope".into() },
+                WalkerMark {
+                    at: [6.0, 7.0],
+                    dest: Some([8.0, 9.0]),
+                    name: "Ada".into(),
+                    citizen: true,
+                    doing: String::new(),
+                    goal: Some(GoalMark { at: [40.0, 50.0], words: "gather clay · 55 m".into(), last_leg: false }),
+                },
+                WalkerMark { at: [1.0, 1.0], dest: None, name: "Bram".into(), citizen: false, doing: "crafting rope".into(), goal: None },
             ],
         });
         let words: String = engine
@@ -1786,10 +1802,10 @@ mod tests {
                 r#"let d = cap_debug();
                    let c = d.cells[0];
                    let w = d.walkers;
-                   `${d.layer} ${c.label} ${c.mine} ${c.x1} ${d.nodes[0].kind} ${d.nodes[0].ground} ${d.nodes[0].suits} ${d.nodes[0].fit} ${d.edges[0][3]} ${w[0].dest[1]} ${w[1].dest == ()} ${w[1].doing}`"#,
+                   `${d.layer} ${c.label} ${c.mine} ${c.x1} ${d.nodes[0].kind} ${d.nodes[0].ground} ${d.nodes[0].suits} ${d.nodes[0].fit} ${d.edges[0][3]} ${w[0].dest[1]} ${w[1].dest == ()} ${w[1].doing} ${w[0].goal.z} ${w[0].goal.words} ${w[0].goal.last_leg} ${w[1].goal == ()}`"#,
             )
             .unwrap();
-        assert_eq!(words, "every layer (2, 3) true 30.0 iron_vein h 120 false wrong ground: h 120, wants 380 to 900 4.0 9.0 true crafting rope");
+        assert_eq!(words, "every layer (2, 3) true 30.0 iron_vein h 120 false wrong ground: h 120, wants 380 to 900 4.0 9.0 true crafting rope 50.0 gather clay · 55 m false true");
     }
 
     #[test]
