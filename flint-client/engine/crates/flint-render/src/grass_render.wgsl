@@ -1,5 +1,8 @@
 // crates/flint-render/src/grass_render.wgsl
 // Grass instanced rendering — stylized cross-quads with wind and bending
+//
+// wooze_noise.wgsl is prepended (grass_pipeline.rs), for the comb of woozy
+// grass (#252).
 
 struct TransformUniforms {
     view_proj: mat4x4<f32>,
@@ -26,7 +29,18 @@ struct GrassRenderUniforms {
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
+    // Woozy grass (#252): the field's beat, as a shallow-woozy mesh gets it.
+    // A swing of 0, as on the wall clock, combs nothing.
+    wooze: ShallowWooze,
 };
+
+// Woozy grass (#252): how far a blade rooted at `root` leans at its tip. Each
+// beat the meadow is combed by the noise shallow wooze moves benches by, read at
+// the root so a blade leans whole, and a patch leans together.
+fn grass_comb(root: vec3<f32>) -> vec2<f32> {
+    let comb = wooze_offset(vec3<f32>(root.x, 0.0, root.z), grass.wooze);
+    return comb.xz;
+}
 
 struct GrassInstance {
     position: vec3<f32>,
@@ -173,6 +187,11 @@ fn vs_main(
     let wind_dir = normalize(grass.wind_direction.xz);
     local_pos.x += wind_offset * wind_dir.x;
     local_pos.z += wind_offset * wind_dir.y;
+    if grass.wooze.leaving.w > 0.0 {
+        let comb = grass_comb(inst.position) * v_sq;
+        local_pos.x += comb.x;
+        local_pos.z += comb.y;
+    }
 
     // Entity bend-on-contact
     for (var i = 0u; i < min(grass.entity_count, 8u); i++) {
@@ -228,8 +247,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let shadow_ndc = shadow_pos.xyz / shadow_pos.w;
         let shadow_uv = shadow_ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
         var shadow = 1.0;
-        if shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 {
-            shadow = textureSampleCompare(shadow_depth, shadow_sampler, shadow_uv, 0, shadow_ndc.z - 0.002);
+        // A far plane of 0 is "shadows off" (the pass is skipped and its
+        // maps are stale), as in the PBR shader.
+        if shadow_uniforms.cascade_splits.z > 0.0 && shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 {
+            shadow = textureSampleCompareLevel(shadow_depth, shadow_sampler, shadow_uv, 0, shadow_ndc.z - 0.002);
         }
 
         let diffuse = n_dot_l * lights.directional_lights[0].intensity * shadow;
@@ -277,6 +298,11 @@ fn vs_shadow(
     let wind_dir = normalize(grass.wind_direction.xz);
     local_pos.x += wind_offset * wind_dir.x;
     local_pos.z += wind_offset * wind_dir.y;
+    if grass.wooze.leaving.w > 0.0 {
+        let comb = grass_comb(inst.position) * v_sq;
+        local_pos.x += comb.x;
+        local_pos.z += comb.y;
+    }
 
     let world_pos = inst.position + local_pos;
 

@@ -150,10 +150,11 @@ pub fn tapered_cylinder(params: &TaperedCylinderParams) -> MeshData {
         }
 
         for i in 0..r {
-            // Winding: clockwise when looking down (-Y)
+            // Counter-clockwise seen from below (-Y), like the body seen
+            // from outside, so back-face culling keeps the cap.
             indices.push(center_idx);
-            indices.push(first_ring + i + 1);
             indices.push(first_ring + i);
+            indices.push(first_ring + i + 1);
         }
     }
 
@@ -183,10 +184,11 @@ pub fn tapered_cylinder(params: &TaperedCylinderParams) -> MeshData {
         }
 
         for i in 0..r {
-            // Winding: counter-clockwise when looking down (+Y)
+            // Counter-clockwise seen from above (+Y). The ring's angle runs
+            // from +X toward +Z, which is clockwise from above, hence i+1, i.
             indices.push(center_idx);
-            indices.push(first_ring + i);
             indices.push(first_ring + i + 1);
+            indices.push(first_ring + i);
         }
     }
 
@@ -217,7 +219,7 @@ pub fn cylinder(params: &CylinderParams) -> MeshData {
 /// Generate a UV sphere.
 ///
 /// Vertices: `(segments + 1) * (rings + 1)`
-/// Triangles: `segments * rings * 2`
+/// Triangles: `segments * (rings - 1) * 2` (one per pole quad, see [`uv_sphere_indices`])
 pub fn sphere(params: &SphereParams) -> MeshData {
     let s = params.segments;
     let ri = params.rings;
@@ -251,23 +253,7 @@ pub fn sphere(params: &SphereParams) -> MeshData {
         }
     }
 
-    let row_width = s + 1;
-    for j in 0..ri {
-        for i in 0..s {
-            let a = j * row_width + i;
-            let b = a + 1;
-            let c = (j + 1) * row_width + i;
-            let d = c + 1;
-
-            indices.push(a);
-            indices.push(c);
-            indices.push(b);
-
-            indices.push(b);
-            indices.push(c);
-            indices.push(d);
-        }
-    }
+    uv_sphere_indices(s, ri, &mut indices);
 
     let bbox =
         BoundingBox::from_positions(&vertices.iter().map(|v| v.position).collect::<Vec<_>>());
@@ -284,7 +270,7 @@ pub fn sphere(params: &SphereParams) -> MeshData {
 /// Generate an ellipsoid (UV sphere with per-axis radii).
 ///
 /// Vertices: `(segments + 1) * (rings + 1)`
-/// Triangles: `segments * rings * 2`
+/// Triangles: `segments * (rings - 1) * 2` (one per pole quad, see [`uv_sphere_indices`])
 pub fn ellipsoid(params: &EllipsoidParams) -> MeshData {
     let s = params.segments;
     let ri = params.rings;
@@ -336,23 +322,7 @@ pub fn ellipsoid(params: &EllipsoidParams) -> MeshData {
         }
     }
 
-    let row_width = s + 1;
-    for j in 0..ri {
-        for i in 0..s {
-            let a = j * row_width + i;
-            let b = a + 1;
-            let c = (j + 1) * row_width + i;
-            let d = c + 1;
-
-            indices.push(a);
-            indices.push(c);
-            indices.push(b);
-
-            indices.push(b);
-            indices.push(c);
-            indices.push(d);
-        }
-    }
+    uv_sphere_indices(s, ri, &mut indices);
 
     let bbox =
         BoundingBox::from_positions(&vertices.iter().map(|v| v.position).collect::<Vec<_>>());
@@ -363,6 +333,36 @@ pub fn ellipsoid(params: &EllipsoidParams) -> MeshData {
         materials: vec![MaterialData::default()],
         submeshes: vec![],
         bounding_box: bbox,
+    }
+}
+
+/// Index a `(segments + 1) x (rings + 1)` latitude/longitude grid.
+///
+/// Every vertex of the top row sits on the north pole and every vertex of the
+/// bottom row on the south pole, so a pole quad has only three distinct
+/// corners: its other triangle has zero area. Emitting it leaves
+/// `segments` slivers at each pole that skinning and tangent generation
+/// choke on, and that `flint gen --validate` reports (#30), so it is skipped.
+fn uv_sphere_indices(s: u32, ri: u32, indices: &mut Vec<u32>) {
+    let row_width = s + 1;
+    for j in 0..ri {
+        for i in 0..s {
+            let a = j * row_width + i;
+            let b = a + 1;
+            let c = (j + 1) * row_width + i;
+            let d = c + 1;
+
+            // Rows run top-down (row j + 1 is below row j), the opposite of
+            // the cylinder, so the quad winds a-b-c to face outward.
+            // a and b are both the north pole on the top row...
+            if j != 0 {
+                indices.extend_from_slice(&[a, b, c]);
+            }
+            // ...and c and d both the south pole on the bottom row.
+            if j + 1 != ri {
+                indices.extend_from_slice(&[b, d, c]);
+            }
+        }
     }
 }
 
@@ -379,6 +379,54 @@ pub fn cone(params: &ConeParams) -> MeshData {
         height_segments: params.height_segments,
         caps: params.cap,
     })
+}
+
+/// Generate an axis-aligned box centred on the origin.
+///
+/// Each face has its own four vertices (24 total, 12 triangles), so normals
+/// stay flat and every face gets the full `[0, 1]` UV square.
+pub fn cuboid(width: f32, height: f32, depth: f32) -> MeshData {
+    let h = [width * 0.5, height * 0.5, depth * 0.5];
+    // (normal, u axis, v axis) per face, with u x v = normal so the quads
+    // wind counter-clockwise seen from outside.
+    const FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+        ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+        ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+        ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+    ];
+
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (n, u, v) in FACES {
+        let base = vertices.len() as u32;
+        for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let mut position = [0.0; 3];
+            for k in 0..3 {
+                position[k] = (n[k] + u[k] * su + v[k] * sv) * h[k];
+            }
+            vertices.push(Vertex {
+                position,
+                normal: n,
+                tangent: [u[0], u[1], u[2], 1.0],
+                uv: [(su + 1.0) * 0.5, (sv + 1.0) * 0.5],
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    let bbox =
+        BoundingBox::from_positions(&vertices.iter().map(|v| v.position).collect::<Vec<_>>());
+
+    MeshData {
+        vertices,
+        indices,
+        materials: vec![MaterialData::default()],
+        submeshes: vec![],
+        bounding_box: bbox,
+    }
 }
 
 #[cfg(test)]
@@ -548,7 +596,7 @@ mod tests {
         let expected_verts = (s + 1) * (ri + 1);
         assert_eq!(mesh.vertex_count(), expected_verts as usize);
 
-        let expected_tris = s * ri * 2;
+        let expected_tris = s * (ri - 1) * 2;
         assert_eq!(mesh.triangle_count(), expected_tris as usize);
     }
 
@@ -621,7 +669,7 @@ mod tests {
         let expected_verts = (s + 1) * (ri + 1);
         assert_eq!(mesh.vertex_count(), expected_verts as usize);
 
-        let expected_tris = s * ri * 2;
+        let expected_tris = s * (ri - 1) * 2;
         assert_eq!(mesh.triangle_count(), expected_tris as usize);
     }
 
@@ -730,6 +778,92 @@ mod tests {
             let r = (v.position[0] * v.position[0] + v.position[2] * v.position[2]).sqrt();
             assert!(r < 1e-5, "apex radius should be ~0, got {}", r);
             assert!((v.position[1] - 3.0).abs() < 1e-5, "apex y should be 3.0");
+        }
+    }
+
+    /// Every triangle has three distinct indices, non-zero area unless it
+    /// touches a pole, and winds so its face normal agrees with the vertex
+    /// normals (counter-clockwise seen from outside).
+    fn assert_outward_and_non_degenerate(mesh: &MeshData) {
+        for tri in mesh.indices.chunks_exact(3) {
+            assert!(
+                tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2],
+                "degenerate indices {tri:?}"
+            );
+            let p = |i: u32| Vec3::from_array(mesh.vertices[i as usize].position);
+            let face = (p(tri[1]) - p(tri[0])).cross(&(p(tri[2]) - p(tri[0])));
+            if face.length() < 1e-7 {
+                continue; // zero-area pole triangle of a UV sphere/cone apex
+            }
+            let n: Vec3 = tri
+                .iter()
+                .map(|&i| Vec3::from_array(mesh.vertices[i as usize].normal))
+                .fold(Vec3::new(0.0, 0.0, 0.0), |a, b| a + b);
+            assert!(face.dot(&n) > 0.0, "triangle {tri:?} winds inward");
+        }
+    }
+
+    #[test]
+    fn cylinder_acceptance_counts() {
+        // The counts named in issue #19.
+        let mesh = tapered_cylinder(&TaperedCylinderParams {
+            radius_bottom: 1.0,
+            radius_top: 0.5,
+            height: 2.0,
+            radial_segments: 16,
+            height_segments: 4,
+            caps: false,
+        });
+        assert_eq!(mesh.vertex_count(), 85);
+        assert_eq!(mesh.indices.len(), 384);
+    }
+
+    #[test]
+    fn primitives_wind_outward_without_degenerates() {
+        assert_outward_and_non_degenerate(&tapered_cylinder(&TaperedCylinderParams {
+            radius_bottom: 1.0,
+            radius_top: 0.5,
+            height: 2.0,
+            radial_segments: 16,
+            height_segments: 4,
+            caps: true,
+        }));
+        assert_outward_and_non_degenerate(&sphere(&SphereParams {
+            radius: 1.0,
+            segments: 16,
+            rings: 12,
+        }));
+        assert_outward_and_non_degenerate(&cone(&ConeParams {
+            radius: 1.0,
+            height: 2.0,
+            radial_segments: 12,
+            height_segments: 3,
+            cap: true,
+        }));
+        assert_outward_and_non_degenerate(&ellipsoid(&EllipsoidParams {
+            radius_x: 1.0,
+            radius_y: 0.5,
+            radius_z: 2.0,
+            segments: 12,
+            rings: 8,
+        }));
+        assert_outward_and_non_degenerate(&cuboid(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn cuboid_counts_bounds_and_uvs() {
+        let mesh = cuboid(2.0, 4.0, 6.0);
+        assert_eq!(mesh.vertex_count(), 24);
+        assert_eq!(mesh.triangle_count(), 12);
+        assert!(mesh.validate().is_ok());
+        let bb = &mesh.bounding_box;
+        assert!((bb.min.x + 1.0).abs() < 1e-6 && (bb.max.x - 1.0).abs() < 1e-6);
+        assert!((bb.min.y + 2.0).abs() < 1e-6 && (bb.max.y - 2.0).abs() < 1e-6);
+        assert!((bb.min.z + 3.0).abs() < 1e-6 && (bb.max.z - 3.0).abs() < 1e-6);
+        for v in &mesh.vertices {
+            assert!(v.uv.iter().all(|c| (0.0..=1.0).contains(c)));
+            let t = Vec3::new(v.tangent[0], v.tangent[1], v.tangent[2]);
+            assert!(t.dot(&Vec3::from_array(v.normal)).abs() < 1e-6);
         }
     }
 }

@@ -5,11 +5,38 @@ edition.workspace = true
 license.workspace = true
 description = "Spatial audio system for Flint engine (Kira backend)"
 
+[features]
+default = ["device"]
+# The sound card: kira's cpal backend, which links ALSA on Linux. Off, the
+# engine runs silent, as it does on a machine with no device (#221).
+device = ["kira/cpal"]
+
 [dependencies]
 flint-core = { workspace = true }
 flint-ecs = { workspace = true }
 flint-runtime = { workspace = true }
 kira = { workspace = true }
+# Decoding a packet at a time (#124), as kira does in one call.
+symphonia = { workspace = true }
+web-time = { workspace = true }
 glam = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+
+# The browser (#101). kira already turns on cpal's WebAudio host for wasm32;
+# naming it here keeps sound from hanging on that default, and cpal is what
+# `web::WebAudioBackend` builds its stream on.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { version = "0.16", features = ["wasm-bindgen"] }
+send_wrapper = "0.6"
+wasm-bindgen = "0.2"
+# The AudioWorklet's glue (#136, src/worklet.rs and src/worklet.js).
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console", "Performance", "Window", "AudioContext", "BaseAudioContext",
+    "AudioContextState", "EventTarget", "Event", "Document",
+] }
+
+[dev-dependencies]
+# The worklet's mixer, to drive with a remote engine in the tests (#136).
+flint-audio-worklet = { workspace = true }

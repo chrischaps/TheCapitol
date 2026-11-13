@@ -1,13 +1,16 @@
 //! Flint CLI - Command-line interface for the Flint engine
 
+mod check;
 mod commands;
+mod file_dialog;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
-    asset, calibrate, edit_router, entity, gen, gen_preview, init, play, play_chart, play_suite,
-    prefab, preview, query, render, render_suite, replay_chart, scene, schema, spike_rumble,
-    spline_edit, terrain_edit, tex_edit, validate, validate_suite,
+    asset, bundle, calibrate, check as check_cmd, edit_router, entity, examples, export, gen,
+    gen_preview, init, play, play_chart, play_suite, prefab, preview, query, render,
+    render_goldens, render_suite, replay_chart, scene, schema, script, spike_rumble, spline_edit,
+    style, terrain_edit, tex_edit, validate, validate_suite,
 };
 
 #[derive(Parser)]
@@ -15,17 +18,21 @@ use commands::{
 #[command(about = "CLI-first game engine for AI-assisted development", long_about = None)]
 #[command(version)]
 struct Cli {
+    /// Project root: the folder holding flint.toml, the content store
+    /// (.flint/) and the asset catalog (assets/). Found by walking up from
+    /// the working directory if omitted
+    #[arg(long, global = true, value_name = "DIR")]
+    project: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new Flint project
-    Init {
-        /// Project name/directory
-        name: String,
-    },
+    /// Start a game project: a manifest, a lit scene, a HUD script, an
+    /// input config and an agent guide, ready to render and play
+    Init(init::InitArgs),
 
     /// Entity operations
     #[command(subcommand)]
@@ -47,17 +54,22 @@ enum Commands {
         /// Output format (json or toml)
         #[arg(long, default_value = "json")]
         format: String,
-    },
 
-    /// Show schema information
-    Schema {
-        /// Component or archetype name
-        name: String,
-
-        /// Paths to schemas directories (can specify multiple)
-        #[arg(long, default_value = "schemas", action = clap::ArgAction::Append)]
+        /// Schema directories, later ones overriding earlier (repeatable).
+        /// Without it: the project's flint.toml `schemas`, else schemas/ in
+        /// the working directory, beside the scene and one level up
+        #[arg(long, action = clap::ArgAction::Append)]
         schemas: Vec<String>,
     },
+
+    /// Show schema information: one component or archetype, --list for
+    /// all of them, --format json / json-schema for the schemas as data
+    Schema(schema::SchemaArgs),
+
+    /// The script API: `flint script api [--json] [--filter x]` lists every
+    /// function a script can call, and the callbacks
+    #[command(subcommand)]
+    Script(script::ScriptCommands),
 
     /// Open a file in the appropriate interactive editor
     Edit(edit_router::EditArgs),
@@ -72,8 +84,10 @@ enum Commands {
         #[arg(long)]
         watch: bool,
 
-        /// Paths to schemas directories (can specify multiple)
-        #[arg(long, default_value = "schemas", action = clap::ArgAction::Append)]
+        /// Schema directories, later ones overriding earlier (repeatable).
+        /// Without it: the project's flint.toml `schemas`, else schemas/ in the
+        /// working directory, beside the scene and one level up
+        #[arg(long, action = clap::ArgAction::Append)]
         schemas: Vec<String>,
 
         /// Hide the egui inspector panels (entity tree, inspector, stats)
@@ -85,8 +99,25 @@ enum Commands {
     #[command(hide = true)]
     SplineEdit(spline_edit::EditArgs),
 
-    /// Validate a scene against constraints
-    Validate(validate::ValidateArgs),
+    /// Validate a scene against its schemas and constraints (and fix what
+    /// a constraint can fix)
+    Validate(Box<validate::ValidateArgs>),
+
+    /// The pre-flight: everything wrong with a project or a scene in one
+    /// run (schemas, entity references, assets, files, styles, constraints)
+    Check(Box<check_cmd::CheckArgs>),
+
+    /// The curated example scenes, from examples/index.toml: list them by
+    /// topic, or --check that every one is indexed and validates
+    Examples(examples::ExamplesArgs),
+
+    /// Pack a game folder into .flintpack bundles for the web player
+    Bundle(bundle::BundleArgs),
+
+    /// Export a game for elsewhere: `flint export web <game>` writes a
+    /// folder any static server plays it from
+    #[command(subcommand)]
+    Export(export::ExportCommands),
 
     /// Validate a musical suite manifest (and optional beatmap chart)
     ValidateSuite(validate_suite::ValidateSuiteArgs),
@@ -107,8 +138,13 @@ enum Commands {
     /// Replay a recorded or synthetic session through judgment, fully headless
     ReplayChart(replay_chart::ReplayChartArgs),
 
-    /// Render a scripted suite session to WAV, offline and deterministic
+    /// Render a music suite (`.suite.toml`) to WAV, offline and
+    /// deterministically
     RenderSuite(render_suite::RenderSuiteArgs),
+
+    /// Render a `.goldens.toml` of scenes and gate each against its golden
+    /// PNG (`--bless` rewrites them)
+    Goldens(render_goldens::GoldensArgs),
 
     /// Prefab operations
     #[command(subcommand)]
@@ -142,6 +178,11 @@ enum Commands {
 
     /// Render a scene to a PNG image (headless)
     Render(render::RenderArgs),
+
+    /// User-authored styles: new (from a template), check (no GPU),
+    /// prelude (the generated code), list
+    #[command(subcommand)]
+    Style(style::StyleCommands),
 }
 
 fn main() -> Result<()> {
@@ -150,24 +191,42 @@ fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,rfd=off")),
         )
+        // Stdout belongs to what a command answers with, such as --report json.
+        .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    // `render-suite <x>.goldens.toml` is `goldens` (#327)
+    let cli = Cli::parse_from(render_goldens::route_render_suite_goldens(
+        std::env::args_os().collect(),
+    ));
+    if let Some(dir) = &cli.project {
+        if !dir.is_dir() {
+            anyhow::bail!("--project {}: not a directory", dir.display());
+        }
+        let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.clone());
+        // Reads the directory's flint.toml: a bad manifest stops here.
+        let project =
+            flint_core::project::Project::at(dir).map_err(|e| anyhow::anyhow!("--project {e}"))?;
+        flint_core::project::set_override(project);
+    }
 
     match cli.command {
-        Commands::Init { name } => init::run(&name),
+        Commands::Init(args) => init::run(args),
         Commands::Entity(cmd) => entity::run(cmd),
         Commands::Scene(cmd) => scene::run(cmd),
         Commands::Query {
             query,
             scene,
             format,
-        } => query::run(&query, scene.as_deref(), &format),
-        Commands::Schema { name, schemas } => schema::run(
-            &name,
-            &schemas.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        ),
-        Commands::Validate(args) => validate::run(args),
+            schemas,
+        } => query::run(&query, scene.as_deref(), &format, &schemas),
+        Commands::Schema(args) => schema::run(args),
+        Commands::Script(cmd) => script::run(cmd),
+        Commands::Validate(args) => validate::run(*args),
+        Commands::Check(args) => check_cmd::run(*args),
+        Commands::Examples(args) => examples::run(args),
+        Commands::Bundle(args) => bundle::run(args),
+        Commands::Export(cmd) => export::run(cmd),
         Commands::ValidateSuite(args) => validate_suite::run(args),
         Commands::PlaySuite(args) => play_suite::run(args),
         Commands::Calibrate(args) => calibrate::run(args),
@@ -175,6 +234,7 @@ fn main() -> Result<()> {
         Commands::SpikeRumble(args) => spike_rumble::run(args),
         Commands::ReplayChart(args) => replay_chart::run(args),
         Commands::RenderSuite(args) => render_suite::run(args),
+        Commands::Goldens(args) => render_goldens::run_command(args),
         Commands::Play(args) => play::run(args),
         Commands::Prefab(cmd) => prefab::run(cmd),
         Commands::Asset(cmd) => asset::run(cmd),
@@ -186,15 +246,24 @@ fn main() -> Result<()> {
             watch,
             schemas,
             no_inspector,
-        } => {
-            // Serve uses first schemas path (viewer doesn't need multi-dir yet)
-            let schemas_path = schemas.first().map(|s| s.as_str()).unwrap_or("schemas");
-            flint_viewer::app::run(&scene, watch, schemas_path, !no_inspector, false)
-        }
+        } => flint_viewer::app::run(
+            &scene,
+            watch,
+            &schemas,
+            !no_inspector,
+            false,
+            Default::default(),
+            Default::default(),
+        ),
         Commands::Gen(args) => gen::run(args),
         Commands::GenPreview(args) => gen_preview::run(args),
         Commands::TerrainEdit(args) => terrain_edit::run(args),
         Commands::TexEdit(args) => tex_edit::run(args),
-        Commands::Render(args) => render::run(args),
+        Commands::Render(mut args) => {
+            // --variant builds each variant's command line on this one (#291)
+            args.command_line = commands::variants::subcommand_words(std::env::args_os());
+            render::run(args)
+        }
+        Commands::Style(cmd) => style::run(cmd),
     }
 }

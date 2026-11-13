@@ -55,7 +55,7 @@ The Mock provider generates solid-color PNGs, minimal valid GLB files, and silen
 Style guides enforce visual consistency across generated assets. They are TOML files that define a palette, material constraints, geometry constraints, and prompt modifiers:
 
 ```toml
-# styles/medieval_tavern.style.toml
+# styles/medieval_tavern.styleguide.toml
 [style]
 name = "medieval_tavern"
 description = "Weathered medieval fantasy tavern"
@@ -77,7 +77,9 @@ require_normals = true
 
 When a style guide is active, the provider enriches the generation prompt by prepending the `prompt_prefix`, appending palette colors and material descriptors, and adding the `prompt_suffix`. The `negative_prompt` tells AI services what to avoid.
 
-Style guides are searched in `styles/` then `.flint/styles/` by name (e.g., `medieval_tavern` finds `styles/medieval_tavern.style.toml`).
+Style guides are searched in `styles/` then `.flint/styles/` by name (e.g., `medieval_tavern` finds `styles/medieval_tavern.styleguide.toml`).
+
+The suffix is `.styleguide.toml`. Before #420 it was `.style.toml`, which is also the suffix of a [UI class file](scripting.md#data-driven-ui-system), so a folder holding both couldn't be told apart by name. A guide still named `<name>.style.toml` loads, but `flint` warns and names the file to rename it to; a later release stops reading the old name. When both names exist, the `.styleguide.toml` is the one loaded.
 
 ## Semantic Asset Definitions
 
@@ -130,18 +132,20 @@ flint asset resolve my_scene.scene.toml --strategy human_task --output-dir tasks
 
 ## Model Validation
 
-After generating a 3D model, Flint can validate it against a style guide's constraints. The validator imports the GLB file through the same `import_gltf()` pipeline used by the player, then checks:
+After generating a 3D model, Flint can validate it against a style guide's constraints. The validator imports the GLB file through the same `import_gltf()` pipeline used by the player, then runs the checks `flint gen --validate` runs on procedural output, under the same names (see [Validation](procgen.md#validation) for the full table):
 
-- **Triangle count** against `geometry.max_triangles`
-- **UV coordinates** present if `geometry.require_uvs` is set
-- **Normals** present if `geometry.require_normals` is set
-- **Material properties** against `materials.roughness_range` and `materials.metallic_range`
+- **mesh integrity** and **degenerate triangles**
+- **style triangle budget** against `geometry.max_triangles`, per mesh (per LOD for a `LOD_0`, `LOD_1`, ... file)
+- **UV range**: missing UVs warn, or fail if `geometry.require_uvs` is set
+- **normals**: zero normals fail; missing ones warn, or fail if `geometry.require_normals` is set
+- **PBR roughness / metallic** against `materials.roughness_range` and `materials.metallic_range`
+- **palette**: each material's base colour against the style's `palette`
 
 ```bash
 flint asset validate model.glb --style medieval_tavern
 ```
 
-Each check reports Pass, Warn, or Fail status.
+Each check reports PASS, WARN, or FAIL; any FAIL exits 1.
 
 ## Build Manifests
 
@@ -212,6 +216,6 @@ This means scenes can seamlessly reference both pre-imported and AI-generated as
 ## Further Reading
 
 - [Assets](assets.md) --- content-addressed storage and catalog system
-- [File Formats](../formats/overview.md) --- `.style.toml` and `asset_def.toml` format reference
+- [File Formats](../formats/overview.md) --- `.styleguide.toml` and `asset_def.toml` format reference
 - [CLI Reference](../cli-reference/overview.md) --- full command documentation
 - [AI Agent Workflow](../guides/ai-agent-workflow.md) --- using AI generation in automated workflows

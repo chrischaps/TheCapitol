@@ -53,7 +53,7 @@ fn target(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::TextureVi
 #[test]
 fn a_renderer_times_its_phases_once_asked() {
     let Some((device, queue)) = timing_device() else {
-        eprintln!("no GPU adapter with timestamp queries; skipping");
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter with timestamp queries");
         return;
     };
     let mut renderer = SceneRenderer::new_headless(
@@ -102,7 +102,8 @@ fn a_renderer_times_its_phases_once_asked() {
     let labels: Vec<&str> = stats.gpu_passes.iter().map(|p| p.label).collect();
     assert_eq!(
         labels,
-        ["Shadows", "Scene", "Post-process", "Composite", "UI"]
+        // The post chain is a scope per effect that is on (#120).
+        ["Shadows", "Scene", "SSAO", "Bloom", "Composite", "UI"]
     );
     assert!(stats
         .gpu_passes
@@ -129,7 +130,24 @@ fn a_renderer_times_its_phases_once_asked() {
         .iter()
         .map(|p| p.label)
         .collect();
-    assert_eq!(labels, ["Shadows", "Scene", "Post-process", "FXAA", "UI"]);
+    assert_eq!(labels, ["Shadows", "Scene", "SSAO", "Bloom", "FXAA", "UI"]);
+
+    // Recording (#292): every frame drawn from now on, raw, once flushed;
+    // a frame that waited on the GPU each time is never skipped.
+    renderer.gpu_timer_mut().unwrap().record(true);
+    for _ in 0..5 {
+        timed(&mut renderer);
+    }
+    let timer = renderer.gpu_timer_mut().unwrap();
+    timer.flush(&device);
+    assert_eq!(timer.recorded().len(), 5, "every frame, the last included");
+    let spread = flint_render::gpu_timer::spread(timer.recorded(), 1);
+    assert_eq!(spread.frames, 4);
+    let ui = spread.passes.iter().find(|p| p.label == "UI").unwrap();
+    assert_eq!(ui.samples.len(), 4);
+    assert!(ui.min <= ui.p50 && ui.p50 <= ui.p90 && ui.p90 <= ui.max);
+    timer.record(false);
+    assert!(timer.recorded().is_empty());
 
     // Off again: the times go with the timer.
     assert!(!renderer.set_gpu_timing(&device, &queue, false));

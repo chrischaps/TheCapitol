@@ -5,8 +5,11 @@
 
 mod component;
 mod entity;
+pub mod motion_hold;
+mod view;
 mod world;
 
 pub use component::DynamicComponents;
 pub use entity::EntityInfo;
+pub use view::{ComponentView, ReadReports, KEPT_REPORTS};
 pub use world::FlintWorld;

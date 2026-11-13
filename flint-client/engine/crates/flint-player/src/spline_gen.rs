@@ -6,12 +6,22 @@
 //! 2. For entities with a `spline_mesh` component, sweep a rectangular
 //!    cross-section along the referenced spline and upload the resulting
 //!    mesh + trimesh collider.
+//!
+//! UVs: `u` runs 0..1 across each face (left to right on top, bottom to top
+//! on the sides); `v` is distance along the sweep in metres divided by
+//! `texture_length`, measured along the mesh's own offset path so walls on
+//! the inside of a bend don't squash their texture. On a closed spline the
+//! length is nudged so a whole number of repeats meets at the seam. An
+//! optional `texture` (and `normal_texture`) is loaded with mipmaps and tiles
+//! along `v`. `collider = false` draws a mesh without a physics collider, for
+//! scenery such as verges.
 
 use flint_core::components as comp;
-use flint_core::spline::{self, SplineControlPoint, SplineSample};
 use flint_core::toml_util::{toml_f32, toml_f32_slice};
+use flint_core::vfs;
 use flint_core::Vec3;
 use flint_ecs::FlintWorld;
+use flint_geometry::spline::{self, SplineControlPoint, SplineSample};
 use flint_import::ImportedMaterial;
 use flint_physics::PhysicsSystem;
 use flint_render::{SceneRenderer, Vertex};
@@ -28,7 +38,7 @@ struct SplineDef {
 }
 
 fn parse_spline_file(path: &Path) -> Option<SplineDef> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = vfs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&content).ok()?;
 
     let spline_section = value.get("spline")?;
@@ -140,7 +150,11 @@ fn store_spline_data(
         toml::Value::Integer(gap_ranges.len() as i64),
     );
 
-    let _ = world.set_component(entity_id, comp::SPLINE_DATA, toml::Value::Table(table));
+    let _ = world.set_component(
+        entity_id,
+        flint_geometry::components::SPLINE_DATA,
+        toml::Value::Table(table),
+    );
 }
 
 // ─── Pass 2: generate cross-section meshes ───────────────
@@ -157,7 +171,11 @@ struct SplineMeshDef {
     restitution: f32,
     metallic: f32,
     roughness: f32,
-    chunk_size: u32, // 0 = no chunking (single mesh), >0 = segments per chunk
+    chunk_size: u32,         // 0 = no chunking (single mesh), >0 = segments per chunk
+    texture: Option<String>, // base colour map, path relative to the scene
+    normal_texture: Option<String>, // tangent-space normal map, same mapping
+    texture_length: f32,     // metres of sweep per texture repeat
+    collider: bool,          // false = drawn only, nothing collides with it
 }
 
 fn parse_spline_mesh_component(comp: &toml::Value) -> Option<SplineMeshDef> {
@@ -212,6 +230,26 @@ fn parse_spline_mesh_component(comp: &toml::Value) -> Option<SplineMeshDef> {
         .get("chunk_size")
         .and_then(|v| v.as_integer())
         .unwrap_or(0) as u32;
+    let texture = comp
+        .get("texture")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let normal_texture = comp
+        .get("normal_texture")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let texture_length = comp
+        .get("texture_length")
+        .and_then(toml_f32)
+        .filter(|l| *l > 0.0)
+        .unwrap_or(width.max(0.01));
+
+    let collider = comp
+        .get("collider")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     Some(SplineMeshDef {
         spline_entity,
@@ -226,7 +264,73 @@ fn parse_spline_mesh_component(comp: &toml::Value) -> Option<SplineMeshDef> {
         metallic,
         roughness,
         chunk_size,
+        texture,
+        normal_texture,
+        texture_length,
+        collider,
     })
+}
+
+/// Texture `v` at each sample: distance along the cross-section's centre
+/// path (the spline moved by `offset`) over `texture_length`. A closed
+/// spline gets one extra entry, the full loop, for the segment that wraps
+/// back to sample 0, and its length is adjusted so the loop holds a whole
+/// number of repeats and the texture meets itself at the seam.
+fn sweep_v_coords(
+    samples: &[SplineSample],
+    closed: bool,
+    offset: [f32; 2],
+    texture_length: f32,
+) -> Vec<f32> {
+    let n = samples.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let centre = |s: &SplineSample| s.position + s.right * offset[0] + s.up * offset[1];
+    let mut dist = Vec::with_capacity(n + 1);
+    dist.push(0.0f32);
+    for i in 1..n {
+        let d = (centre(&samples[i]) - centre(&samples[i - 1])).length();
+        dist.push(dist[i - 1] + d);
+    }
+    let mut length = texture_length;
+    if closed {
+        let total = dist[n - 1] + (centre(&samples[0]) - centre(&samples[n - 1])).length();
+        dist.push(total);
+        let repeats = (total / texture_length).round().max(1.0);
+        length = total / repeats;
+    }
+    dist.into_iter().map(|d| d / length).collect()
+}
+
+/// Resolve a path written in a scene by the project's one search
+/// (`AssetKind::Files`, ADR 0114): from the scene's directory, then from each
+/// directory above it up to the project root (where a game's `splines/`,
+/// `textures/` sit), then the engine. A miss is warned about with every path
+/// tried, and the path beside the scene is returned for the loader's error.
+fn resolve_scene_path(scene_dir: &Path, rel: &str) -> std::path::PathBuf {
+    // The scene's project, found from its folder (`--project` pins it)
+    let project = flint_core::project::Project::for_scene(&scene_dir.join("scene.toml"));
+    project.file_or_beside("spline file", rel, scene_dir)
+}
+
+/// Load a spline mesh's texture into the renderer's cache, with mipmaps, keyed
+/// by the path as written. Returns the key when the texture is available.
+fn load_mesh_texture(
+    renderer: &mut SceneRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene_dir: &Path,
+    rel: &str,
+) -> Option<String> {
+    let path = resolve_scene_path(scene_dir, rel);
+    match renderer.load_texture_file_mipmapped(device, queue, rel, &path) {
+        Ok(_) => Some(rel.to_string()),
+        Err(e) => {
+            tracing::warn!("spline_mesh texture '{}': {}", rel, e);
+            None
+        }
+    }
 }
 
 /// Generate a rectangular cross-section mesh swept along spline samples.
@@ -250,6 +354,7 @@ fn generate_cross_section_mesh(
     stripe_width: f32,
     spacing: f32,
     gap_ranges: &[(f32, f32)],
+    v_coords: &[f32],
 ) -> (Vec<Vertex>, Vec<u32>, Vec<[f32; 3]>, Vec<[u32; 3]>) {
     let n = samples.len();
     if n < 2 {
@@ -387,8 +492,10 @@ fn generate_cross_section_mesh(
         let [c_bl, c_br, c_tr, c_tl] = corners[seg];
         let [n_bl, n_br, n_tr, n_tl] = corners[next];
 
-        let u0 = seg as f32 / num_segs as f32;
-        let u1 = (seg + 1) as f32 / num_segs as f32;
+        // Texture v along the sweep (`v_coords` has an entry past the last
+        // sample for the segment that closes a loop)
+        let v0 = v_coords[seg];
+        let v1 = v_coords[seg + 1];
 
         // Per-segment color: alternate between primary and stripe color
         let seg_color = if let Some(sc) = stripe_color {
@@ -412,25 +519,25 @@ fn generate_cross_section_mesh(
                 position: c_tl.to_array(),
                 normal: top_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u0],
+                uv: [0.0, v0],
             },
             Vertex {
                 position: c_tr.to_array(),
                 normal: top_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u0],
+                uv: [1.0, v0],
             },
             Vertex {
                 position: n_tl.to_array(),
                 normal: top_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u1],
+                uv: [0.0, v1],
             },
             Vertex {
                 position: n_tr.to_array(),
                 normal: top_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u1],
+                uv: [1.0, v1],
             },
         ]);
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
@@ -452,25 +559,25 @@ fn generate_cross_section_mesh(
                 position: c_br.to_array(),
                 normal: bot_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u0],
+                uv: [0.0, v0],
             },
             Vertex {
                 position: c_bl.to_array(),
                 normal: bot_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u0],
+                uv: [1.0, v0],
             },
             Vertex {
                 position: n_br.to_array(),
                 normal: bot_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u1],
+                uv: [0.0, v1],
             },
             Vertex {
                 position: n_bl.to_array(),
                 normal: bot_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u1],
+                uv: [1.0, v1],
             },
         ]);
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
@@ -492,25 +599,25 @@ fn generate_cross_section_mesh(
                 position: c_bl.to_array(),
                 normal: left_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u0],
+                uv: [0.0, v0],
             },
             Vertex {
                 position: c_tl.to_array(),
                 normal: left_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u0],
+                uv: [1.0, v0],
             },
             Vertex {
                 position: n_bl.to_array(),
                 normal: left_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u1],
+                uv: [0.0, v1],
             },
             Vertex {
                 position: n_tl.to_array(),
                 normal: left_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u1],
+                uv: [1.0, v1],
             },
         ]);
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
@@ -532,25 +639,25 @@ fn generate_cross_section_mesh(
                 position: c_tr.to_array(),
                 normal: right_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u0],
+                uv: [1.0, v0],
             },
             Vertex {
                 position: c_br.to_array(),
                 normal: right_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u0],
+                uv: [0.0, v0],
             },
             Vertex {
                 position: n_tr.to_array(),
                 normal: right_normal.to_array(),
                 color: seg_color,
-                uv: [0.0, u1],
+                uv: [1.0, v1],
             },
             Vertex {
                 position: n_br.to_array(),
                 normal: right_normal.to_array(),
                 color: seg_color,
-                uv: [1.0, u1],
+                uv: [0.0, v1],
             },
         ]);
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
@@ -624,6 +731,7 @@ pub fn load_splines(
     renderer: &mut SceneRenderer,
     mut physics: Option<&mut PhysicsSystem>,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
 ) {
     let scene_dir = Path::new(scene_path)
         .parent()
@@ -646,21 +754,11 @@ pub fn load_splines(
     for entity in world.all_entities() {
         let spline_file = world
             .get_components(entity.id)
-            .and_then(|c| c.get(comp::SPLINE).cloned())
+            .and_then(|c| c.get(flint_geometry::components::SPLINE).cloned())
             .and_then(|s| s.get("file").and_then(|v| v.as_str().map(String::from)));
 
         if let Some(file_rel) = spline_file {
-            // Resolve path: scene dir, then parent
-            let spline_path = {
-                let p = scene_dir.join(&file_rel);
-                if p.exists() {
-                    p
-                } else if let Some(parent) = scene_dir.parent() {
-                    parent.join(&file_rel)
-                } else {
-                    p
-                }
-            };
+            let spline_path = resolve_scene_path(scene_dir, &file_rel);
 
             match parse_spline_file(&spline_path) {
                 Some(def) => {
@@ -670,7 +768,7 @@ pub fn load_splines(
                         spline::sample_open_spline(&def.control_points, def.spacing)
                     };
 
-                    println!(
+                    eprintln!(
                         "Loaded spline '{}': {} control points → {} samples ({})",
                         entity.name,
                         def.control_points.len(),
@@ -725,7 +823,7 @@ pub fn load_splines(
     for entity in world.all_entities() {
         let mesh_comp = world
             .get_components(entity.id)
-            .and_then(|c| c.get(comp::SPLINE_MESH).cloned());
+            .and_then(|c| c.get(flint_geometry::components::SPLINE_MESH).cloned());
 
         if let Some(comp) = mesh_comp {
             match parse_spline_mesh_component(&comp) {
@@ -757,6 +855,23 @@ pub fn load_splines(
         };
         let info = &spline_infos[spline_idx];
 
+        let v_coords = sweep_v_coords(
+            &info.samples,
+            info.closed,
+            job.def.offset,
+            job.def.texture_length,
+        );
+        let base_color_texture = job
+            .def
+            .texture
+            .as_deref()
+            .and_then(|t| load_mesh_texture(renderer, device, queue, scene_dir, t));
+        let normal_texture = job
+            .def
+            .normal_texture
+            .as_deref()
+            .and_then(|t| load_mesh_texture(renderer, device, queue, scene_dir, t));
+
         if job.def.chunk_size > 0 {
             // ── Chunked mesh generation ──
             let chunk_sz = job.def.chunk_size as usize;
@@ -764,7 +879,7 @@ pub fn load_splines(
             let num_segs = if info.closed { n } else { n - 1 };
             let num_chunks = (num_segs + chunk_sz - 1) / chunk_sz;
 
-            println!(
+            eprintln!(
                 "  Chunked mesh '{}': {}x{} @ offset [{:.1}, {:.1}], {} segments → {} chunks of {}",
                 job.entity_name,
                 job.def.width,
@@ -797,6 +912,8 @@ pub fn load_splines(
                 } else {
                     info.samples[sample_start..sample_end].to_vec()
                 };
+                // v runs on from the whole sweep, so chunks tile seamlessly
+                let chunk_v = &v_coords[sample_start..sample_start + chunk_samples.len()];
 
                 if chunk_samples.len() < 2 {
                     continue;
@@ -827,6 +944,7 @@ pub fn load_splines(
                     job.def.stripe_width,
                     info.spacing,
                     &info.gap_ranges,
+                    chunk_v,
                 );
 
                 if verts.is_empty() {
@@ -875,7 +993,7 @@ pub fn load_splines(
                 chunk_table.insert("t_end".into(), toml::Value::Float(t_end as f64));
                 let _ = world.set_component(
                     chunk_id,
-                    comp::SPLINE_CHUNK,
+                    flint_geometry::components::SPLINE_CHUNK,
                     toml::Value::Table(chunk_table),
                 );
 
@@ -885,8 +1003,8 @@ pub fn load_splines(
                     base_color: job.def.color,
                     metallic: job.def.metallic,
                     roughness: job.def.roughness,
-                    base_color_texture: None,
-                    normal_texture: None,
+                    base_color_texture: base_color_texture.clone(),
+                    normal_texture: normal_texture.clone(),
                     metallic_roughness_texture: None,
                     use_vertex_color: job.def.stripe_color.is_some(),
                     alpha_mode: flint_import::AlphaMode::Opaque,
@@ -896,7 +1014,7 @@ pub fn load_splines(
                 renderer.load_procedural_mesh(device, &chunk_name, &verts, &indices, material);
 
                 // Register trimesh collider
-                if let Some(ref mut phys) = physics {
+                if let (Some(phys), true) = (physics.as_deref_mut(), job.def.collider) {
                     phys.register_static_trimesh(
                         chunk_id,
                         phys_verts,
@@ -923,13 +1041,14 @@ pub fn load_splines(
                 job.def.stripe_width,
                 info.spacing,
                 &info.gap_ranges,
+                &v_coords,
             );
 
             if verts.is_empty() {
                 continue;
             }
 
-            println!(
+            eprintln!(
                 "  Mesh '{}': {}x{} @ offset [{:.1}, {:.1}] → {} verts, {} tris",
                 job.entity_name,
                 job.def.width,
@@ -946,8 +1065,8 @@ pub fn load_splines(
                 base_color: job.def.color,
                 metallic: job.def.metallic,
                 roughness: job.def.roughness,
-                base_color_texture: None,
-                normal_texture: None,
+                base_color_texture: base_color_texture.clone(),
+                normal_texture: normal_texture.clone(),
                 metallic_roughness_texture: None,
                 use_vertex_color: job.def.stripe_color.is_some(),
                 alpha_mode: flint_import::AlphaMode::Opaque,
@@ -957,7 +1076,7 @@ pub fn load_splines(
             renderer.load_procedural_mesh(device, &job.entity_name, &verts, &indices, material);
 
             // Register trimesh collider (when physics is available)
-            if let Some(ref mut phys) = physics {
+            if let (Some(phys), true) = (physics.as_deref_mut(), job.def.collider) {
                 phys.register_static_trimesh(
                     job.entity_id,
                     phys_verts,
@@ -973,10 +1092,76 @@ pub fn load_splines(
     }
 
     if !spline_infos.is_empty() || !mesh_jobs.is_empty() {
-        println!(
+        eprintln!(
             "Spline generation complete: {} splines, {} meshes.",
             spline_infos.len(),
             mesh_jobs.len(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A square loop of side `side` in the XZ plane, `per_side` samples a
+    /// side, with right vectors pointing into the loop.
+    fn square_loop(side: f32, per_side: usize) -> Vec<SplineSample> {
+        let corners = [
+            (Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+            (Vec3::new(side, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            (Vec3::new(side, 0.0, side), Vec3::new(-1.0, 0.0, 0.0)),
+            (Vec3::new(0.0, 0.0, side), Vec3::new(0.0, 0.0, -1.0)),
+        ];
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let mut out = Vec::new();
+        for (start, fwd) in corners {
+            let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+            for i in 0..per_side {
+                let t = out.len() as f32 / (4 * per_side) as f32;
+                out.push(SplineSample {
+                    position: start + fwd * (side * i as f32 / per_side as f32),
+                    forward: fwd,
+                    right,
+                    up,
+                    twist: 0.0,
+                    t,
+                });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn open_sweep_v_is_metres_over_length() {
+        let samples: Vec<SplineSample> = square_loop(40.0, 20).into_iter().take(11).collect();
+        let v = sweep_v_coords(&samples, false, [0.0, 0.0], 4.0);
+        assert_eq!(v.len(), 11);
+        // samples 2 m apart, 4 m per repeat
+        assert!((v[10] - 5.0).abs() < 1e-4, "{v:?}");
+    }
+
+    #[test]
+    fn closed_sweep_meets_itself_at_the_seam() {
+        // a 160 m loop with a 7 m texture: 22.86 repeats, rounded to 23
+        let samples = square_loop(40.0, 20);
+        let v = sweep_v_coords(&samples, true, [0.0, 0.0], 7.0);
+        assert_eq!(v.len(), samples.len() + 1, "one more entry closes the loop");
+        let last = *v.last().unwrap();
+        assert!((last - 23.0).abs() < 1e-3, "{last}");
+    }
+
+    #[test]
+    fn offset_sweeps_measure_their_own_path() {
+        // each sweep is measured along its own offset path: a wall 2 m
+        // outside the square cuts its corners wider than the centre line
+        let samples = square_loop(40.0, 20);
+        let len = |x: f32| {
+            *sweep_v_coords(&samples, false, [x, 0.0], 1.0)
+                .last()
+                .unwrap()
+        };
+        assert!((len(0.0) - 158.0).abs() < 1e-3, "{}", len(0.0));
+        assert!(len(-2.0) > len(0.0) + 1.0, "{}", len(-2.0));
     }
 }

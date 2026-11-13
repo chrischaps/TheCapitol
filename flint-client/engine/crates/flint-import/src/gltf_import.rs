@@ -3,17 +3,52 @@
 use crate::types::{
     AlphaMode, ImportResult, ImportedChannel, ImportedJoint, ImportedKeyframe, ImportedMaterial,
     ImportedMesh, ImportedNode, ImportedNodeChannel, ImportedNodeClip, ImportedSkeletalClip,
-    ImportedSkeleton, ImportedTexture, JointProperty,
+    ImportedSkeleton, ImportedTexture, JointProperty, LodBand,
 };
 use flint_asset::{AssetMeta, AssetType};
-use flint_core::{ContentHash, FlintError, Result};
+use flint_core::{vfs, ContentHash, FlintError, Result};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Imports kept by path while [`memoize_imports`] is on.
+static MEMO: std::sync::Mutex<Option<HashMap<PathBuf, ImportResult>>> = std::sync::Mutex::new(None);
+
+/// Keep every import in memory, by path, and hand out copies (#329), or
+/// (`false`) drop them and decode each time again. For a process that
+/// loads the same files over and over and knows they won't change under
+/// it: `flint goldens` renders dozens of cases that share a few
+/// models, and decoding a model's textures is most of a debug build's
+/// time a case. Off by default; a watcher reloading a file must not get
+/// its old copy.
+pub fn memoize_imports(on: bool) {
+    *MEMO.lock().unwrap_or_else(|e| e.into_inner()) = on.then(HashMap::new);
+}
 
 /// Import a glTF or GLB file
 pub fn import_gltf<P: AsRef<Path>>(path: P) -> Result<ImportResult> {
     let path = path.as_ref();
-    let (document, buffers, images) = gltf::import(path)
+    {
+        let memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+        match memo.as_ref() {
+            None => drop(memo),
+            Some(kept) => {
+                if let Some(hit) = kept.get(path) {
+                    return Ok(hit.clone());
+                }
+                drop(memo);
+                let result = decode_gltf(path)?;
+                if let Some(kept) = MEMO.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    kept.insert(path.to_path_buf(), result.clone());
+                }
+                return Ok(result);
+            }
+        }
+    }
+    decode_gltf(path)
+}
+
+fn decode_gltf(path: &Path) -> Result<ImportResult> {
+    let (document, buffers, images) = import_via_vfs(path)
         .map_err(|e| FlintError::ImportError(format!("Failed to import glTF: {}", e)))?;
 
     let hash = ContentHash::from_file(path)
@@ -88,7 +123,20 @@ pub fn import_gltf<P: AsRef<Path>>(path: P) -> Result<ImportResult> {
                 .map(String::from)
                 .unwrap_or_else(|| node_name.clone());
 
+            // A level of detail authored as `extras.flint_lod`, on a primitive
+            // or on its mesh. Primitives let one mesh (one node, one entity)
+            // carry every level of a model, so the levels cost no extra
+            // entities: a node per level would be expanded into a child each.
+            let band_in = |extras: &gltf::json::Extras| {
+                extras
+                    .as_ref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+                    .and_then(|extras| LodBand::from_extras(&extras))
+            };
+            let mesh_lod = band_in(mesh.extras());
+
             for primitive in mesh.primitives() {
+                let lod = band_in(primitive.extras()).or(mesh_lod);
                 let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
                 let positions: Vec<[f32; 3]> = reader
@@ -132,6 +180,7 @@ pub fn import_gltf<P: AsRef<Path>>(path: P) -> Result<ImportResult> {
                     joint_indices,
                     joint_weights,
                     skin_index,
+                    lod,
                 });
                 mesh_primitive_indices.push(prim_index);
             }
@@ -184,6 +233,10 @@ pub fn import_gltf<P: AsRef<Path>>(path: P) -> Result<ImportResult> {
         root_nodes.push(idx);
     }
 
+    // `LOD_0`, `LOD_1`, ... at the root are one model's levels, not parts:
+    // band them so one draws at a time (#193).
+    crate::lod_chain::band_lod_chain(&mut meshes, &imported_nodes, &root_nodes);
+
     // Name each texture the same way the material references below do
     // (`texture_name`), so embedded textures resolve by name after upload.
     let mut textures = Vec::new();
@@ -228,21 +281,21 @@ pub fn import_gltf<P: AsRef<Path>>(path: P) -> Result<ImportResult> {
         let metallic = pbr.metallic_factor();
         let roughness = pbr.roughness_factor();
 
-        let base_color_texture = pbr.base_color_texture().map(|info| {
-            texture_name(info.texture())
-        });
+        let base_color_texture = pbr
+            .base_color_texture()
+            .map(|info| texture_name(info.texture()));
 
-        let normal_texture = material.normal_texture().map(|info| {
-            texture_name(info.texture())
-        });
+        let normal_texture = material
+            .normal_texture()
+            .map(|info| texture_name(info.texture()));
 
-        let metallic_roughness_texture = pbr.metallic_roughness_texture().map(|info| {
-            texture_name(info.texture())
-        });
+        let metallic_roughness_texture = pbr
+            .metallic_roughness_texture()
+            .map(|info| texture_name(info.texture()));
 
-        let emissive_texture = material.emissive_texture().map(|info| {
-            texture_name(info.texture())
-        });
+        let emissive_texture = material
+            .emissive_texture()
+            .map(|info| texture_name(info.texture()));
 
         let alpha_mode = match material.alpha_mode() {
             gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
@@ -266,6 +319,7 @@ pub fn import_gltf<P: AsRef<Path>>(path: P) -> Result<ImportResult> {
             emissive_strength: material.emissive_strength().unwrap_or(1.0),
             emissive_texture,
             vertex_emission: false,
+            double_sided: material.double_sided(),
         });
     }
 
@@ -346,6 +400,14 @@ fn extract_skeletons(
 ) -> Vec<ImportedSkeleton> {
     let mut skeletons = Vec::new();
 
+    let nodes: Vec<gltf::Node> = document.nodes().collect();
+    let mut node_parent: HashMap<usize, usize> = HashMap::new();
+    for node in &nodes {
+        for child in node.children() {
+            node_parent.insert(child.index(), node.index());
+        }
+    }
+
     for skin in document.skins() {
         let skin_name = skin
             .name()
@@ -375,8 +437,10 @@ fn extract_skeletons(
                 .map(String::from)
                 .unwrap_or_else(|| format!("joint_{}", joint_idx));
 
-            // Find parent: walk up the glTF node tree and check if the parent is also a joint
-            let parent = find_parent_joint(document, node.index(), &node_to_joint);
+            // Walk up to the nearest ancestor that is a joint, keeping the
+            // non-joint nodes passed on the way (#294).
+            let (parent, parent_offset) =
+                find_parent_joint(&node_parent, &nodes, node.index(), &node_to_joint);
 
             let ibm = ibms.get(joint_idx).copied().unwrap_or_else(identity_4x4);
             let (rest_translation, rest_rotation, rest_scale) = node.transform().decomposed();
@@ -389,6 +453,7 @@ fn extract_skeletons(
                 rest_translation,
                 rest_rotation,
                 rest_scale,
+                parent_offset,
             });
         }
 
@@ -401,22 +466,46 @@ fn extract_skeletons(
     skeletons
 }
 
-/// Find the parent joint index for a given node, if the parent is within the skin's joint set
+/// The nearest ancestor of `node_index` that is one of the skin's joints,
+/// and the transform of the non-joint nodes between the two (or between the
+/// node and the scene root when no ancestor is a joint), `None` when that is
+/// identity. See `ImportedJoint::parent_offset`.
 fn find_parent_joint(
-    document: &gltf::Document,
+    node_parent: &HashMap<usize, usize>,
+    nodes: &[gltf::Node],
     node_index: usize,
     node_to_joint: &HashMap<usize, usize>,
-) -> Option<usize> {
-    // Walk all nodes to find the parent of node_index
-    for node in document.nodes() {
-        for child in node.children() {
-            if child.index() == node_index {
-                // Found the parent node — check if it's a joint
-                return node_to_joint.get(&node.index()).copied();
-            }
+) -> (Option<usize>, Option<[[f32; 4]; 4]>) {
+    let identity = identity_4x4();
+    let mut offset: Option<[[f32; 4]; 4]> = None;
+    let mut cur = node_parent.get(&node_index).copied();
+    // A parent map from a valid glTF is a forest; the bound stops a cycle.
+    for _ in 0..nodes.len() {
+        let Some(index) = cur else { break };
+        if let Some(&joint) = node_to_joint.get(&index) {
+            return (Some(joint), offset);
+        }
+        let m = nodes[index].transform().matrix();
+        if m != identity {
+            offset = Some(match offset {
+                Some(below) => mat4_mul(&m, &below),
+                None => m,
+            });
+        }
+        cur = node_parent.get(&index).copied();
+    }
+    (None, offset)
+}
+
+/// Multiply two column-major 4x4 matrices (`m[col][row]`).
+fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col][row] = (0..4).map(|k| a[k][row] * b[col][k]).sum();
         }
     }
-    None
+    out
 }
 
 /// Extract skeletal animation clips from glTF animations
@@ -704,6 +793,147 @@ fn build_keyframes(
         .collect()
 }
 
+/// `gltf::import`, read through the vfs. gltf's importer opens the file and
+/// everything it references with `std::fs`, so this does the same steps over
+/// the active file source (the disk, or the web's bundle): the document, its
+/// buffers (GLB blob, `data:` URI or a file next to it) and its images.
+/// `data:` URIs and buffer views never touch a file, so gltf decodes those.
+fn import_via_vfs(
+    path: &Path,
+) -> gltf::Result<(
+    gltf::Document,
+    Vec<gltf::buffer::Data>,
+    Vec<gltf::image::Data>,
+)> {
+    let base = path.parent().unwrap_or_else(|| Path::new("./"));
+    let bytes = vfs::read(path).map_err(gltf::Error::Io)?;
+    let gltf::Gltf { document, mut blob } = gltf::Gltf::from_slice(&bytes)?;
+
+    // As `gltf::import_buffers`: padded to 4 bytes, and no shorter than the
+    // length the document declares.
+    let mut buffers = Vec::new();
+    for buffer in document.buffers() {
+        let mut data = match buffer.source() {
+            gltf::buffer::Source::Bin => blob.take().ok_or(gltf::Error::MissingBlob)?,
+            gltf::buffer::Source::Uri(uri) if uri.starts_with("data:") => {
+                gltf::buffer::Data::from_source(buffer.source(), None)?.0
+            }
+            gltf::buffer::Source::Uri(uri) => read_uri(base, uri)?,
+        };
+        while data.len() % 4 != 0 {
+            data.push(0);
+        }
+        if data.len() < buffer.length() {
+            return Err(gltf::Error::BufferLength {
+                buffer: buffer.index(),
+                expected: buffer.length(),
+                actual: data.len(),
+            });
+        }
+        buffers.push(gltf::buffer::Data(data));
+    }
+
+    let mut images = Vec::new();
+    for img in document.images() {
+        let data = match img.source() {
+            gltf::image::Source::Uri { uri, mime_type } if !uri.starts_with("data:") => {
+                let encoded = read_uri(base, uri)?;
+                // The format the way gltf picks it: the MIME type, else the
+                // URI's extension. (gltf's byte sniffing is a feature Flint
+                // does not enable.)
+                let format = match mime_type {
+                    Some("image/png") => image::ImageFormat::Png,
+                    Some("image/jpeg") => image::ImageFormat::Jpeg,
+                    Some(_) => return Err(gltf::Error::UnsupportedImageEncoding),
+                    None => match uri.rsplit('.').next() {
+                        Some("png") => image::ImageFormat::Png,
+                        Some("jpg") | Some("jpeg") => image::ImageFormat::Jpeg,
+                        _ => return Err(gltf::Error::UnsupportedImageEncoding),
+                    },
+                };
+                let decoded = image::load_from_memory_with_format(&encoded, format)
+                    .map_err(gltf::Error::Image)?;
+                image_data(decoded)?
+            }
+            // A buffer view or a `data:` URI. gltf only resolves URIs when
+            // given a base; this one is never used.
+            source => gltf::image::Data::from_source(source, Some(Path::new("")), &buffers)?,
+        };
+        images.push(data);
+    }
+
+    Ok((document, buffers, images))
+}
+
+/// An external buffer or image URI, read through the vfs relative to the
+/// file's directory: `file:` paths as written, relative ones percent-decoded,
+/// any other scheme refused (gltf's rules).
+fn read_uri(base: &Path, uri: &str) -> gltf::Result<Vec<u8>> {
+    let path = if let Some(rest) = uri
+        .strip_prefix("file://")
+        .or_else(|| uri.strip_prefix("file:"))
+    {
+        PathBuf::from(rest)
+    } else if uri.contains(':') {
+        return Err(gltf::Error::UnsupportedScheme);
+    } else {
+        base.join(percent_decode(uri))
+    };
+    vfs::read(path).map_err(gltf::Error::Io)
+}
+
+/// `%XX` escapes decoded (`tire%20tread.png` -> `tire tread.png`), as gltf
+/// does to a relative URI before opening it. A `%` not followed by two hex
+/// digits stays as it is.
+fn percent_decode(uri: &str) -> String {
+    let bytes = uri.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escape = bytes
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit));
+        match (bytes[i], escape) {
+            (b'%', Some(hex)) => {
+                let hex = std::str::from_utf8(hex).unwrap_or("00");
+                out.push(u8::from_str_radix(hex, 16).unwrap_or(0));
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A decoded image as gltf hands it over (its own constructor is private):
+/// the pixel layout named by the variant, the raw bytes.
+fn image_data(decoded: image::DynamicImage) -> gltf::Result<gltf::image::Data> {
+    use gltf::image::Format;
+    let format = match decoded {
+        image::DynamicImage::ImageLuma8(_) => Format::R8,
+        image::DynamicImage::ImageLumaA8(_) => Format::R8G8,
+        image::DynamicImage::ImageRgb8(_) => Format::R8G8B8,
+        image::DynamicImage::ImageRgba8(_) => Format::R8G8B8A8,
+        image::DynamicImage::ImageLuma16(_) => Format::R16,
+        image::DynamicImage::ImageLumaA16(_) => Format::R16G16,
+        image::DynamicImage::ImageRgb16(_) => Format::R16G16B16,
+        image::DynamicImage::ImageRgba16(_) => Format::R16G16B16A16,
+        image::DynamicImage::ImageRgb32F(_) => Format::R32G32B32FLOAT,
+        image::DynamicImage::ImageRgba32F(_) => Format::R32G32B32A32FLOAT,
+        other => return Err(gltf::Error::UnsupportedImageFormat(other)),
+    };
+    let (width, height) = (decoded.width(), decoded.height());
+    Ok(gltf::image::Data {
+        pixels: decoded.into_bytes(),
+        format,
+        width,
+        height,
+    })
+}
+
 /// A texture's name for the cache: the glTF texture name, else its source
 /// image's name (Blender names images but not textures — e.g. `tire_normal`,
 /// which the texture cache also reads to pick a linear format for normal
@@ -719,6 +949,48 @@ fn texture_name(texture: gltf::Texture<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// While the memo is on (#329) a path decodes once, even if the file
+    /// changes under it; off, every import reads the file again.
+    #[test]
+    fn memoized_imports_decode_a_path_once() {
+        let gltf = |name: &str| {
+            format!(
+                r#"{{ "asset": {{ "version": "2.0" }}, "materials": [{{ "name": "{name}" }}] }}"#
+            )
+        };
+        let path = std::env::temp_dir().join(format!("flint-memo-{}.gltf", std::process::id()));
+        let material = |path: &Path| import_gltf(path).unwrap().materials[0].name.clone();
+        std::fs::write(&path, gltf("first")).unwrap();
+        memoize_imports(true);
+        let first = material(&path);
+        std::fs::write(&path, gltf("second")).unwrap();
+        let kept = material(&path);
+        memoize_imports(false);
+        let fresh = material(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((first.as_str(), kept.as_str()), ("first", "first"));
+        assert_eq!(fresh, "second");
+    }
+
+    /// glTF `doubleSided` reaches the material (#623), and a material that
+    /// doesn't say stays single-sided, glTF's default. The fixture is
+    /// `tools/test-models/double_sided_card.py`'s.
+    #[test]
+    fn double_sided_is_read() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testModels/DoubleSidedCard.glb"
+        );
+        let model = import_gltf(path).unwrap();
+        let sides: Vec<_> = model
+            .materials
+            .iter()
+            .map(|m| (m.name.as_str(), m.double_sided))
+            .collect();
+        assert_eq!(sides, [("two_sided", true), ("one_sided", false)]);
+        assert!(!ImportedMaterial::default().double_sided);
+    }
 
     /// A material with painted-on lights keeps its emissive map's name, the
     /// same name the texture is imported under, so the renderer can find it.
@@ -749,5 +1021,57 @@ mod tests {
         assert_eq!(material.emissive_texture.as_deref(), Some("windows"));
         assert_eq!(result.textures[0].name, "windows");
         assert_eq!(material.base_color_texture, None);
+    }
+
+    /// A `.gltf` whose buffer and texture are separate files imports from a
+    /// memory bundle, with the URIs resolved next to the model and
+    /// percent-decoded, exactly as it would from disk.
+    #[test]
+    fn a_gltf_with_external_files_imports_from_a_memory_source() {
+        use flint_core::vfs::MemorySource;
+        use std::sync::Arc;
+
+        // One triangle: three f32 positions, 36 bytes.
+        let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let bin: Vec<u8> = positions
+            .iter()
+            .flatten()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([255, 128, 0, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let gltf = r#"{
+            "asset": { "version": "2.0" },
+            "scene": 0,
+            "scenes": [{ "nodes": [0] }],
+            "nodes": [{ "name": "tri", "mesh": 0 }],
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 } }] }],
+            "buffers": [{ "uri": "tri%20data.bin", "byteLength": 36 }],
+            "bufferViews": [{ "buffer": 0, "byteLength": 36 }],
+            "accessors": [{
+                "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+            }],
+            "images": [{ "uri": "paint.png", "name": "paint" }],
+            "textures": [{ "source": 0 }]
+        }"#;
+
+        let mut bundle = MemorySource::new();
+        bundle.insert("models/tri.gltf", gltf);
+        bundle.insert("models/tri data.bin", bin);
+        bundle.insert("models/paint.png", png);
+        let result = vfs::scoped(Arc::new(bundle), || import_gltf("models/tri.gltf"));
+        let result = result.unwrap();
+
+        assert_eq!(result.meshes.len(), 1);
+        assert_eq!(result.meshes[0].positions, positions.to_vec());
+        assert_eq!(result.textures[0].name, "paint");
+        assert_eq!(
+            (result.textures[0].width, result.textures[0].height),
+            (2, 1)
+        );
+        assert_eq!(percent_decode("a%2fb%zz%"), "a/b%zz%");
     }
 }

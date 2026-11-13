@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use flint_core::vfs;
 use flint_core::ContentHash;
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +91,575 @@ pub struct LodLevel {
     pub target_triangles: u32,
 }
 
+// ── Living props ───────────────────────────────────────────────────────────
+
+/// The params `[living] drift` may name.
+pub const DRIFT_PARAMS: &[&str] = &["branch_angle", "lsystem_tropism", "trunk_curve"];
+
+/// What `[living] jitter` may target.
+pub const JITTER_TARGETS: &[&str] = &["leaf_cards"];
+
+/// The `[living]` table: this spec is a prop that keeps drifting between
+/// versions of itself. `flint gen`'s bake doesn't read it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LivingConfig {
+    /// The seed that fixes the structure: the prop's identity. Required,
+    /// since a prop's identity shouldn't be left to a default.
+    pub lineage_seed: u64,
+    /// How many poses to keep ready.
+    #[serde(default = "default_pose_ring")]
+    pub pose_ring: u32,
+    /// The slow, large layer: changes the silhouette and always glides.
+    #[serde(default)]
+    pub drift: DriftConfig,
+    /// The fast, small layer: makes it feel drawn and may snap.
+    #[serde(default)]
+    pub jitter: JitterConfig,
+    /// Seconds between pose targets: one beat of the hold-and-glide clock.
+    #[serde(default = "default_step")]
+    pub step: f32,
+    /// How much of each step is spent easing to the next pose, 0 to 1: 0
+    /// holds and then snaps, 1 never holds.
+    #[serde(default = "default_glide")]
+    pub glide: f32,
+    /// How the branches fall out of phase with each other.
+    #[serde(default)]
+    pub stagger: Stagger,
+    /// How far poses wander from the lineage's, and where on the tree.
+    #[serde(default)]
+    pub variance: VarianceConfig,
+    /// Faint copies of the prop a little before and after now. Left out of a
+    /// spec's text unless changed, since they don't touch what's baked.
+    #[serde(default, skip_serializing_if = "EchoConfig::is_default")]
+    pub echoes: EchoConfig,
+    /// How its echoes meet what's behind them. It's the spec's alone: no
+    /// scene, species or live tuning changes it.
+    #[serde(default, skip_serializing_if = "EchoBlend::is_default")]
+    pub echo_blend: EchoBlend,
+    /// Whose the poses' slide is (`form_v1`'s `slide`; see [`SegmentPose::slide`]
+    /// in `living.rs`). 0, the default: every pose's, the prop's own too. Above
+    /// 0 it belongs to the echoes: the prop itself never slides, and an echo's
+    /// slide grows with its distance from now, whole at this many steps. So
+    /// echoes at a spread of 0 sit on the prop, and wide ones stand beside it,
+    /// while the prop moves only as its other terms say. Up to 2 steps.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub echo_slide: f32,
+    /// Where its echoes stand once they're spread wide: a few set places
+    /// rather than a continuous spread, so the copies there can be counted.
+    /// None, the default. It's the spec's alone, like the blend. See
+    /// [`EchoPlaces`].
+    #[serde(default, skip_serializing_if = "EchoPlaces::is_empty")]
+    pub echo_places: EchoPlaces,
+    /// How soft its silhouette is, 0 to 1 (#582): the body fades where its
+    /// surface turns away from the eye, so the outline feathers at rest,
+    /// however still or busy the prop is. 0, the default, is a hard edge and
+    /// draws exactly as before; above 0 the body draws translucent, after
+    /// everything opaque. Cards (leaves, marks) keep their edges. A scene's
+    /// `[living] softness`, a species' own and `tune_living` turn it at run
+    /// time; nothing baked reads it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub softness: f32,
+}
+
+/// One of [`EchoPlaces::at`]: `[along, up, steps]`. The first two are metres
+/// along the prop's place axes (`form_v1`: along its lines of writing, and up
+/// the form; any other generator: the prop's X and Y), the third where on the
+/// clock a copy there stands, in steps from now. Negative is behind.
+pub type EchoPlace = [f32; 3];
+
+/// `[living] echo_places` (chrischaps/Embodiment#68): the far end of a spread
+/// as a few copies you can count. Echoes spread continuously, each a little
+/// further from now than the last, so at a wide spread their poses blur into
+/// one another: a smear, not several copies. With places, a spread of `from`
+/// steps or less is exactly as it was, and from there to `whole` every echo
+/// moves to one of the places, its clock to that place's steps and itself to
+/// its offset, the echoes taking the places in turn. At `whole` and beyond the
+/// echoes at a place are one copy, in one pose, at one offset: with
+/// `echo_blend = "lighten"` they draw as one. A spread falling back gathers
+/// them in the same way, so nothing jumps.
+///
+/// An offset is the prop's alone to measure: a page offset half a line up its
+/// length puts its copy's writing between the page's rows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EchoPlaces {
+    /// The places, at most [`MAX_ECHOES`]. Empty is none.
+    pub at: Vec<EchoPlace>,
+    /// The spread, in steps, at which the echoes start toward their places.
+    pub from: f32,
+    /// The spread at which they've reached them.
+    pub whole: f32,
+}
+
+impl EchoPlaces {
+    fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+
+    /// How far from its spread toward its places an echo config of `spread`
+    /// stands: 0 up to `from`, 1 from `whole`, eased in between so its rate
+    /// of change is 0 at both ends.
+    pub fn reached(&self, spread: f32) -> f32 {
+        if self.at.is_empty() || spread <= self.from {
+            return 0.0;
+        }
+        if spread >= self.whole {
+            return 1.0;
+        }
+        let x = (spread - self.from) / (self.whole - self.from);
+        x * x * (3.0 - 2.0 * x)
+    }
+
+    /// Check what the types can't: the key at fault and why.
+    pub fn check(&self) -> std::result::Result<(), (&'static str, String)> {
+        if self.at.is_empty() {
+            return Ok(());
+        }
+        if self.at.len() > MAX_ECHOES as usize {
+            return Err((
+                "at",
+                format!("{} places: at most {MAX_ECHOES}", self.at.len()),
+            ));
+        }
+        for &[along, up, steps] in &self.at {
+            if !(along.is_finite() && up.is_finite() && along.abs() <= 1.0 && up.abs() <= 1.0) {
+                return Err((
+                    "at",
+                    format!("[{along}, {up}, {steps}]: an offset must be within 1 metre"),
+                ));
+            }
+            if !(steps.is_finite() && steps != 0.0 && steps.abs() <= MAX_ECHO_SPREAD) {
+                return Err((
+                    "at",
+                    format!(
+                        "[{along}, {up}, {steps}]: a place's steps must be off now and within {MAX_ECHO_SPREAD:.2}"
+                    ),
+                ));
+            }
+        }
+        if !(self.from.is_finite() && (0.0..MAX_ECHO_SPREAD).contains(&self.from)) {
+            return Err((
+                "from",
+                format!(
+                    "{}: must be from 0 to under {MAX_ECHO_SPREAD:.2} steps",
+                    self.from
+                ),
+            ));
+        }
+        if !(self.whole.is_finite() && self.whole > self.from && self.whole <= MAX_ECHO_SPREAD) {
+            return Err((
+                "whole",
+                format!(
+                    "{}: must be more than from ({}) and at most {MAX_ECHO_SPREAD:.2} steps",
+                    self.whole, self.from
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_zero(x: &f32) -> bool {
+    *x == 0.0
+}
+
+impl LivingConfig {
+    /// How much of its poses' slide a copy `offset` steps from now shows (the
+    /// prop itself is at 0). See [`Self::echo_slide`].
+    pub fn slide_shown(&self, offset: f32) -> f32 {
+        slide_shown(self.echo_slide, offset)
+    }
+}
+
+/// [`LivingConfig::slide_shown`] for an `echo_slide` of `steps`.
+pub fn slide_shown(steps: f32, offset: f32) -> f32 {
+    if steps <= 0.0 {
+        1.0
+    } else {
+        (offset.abs() / steps).min(1.0)
+    }
+}
+
+/// `[living] echo_blend`: how a prop's echoes meet what's behind them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EchoBlend {
+    /// Over it at the echo's opacity, as a translucent copy: an echo in
+    /// shadow darkens a lit prop behind it.
+    #[default]
+    Over,
+    /// The brighter of the two, channel by channel, with the echo's colour
+    /// at its opacity: an echo only ever adds light, so it can't darken the
+    /// prop it's behind, and echoes laid over each other don't add up. For a
+    /// form drawn light on a dark ground (chrischaps/Embodiment#40).
+    Lighten,
+}
+
+impl EchoBlend {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn default_pose_ring() -> u32 {
+    8
+}
+
+fn default_step() -> f32 {
+    0.5
+}
+
+fn default_glide() -> f32 {
+    0.3
+}
+
+impl LivingConfig {
+    /// Check what the types can't, naming the key at fault.
+    pub fn validate(&self) -> Result<()> {
+        let bad = |key: &str, reason: String| {
+            Err(ProcGenError::InvalidParameter {
+                name: format!("living.{key}"),
+                reason,
+            })
+        };
+        let at_least_zero = |x: f32| x.is_finite() && x >= 0.0;
+        let unit = |x: f32| (0.0..=1.0).contains(&x);
+
+        if self.pose_ring < 2 {
+            return bad(
+                "pose_ring",
+                format!("{}: a ring needs at least 2 poses to blend", self.pose_ring),
+            );
+        }
+        if !self.step.is_finite() || self.step <= 0.0 {
+            return bad(
+                "step",
+                format!("{}: must be more than 0 seconds", self.step),
+            );
+        }
+        if !(self.echo_slide.is_finite() && (0.0..=2.0).contains(&self.echo_slide)) {
+            return bad(
+                "echo_slide",
+                format!("{}: must be in [0.0, 2.0] steps", self.echo_slide),
+            );
+        }
+        if !(self.softness.is_finite() && unit(self.softness)) {
+            return bad(
+                "softness",
+                format!("{}: must be in [0.0, 1.0]", self.softness),
+            );
+        }
+        if let Err((key, reason)) = self.echo_places.check() {
+            return bad(&format!("echo_places.{key}"), reason);
+        }
+        if !unit(self.glide) {
+            return bad("glide", format!("{}: must be in [0.0, 1.0]", self.glide));
+        }
+        if !at_least_zero(self.drift.amplitude) {
+            return bad(
+                "drift.amplitude",
+                format!("{}: must be 0 or more", self.drift.amplitude),
+            );
+        }
+        if let Some(p) = self
+            .drift
+            .params
+            .iter()
+            .find(|p| !DRIFT_PARAMS.contains(&p.as_str()))
+        {
+            return bad(
+                "drift.params",
+                format!("unknown param \"{p}\"; expected one of {DRIFT_PARAMS:?}"),
+            );
+        }
+        if !at_least_zero(self.jitter.amplitude) {
+            return bad(
+                "jitter.amplitude",
+                format!("{}: must be 0 or more", self.jitter.amplitude),
+            );
+        }
+        if let Some(t) = self
+            .jitter
+            .targets
+            .iter()
+            .find(|t| !JITTER_TARGETS.contains(&t.as_str()))
+        {
+            return bad(
+                "jitter.targets",
+                format!("unknown target \"{t}\"; expected one of {JITTER_TARGETS:?}"),
+            );
+        }
+        if !(self.jitter.step.is_finite() && self.jitter.step > 0.0) {
+            return bad(
+                "jitter.step",
+                format!("{}: must be more than 0", self.jitter.step),
+            );
+        }
+        if !unit(self.jitter.glide) {
+            return bad(
+                "jitter.glide",
+                format!("{}: must be in [0.0, 1.0]", self.jitter.glide),
+            );
+        }
+        if !unit(self.variance.amount) {
+            return bad(
+                "variance.amount",
+                format!("{}: must be in [0.0, 1.0]", self.variance.amount),
+            );
+        }
+        if !unit(self.variance.steady) {
+            return bad(
+                "variance.steady",
+                format!("{}: must be in [0.0, 1.0]", self.variance.steady),
+            );
+        }
+        if let Err((key, reason)) = self.echoes.check() {
+            return bad(&format!("echoes.{key}"), reason);
+        }
+        Ok(())
+    }
+}
+
+/// `[living] drift`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DriftConfig {
+    /// How large the drift is.
+    pub amplitude: f32,
+    /// Which spec params it moves, from [`DRIFT_PARAMS`].
+    pub params: Vec<String>,
+}
+
+impl Default for DriftConfig {
+    fn default() -> Self {
+        Self {
+            amplitude: 0.35,
+            params: DRIFT_PARAMS.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+}
+
+/// `[living] jitter`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct JitterConfig {
+    /// How large the jitter is.
+    pub amplitude: f32,
+    /// What it moves, from [`JITTER_TARGETS`].
+    pub targets: Vec<String>,
+    /// Seconds between its targets. Fast, on threes at 24 fps by default.
+    pub step: f32,
+    /// How much of a step is spent easing, 0 to 1: 0 snaps, which is what
+    /// makes it read as drawn.
+    pub glide: f32,
+}
+
+impl Default for JitterConfig {
+    fn default() -> Self {
+        Self {
+            amplitude: 0.05,
+            targets: JITTER_TARGETS.iter().map(|t| t.to_string()).collect(),
+            step: 0.125,
+            glide: 0.0,
+        }
+    }
+}
+
+/// How much of an echo's alpha is gone per step of clock offset.
+const ECHO_FALLOFF: f32 = 0.55;
+
+/// The most echoes a prop may have: each is a bone palette and a draw per part.
+pub const MAX_ECHOES: u32 = 16;
+
+/// The widest `spread`, where [`ECHO_FALLOFF`] has taken an echo's alpha to nothing.
+pub const MAX_ECHO_SPREAD: f32 = 1.0 / ECHO_FALLOFF;
+
+/// How the offsets of [`EchoConfig::copies`] bunch toward now. With three pairs
+/// and a spread of 0.9 this is the look chosen by eye in the mock-up: about
+/// 0.25, 0.55 and 0.9 of a step.
+const ECHO_BUNCHING: f32 = 1.17;
+
+/// `[living] echoes`: faint copies of the prop drawn in its own colours, each
+/// sampled a little before or after now on its clock. Every prop has them by
+/// default, and `count = 0` turns them off and costs nothing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct EchoConfig {
+    /// How many copies to draw.
+    pub count: u32,
+    /// How far the farthest copy is from now, in steps of the clock.
+    pub spread: f32,
+    /// The opacity of a copy at now, which falls off with distance from it.
+    pub alpha: f32,
+}
+
+impl Default for EchoConfig {
+    fn default() -> Self {
+        Self {
+            count: 6,
+            spread: 0.9,
+            alpha: 0.2,
+        }
+    }
+}
+
+/// One copy of a prop: see [`EchoConfig::copies`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EchoCopy {
+    /// Where it is on the clock, in steps from now. Negative is behind.
+    pub offset: f32,
+    /// How opaque it's drawn, 0 to 1.
+    pub opacity: f32,
+    /// How far it's moved from the prop, `[along, up]` in metres along the
+    /// prop's place axes: `[0, 0]` but for [`EchoPlaces`].
+    pub place: [f32; 2],
+    /// How far it's gone toward its place, 0 to 1 ([`EchoPlaces::reached`]).
+    pub placed: f32,
+}
+
+impl EchoCopy {
+    /// How much of its poses' slide it shows, with a spec's `echo_slide` of
+    /// `steps`: [`slide_shown`] at its offset, less what its place has taken.
+    /// A copy at its place holds there, its writing unslid, so the copies
+    /// at one place stay one copy and don't smear along their lines.
+    pub fn slide_shown(&self, steps: f32) -> f32 {
+        slide_shown(steps, self.offset) * (1.0 - self.placed)
+    }
+}
+
+impl EchoConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The copies, in the order to draw them: farthest from now first, and of
+    /// a pair the one behind first. An odd count's spare is behind, since a
+    /// trailing copy reads better than one that leads. Nothing that would draw
+    /// nothing is listed, so `count = 0` and `alpha = 0` are both no copies.
+    pub fn copies(&self) -> Vec<EchoCopy> {
+        self.copies_placed(&EchoPlaces::default())
+    }
+
+    /// [`Self::copies`], with a spec's [`EchoPlaces`]: copy `i` goes toward
+    /// place `i % places`, so with two places they alternate behind and
+    /// ahead as the copies do. Its opacity is its distance from now's, where
+    /// it stands on the clock. With no places, or at a spread of `from` or
+    /// less, this is [`Self::copies`] exactly.
+    pub fn copies_placed(&self, places: &EchoPlaces) -> Vec<EchoCopy> {
+        let pairs = self.count.div_ceil(2);
+        let reached = places.reached(self.spread);
+        (0..self.count)
+            .map(|i| {
+                let pair = pairs - i / 2;
+                let reach = self.spread * (pair as f32 / pairs as f32).powf(ECHO_BUNCHING);
+                let offset = if i % 2 == 0 { -reach } else { reach };
+                let (offset, place) = if reached > 0.0 {
+                    let [along, up, steps] = places.at[i as usize % places.at.len()];
+                    (
+                        offset + (steps - offset) * reached,
+                        [along * reached, up * reached],
+                    )
+                } else {
+                    (offset, [0.0; 2])
+                };
+                EchoCopy {
+                    offset,
+                    opacity: self.alpha * (1.0 - offset.abs() * ECHO_FALLOFF),
+                    place,
+                    placed: reached,
+                }
+            })
+            .filter(|copy| copy.offset != 0.0 && copy.opacity > 0.0)
+            .collect()
+    }
+
+    /// Check what the types can't: the key at fault and why.
+    pub fn check(&self) -> std::result::Result<(), (&'static str, String)> {
+        if self.count > MAX_ECHOES {
+            return Err(("count", format!("{}: at most {MAX_ECHOES}", self.count)));
+        }
+        if !(0.0..=MAX_ECHO_SPREAD).contains(&self.spread) {
+            return Err((
+                "spread",
+                format!(
+                    "{}: must be from 0 to {MAX_ECHO_SPREAD:.2} steps, where an echo has faded to nothing",
+                    self.spread
+                ),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.alpha) {
+            return Err(("alpha", format!("{}: must be in [0.0, 1.0]", self.alpha)));
+        }
+        Ok(())
+    }
+}
+
+/// `[living] stagger`: each part's phase offset into the step cycle.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Stagger {
+    /// The whole prop moves at once.
+    None,
+    /// Offset by branching depth.
+    #[default]
+    PerLevel,
+    /// Offset by segment.
+    PerBranch,
+}
+
+/// `[living] variance` (#229): how much of the difference between poses is
+/// left, and where on the tree.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct VarianceConfig {
+    /// How much of each pose's difference from the base is left, 0 to 1.
+    pub amount: f32,
+    /// How much of that is held back from the trunk side: 0 even, 1 all at
+    /// the tips.
+    pub steady: f32,
+    /// Scale each pose so its bounding box matches the base's, as near as one
+    /// scale can: the side furthest over is as far over as the side furthest
+    /// under is under.
+    pub keep_size: bool,
+}
+
+impl VarianceConfig {
+    /// Nothing held back: a pose is exactly what its shape seed grew.
+    pub const FULL: Self = Self {
+        amount: 1.0,
+        steady: 0.0,
+        keep_size: false,
+    };
+
+    /// Check what the types can't: the key at fault and why.
+    pub fn check(&self) -> std::result::Result<(), (&'static str, String)> {
+        for (key, value) in [("amount", self.amount), ("steady", self.steady)] {
+            if !(0.0..=1.0).contains(&value) {
+                return Err((key, format!("{value}: must be in [0.0, 1.0]")));
+            }
+        }
+        Ok(())
+    }
+
+    /// How much of its difference from the base a segment at `depth` keeps:
+    /// `amount × ((1 − steady) + steady × (depth / max_depth)^1.3)`.
+    pub fn weight(&self, depth: u32, max_depth: u32) -> f32 {
+        let level = depth as f32 / max_depth.max(1) as f32;
+        self.amount * ((1.0 - self.steady) + self.steady * level.powf(1.3))
+    }
+}
+
+impl Default for VarianceConfig {
+    fn default() -> Self {
+        Self {
+            amount: 0.35,
+            steady: 0.8,
+            keep_size: true,
+        }
+    }
+}
+
 // ── ProcGenSpec ────────────────────────────────────────────────────────────
 
 /// A complete procedural generation specification.
@@ -110,6 +680,10 @@ pub struct ProcGenSpec {
     /// Optional LOD levels.
     #[serde(default)]
     pub lod: Option<Vec<LodLevel>>,
+    /// Optional `[living]` table. Left out when absent, so a spec without one
+    /// keeps its content hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub living: Option<LivingConfig>,
 }
 
 fn default_params() -> toml::Value {
@@ -119,12 +693,17 @@ fn default_params() -> toml::Value {
 impl ProcGenSpec {
     /// Parse a spec from a TOML string.
     pub fn parse(toml_str: &str) -> Result<Self> {
-        toml::from_str(toml_str).map_err(|e| ProcGenError::SpecParseError(e.to_string()))
+        let spec: Self =
+            toml::from_str(toml_str).map_err(|e| ProcGenError::SpecParseError(e.to_string()))?;
+        if let Some(living) = &spec.living {
+            living.validate()?;
+        }
+        Ok(spec)
     }
 
     /// Load a spec from a TOML file.
     pub fn from_file(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
+        let content = vfs::read_to_string(path)?;
         Self::parse(&content)
     }
 
@@ -153,7 +732,7 @@ impl ProcGenSpec {
 /// skipped (callers should use more targeted loading for error reporting).
 pub fn discover_specs(dir: &Path) -> Result<Vec<ProcGenSpec>> {
     let mut specs = Vec::new();
-    if !dir.is_dir() {
+    if !vfs::is_dir(dir) {
         return Ok(specs);
     }
     visit_dir(dir, &mut specs)?;
@@ -161,10 +740,8 @@ pub fn discover_specs(dir: &Path) -> Result<Vec<ProcGenSpec>> {
 }
 
 fn visit_dir(dir: &Path, specs: &mut Vec<ProcGenSpec>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
+    for path in vfs::read_dir(dir)? {
+        if vfs::is_dir(&path) {
             visit_dir(&path, specs)?;
         } else if path
             .file_name()
@@ -327,6 +904,380 @@ mode = "random"
     fn parse_error_on_bad_toml() {
         let result = ProcGenSpec::parse("not valid { toml");
         assert!(result.is_err());
+    }
+
+    fn with_living(table: &str) -> String {
+        format!("{MINIMAL_SPEC}\n[living]\n{table}\n")
+    }
+
+    #[test]
+    fn a_spec_without_living_keeps_its_hash_text() {
+        let spec = ProcGenSpec::parse(MINIMAL_SPEC).unwrap();
+        assert!(spec.living.is_none());
+        assert!(!toml::to_string(&spec).unwrap().contains("living"));
+    }
+
+    #[test]
+    fn living_parses_the_designs_table() {
+        let spec = ProcGenSpec::parse(&with_living(
+            r#"
+lineage_seed = 7
+pose_ring = 12
+drift = { amplitude = 0.2, params = ["branch_angle", "lsystem_tropism"] }
+jitter = { amplitude = 0.01, targets = ["leaf_cards"] }
+stagger = "per_branch"
+variance = { amount = 1, steady = 0, keep_size = false }
+"#,
+        ))
+        .unwrap();
+        let living = spec.living.as_ref().unwrap();
+        assert_eq!(living.lineage_seed, 7);
+        assert_eq!(living.pose_ring, 12);
+        assert_eq!(living.drift.amplitude, 0.2);
+        assert_eq!(living.drift.params.len(), 2);
+        assert_eq!(living.jitter.amplitude, 0.01);
+        assert_eq!(living.stagger, Stagger::PerBranch);
+        assert_eq!(living.variance.amount, 1.0);
+        assert_eq!(living.variance.steady, 0.0);
+        assert!(!living.variance.keep_size);
+
+        // It survives the round trip every save and content hash takes.
+        let again = ProcGenSpec::parse(&toml::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(spec, again);
+    }
+
+    #[test]
+    fn echoes_default_to_six_and_stay_out_of_a_specs_text() {
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3")).unwrap();
+        let echoes = spec.living.as_ref().unwrap().echoes;
+        assert_eq!(echoes, EchoConfig::default());
+        assert_eq!(echoes.count, 6);
+        assert!(!toml::to_string(&spec).unwrap().contains("echoes"));
+    }
+
+    #[test]
+    fn six_echoes_sit_where_the_mock_up_put_them() {
+        let copies = EchoConfig::default().copies();
+        let offsets: Vec<f32> = copies.iter().map(|c| c.offset).collect();
+        let want = [-0.9, 0.9, -0.56, 0.56, -0.25, 0.25];
+        assert_eq!(offsets.len(), want.len());
+        for (got, want) in offsets.iter().zip(want) {
+            assert!((got - want).abs() < 0.01, "{offsets:?}");
+        }
+        // alpha x (1 - |offset| x 0.55), and so nearer copies are stronger.
+        assert!((copies[0].opacity - 0.2 * (1.0 - 0.9 * 0.55)).abs() < 1e-5);
+        assert!(copies[4].opacity > copies[2].opacity);
+        assert!(copies[2].opacity > copies[0].opacity);
+        assert_eq!(copies[0].opacity, copies[1].opacity);
+    }
+
+    #[test]
+    fn no_copy_is_listed_that_would_draw_nothing() {
+        let off = |count, spread, alpha| {
+            EchoConfig {
+                count,
+                spread,
+                alpha,
+            }
+            .copies()
+        };
+        assert!(off(0, 0.9, 0.2).is_empty());
+        assert!(off(6, 0.0, 0.2).is_empty());
+        assert!(off(6, 0.9, 0.0).is_empty());
+    }
+
+    #[test]
+    fn an_odd_count_keeps_its_spare_behind() {
+        let copies = EchoConfig {
+            count: 3,
+            ..Default::default()
+        }
+        .copies();
+        assert_eq!(copies.len(), 3);
+        assert!(copies[0].offset < 0.0 && copies[1].offset > 0.0 && copies[2].offset < 0.0);
+        assert!(copies[2].offset.abs() < copies[0].offset.abs());
+    }
+
+    #[test]
+    fn echo_blend_is_over_unless_a_spec_says_lighten() {
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3")).unwrap();
+        assert_eq!(spec.living.as_ref().unwrap().echo_blend, EchoBlend::Over);
+        assert!(!toml::to_string(&spec).unwrap().contains("echo_blend"));
+
+        let text = with_living("lineage_seed = 3\necho_blend = \"lighten\"");
+        let spec = ProcGenSpec::parse(&text).unwrap();
+        assert_eq!(spec.living.as_ref().unwrap().echo_blend, EchoBlend::Lighten);
+        assert!(toml::to_string(&spec)
+            .unwrap()
+            .contains("echo_blend = \"lighten\""));
+
+        let text = with_living("lineage_seed = 3\necho_blend = \"screen\"");
+        assert!(ProcGenSpec::parse(&text).is_err());
+    }
+
+    #[test]
+    fn echo_slide_gives_the_slide_to_the_echoes() {
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3")).unwrap();
+        let living = spec.living.as_ref().unwrap();
+        // By default the slide is every pose's, the prop's own too.
+        assert_eq!(living.echo_slide, 0.0);
+        assert_eq!(living.slide_shown(0.0), 1.0);
+        assert_eq!(living.slide_shown(1.3), 1.0);
+        assert!(!toml::to_string(&spec).unwrap().contains("echo_slide"));
+
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3\necho_slide = 1.5")).unwrap();
+        let living = spec.living.as_ref().unwrap();
+        // The prop never slides, an echo more the further it is, whole from 1.5.
+        assert_eq!(living.slide_shown(0.0), 0.0);
+        assert!((living.slide_shown(-0.75) - 0.5).abs() < 1e-6);
+        assert!((living.slide_shown(0.75) - 0.5).abs() < 1e-6);
+        assert_eq!(living.slide_shown(1.8), 1.0);
+
+        for bad in ["-0.5", "2.5"] {
+            let text = with_living(&format!("lineage_seed = 3\necho_slide = {bad}"));
+            let error = ProcGenSpec::parse(&text).unwrap_err().to_string();
+            assert!(error.contains("living.echo_slide"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn softness_is_a_hard_edge_unless_a_spec_says_otherwise() {
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3")).unwrap();
+        assert_eq!(spec.living.as_ref().unwrap().softness, 0.0);
+        assert!(!toml::to_string(&spec).unwrap().contains("softness"));
+
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3\nsoftness = 0.6")).unwrap();
+        assert_eq!(spec.living.as_ref().unwrap().softness, 0.6);
+        assert!(toml::to_string(&spec).unwrap().contains("softness = 0.6"));
+
+        for bad in ["-0.1", "1.5", "nan"] {
+            let text = with_living(&format!("lineage_seed = 3\nsoftness = {bad}"));
+            let error = ProcGenSpec::parse(&text).unwrap_err().to_string();
+            assert!(error.contains("living.softness"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn echo_places_are_none_by_default_and_change_nothing_up_to_from() {
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3")).unwrap();
+        let living = spec.living.as_ref().unwrap();
+        assert!(living.echo_places.at.is_empty());
+        assert!(!toml::to_string(&spec).unwrap().contains("echo_places"));
+
+        let text = with_living(
+            "lineage_seed = 3\necho_places = { at = [[-0.05, 0.015, -0.6], [0.05, -0.015, 0.6]], from = 0.6, whole = 1.6 }",
+        );
+        let spec = ProcGenSpec::parse(&text).unwrap();
+        let places = &spec.living.as_ref().unwrap().echo_places;
+        assert_eq!(places.at.len(), 2);
+        assert!(toml::to_string(&spec).unwrap().contains("echo_places"));
+        // At `from` or less, the copies are the continuous spread's, bit for bit.
+        for spread in [0.0, 0.2, 0.45, 0.6] {
+            let echoes = EchoConfig {
+                count: 9,
+                spread,
+                alpha: 0.45,
+            };
+            assert_eq!(
+                echoes.copies_placed(places),
+                echoes.copies(),
+                "spread {spread}"
+            );
+        }
+    }
+
+    #[test]
+    fn at_a_whole_spread_the_echoes_at_a_place_are_one_copy() {
+        let places = EchoPlaces {
+            at: vec![[-0.05, 0.015, -0.6], [0.05, -0.015, 0.6]],
+            from: 0.6,
+            whole: 1.6,
+        };
+        let echoes = EchoConfig {
+            count: 9,
+            spread: 1.8,
+            alpha: 0.45,
+        };
+        let copies = echoes.copies_placed(&places);
+        assert_eq!(copies.len(), 9);
+        // They take the places in turn, behind then ahead, as the copies do.
+        for (i, copy) in copies.iter().enumerate() {
+            let [along, up, steps] = places.at[i % 2];
+            assert_eq!(copy.offset, steps);
+            assert_eq!(copy.place, [along, up]);
+            // At its place it holds: none of its poses' slide.
+            assert_eq!(copy.placed, 1.0);
+            assert_eq!(copy.slide_shown(1.5), 0.0);
+            assert!((copy.opacity - 0.45 * (1.0 - 0.6 * ECHO_FALLOFF)).abs() < 1e-6);
+        }
+        // In between they move toward their places together, eased, never back.
+        let mut last: Option<Vec<EchoCopy>> = None;
+        for k in 0..=40 {
+            let spread = 0.6 + k as f32 * 0.025;
+            let copies = EchoConfig { spread, ..echoes }.copies_placed(&places);
+            if let Some(last) = &last {
+                for (a, b) in last.iter().zip(&copies) {
+                    assert!(b.place[0].abs() >= a.place[0].abs(), "spread {spread}");
+                    assert!(
+                        (b.place[0] - a.place[0]).abs() < 0.004,
+                        "a jump at {spread}"
+                    );
+                    assert!((b.offset - a.offset).abs() < 0.06, "a jump at {spread}");
+                }
+            }
+            last = Some(copies);
+        }
+        assert_eq!(places.reached(0.6), 0.0);
+        assert_eq!(places.reached(1.6), 1.0);
+        assert!((places.reached(1.1) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn echo_places_are_checked_at_parse() {
+        for (places, says) in [
+            (
+                "at = [[0.0, 0.0, 0.0]], from = 0.5, whole = 1.5",
+                "living.echo_places.at",
+            ),
+            (
+                "at = [[0.0, 2.0, 0.5]], from = 0.5, whole = 1.5",
+                "living.echo_places.at",
+            ),
+            (
+                "at = [[0.0, 0.0, 1.9]], from = 0.5, whole = 1.5",
+                "living.echo_places.at",
+            ),
+            (
+                "at = [[0.0, 0.0, 0.5]], from = 1.5, whole = 1.5",
+                "living.echo_places.whole",
+            ),
+            (
+                "at = [[0.0, 0.0, 0.5]], from = 0.5, whole = 1.9",
+                "living.echo_places.whole",
+            ),
+            (
+                "at = [[0.0, 0.0, 0.5]], from = -0.1, whole = 1.5",
+                "living.echo_places.from",
+            ),
+        ] {
+            let text = with_living(&format!("lineage_seed = 3\necho_places = {{ {places} }}"));
+            let error = ProcGenSpec::parse(&text).unwrap_err().to_string();
+            assert!(error.contains(says), "{places}: {error}");
+        }
+    }
+
+    #[test]
+    fn echoes_are_checked_at_parse() {
+        for (table, key) in [
+            ("count = 17", "living.echoes.count"),
+            ("spread = -0.1", "living.echoes.spread"),
+            ("spread = 2.0", "living.echoes.spread"),
+            ("alpha = 1.5", "living.echoes.alpha"),
+        ] {
+            let text = with_living(&format!("lineage_seed = 3\nechoes = {{ {table} }}"));
+            let error = ProcGenSpec::parse(&text).unwrap_err().to_string();
+            assert!(error.contains(key), "{table}: {error}");
+        }
+    }
+
+    #[test]
+    fn living_reads_and_checks_step_and_glide() {
+        let table = "lineage_seed = 3\nstep = 0.25\nglide = 0.8";
+        let spec = ProcGenSpec::parse(&with_living(table)).unwrap();
+        let living = spec.living.as_ref().unwrap();
+        assert_eq!((living.step, living.glide), (0.25, 0.8));
+
+        for (table, says) in [
+            ("lineage_seed = 3\nstep = 0", "living.step"),
+            ("lineage_seed = 3\nstep = -1", "living.step"),
+            ("lineage_seed = 3\nglide = 1.5", "living.glide"),
+            ("lineage_seed = 3\nglide = -0.1", "living.glide"),
+        ] {
+            let error = ProcGenSpec::parse(&with_living(table))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(says), "{table}: {error}");
+        }
+    }
+
+    #[test]
+    fn living_fills_in_defaults_from_the_lineage_alone() {
+        let spec = ProcGenSpec::parse(&with_living("lineage_seed = 3")).unwrap();
+        let living = spec.living.unwrap();
+        assert_eq!(living.pose_ring, 8);
+        assert_eq!(living.step, 0.5);
+        assert_eq!(living.glide, 0.3);
+        assert_eq!(living.stagger, Stagger::PerLevel);
+        assert_eq!(living.drift, DriftConfig::default());
+        assert_eq!(living.jitter, JitterConfig::default());
+        assert_eq!(
+            living.variance,
+            VarianceConfig {
+                amount: 0.35,
+                steady: 0.8,
+                keep_size: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_partial_nested_table_keeps_its_other_defaults() {
+        let spec = ProcGenSpec::parse(&with_living(
+            "lineage_seed = 3\nvariance = { amount = 0.5 }",
+        ))
+        .unwrap();
+        let variance = spec.living.unwrap().variance;
+        assert_eq!(variance.amount, 0.5);
+        assert_eq!(variance.steady, 0.8);
+    }
+
+    #[test]
+    fn malformed_living_names_the_bad_key() {
+        for (table, key) in [
+            ("pose_ring = 8", "lineage_seed"),
+            ("lineage_seed = -1", "lineage_seed"),
+            ("lineage_seed = 7\npose_rng = 8", "pose_rng"),
+            ("lineage_seed = 7\npose_ring = \"eight\"", "pose_ring"),
+            ("lineage_seed = 7\npose_ring = 1", "living.pose_ring"),
+            (
+                "lineage_seed = 7\ndrift = { amplitude = 0.1, parms = [] }",
+                "parms",
+            ),
+            (
+                "lineage_seed = 7\ndrift = { amplitude = -0.1 }",
+                "living.drift.amplitude",
+            ),
+            (
+                "lineage_seed = 7\ndrift = { params = [\"branch_angel\"] }",
+                "branch_angel",
+            ),
+            (
+                "lineage_seed = 7\njitter = { amplitude = -1 }",
+                "living.jitter.amplitude",
+            ),
+            (
+                "lineage_seed = 7\njitter = { targets = [\"bark\"] }",
+                "living.jitter.targets",
+            ),
+            ("lineage_seed = 7\nstagger = \"per_twig\"", "stagger"),
+            (
+                "lineage_seed = 7\nvariance = { amount = 1.5 }",
+                "living.variance.amount",
+            ),
+            (
+                "lineage_seed = 7\nvariance = { steady = -0.5 }",
+                "living.variance.steady",
+            ),
+            (
+                "lineage_seed = 7\nvariance = { keep_size = 1 }",
+                "keep_size",
+            ),
+        ] {
+            let message = ProcGenSpec::parse(&with_living(table))
+                .expect_err(table)
+                .to_string();
+            assert!(message.contains(key), "{table:?} gave: {message}");
+        }
     }
 
     #[test]

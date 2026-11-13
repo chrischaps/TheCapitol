@@ -31,6 +31,14 @@ The viewer uses an orbit camera that rotates around a focus point. If the scene 
 
 Any manual orbit input cancels auto-orbit. Start in turntable mode with `--auto-orbit`.
 
+## The Selection Outline
+
+Whatever you pick, in the viewport or the scene tree, is outlined in selection yellow. The outline goes round the entity and everything under it in the hierarchy, so picking a parent with no mesh of its own (or a glTF model whose nodes were expanded into child entities) outlines the whole of it. It follows what was drawn: a skinned figure in its pose, a woozy prop where it has drifted to, a sprite by its cut-out, glass by its edge rather than filled. Where the selection is hidden behind something, its outline carries on through, fainter, so you can see where it is.
+
+![The selection outline on a mesh-less parent (the cart), a skinned figure and a barrel whose underside sinks below the floor, its hidden part drawn faint](../images/selection-outline.png)
+
+The outline is drawn over the finished image, after tonemapping, post-processing and every style, so it is the same colour and width (2 points) in every scene and on every display. It changes nothing else: with nothing selected the frame is what `flint render` makes. `flint render --select <entity>` draws the same outline headlessly; the colour is `SELECTION_COLOR_SRGB` in `crates/flint-render/src/selection_outline.rs`.
+
 ## Transform Gizmo
 
 When you select an entity in the inspector, a gizmo appears at its position with colored axis arrows and plane handles:
@@ -49,7 +57,7 @@ The gizmo uses constraint-plane dragging: for single-axis movement, it automatic
 | Input | Action |
 |-------|--------|
 | W / E / R | Gizmo mode: translate / rotate / scale (entity selected) |
-| Ctrl+S | Save scene to disk |
+| Ctrl+S | Save scene to disk: only the fields you edited are written, the rest of the file stays as it is; with nothing edited the file isn't touched |
 | Ctrl+Z | Undo position change |
 | Ctrl+Shift+Z | Redo position change |
 | Escape | Cancel current gizmo drag |
@@ -80,7 +88,7 @@ The viewer renders scenes with the same PBR pipeline used by the player:
 
 ### The Rendering & Effects Menu (F4)
 
-F4 opens one window holding every render and post-process control: post-processing on/off, exposure, vignette, SSAO, depth of field, fog, bloom, color grade and film grain, FXAA, Kuwahara, render modes, dither and volumetric light, shadows and their resolution, the lighting levers, vertical FOV, and the shading debug mode (PBR, wireframe overlay, wireframe, normals, depth, UV, unlit, metal/rough). Changes apply immediately.
+F4 opens one window holding every render and post-process control: post-processing on/off, exposure, vignette, SSAO, depth of field, fog, bloom, color grade and film grain, FXAA, Kuwahara, contour lines and the shading boil, render modes, dither and volumetric light, shadows and their resolution, the lighting levers, vertical FOV, and the shading debug mode (PBR, wireframe overlay, wireframe, normals, depth, UV, unlit, metal/rough). Changes apply immediately.
 
 Two controls are specific to the viewer:
 

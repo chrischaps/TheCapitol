@@ -25,8 +25,8 @@ An agent building a scene follows a create-validate-query-render cycle:
 Before creating entities, the agent learns what's available:
 
 ```bash
-# List available archetypes
-flint schema --list-archetypes --schemas schemas
+# List every component and archetype (--json for data)
+flint schema --list --schemas schemas
 
 # Inspect a specific archetype
 flint schema player --schemas schemas
@@ -136,6 +136,21 @@ flint render levels/dungeon.scene.toml --output preview.png \
     --width 1920 --height 1080 --distance 25 --yaw 45
 ```
 
+### Step 7: Tune a Look
+
+To give a scene a stylized look, start from a preset and change one setting at a time, judging each change from a contact sheet:
+
+```bash
+flint render --look help                        # the presets, what each tunes first, and notes
+flint render levels/dungeon.scene.toml --look ascii_noir --no-grid -o noir.png
+flint render levels/dungeon.scene.toml --look ascii_noir --no-grid \
+    --sweep ascii.brightness=0,0.15,0.3,0.45 -o noir-brightness.png
+```
+
+Read the sheet, pick a value, and write it into the scene's `[post_process.styles.<name>]` table, or into a `styles/<name>.look.toml` of the game's own. Then sweep the next key. To compare whole looks, use `--sweep look=a,b,c`. Each look's `tune` list names the sweeps worth running first. [Looks and sweeps](../concepts/stylize-passes.md#looks-and-sweeps) covers the format and how to choose a cell size and ramp.
+
+Read numbers rather than guess. `--report sheet.json` gives each column's luminance, near-black and near-white shares, edge density and ASCII ramp histogram. With a target picture, `--reference ref.png` scores each column's distance to it. `--ai-refine` then runs the loop for you: it proposes edits, renders them, keeps whatever lowers the distance, and writes a refined `.look.toml` with a log. Every call is metered, and `--ai-provider mock` costs nothing. See [Measuring and refining a look](../concepts/stylize-passes.md#measuring-and-refining-a-look).
+
 ## AI Asset Generation
 
 Agents can generate assets alongside scene construction:
@@ -239,6 +254,7 @@ echo "Scene built successfully. Preview: preview.png"
 
 ## Best Practices
 
+- **Run `flint check` before playing or rendering** --- it lists every problem of the project in one run, with the file, entity and field of each, as JSON with `--json`: schemas, entity references, missing assets and files (with the paths tried), styles, constraints
 - **Always validate after creating entities** --- catch problems early
 - **Use JSON output** --- easier to parse than text
 - **Use `--dry-run` before `--fix`** --- preview changes before applying

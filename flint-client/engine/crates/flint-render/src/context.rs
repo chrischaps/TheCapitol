@@ -8,7 +8,9 @@ use winit::window::Window;
 pub enum RenderError {
     #[error("Failed to create surface: {0}")]
     SurfaceCreation(String),
-    #[error("Failed to get adapter")]
+    // `flint goldens` and its test read "Failed to get adapter" as no GPU:
+    // keep those words first (#220 added the hint after them)
+    #[error("Failed to get adapter: {}", crate::gpu_select::no_adapter_hint())]
     AdapterNotFound,
     #[error("Failed to create device: {0}")]
     DeviceCreation(String),
@@ -27,6 +29,11 @@ pub struct RenderContext {
     pub size: winit::dpi::PhysicalSize<u32>,
     pub depth_texture: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
+    /// `depth_texture`'s [`new_depth_id`](crate::bind_cache::new_depth_id),
+    /// taken again whenever it is made again, so the renderer can keep bind
+    /// groups over `depth_view` (#379). A host that replaces the texture
+    /// itself takes a new one too.
+    pub depth_id: u64,
     // Retained for surface recreation on Android resume
     instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -37,6 +44,38 @@ pub struct RenderContext {
     /// sRGB suffix, so egui's own gamma handling applies and alpha blends in
     /// display space.
     pub hud_format: wgpu::TextureFormat,
+    /// Format the scene's last pass writes the swapchain in: always sRGB
+    /// when the surface can give an sRGB view. A desktop surface is sRGB
+    /// itself; a browser canvas offers only `Bgra8Unorm`/`Rgba8Unorm`, so
+    /// it is configured plain with an sRGB view format (#102) and the frame
+    /// is drawn through that view (see [`Self::frame_view`]).
+    pub view_format: wgpu::TextureFormat,
+    /// The present modes the surface offers, kept so
+    /// [`Self::present_mode_in_use`] can say which one an `Auto` mode
+    /// became (#380).
+    pub supported_present_modes: Vec<wgpu::PresentMode>,
+}
+
+/// The present mode wgpu configures for `requested` on a surface offering
+/// `supported`: an `Auto` mode is the first of its list the surface has,
+/// as wgpu-core 23's `surface_configure` picks it (`AutoVsync`: FifoRelaxed,
+/// Fifo; `AutoNoVsync`: Immediate, Mailbox, Fifo). Any other mode is used
+/// as asked.
+pub fn resolve_present_mode(
+    requested: wgpu::PresentMode,
+    supported: &[wgpu::PresentMode],
+) -> wgpu::PresentMode {
+    use wgpu::PresentMode as P;
+    let order: &[P] = match requested {
+        P::AutoVsync => &[P::FifoRelaxed, P::Fifo],
+        P::AutoNoVsync => &[P::Immediate, P::Mailbox, P::Fifo],
+        other => return other,
+    };
+    order
+        .iter()
+        .copied()
+        .find(|m| supported.contains(m))
+        .unwrap_or(P::Fifo)
 }
 
 impl RenderContext {
@@ -88,6 +127,11 @@ impl RenderContext {
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
+        // Without an sRGB surface (WebGPU canvases), draw through an sRGB
+        // view of the plain one, so the encode happens on write exactly as
+        // it does on the desktop. Without it the web frame came out darker
+        // and more saturated (docs/design/web.md).
+        let view_format = surface_format.add_srgb_suffix();
 
         // Ask for COPY_SRC on the swapchain when the surface allows it so the
         // player can screenshot the presented frame (HUD included). Some
@@ -135,6 +179,8 @@ impl RenderContext {
             // against the scene happens in display space, not linear space.
             view_formats: if surface_format.remove_srgb_suffix() != surface_format {
                 vec![surface_format.remove_srgb_suffix()]
+            } else if view_format != surface_format {
+                vec![view_format]
             } else {
                 vec![]
             },
@@ -156,10 +202,22 @@ impl RenderContext {
             size,
             depth_texture,
             depth_view,
+            depth_id: crate::bind_cache::new_depth_id(),
             instance,
             adapter,
             surface_copyable,
             hud_format: surface_format.remove_srgb_suffix(),
+            view_format,
+            supported_present_modes: surface_caps.present_modes.clone(),
+        })
+    }
+
+    /// The view of a swapchain texture that scene passes draw into, in
+    /// [`Self::view_format`].
+    pub fn frame_view(&self, texture: &wgpu::Texture) -> wgpu::TextureView {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.view_format),
+            ..Default::default()
         })
     }
 
@@ -276,6 +334,7 @@ impl RenderContext {
         self.size = size;
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
+        self.depth_id = crate::bind_cache::new_depth_id();
 
         Ok(())
     }
@@ -291,6 +350,7 @@ impl RenderContext {
             let (depth_texture, depth_view) = create_depth_texture(&self.device, &self.config);
             self.depth_texture = depth_texture;
             self.depth_view = depth_view;
+            self.depth_id = crate::bind_cache::new_depth_id();
         }
     }
 
@@ -301,6 +361,20 @@ impl RenderContext {
             self.config.present_mode,
             wgpu::PresentMode::AutoVsync | wgpu::PresentMode::Fifo | wgpu::PresentMode::FifoRelaxed
         )
+    }
+
+    /// The present mode the swapchain runs in: `config.present_mode` with
+    /// an `Auto` mode resolved as wgpu resolves it. The perf readout names
+    /// it, since under Fifo an idle GPU clocks down and its pass times read
+    /// high (#380).
+    pub fn present_mode_in_use(&self) -> wgpu::PresentMode {
+        resolve_present_mode(self.config.present_mode, &self.supported_present_modes)
+    }
+
+    /// The depth view with its id, for
+    /// [`SceneRenderer::encode_to`](crate::SceneRenderer::encode_to).
+    pub fn depth_target(&self) -> crate::bind_cache::DepthTarget<'_> {
+        crate::bind_cache::DepthTarget::new(&self.depth_view, self.depth_id)
     }
 
     /// Get aspect ratio
@@ -344,4 +418,29 @@ fn create_depth_texture(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     (texture, view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_present_mode;
+    use wgpu::PresentMode as P;
+
+    #[test]
+    fn auto_modes_resolve_as_wgpu_picks_them() {
+        // Windows DX12/Vulkan offer all three; vsync is Fifo there.
+        let all = [P::Fifo, P::Mailbox, P::Immediate];
+        assert_eq!(resolve_present_mode(P::AutoVsync, &all), P::Fifo);
+        assert_eq!(resolve_present_mode(P::AutoNoVsync, &all), P::Immediate);
+        // Relaxed Fifo is wgpu's first choice for vsync where it exists.
+        let relaxed = [P::Fifo, P::FifoRelaxed];
+        assert_eq!(resolve_present_mode(P::AutoVsync, &relaxed), P::FifoRelaxed);
+        // No Immediate: unlocked falls to Mailbox, then to Fifo.
+        assert_eq!(
+            resolve_present_mode(P::AutoNoVsync, &[P::Fifo, P::Mailbox]),
+            P::Mailbox
+        );
+        assert_eq!(resolve_present_mode(P::AutoNoVsync, &[P::Fifo]), P::Fifo);
+        // A named mode is used as asked.
+        assert_eq!(resolve_present_mode(P::Mailbox, &all), P::Mailbox);
+    }
 }

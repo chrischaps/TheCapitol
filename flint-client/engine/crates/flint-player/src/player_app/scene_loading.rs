@@ -6,9 +6,12 @@ use flint_animation::skeletal_clip::SkeletalClip;
 use flint_animation::skeleton::Skeleton;
 use flint_animation::AnimationSystem;
 use flint_asset::{AssetCatalog, ContentStore};
+use flint_audio::decode::Need;
 use flint_audio::AudioSystem;
 use flint_core::components as comp;
-use flint_core::toml_util::{toml_f32, toml_vec3};
+use flint_core::project::{AssetKind, Project};
+use flint_core::toml_util::{toml_f32, toml_f64, toml_vec3};
+use flint_core::vfs;
 use flint_core::EntityId;
 use flint_core::Vec3 as FlintVec3;
 use flint_ecs::FlintWorld;
@@ -23,6 +26,56 @@ use std::path::{Path, PathBuf};
 /// Moved to flint-render so the viewer shares it; re-exported to keep the
 /// `flint_player::post_process_config_from_def` path (flint-cli uses it).
 pub use flint_render::post_process_config_from_def;
+
+/// Register the user-authored styles (`styles/*.shader.toml`, ADR 0112)
+/// a scene at `scene_path` can see, before its `[post_process]` is read:
+/// a table naming a style the registry doesn't know is dropped with a
+/// warning. Styles already registered are kept, so a scene change only
+/// adds (#275).
+pub fn load_user_styles(scene_path: &str) {
+    load_user_styles_in(&flint_core::project::AssetScope::for_scene(Path::new(
+        scene_path,
+    )));
+}
+
+/// [`load_user_styles`] for a host that holds the scene's project: every
+/// `styles/*.shader.toml` the project's one asset search lists from
+/// `scope`, the nearest of a name winning (ADR 0114, #426).
+pub fn load_user_styles_in(scope: &flint_core::project::AssetScope) {
+    for message in flint_render::stylize::custom::load_for(scope) {
+        tracing::warn!("{message}");
+    }
+}
+
+/// A scene's `[post_process]` as the player draws it: the look the scene
+/// names laid under its own keys (#356), then the `--look` named, if any,
+/// merged over the result as `flint render --look` does (#435). A `--look`
+/// that won't apply leaves the scene's own, with a warning (the player
+/// checked the name at startup). The result keeps the scene's authored
+/// keys, so a later `set_look` or F4 Look re-resolves from the scene.
+/// Looks are searched for from `scope`, the scene's project and folder.
+pub fn scene_post_process_in(
+    look: Option<&str>,
+    scene_path: &str,
+    scope: &flint_core::project::AssetScope,
+    pp: Option<flint_scene::PostProcessDef>,
+) -> Option<flint_scene::PostProcessDef> {
+    let pp = pp.map(|d| flint_render::look::resolve_scene_in(&d, Path::new(scene_path), scope));
+    let Some(name) = look else {
+        return pp;
+    };
+    match flint_render::look::find_in(name, scope).and_then(|l| l.apply(pp.as_ref())) {
+        Ok(mut def) => {
+            def.look = Some(name.to_string());
+            def.authored = pp.and_then(|p| p.authored);
+            Some(def)
+        }
+        Err(e) => {
+            tracing::warn!("--look {name}: {e}");
+            pp
+        }
+    }
+}
 
 /// Load terrain from world entities. Free function to avoid borrow conflicts.
 /// Info about loaded grass, returned from terrain loading for debug panel creation.
@@ -51,6 +104,7 @@ pub(super) fn load_terrain_from_world_inner(
     let scene_dir = Path::new(scene_path)
         .parent()
         .unwrap_or_else(|| Path::new("."));
+    let project = &Project::for_scene(Path::new(scene_path));
 
     for entity in world.all_entities() {
         let terrain_comp = match world.get_component(entity.id, comp::TERRAIN) {
@@ -66,22 +120,8 @@ pub(super) fn load_terrain_from_world_inner(
             }
         };
 
-        // Resolve heightmap path (scene dir, then parent)
-        let hm_path = {
-            let p = scene_dir.join(&heightmap_rel);
-            if p.exists() {
-                p
-            } else if let Some(parent) = scene_dir.parent() {
-                let pp = parent.join(&heightmap_rel);
-                if pp.exists() {
-                    pp
-                } else {
-                    p
-                }
-            } else {
-                p
-            }
-        };
+        // A path found by the project's one search (`AssetKind::Files`)
+        let hm_path = project.file_or_beside("terrain heightmap", &heightmap_rel, scene_dir);
 
         let heightmap = match Heightmap::from_png(&hm_path) {
             Ok(hm) => hm,
@@ -161,6 +201,8 @@ pub(super) fn load_terrain_from_world_inner(
             &config.layer_textures,
             scene_dir,
         );
+        // A style_mask on the terrain entity masks its chunks (#310)
+        scene_renderer.set_terrain_entity(Some(entity.id));
 
         // Register physics collider
         let (verts, tris) = terrain.trimesh_data();
@@ -185,20 +227,10 @@ pub(super) fn load_terrain_from_world_inner(
             let hm_d = heightmap.depth;
 
             // Load splat map pixels for grass compute shader
-            let splat_path = {
-                let p = scene_dir.join(&config.splat_map_path);
-                if p.exists() {
-                    p
-                } else {
-                    scene_dir
-                        .parent()
-                        .map(|pp| pp.join(&config.splat_map_path))
-                        .filter(|pp| pp.exists())
-                        .unwrap_or(p)
-                }
-            };
+            let splat_path =
+                project.file_or_beside("terrain splat map", &config.splat_map_path, scene_dir);
 
-            if let Ok(splat_img) = image::open(&splat_path) {
+            if let Ok(splat_img) = flint_render::open_image(&splat_path) {
                 let splat_rgba = splat_img.to_rgba8();
                 let (sw, sh) = splat_rgba.dimensions();
 
@@ -250,7 +282,8 @@ pub(super) fn load_terrain_from_world_inner(
 
     // Grass on a scene-authored mesh ground (ADR 0089). One grass field per
     // scene: a grass_ground replaces a terrain's grass.
-    if let Some(info) = load_grass_ground(world, scene_dir, device, queue, scene_renderer) {
+    if let Some(info) = load_grass_ground(world, project, scene_dir, device, queue, scene_renderer)
+    {
         if grass_info_out.is_some() {
             tracing::warn!(
                 "grass_ground '{}' replaces the terrain's grass",
@@ -262,7 +295,9 @@ pub(super) fn load_terrain_from_world_inner(
 }
 
 /// Load a scene's `grass_ground` into `scene_renderer`, as the player does
-/// (ADR 0089). Returns whether grass was set. Public for `flint render`.
+/// (ADR 0089). Returns whether grass was set. Kept for games and
+/// `flint render`; the loader is `flint_render::load_scene_grass_ground`,
+/// which the scene viewer shares (#332).
 pub fn load_scene_grass_ground(
     world: &FlintWorld,
     scene_path: &str,
@@ -270,112 +305,54 @@ pub fn load_scene_grass_ground(
     queue: &wgpu::Queue,
     scene_renderer: &mut SceneRenderer,
 ) -> bool {
-    let scene_dir = Path::new(scene_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    load_grass_ground(world, scene_dir, device, queue, scene_renderer).is_some()
+    flint_render::load_scene_grass_ground(world, scene_path, device, queue, scene_renderer)
+        .is_some()
 }
 
-/// Load the first `grass_ground` entity's mask and hand it to the renderer
-/// (ADR 0089). The ground is level at the entity's `y`, from its `x`, `z`
-/// across `width` × `depth`.
+/// The player's grass ground: `flint_render::load_grass_ground_in`, with
+/// what the grass debug panel needs.
 fn load_grass_ground(
     world: &FlintWorld,
+    project: &Project,
     scene_dir: &Path,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     scene_renderer: &mut SceneRenderer,
 ) -> Option<LoadedGrassInfo> {
-    for entity in world.all_entities() {
-        let Some(ground) = world.get_component(entity.id, comp::GRASS_GROUND) else {
-            continue;
-        };
-        let config = flint_terrain::GrassConfig::from_component(ground, true);
-        if !config.enabled {
-            return None;
-        }
-        let mask_rel = ground.get("mask").and_then(|v| v.as_str()).unwrap_or("");
-        if mask_rel.is_empty() {
-            tracing::warn!("grass_ground '{}': missing mask path", entity.name);
-            return None;
-        }
-        let mask_path = {
-            let p = scene_dir.join(mask_rel);
-            match scene_dir.parent().map(|pp| pp.join(mask_rel)) {
-                Some(pp) if !p.exists() && pp.exists() => pp,
-                _ => p,
-            }
-        };
-        let mask = match image::open(&mask_path) {
-            Ok(img) => img.to_luma8(),
-            Err(e) => {
-                tracing::warn!(
-                    "grass_ground '{}': mask {:?}: {}",
-                    entity.name,
-                    mask_path,
-                    e
-                );
-                return None;
-            }
-        };
-        let get_f32 = |key: &str, default: f32| -> f32 {
-            ground.get(key).and_then(toml_f32).unwrap_or(default)
-        };
-        let pos = world
-            .get_component(entity.id, comp::TRANSFORM)
-            .and_then(|t| t.get("position").and_then(toml_vec3))
-            .unwrap_or([0.0; 3]);
-        let (mask_width, mask_height) = mask.dimensions();
-        let result = scene_renderer.set_grass_ground(
-            device,
-            queue,
-            &config,
-            &flint_render::GrassGround {
-                origin: [pos[0], pos[2]],
-                size: [get_f32("width", 64.0), get_f32("depth", 64.0)],
-                mask: mask.as_raw(),
-                mask_width,
-                mask_height,
-                scale_by_mask: ground
-                    .get("scale_by_mask")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true),
-                height: flint_render::GrassHeight::Flat(pos[1]),
-            },
-        );
-        if let Err(e) = result {
-            tracing::warn!("grass_ground '{}': {}", entity.name, e);
-            return None;
-        }
-        tracing::info!(
-            "Grass ground '{}': {}x{} mask, density={}, max_dist={}",
-            entity.name,
-            mask_width,
-            mask_height,
-            config.density,
-            config.max_distance
-        );
-        return Some(LoadedGrassInfo {
-            config,
-            terrain_entity_name: entity.name.clone(),
-            component: comp::GRASS_GROUND,
-        });
-    }
-    None
+    let loaded = flint_render::load_grass_ground_in(
+        world,
+        project,
+        scene_dir,
+        device,
+        queue,
+        scene_renderer,
+    )?;
+    Some(LoadedGrassInfo {
+        config: loaded.config,
+        terrain_entity_name: loaded.entity_name,
+        component: comp::GRASS_GROUND,
+    })
 }
 
 /// Build a ModelLoadConfig with catalog-resolved path overrides.
 pub(super) fn build_model_load_config(
+    project: &Project,
     scene_path: &str,
     world: &FlintWorld,
     catalog: Option<&AssetCatalog>,
     store: Option<&ContentStore>,
 ) -> ModelLoadConfig {
-    let mut config = ModelLoadConfig::from_scene_path(scene_path);
+    let mut config = ModelLoadConfig::in_project(project.clone(), scene_path);
+    // The player asks procgen for every name before its file (#32), and the
+    // catalog before that: a not-found warning says so beside the paths.
+    config
+        .asked_first
+        .push("a procgen spec of the same name (specs/<name>.procgen.toml)");
 
     let (Some(cat), Some(st)) = (catalog, store) else {
         return config;
     };
+    config.asked_first.insert(0, "the asset catalog");
 
     for entity in world.all_entities() {
         if let Some(comps) = world.get_components(entity.id) {
@@ -423,6 +400,16 @@ pub(super) fn register_skeletal_data(
     load_result: &model_loader::ModelLoadResult,
     animation: &mut AnimationSystem,
 ) {
+    register_skeletal_data_saying(load_result, animation, &mut |line| println!("{line}"));
+}
+
+/// [`register_skeletal_data`], each clip it registers told to `say` rather
+/// than printed: a headless host keeps stdout for its own output.
+pub(super) fn register_skeletal_data_saying(
+    load_result: &model_loader::ModelLoadResult,
+    animation: &mut AnimationSystem,
+    say: &mut dyn FnMut(String),
+) {
     // Skeletons built from the first import of each asset, so entities that hit
     // the mesh cache (`import_result: None` — every 2nd+ entity sharing a
     // skinned asset) still get their own skeleton and animate independently.
@@ -450,12 +437,12 @@ pub(super) fn register_skeletal_data(
             .or_insert(skeletons);
         for imported_clip in &import_result.skeletal_clips {
             let clip = SkeletalClip::from_imported(imported_clip);
-            println!(
+            say(format!(
                 "  Skeletal clip: {} ({:.1}s, {} tracks)",
                 clip.name,
                 clip.duration,
                 clip.joint_tracks.len()
-            );
+            ));
             animation.add_skeletal_clip(clip);
         }
     }
@@ -481,16 +468,25 @@ pub(super) fn register_node_animation_data(
     load_result: &model_loader::ModelLoadResult,
     animation: &mut AnimationSystem,
 ) {
+    register_node_animation_data_saying(load_result, animation, &mut |line| println!("{line}"));
+}
+
+/// [`register_node_animation_data`], telling `say` what it registers.
+pub(super) fn register_node_animation_data_saying(
+    load_result: &model_loader::ModelLoadResult,
+    animation: &mut AnimationSystem,
+    say: &mut dyn FnMut(String),
+) {
     for loaded in &load_result.models {
         if let Some(ref import_result) = loaded.import_result {
             for imported_clip in &import_result.node_clips {
                 let clip = NodeClip::from_imported(imported_clip);
-                println!(
+                say(format!(
                     "  Node clip: {} ({:.1}s, {} tracks)",
                     clip.name,
                     clip.duration,
                     clip.node_tracks.len()
-                );
+                ));
                 animation.add_node_clip(clip);
             }
         }
@@ -503,57 +499,62 @@ pub(super) fn register_node_animation_data(
 /// Load audio files referenced by audio_source components and (unless the
 /// scene opts out via `[scene] preload_audio = false`) preload every audio
 /// file from audio/ for script-triggered sounds.
+///
+/// With `queue`, nothing is decoded here: each sound joins the engine's
+/// decode queue, which `tick_av_systems` works through a few milliseconds a
+/// frame, sources that are heard at once (autoplay, above silence) first,
+/// then the rest smallest first. That is how a late audio bundle arrives
+/// mid-game without a stall (#124). Without it, everything is decoded now,
+/// as a scene load can afford.
 pub(super) fn load_audio_from_world(
     world: &FlintWorld,
     audio: &mut AudioSystem,
+    project: &Project,
     scene_path: &str,
     preload_all: bool,
+    queue: bool,
 ) {
-    let scene_dir = Path::new(scene_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let mut load = |name: &str, path: &Path, need: Need| {
+        if audio.engine.has_sound(name) {
+            return;
+        }
+        let result = if queue {
+            audio.engine.queue_sound(name, path, need)
+        } else {
+            audio.engine.load_sound(name, path)
+        };
+        match result {
+            Err(e) => tracing::warn!("Failed to load audio '{}': {:?}", name, e),
+            Ok(()) if !queue => println!("Loaded audio: {}", name),
+            Ok(()) => {}
+        }
+    };
+    let scene_dir = scene_dir_of(scene_path);
 
-    // Build list of directories to search: scene dir first, then parent (game root)
-    let mut search_dirs = vec![scene_dir.to_path_buf()];
-    if let Some(parent) = scene_dir.parent() {
-        search_dirs.push(parent.to_path_buf());
-    }
-
-    // Load audio files referenced by audio_source components
+    // Load audio files referenced by audio_source components: a `file` is a
+    // path from the scene's directory or from any directory up to the
+    // project root (`audio/hit.ogg`), by the project's one search.
     for entity in world.all_entities() {
-        let audio_file = world
+        let Some(source) = world
             .get_components(entity.id)
             .and_then(|components| components.get(comp::AUDIO_SOURCE).cloned())
-            .and_then(|audio_src| {
-                audio_src
-                    .get("file")
-                    .and_then(|v| v.as_str().map(String::from))
-            });
+        else {
+            continue;
+        };
+        let Some(file_name) = source.get("file").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Heard the moment it loads: an autoplay source above silence.
+        let audible = source
+            .get("autoplay")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+            && source.get("volume").and_then(toml_f64).unwrap_or(1.0) > 0.0;
+        let need = if audible { Need::Audible } else { Need::Later };
 
-        if let Some(file_name) = audio_file {
-            if audio.engine.has_sound(&file_name) {
-                continue;
-            }
-
-            let mut loaded = false;
-            for dir in &search_dirs {
-                let audio_path = dir.join(&file_name);
-                if audio_path.exists() {
-                    match audio.engine.load_sound(&file_name, &audio_path) {
-                        Ok(_) => {
-                            println!("Loaded audio: {}", file_name);
-                            loaded = true;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to load audio '{}': {:?}", file_name, e);
-                        }
-                    }
-                    break;
-                }
-            }
-            if !loaded {
-                tracing::warn!("Audio file not found: {}", file_name);
-            }
+        match project.resolve(AssetKind::Audio, file_name, scene_dir) {
+            Ok(audio_path) => load(file_name, &audio_path, need),
+            Err(missing) => tracing::warn!("{missing}"),
         }
     }
 
@@ -564,697 +565,216 @@ pub(super) fn load_audio_from_world(
         tracing::info!("Scene opts out of audio preload (preload_audio = false)");
         return;
     }
-    for dir in &search_dirs {
-        let audio_dir = dir.join("audio");
-        if audio_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&audio_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if ext == "ogg" || ext == "wav" || ext == "mp3" || ext == "flac" {
-                        let rel_name =
-                            format!("audio/{}", path.file_name().unwrap().to_string_lossy());
-                        if audio.engine.has_sound(&rel_name) {
-                            continue;
-                        }
-                        match audio.engine.load_sound(&rel_name, &path) {
-                            Ok(_) => {
-                                println!("Preloaded audio: {}", rel_name);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to preload audio '{}': {:?}", rel_name, e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    // Every `audio/` the scene can see, a nearer file hiding a farther one
+    // of the same file name. Each is kept as `audio/<file>`, whichever
+    // `audio/` it came from, which is the name a script plays it by.
+    for sound in project.list(AssetKind::Audio, scene_dir) {
+        load(&format!("audio/{}", sound.name), &sound.path, Need::Later);
     }
 }
 
+/// The directory a scene file is in (`.` for a bare file name).
+fn scene_dir_of(scene_path: &str) -> &Path {
+    Path::new(scene_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Every file of `kind` the scene can see (`Project::list`), in the order a
+/// loader should register them when a later one of a name replaces an
+/// earlier: the farthest folder first, so that the nearest has the last
+/// word, and by file name within a folder as before.
+pub(super) fn visible_files(project: &Project, kind: AssetKind, scene_path: &str) -> Vec<PathBuf> {
+    let listed = project.list(kind, scene_dir_of(scene_path));
+    let mut folders: Vec<Vec<PathBuf>> = Vec::new();
+    for file in listed {
+        match folders.last_mut() {
+            Some(folder) if folder[0].parent() == file.path.parent() => folder.push(file.path),
+            _ => folders.push(vec![file.path]),
+        }
+    }
+    folders.into_iter().rev().flatten().collect()
+}
+
 /// Load every texture referenced by live particle instances and registered
-/// effects into the renderer's texture cache. Searched in `particles/`, the
-/// scene dir, then its parent (game root) — see `flint_particles::texture_search_dirs`.
+/// effects into the renderer's texture cache, each found by the project's
+/// one search (`AssetKind::ParticleTextures`: `particles/`, then beside the
+/// scene, at each directory up to the root, then in the engine).
 pub(super) fn load_particle_textures_from_world(
     particles: &flint_particles::ParticleSystem,
     renderer: &mut SceneRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    project: &flint_core::project::Project,
     scene_path: &str,
 ) {
-    let dirs = flint_particles::texture_search_dirs(scene_path);
-    flint_render::load_particle_textures(renderer, device, queue, &particles.sync, &dirs);
-}
-
-/// Load `.anim.toml` files from the `animations/` directory next to the scene.
-/// Also checks one level up (game root) for projects that use a `scenes/` subdirectory.
-pub(super) fn load_animations_from_world(scene_path: &str, animation: &mut AnimationSystem) {
-    let scene_dir = Path::new(scene_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-
-    let mut anim_dir = scene_dir.join("animations");
-    if !anim_dir.is_dir() {
-        // Check parent directory (game project structure)
-        if let Some(parent) = scene_dir.parent() {
-            let parent_anim = parent.join("animations");
-            if parent_anim.is_dir() {
-                anim_dir = parent_anim;
-            } else {
-                return;
-            }
-        } else {
-            return;
-        }
-    }
-
-    let entries = match std::fs::read_dir(&anim_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map_or(false, |n| n.ends_with(".anim.toml"))
-        {
-            match flint_animation::loader::load_clip_from_file(&path) {
-                Ok(clip) => {
-                    println!("Loaded animation: {} ({:.1}s)", clip.name, clip.duration);
-                    animation.add_property_clip(clip);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load animation '{}': {:?}", path.display(), e);
-                }
-            }
-        }
-    }
-}
-
-/// Load `.sequence.toml` files from the `animations/` directory next to the scene
-/// (or one level up). Sequences are referenced by `name` from `animator.sequence`.
-pub(super) fn load_sequences_from_world(scene_path: &str, animation: &mut AnimationSystem) {
-    let Some(anim_dir) = resolve_animations_dir(scene_path) else {
-        return;
-    };
-    let entries = match std::fs::read_dir(&anim_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(".sequence.toml"))
-        {
-            match flint_animation::load_sequence_from_file(&path) {
-                Ok(seq) => {
-                    println!(
-                        "Loaded sequence: {} ({:.1}s, {} events)",
-                        seq.name,
-                        seq.resolved_duration(),
-                        seq.events.len()
-                    );
-                    animation.add_sequence(seq);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load sequence '{}': {:?}", path.display(), e);
-                }
-            }
-        }
-    }
-}
-
-/// `<scene_dir>/animations/`, falling back to `<scene_dir>/../animations/`
-/// for projects that keep scenes in a subdirectory.
-fn resolve_animations_dir(scene_path: &str) -> Option<std::path::PathBuf> {
-    let scene_dir = Path::new(scene_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    let local = scene_dir.join("animations");
-    if local.is_dir() {
-        return Some(local);
-    }
-    let up = scene_dir.parent()?.join("animations");
-    up.is_dir().then_some(up)
-}
-
-/// Load `.sprite.toml` files from the `animations/` directory next to the scene.
-/// Each file can define multiple sprite animation clips under `[animation.NAME]` sections.
-pub(super) fn load_sprite_animations_from_world(scene_path: &str, animation: &mut AnimationSystem) {
-    let scene_dir = Path::new(scene_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-
-    let mut anim_dir = scene_dir.join("animations");
-    if !anim_dir.is_dir() {
-        if let Some(parent) = scene_dir.parent() {
-            let parent_anim = parent.join("animations");
-            if parent_anim.is_dir() {
-                anim_dir = parent_anim;
-            } else {
-                return;
-            }
-        } else {
-            return;
-        }
-    }
-
-    let entries = match std::fs::read_dir(&anim_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map_or(false, |n| n.ends_with(".sprite.toml"))
-        {
-            match flint_animation::sprite_clip::load_sprite_clips_from_file(&path) {
-                Ok(clips) => {
-                    for clip in clips {
-                        println!(
-                            "Loaded sprite animation: {} ({}ms, {} frames)",
-                            clip.name,
-                            clip.total_duration_ms(),
-                            clip.frames.len()
-                        );
-                        animation.add_sprite_clip(clip);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to load sprite animation '{}': {:?}",
-                        path.display(),
-                        e
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Resolve a scene path relative to the current scene.
-/// If target is already an absolute path or starts from a known root, use it directly.
-/// Otherwise resolve relative to the current scene's directory.
-pub(super) fn resolve_scene_path(current_scene: &str, target: &str) -> String {
-    let target_path = Path::new(target);
-    if target_path.is_absolute() || target_path.exists() {
-        return target.to_string();
-    }
-
-    let current_dir = Path::new(current_scene)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-
-    let resolved = current_dir.join(target);
-    if resolved.exists() {
-        return resolved.to_string_lossy().to_string();
-    }
-
-    // Try parent directory (game root)
-    if let Some(parent) = current_dir.parent() {
-        let parent_resolved = parent.join(target);
-        if parent_resolved.exists() {
-            return parent_resolved.to_string_lossy().to_string();
-        }
-    }
-
-    // Return as-is, let scene loader report the error
-    target.to_string()
-}
-
-/// Set up the script system's scripts directory from the scene path
-pub(super) fn load_scripts_from_world(scene_path: &str, script: &mut ScriptSystem) {
-    script.load_scripts_from_scene(scene_path);
-}
-
-// ── Procgen asset resolution ──────────────────────────────────────────────
-
-/// Resolve unresolved model/texture asset names against procgen specs.
-///
-/// For each entity with a `model.asset` or texture name that is not already
-/// resolved (not in `config.overrides` and not in the mesh cache), check if
-/// a matching procgen spec exists. If so, generate and upload directly to GPU.
-pub(super) fn resolve_procgen_assets(
-    world: &FlintWorld,
-    resolver: &mut flint_procgen::ProcGenResolver,
-    renderer: &mut SceneRenderer,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    config: &flint_render::model_loader::ModelLoadConfig,
-) {
-    // Collect unresolved asset names to avoid borrow conflicts
-    let mut unresolved_models: Vec<String> = Vec::new();
-    let mut unresolved_textures: Vec<String> = Vec::new();
-
-    for entity in world.all_entities() {
-        if let Some(comps) = world.get_components(entity.id) {
-            // Check model assets
-            if let Some(model) = comps.get(comp::MODEL) {
-                if let Some(name) = model.get("asset").and_then(|v| v.as_str()) {
-                    if !config.overrides.contains_key(name)
-                        && !renderer.mesh_cache().contains(name)
-                        && resolver.has_spec(name)
-                    {
-                        if !unresolved_models.contains(&name.to_string()) {
-                            unresolved_models.push(name.to_string());
-                        }
-                    }
-                }
-            }
-
-            // Check texture assets (material + sprite)
-            for comp_name in &[comp::MATERIAL, comp::SPRITE] {
-                if let Some(comp_data) = comps.get(*comp_name) {
-                    if let Some(tex) = comp_data.get("texture").and_then(|v| v.as_str()) {
-                        if !config.overrides.contains_key(tex) && resolver.has_spec(tex) {
-                            if !unresolved_textures.contains(&tex.to_string()) {
-                                unresolved_textures.push(tex.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Generate and upload each unresolved asset
-    for name in &unresolved_models {
-        match resolver.generate(name) {
-            Ok(output) => match output {
-                flint_procgen::GeneratorOutput::Mesh(mesh) => {
-                    upload_procgen_mesh(name, &mesh, renderer, device);
-                    tracing::info!(
-                        "Procgen resolved mesh '{}' ({} tris)",
-                        name,
-                        mesh.triangle_count()
-                    );
-                }
-                flint_procgen::GeneratorOutput::MeshWithLods(lods) => {
-                    if let Some(mesh) = lods.first() {
-                        upload_procgen_mesh(name, mesh, renderer, device);
-                        tracing::info!(
-                            "Procgen resolved mesh '{}' (LOD0, {} tris)",
-                            name,
-                            mesh.triangle_count()
-                        );
-                    }
-                }
-                flint_procgen::GeneratorOutput::Image(img) => {
-                    upload_procgen_image(name, &img, renderer, device, queue);
-                    tracing::info!(
-                        "Procgen resolved image '{}' ({}x{})",
-                        name,
-                        img.width,
-                        img.height
-                    );
-                }
-                flint_procgen::GeneratorOutput::ImageSet(images) => {
-                    for (i, img) in images.iter().enumerate() {
-                        let tex_name = if i == 0 {
-                            name.clone()
-                        } else {
-                            format!(
-                                "{}_{}",
-                                name,
-                                match img.channel_semantics {
-                                    flint_procgen::ChannelSemantics::Color => "color",
-                                    flint_procgen::ChannelSemantics::Normal => "normal",
-                                    flint_procgen::ChannelSemantics::Roughness => "roughness",
-                                    flint_procgen::ChannelSemantics::Metallic => "metallic",
-                                    flint_procgen::ChannelSemantics::Height => "height",
-                                    flint_procgen::ChannelSemantics::Mask => "mask",
-                                }
-                            )
-                        };
-                        upload_procgen_image(&tex_name, img, renderer, device, queue);
-                    }
-                    tracing::info!(
-                        "Procgen resolved image set '{}' ({} maps)",
-                        name,
-                        images.len()
-                    );
-                }
-                _ => {
-                    tracing::warn!(
-                        "Procgen spec '{}' produced unsupported output type for model",
-                        name
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Procgen generation failed for '{}': {}", name, e);
-            }
-        }
-    }
-
-    for name in &unresolved_textures {
-        if unresolved_models.contains(name) {
-            continue; // Already handled above
-        }
-        match resolver.generate(name) {
-            Ok(output) => match output {
-                flint_procgen::GeneratorOutput::Image(img) => {
-                    upload_procgen_image(name, &img, renderer, device, queue);
-                    tracing::info!(
-                        "Procgen resolved texture '{}' ({}x{})",
-                        name,
-                        img.width,
-                        img.height
-                    );
-                }
-                flint_procgen::GeneratorOutput::ImageSet(images) => {
-                    for (i, img) in images.iter().enumerate() {
-                        let tex_name = if i == 0 {
-                            name.clone()
-                        } else {
-                            format!(
-                                "{}_{}",
-                                name,
-                                match img.channel_semantics {
-                                    flint_procgen::ChannelSemantics::Color => "color",
-                                    flint_procgen::ChannelSemantics::Normal => "normal",
-                                    flint_procgen::ChannelSemantics::Roughness => "roughness",
-                                    flint_procgen::ChannelSemantics::Metallic => "metallic",
-                                    flint_procgen::ChannelSemantics::Height => "height",
-                                    flint_procgen::ChannelSemantics::Mask => "mask",
-                                }
-                            )
-                        };
-                        upload_procgen_image(&tex_name, img, renderer, device, queue);
-                    }
-                    tracing::info!(
-                        "Procgen resolved texture set '{}' ({} maps)",
-                        name,
-                        images.len()
-                    );
-                }
-                _ => {
-                    tracing::warn!(
-                        "Procgen spec '{}' produced non-image output for texture ref",
-                        name
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Procgen generation failed for texture '{}': {}", name, e);
-            }
-        }
-    }
-
-    if !unresolved_models.is_empty() || !unresolved_textures.is_empty() {
-        let stats = resolver.cache_stats();
-        tracing::debug!(
-            "Procgen cache: {} entries, {} bytes, {} hits / {} misses",
-            stats.entry_count,
-            stats.total_bytes,
-            stats.hits,
-            stats.misses,
-        );
-    }
-}
-
-/// Upload a procgen mesh to the GPU mesh cache.
-///
-/// Converts `flint_procgen::Vertex` → `flint_render::Vertex` (drops tangent,
-/// adds vertex color from `MaterialData`). Handles multi-submesh by uploading
-/// each submesh as a separate mesh entry.
-fn upload_procgen_mesh(
-    name: &str,
-    mesh: &flint_procgen::MeshData,
-    renderer: &mut SceneRenderer,
-    device: &wgpu::Device,
-) {
-    let default_material = flint_procgen::MaterialData::default();
-
-    if mesh.submeshes.is_empty() || mesh.submeshes.len() == 1 {
-        // Single mesh — convert all vertices with the first material's color
-        let mat = mesh.materials.first().unwrap_or(&default_material);
-        let vertices: Vec<flint_render::Vertex> = mesh
-            .vertices
-            .iter()
-            .map(|v| flint_render::Vertex {
-                position: v.position,
-                normal: v.normal,
-                color: mat.base_color,
-                uv: v.uv,
-            })
-            .collect();
-
-        let imported_mat = flint_import::ImportedMaterial {
-            name: mat.name.clone(),
-            base_color: mat.base_color,
-            metallic: mat.metallic,
-            roughness: mat.roughness,
-            base_color_texture: None,
-            normal_texture: None,
-            metallic_roughness_texture: None,
-            use_vertex_color: true,
-            alpha_mode: flint_import::AlphaMode::Opaque,
-            alpha_cutoff: 0.5,
-            ..Default::default()
-        };
-
-        renderer.load_procedural_mesh(device, name, &vertices, &mesh.indices, imported_mat);
-    } else {
-        // Multi-submesh: upload each as "{name}_sub{i}"
-        for (i, sub) in mesh.submeshes.iter().enumerate() {
-            let mat = mesh
-                .materials
-                .get(sub.material_index)
-                .unwrap_or(&default_material);
-
-            let start = sub.index_start as usize;
-            let count = sub.index_count as usize;
-            let sub_indices = &mesh.indices[start..start + count];
-
-            // Find min/max index to compact vertices
-            let min_idx = *sub_indices.iter().min().unwrap_or(&0) as usize;
-            let max_idx = *sub_indices.iter().max().unwrap_or(&0) as usize;
-
-            let vertices: Vec<flint_render::Vertex> = mesh.vertices[min_idx..=max_idx]
-                .iter()
-                .map(|v| flint_render::Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: mat.base_color,
-                    uv: v.uv,
-                })
-                .collect();
-
-            let compacted_indices: Vec<u32> = sub_indices
-                .iter()
-                .map(|&idx| idx - min_idx as u32)
-                .collect();
-
-            let sub_name = format!("{name}_sub{i}");
-            let imported_mat = flint_import::ImportedMaterial {
-                name: mat.name.clone(),
-                base_color: mat.base_color,
-                metallic: mat.metallic,
-                roughness: mat.roughness,
-                base_color_texture: None,
-                normal_texture: None,
-                metallic_roughness_texture: None,
-                use_vertex_color: true,
-                alpha_mode: flint_import::AlphaMode::Opaque,
-                alpha_cutoff: 0.5,
-                ..Default::default()
-            };
-
-            renderer.load_procedural_mesh(
-                device,
-                &sub_name,
-                &vertices,
-                &compacted_indices,
-                imported_mat,
-            );
-        }
-    }
-}
-
-/// Upload a procgen image to the GPU texture cache.
-fn upload_procgen_image(
-    name: &str,
-    img: &flint_procgen::ImageData,
-    renderer: &mut SceneRenderer,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) {
-    let is_normal = matches!(
-        img.channel_semantics,
-        flint_procgen::ChannelSemantics::Normal
-    );
-    match renderer.load_texture_rgba(
+    flint_render::load_scene_particle_textures(
+        renderer,
         device,
         queue,
-        name,
-        img.width,
-        img.height,
-        &img.pixels,
-        is_normal,
-    ) {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!("Procgen texture '{}' already cached", name);
-        }
-        Err(e) => {
-            tracing::warn!("Failed to upload procgen texture '{}': {}", name, e);
-        }
-    }
+        &particles.sync,
+        project,
+        scene_dir_of(scene_path),
+    );
 }
 
-// ── Queued procgen asset resolution ───────────────────────────────────
-
-/// Enqueue unresolved procgen assets for frame-budgeted generation.
-///
-/// Walks entities the same way as `resolve_procgen_assets()` but submits
-/// requests to the resolver's queue instead of generating synchronously.
-/// Used for dynamically spawned entities and runtime asset loading.
-#[allow(dead_code)]
-pub(super) fn enqueue_procgen_assets(
-    world: &FlintWorld,
-    resolver: &mut flint_procgen::ProcGenResolver,
-    renderer: &SceneRenderer,
-    config: &flint_render::model_loader::ModelLoadConfig,
+/// Load every `.anim.toml` clip the scene can see: `animations/` beside the
+/// scene, beside each directory above it up to the project root, and in the
+/// mounted engine (the project's one asset search, ADR 0114). A nearer file
+/// hides a farther one of the same file name.
+pub(super) fn load_animations_from_world(
+    project: &Project,
+    scene_path: &str,
+    animation: &mut AnimationSystem,
 ) {
-    for entity in world.all_entities() {
-        let comps = match world.get_components(entity.id) {
-            Some(c) => c,
-            None => continue,
-        };
+    load_animations_saying(project, scene_path, animation, &mut |line| {
+        println!("{line}")
+    });
+}
 
-        // Read entity position for priority calculation
-        let position = comps
-            .get(comp::TRANSFORM)
-            .and_then(|t| t.get("position").and_then(toml_vec3))
-            .unwrap_or([0.0; 3]);
-
-        // Check model assets
-        if let Some(model) = comps.get(comp::MODEL) {
-            if let Some(name) = model.get("asset").and_then(|v| v.as_str()) {
-                if !config.overrides.contains_key(name)
-                    && !renderer.mesh_cache().contains(name)
-                    && resolver.has_spec(name)
-                {
-                    resolver.enqueue(name, position, flint_procgen::AssetKind::Model);
-                }
+/// [`load_animations_from_world`], telling `say` what it loads.
+pub(super) fn load_animations_saying(
+    project: &Project,
+    scene_path: &str,
+    animation: &mut AnimationSystem,
+    say: &mut dyn FnMut(String),
+) {
+    for path in visible_files(project, AssetKind::Animations, scene_path) {
+        match flint_animation::loader::load_clip_from_file(&path) {
+            Ok(clip) => {
+                say(format!(
+                    "Loaded animation: {} ({:.1}s)",
+                    clip.name, clip.duration
+                ));
+                animation.add_property_clip(clip);
             }
-        }
-
-        // Check texture assets (material + sprite)
-        for comp_name in &[comp::MATERIAL, comp::SPRITE] {
-            if let Some(comp_data) = comps.get(*comp_name) {
-                if let Some(tex) = comp_data.get("texture").and_then(|v| v.as_str()) {
-                    if !config.overrides.contains_key(tex) && resolver.has_spec(tex) {
-                        resolver.enqueue(tex, position, flint_procgen::AssetKind::Texture);
-                    }
-                }
+            Err(e) => {
+                tracing::warn!("Failed to load animation '{}': {:?}", path.display(), e);
             }
         }
     }
 }
 
-/// Upload completed queued assets to the GPU.
-pub(super) fn upload_completed_procgen_assets(
-    completed: &[flint_procgen::CompletedAsset],
-    renderer: &mut SceneRenderer,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+/// Load every `.sequence.toml` the scene can see, from the same folders as
+/// [`load_animations_from_world`]. Sequences are referenced by `name` from
+/// `animator.sequence`; a name no file gives is warned about with the
+/// folders that were read.
+pub(super) fn load_sequences_from_world(
+    project: &Project,
+    scene_path: &str,
+    animation: &mut AnimationSystem,
 ) {
-    for asset in completed {
-        match (&asset.output, asset.asset_kind) {
-            (flint_procgen::GeneratorOutput::Mesh(mesh), _) => {
-                upload_procgen_mesh(&asset.spec_name, mesh, renderer, device);
-                tracing::info!(
-                    "Queued procgen resolved mesh '{}' ({} tris)",
-                    asset.spec_name,
-                    mesh.triangle_count()
-                );
+    load_sequences_saying(project, scene_path, animation, &mut |line| {
+        println!("{line}")
+    });
+}
+
+/// [`load_sequences_from_world`], telling `say` what it loads.
+pub(super) fn load_sequences_saying(
+    project: &Project,
+    scene_path: &str,
+    animation: &mut AnimationSystem,
+    say: &mut dyn FnMut(String),
+) {
+    animation
+        .set_sequence_search(project.search_dirs(AssetKind::Sequences, scene_dir_of(scene_path)));
+    for path in visible_files(project, AssetKind::Sequences, scene_path) {
+        match flint_animation::load_sequence_from_file(&path) {
+            Ok(seq) => {
+                say(format!(
+                    "Loaded sequence: {} ({:.1}s, {} events)",
+                    seq.name,
+                    seq.resolved_duration(),
+                    seq.events.len()
+                ));
+                animation.add_sequence(seq);
             }
-            (flint_procgen::GeneratorOutput::MeshWithLods(lods), _) => {
-                if let Some(mesh) = lods.first() {
-                    upload_procgen_mesh(&asset.spec_name, mesh, renderer, device);
-                    tracing::info!(
-                        "Queued procgen resolved mesh '{}' (LOD0, {} tris)",
-                        asset.spec_name,
-                        mesh.triangle_count()
-                    );
+            Err(e) => {
+                tracing::warn!("Failed to load sequence '{}': {:?}", path.display(), e);
+            }
+        }
+    }
+}
+
+/// Load every `.sprite.toml` the scene can see, from the same folders as
+/// [`load_animations_from_world`]. Each file can define several sprite
+/// animation clips under `[animation.NAME]` sections.
+pub(super) fn load_sprite_animations_from_world(
+    project: &Project,
+    scene_path: &str,
+    animation: &mut AnimationSystem,
+) {
+    load_sprite_animations_saying(project, scene_path, animation, &mut |line| {
+        println!("{line}")
+    });
+}
+
+/// [`load_sprite_animations_from_world`], telling `say` what it loads.
+pub(super) fn load_sprite_animations_saying(
+    project: &Project,
+    scene_path: &str,
+    animation: &mut AnimationSystem,
+    say: &mut dyn FnMut(String),
+) {
+    for path in visible_files(project, AssetKind::SpriteAnimations, scene_path) {
+        match flint_animation::sprite_clip::load_sprite_clips_from_file(&path) {
+            Ok(clips) => {
+                for clip in clips {
+                    say(format!(
+                        "Loaded sprite animation: {} ({}ms, {} frames)",
+                        clip.name,
+                        clip.total_duration_ms(),
+                        clip.frames.len()
+                    ));
+                    animation.add_sprite_clip(clip);
                 }
             }
-            (flint_procgen::GeneratorOutput::Image(img), _) => {
-                upload_procgen_image(&asset.spec_name, img, renderer, device, queue);
-                tracing::info!(
-                    "Queued procgen resolved image '{}' ({}x{})",
-                    asset.spec_name,
-                    img.width,
-                    img.height
-                );
-            }
-            (flint_procgen::GeneratorOutput::ImageSet(images), _) => {
-                for (i, img) in images.iter().enumerate() {
-                    let tex_name = if i == 0 {
-                        asset.spec_name.clone()
-                    } else {
-                        format!(
-                            "{}_{}",
-                            asset.spec_name,
-                            match img.channel_semantics {
-                                flint_procgen::ChannelSemantics::Color => "color",
-                                flint_procgen::ChannelSemantics::Normal => "normal",
-                                flint_procgen::ChannelSemantics::Roughness => "roughness",
-                                flint_procgen::ChannelSemantics::Metallic => "metallic",
-                                flint_procgen::ChannelSemantics::Height => "height",
-                                flint_procgen::ChannelSemantics::Mask => "mask",
-                            }
-                        )
-                    };
-                    upload_procgen_image(&tex_name, img, renderer, device, queue);
-                }
-                tracing::info!(
-                    "Queued procgen resolved image set '{}' ({} maps)",
-                    asset.spec_name,
-                    images.len()
-                );
-            }
-            _ => {
+            Err(e) => {
                 tracing::warn!(
-                    "Queued procgen spec '{}' produced unsupported output type",
-                    asset.spec_name
+                    "Failed to load sprite animation '{}': {:?}",
+                    path.display(),
+                    e
                 );
             }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vertex_conversion_correctness() {
-        let procgen_vertex = flint_procgen::Vertex {
-            position: [1.0, 2.0, 3.0],
-            normal: [0.0, 1.0, 0.0],
-            tangent: [1.0, 0.0, 0.0, 1.0],
-            uv: [0.5, 0.75],
-        };
-        let color = [0.8, 0.2, 0.1, 1.0];
-
-        let render_vertex = flint_render::Vertex {
-            position: procgen_vertex.position,
-            normal: procgen_vertex.normal,
-            color,
-            uv: procgen_vertex.uv,
-        };
-
-        assert_eq!(render_vertex.position, [1.0, 2.0, 3.0]);
-        assert_eq!(render_vertex.normal, [0.0, 1.0, 0.0]);
-        assert_eq!(render_vertex.color, [0.8, 0.2, 0.1, 1.0]);
-        assert_eq!(render_vertex.uv, [0.5, 0.75]);
+/// The scene a transition names, from the current scene: a path found by
+/// the project's one search (`AssetKind::Scenes`, ADR 0114), which tries it
+/// from the current scene's directory, then from each directory above it up
+/// to the project root, then in the engine. One that isn't found there is
+/// returned as written (a path from the working directory, as it was
+/// before), for the scene loader to open or report.
+pub(super) fn resolve_scene_path(project: &Project, current_scene: &str, target: &str) -> String {
+    let answer = project.explain(AssetKind::Scenes, target, scene_dir_of(current_scene));
+    match answer.found {
+        Some(found) => {
+            if let Some(change) = &answer.order_change {
+                change.log();
+            }
+            found.to_string_lossy().to_string()
+        }
+        None => {
+            if !vfs::exists(target) {
+                let not_found = flint_core::project::NotFound {
+                    kind: AssetKind::Scenes,
+                    name: answer.name,
+                    tried: answer.tried,
+                };
+                tracing::warn!("{not_found}");
+            }
+            target.to_string()
+        }
     }
+}
+
+/// Point the script system at the scripts the scene can see in `project`
+pub(super) fn load_scripts_from_world(
+    project: &Project,
+    scene_path: &str,
+    script: &mut ScriptSystem,
+) {
+    script.load_scripts_from_scene(scene_path, project);
 }

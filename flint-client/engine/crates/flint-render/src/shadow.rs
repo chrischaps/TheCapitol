@@ -5,6 +5,7 @@
 //! this texture to compute shadow factors.
 
 use crate::primitives::{SkinnedVertex, Vertex};
+use crate::wooze_pipeline::ShallowWoozeUniforms;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
@@ -69,8 +70,12 @@ impl Default for ShadowUniforms {
 /// The shadow mapping system
 pub struct ShadowPass {
     pub shadow_pipeline: wgpu::RenderPipeline,
+    /// `shadow_pipeline` culling nothing, for glTF `doubleSided` casters (#623).
+    pub shadow_pipeline_double_sided: wgpu::RenderPipeline,
     pub shadow_bind_group_layout: wgpu::BindGroupLayout,
     pub skinned_shadow_pipeline: wgpu::RenderPipeline,
+    /// `skinned_shadow_pipeline` culling nothing (#623).
+    pub skinned_shadow_pipeline_double_sided: wgpu::RenderPipeline,
     pub skinned_shadow_bone_layout: wgpu::BindGroupLayout,
     pub shadow_texture: wgpu::Texture,
     pub shadow_view: wgpu::TextureView,
@@ -87,8 +92,38 @@ pub struct ShadowPass {
     pub draw_capacity: u32,
     pub resolution: u32,
     pub enabled: bool,
+    /// Cascades drawn, `1..=CASCADE_COUNT` (FlintKart#55). Each is a draw
+    /// of every caster; fewer cover the same distance at coarser texels.
+    /// The texture keeps all its layers, so changing this allocates nothing.
+    cascades: usize,
+    /// How far from the camera the cascades reach, metres.
+    distance: f32,
+    /// The uniforms on the GPU say "no shadows" (see `write_off_uniforms`).
+    pub(crate) shadows_written_off: bool,
     shadow_uniforms: ShadowUniforms,
+    /// Its [`gpu_id`](crate::bind_cache::gpu_id): bind groups kept over its
+    /// views and buffers name it (#139). A new resolution is a new pass.
+    pub id: u64,
+    /// The pipelines for shallow wooze's casters (#215), once a scene has some.
+    pub(crate) wooze: Option<ShadowWooze>,
 }
+
+/// How a caster with shallow wooze goes into the cascades: the same depth pipelines
+/// with a vertex stage that displaces, reading further into each draw's slot.
+pub(crate) struct ShadowWooze {
+    layout: wgpu::BindGroupLayout,
+    pub pipeline: wgpu::RenderPipeline,
+    pub skinned_pipeline: wgpu::RenderPipeline,
+    /// The two above culling nothing, for glTF `doubleSided` casters (#623).
+    pub pipeline_double_sided: wgpu::RenderPipeline,
+    pub skinned_pipeline_double_sided: wgpu::RenderPipeline,
+    /// Over the same buffer as `draw_bind_group`, seeing more of each slot.
+    pub bind_group: wgpu::BindGroup,
+}
+
+/// How much of a shadow draw slot a woozy caster reads.
+const WOOZY_SHADOW_BINDING: u64 = (std::mem::size_of::<ShadowDrawUniforms>()
+    + std::mem::size_of::<ShallowWoozeUniforms>()) as u64;
 
 impl ShadowPass {
     pub fn new(device: &wgpu::Device, resolution: u32) -> Self {
@@ -122,40 +157,46 @@ impl ShadowPass {
                 push_constant_ranges: &[],
             });
 
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Shadow Depth Pipeline"),
-            layout: Some(&shadow_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_shader,
-                entry_point: Some("vs_shadow"),
-                buffers: &[Vertex::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: None, // Depth only, no fragment shader
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
+        let make_shadow = |label: &str, cull_mode: Option<wgpu::Face>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&shadow_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_shader,
+                    entry_point: Some("vs_shadow"),
+                    buffers: &[Vertex::desc()],
+                    compilation_options: Default::default(),
                 },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+                fragment: None, // Depth only, no fragment shader
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let shadow_pipeline = make_shadow("Shadow Depth Pipeline", Some(wgpu::Face::Back));
+        // glTF `doubleSided` casters (#623): a card shadows from either side
+        let shadow_pipeline_double_sided =
+            make_shadow("Shadow Depth Pipeline (double-sided)", None);
 
         // Skinned shadow pipeline: bind group 0 = shadow uniforms, bind group 1 = bone matrices
         let skinned_shadow_bone_layout =
@@ -180,9 +221,9 @@ impl ShadowPass {
                 push_constant_ranges: &[],
             });
 
-        let skinned_shadow_pipeline =
+        let make_skinned_shadow = |label: &str, cull_mode: Option<wgpu::Face>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Skinned Shadow Depth Pipeline"),
+                label: Some(label),
                 layout: Some(&skinned_shadow_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shadow_shader,
@@ -195,7 +236,7 @@ impl ShadowPass {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode,
                     polygon_mode: wgpu::PolygonMode::Fill,
                     unclipped_depth: false,
                     conservative: false,
@@ -214,7 +255,12 @@ impl ShadowPass {
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
                 cache: None,
-            });
+            })
+        };
+        let skinned_shadow_pipeline =
+            make_skinned_shadow("Skinned Shadow Depth Pipeline", Some(wgpu::Face::Back));
+        let skinned_shadow_pipeline_double_sided =
+            make_skinned_shadow("Skinned Shadow Depth Pipeline (double-sided)", None);
 
         // Create shadow depth texture array (one layer per cascade)
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -277,8 +323,10 @@ impl ShadowPass {
 
         Self {
             shadow_pipeline,
+            shadow_pipeline_double_sided,
             shadow_bind_group_layout,
             skinned_shadow_pipeline,
+            skinned_shadow_pipeline_double_sided,
             skinned_shadow_bone_layout,
             shadow_texture,
             shadow_view,
@@ -290,7 +338,12 @@ impl ShadowPass {
             draw_capacity: SHADOW_DRAW_INITIAL_CAPACITY,
             resolution,
             enabled: true,
+            cascades: CASCADE_COUNT,
+            distance: flint_core::quality::DEFAULT_SHADOW_DISTANCE,
+            shadows_written_off: false,
             shadow_uniforms,
+            id: crate::bind_cache::gpu_id(),
+            wooze: None,
         }
     }
 
@@ -335,11 +388,145 @@ impl ShadowPass {
         self.draw_buffer = buffer;
         self.draw_bind_group = bind_group;
         self.draw_capacity = capacity;
+        if let Some(wooze) = &mut self.wooze {
+            wooze.bind_group = Self::woozy_bind_group(device, &wooze.layout, &self.draw_buffer);
+        }
+    }
+
+    /// Build what woozy casters draw with, if it isn't already (#215).
+    pub(crate) fn ensure_wooze(&mut self, device: &wgpu::Device) {
+        if self.wooze.is_some() {
+            return;
+        }
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shallow Wooze Shadow Shader"),
+            source: wgpu::ShaderSource::Wgsl(crate::wooze_pipeline::SHADOW_SOURCE.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(WOOZY_SHADOW_BINDING),
+                },
+                count: None,
+            }],
+            label: Some("Shallow Wooze Shadow Bind Group Layout"),
+        });
+        let pipeline_for = |label: &str,
+                            entry: &str,
+                            groups: &[&wgpu::BindGroupLayout],
+                            buffer: wgpu::VertexBufferLayout<'static>,
+                            cull_mode: Option<wgpu::Face>| {
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: groups,
+                push_constant_ranges: &[],
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    buffers: &[buffer],
+                    compilation_options: Default::default(),
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let pipeline = pipeline_for(
+            "Shallow Wooze Shadow Pipeline",
+            "vs_shadow_wooze",
+            &[&layout],
+            Vertex::desc(),
+            Some(wgpu::Face::Back),
+        );
+        let pipeline_double_sided = pipeline_for(
+            "Shallow Wooze Shadow Pipeline (double-sided)",
+            "vs_shadow_wooze",
+            &[&layout],
+            Vertex::desc(),
+            None,
+        );
+        let skinned_pipeline = pipeline_for(
+            "Shallow Wooze Skinned Shadow Pipeline",
+            "vs_skinned_shadow_wooze",
+            &[&layout, &self.skinned_shadow_bone_layout],
+            SkinnedVertex::desc(),
+            Some(wgpu::Face::Back),
+        );
+        let skinned_pipeline_double_sided = pipeline_for(
+            "Shallow Wooze Skinned Shadow Pipeline (double-sided)",
+            "vs_skinned_shadow_wooze",
+            &[&layout, &self.skinned_shadow_bone_layout],
+            SkinnedVertex::desc(),
+            None,
+        );
+        let bind_group = Self::woozy_bind_group(device, &layout, &self.draw_buffer);
+        self.wooze = Some(ShadowWooze {
+            layout,
+            pipeline,
+            skinned_pipeline,
+            pipeline_double_sided,
+            skinned_pipeline_double_sided,
+            bind_group,
+        });
+    }
+
+    fn woozy_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(WOOZY_SHADOW_BINDING),
+                }),
+            }],
+            label: Some("Shallow Wooze Shadow Bind Group"),
+        })
     }
 
     /// Upload one frame's shadow draw uniforms, one `SHADOW_DRAW_STRIDE`
-    /// slot each, in the order the passes will bind them.
-    pub fn write_draw_uniforms(&self, queue: &wgpu::Queue, draws: &[ShadowDrawUniforms]) {
+    /// slot each, in the order the passes will bind them. `wooze` holds the drift
+    /// of the slots whose casters have any (#215), by slot.
+    pub(crate) fn write_draw_uniforms(
+        &self,
+        queue: &wgpu::Queue,
+        draws: &[ShadowDrawUniforms],
+        wooze: &[(u32, ShallowWoozeUniforms)],
+    ) {
         if draws.is_empty() {
             return;
         }
@@ -350,7 +537,53 @@ impl ShadowPass {
             let src = bytemuck::bytes_of(d);
             bytes[i * stride..i * stride + src.len()].copy_from_slice(src);
         }
+        let past = std::mem::size_of::<ShadowDrawUniforms>();
+        for (slot, drift) in wooze {
+            let src = bytemuck::bytes_of(drift);
+            let at = *slot as usize * stride + past;
+            bytes[at..at + src.len()].copy_from_slice(src);
+        }
         queue.write_buffer(&self.draw_buffer, 0, &bytes);
+    }
+
+    /// Upload uniforms that turn shadows off in every shader that samples
+    /// the maps: a shadow far plane of 0 lights everything (the state a
+    /// renderer starts in). Once, until the pass draws again.
+    pub fn write_off_uniforms(&mut self, queue: &wgpu::Queue) {
+        if self.shadows_written_off {
+            return;
+        }
+        let off = ShadowUniforms::default();
+        queue.write_buffer(
+            &self.shadow_uniforms_buffer,
+            0,
+            bytemuck::cast_slice(&[off]),
+        );
+        self.shadows_written_off = true;
+    }
+
+    /// Cascades drawn; see [`Self::set_cascades`].
+    pub fn cascades(&self) -> usize {
+        self.cascades
+    }
+
+    /// Draw `n` cascades, clamped to `1..=CASCADE_COUNT`. The rest are left
+    /// out of the shader's choice: their splits sit at the far plane.
+    pub fn set_cascades(&mut self, n: usize) {
+        self.cascades = n.clamp(1, CASCADE_COUNT);
+    }
+
+    /// How far shadows reach from the camera, metres.
+    pub fn distance(&self) -> f32 {
+        self.distance
+    }
+
+    /// Reach `metres` from the camera (clamped as `QualitySettings` clamps).
+    pub fn set_distance(&mut self, metres: f32) {
+        use flint_core::quality::{MAX_SHADOW_DISTANCE, MIN_SHADOW_DISTANCE};
+        if metres.is_finite() {
+            self.distance = metres.clamp(MIN_SHADOW_DISTANCE, MAX_SHADOW_DISTANCE);
+        }
     }
 
     /// Compute cascade splits and light view-projection matrices.
@@ -358,19 +591,29 @@ impl ShadowPass {
     /// `max_shadow_distance` extends the shadow frustum depth along the light
     /// direction so that off-screen shadow casters (ceilings, walls behind the
     /// camera, etc.) are captured in the shadow map.
+    ///
+    /// `cam_near` / `cam_far` are the camera projection's own planes, which
+    /// turn the split distances into the frustum's slices; the cascades
+    /// cover view depths from `cam_near` to [`Self::distance`] (or the far
+    /// plane, if nearer). Before FlintKart#55 the planes were taken as 0.1
+    /// and 200 whatever the camera's were, so with the usual 1000 m far
+    /// plane the last cascade stretched to 1000 m while drawing to 200.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_cascades(
         &mut self,
         light_dir: [f32; 3],
         camera_pos: [f32; 3],
         camera_view_proj_inv: [[f32; 4]; 4],
-        near: f32,
-        far: f32,
+        cam_near: f32,
+        cam_far: f32,
         max_shadow_distance: f32,
         sun_tan_angular: f32,
     ) {
         // Practical cascade split scheme (logarithmic/uniform blend)
         let lambda = 0.5f32; // blend factor
-        let splits = compute_cascade_splits(near, far, CASCADE_COUNT, lambda);
+        let count = self.cascades.clamp(1, CASCADE_COUNT);
+        let (near, far) = (cam_near, self.distance.min(cam_far).max(cam_near * 2.0));
+        let splits = cascade_split_slots(&compute_cascade_splits(near, far, count, lambda));
 
         self.shadow_uniforms.cascade_splits = [
             splits[1],
@@ -381,13 +624,18 @@ impl ShadowPass {
 
         let light_dir_norm = normalize_3(light_dir);
 
-        for i in 0..CASCADE_COUNT {
+        for i in 0..count {
             let cascade_near = splits[i];
             let cascade_far = splits[i + 1];
 
             // Compute frustum corners for this cascade
-            let corners =
-                frustum_corners(cascade_near, cascade_far, near, far, &camera_view_proj_inv);
+            let corners = frustum_corners(
+                cascade_near,
+                cascade_far,
+                cam_near,
+                cam_far,
+                &camera_view_proj_inv,
+            );
 
             // Compute tight orthographic bounds from light's perspective
             let (light_vp, depth_range) = compute_light_matrix(
@@ -400,6 +648,14 @@ impl ShadowPass {
             self.shadow_uniforms.cascade_view_proj[i] = light_vp;
             self.shadow_uniforms.pcss[i] = depth_range;
         }
+        // Cascades not drawn copy the last one drawn: the shader never picks
+        // them (their splits are the far plane), but stale matrices would be
+        // a trap for anything that does.
+        for i in count..CASCADE_COUNT {
+            self.shadow_uniforms.cascade_view_proj[i] =
+                self.shadow_uniforms.cascade_view_proj[count - 1];
+            self.shadow_uniforms.pcss[i] = self.shadow_uniforms.pcss[count - 1];
+        }
         // 0 = PCSS off → shaders take the legacy 3×3 PCF path (ADR 0057).
         self.shadow_uniforms.pcss[3] = sun_tan_angular;
     }
@@ -407,6 +663,18 @@ impl ShadowPass {
     pub fn shadow_uniforms(&self) -> &ShadowUniforms {
         &self.shadow_uniforms
     }
+}
+
+/// Splits for all `CASCADE_COUNT` slots from `count` cascades' splits: the
+/// slots past `count` start at the far plane, so the shader's
+/// `view_depth > split` test never picks them.
+fn cascade_split_slots(splits: &[f32]) -> [f32; CASCADE_COUNT + 1] {
+    let far = *splits.last().unwrap_or(&0.0);
+    let mut out = [far; CASCADE_COUNT + 1];
+    for (o, s) in out.iter_mut().zip(splits) {
+        *o = *s;
+    }
+    out
 }
 
 /// Compute logarithmic/uniform blend cascade split distances
@@ -608,4 +876,23 @@ fn mat4_mul_point(m: &[[f32; 4]; 4], p: &[f32; 3]) -> [f32; 3] {
         return [out[0], out[1], out[2]];
     }
     [out[0] / w, out[1] / w, out[2] / w]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fewer_cascades_cover_the_same_reach() {
+        for count in 1..=CASCADE_COUNT {
+            let splits = cascade_split_slots(&compute_cascade_splits(0.1, 120.0, count, 0.5));
+            assert_eq!(splits[0], 0.1);
+            // The shadow far plane (slot 3, the shader's `.z`) is the reach.
+            assert_eq!(splits[CASCADE_COUNT], 120.0, "{count} cascades");
+            for (i, s) in splits.iter().enumerate().skip(count + 1) {
+                assert_eq!(*s, 120.0, "slot {i} of {count} must be unreachable");
+            }
+            assert!(splits.windows(2).all(|w| w[0] <= w[1]));
+        }
+    }
 }

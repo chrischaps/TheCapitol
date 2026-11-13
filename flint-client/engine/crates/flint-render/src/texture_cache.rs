@@ -1,9 +1,26 @@
 //! GPU texture cache — uploads imported textures and provides default fallbacks
 
+use flint_core::vfs;
 use flint_import::ImportedTexture;
 use std::collections::HashMap;
 use std::path::Path;
 use wgpu::util::DeviceExt;
+
+pub use flint_pixels::{memoize_mip_chains, mip_chain};
+
+/// Open and decode an image file through the file layer: `image::open`, but
+/// the bytes come from [`vfs::read`] so a memory source works too. The format
+/// comes from the path's extension, as `image::open` does, falling back to
+/// sniffing the bytes when the extension names none.
+pub fn open_image(path: &Path) -> image::ImageResult<image::DynamicImage> {
+    let bytes = vfs::read(path).map_err(image::ImageError::IoError)?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    match image::ImageFormat::from_path(path) {
+        Ok(format) => reader.set_format(format),
+        Err(_) => reader = reader.with_guessed_format()?,
+    }
+    reader.decode()
+}
 
 /// A GPU-resident texture with its view and sampler
 pub struct GpuTexture {
@@ -102,7 +119,9 @@ impl TextureCache {
     /// `linear` is for data maps (normal, metallic-roughness): they're
     /// sampled as stored. Colour maps (base colour, emissive) are sRGB. The
     /// caller decides from how the material uses the texture, since a glTF
-    /// texture's name says nothing about it.
+    /// texture's name says nothing about it. The whole mip chain is built
+    /// (see [`mip_chain`]), so a model's painted texture seen from far off
+    /// (generated ground, signage) settles instead of shimmering.
     pub fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -116,7 +135,7 @@ impl TextureCache {
         }
 
         // Convert to RGBA8 if needed
-        let rgba_data = Self::ensure_rgba(
+        let rgba_data = flint_pixels::to_rgba8(
             &imported.data,
             &imported.format,
             imported.width,
@@ -129,6 +148,9 @@ impl TextureCache {
             wgpu::TextureFormat::Rgba8UnormSrgb
         };
 
+        let (data, mip_level_count) =
+            mip_chain(&rgba_data, imported.width, imported.height, !linear);
+
         let texture = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {
@@ -138,7 +160,7 @@ impl TextureCache {
                     height: imported.height,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: 1,
+                mip_level_count,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
@@ -146,7 +168,7 @@ impl TextureCache {
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            &rgba_data,
+            &data,
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -181,19 +203,51 @@ impl TextureCache {
         name: &str,
         path: &Path,
     ) -> Result<bool, String> {
+        self.load_file_with(device, queue, name, path, false)
+    }
+
+    /// [`load_file`](Self::load_file) with a full mip chain, for surfaces
+    /// seen at grazing angles and long distances (roads, floors) where a
+    /// single level shimmers. Levels are box-filtered on the CPU, colour in
+    /// linear light. If `name` is already cached it is kept as it is.
+    pub fn load_file_mipmapped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        name: &str,
+        path: &Path,
+    ) -> Result<bool, String> {
+        self.load_file_with(device, queue, name, path, true)
+    }
+
+    fn load_file_with(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        name: &str,
+        path: &Path,
+        mipmaps: bool,
+    ) -> Result<bool, String> {
         if self.textures.contains_key(name) {
             return Ok(false);
         }
 
-        let img = image::open(path)
+        let img = open_image(path)
             .map_err(|e| format!("Failed to open image '{}': {}", path.display(), e))?;
         let rgba = img.to_rgba8();
         let (width, height) = rgba.dimensions();
 
-        let format = if is_data_map_name(name) {
+        let is_data = is_data_map_name(name);
+        let format = if is_data {
             wgpu::TextureFormat::Rgba8Unorm
         } else {
             wgpu::TextureFormat::Rgba8UnormSrgb
+        };
+
+        let (data, mip_level_count) = if mipmaps {
+            mip_chain(&rgba, width, height, !is_data)
+        } else {
+            (rgba.into_raw(), 1)
         };
 
         let texture = device.create_texture_with_data(
@@ -205,7 +259,7 @@ impl TextureCache {
                     height,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: 1,
+                mip_level_count,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
@@ -213,7 +267,7 @@ impl TextureCache {
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            &rgba,
+            &data,
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -356,25 +410,44 @@ impl TextureCache {
             ));
         }
 
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &tex.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(tex.width * 4),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width: tex.width,
-                height: tex.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        // A mipmapped texture gets its whole chain rebuilt, or the smaller
+        // levels would go on showing the old image at a distance.
+        let levels = tex.texture.mip_level_count();
+        let chain;
+        let data = if levels > 1 {
+            let srgb = tex.texture.format() == wgpu::TextureFormat::Rgba8UnormSrgb;
+            chain = mip_chain(data, tex.width, tex.height, srgb).0;
+            chain.as_slice()
+        } else {
+            data
+        };
+
+        let (mut w, mut h, mut offset) = (tex.width, tex.height, 0usize);
+        for level in 0..levels {
+            let len = (w * h * 4) as usize;
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &tex.texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data[offset..offset + len],
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            offset += len;
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
 
         Ok(())
     }
@@ -387,47 +460,5 @@ impl TextureCache {
     /// Clear all user-loaded textures (preserves built-in defaults)
     pub fn clear_user_textures(&mut self) {
         self.textures.clear();
-    }
-
-    /// Convert imported texture data to RGBA8 format
-    fn ensure_rgba(data: &[u8], format: &str, width: u32, height: u32) -> Vec<u8> {
-        let pixel_count = (width * height) as usize;
-        match format {
-            "rgba8" => data.to_vec(),
-            "rgb8" => {
-                let mut rgba = Vec::with_capacity(pixel_count * 4);
-                for chunk in data.chunks_exact(3) {
-                    rgba.push(chunk[0]);
-                    rgba.push(chunk[1]);
-                    rgba.push(chunk[2]);
-                    rgba.push(255);
-                }
-                rgba
-            }
-            "rg8" => {
-                let mut rgba = Vec::with_capacity(pixel_count * 4);
-                for chunk in data.chunks_exact(2) {
-                    rgba.push(chunk[0]);
-                    rgba.push(chunk[1]);
-                    rgba.push(0);
-                    rgba.push(255);
-                }
-                rgba
-            }
-            "r8" => {
-                let mut rgba = Vec::with_capacity(pixel_count * 4);
-                for &byte in data {
-                    rgba.push(byte);
-                    rgba.push(byte);
-                    rgba.push(byte);
-                    rgba.push(255);
-                }
-                rgba
-            }
-            _ => {
-                // For unsupported formats, return white pixels
-                vec![255u8; pixel_count * 4]
-            }
-        }
     }
 }

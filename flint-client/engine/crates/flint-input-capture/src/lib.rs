@@ -6,7 +6,7 @@
 //! via the shared [`ClockBridge`] with a **compensated suite sample**
 //! (bridged clock sample minus the caller's total judgment offset — output
 //! latency plus tap calibration), then sent over an `mpsc` channel as
-//! flint-music [`InputEvent`]s. Downstream code never touches gilrs; the
+//! flint-rhythm [`InputEvent`]s. Downstream code never touches gilrs; the
 //! replay path constructs the identical stream from a file.
 //!
 //! Verb mapping (physical → chart verb space) is a [`VerbMap`] profile:
@@ -25,19 +25,39 @@
 //! timestamps are only as fine as the poll cadence, which is exactly why
 //! this thread exists and why [`measure_granularity`] reports the real
 //! numbers instead of trusting the driver.
+//!
+//! On wasm32 the thread, its loop and the motor path compile out (a browser
+//! has no threads to spawn), and [`spawn_with_rumble`] reports capture as
+//! unavailable. The verb maps, deadzone and rumble scheduling still build, so
+//! the loop's helpers go unused there.
+//!
+//! Without the `gamepad` feature (#221) the same goes natively: [`pad`] is a
+//! stand-in that never finds a backend, so capture, the granularity probe
+//! and the rumble spike each fail at their start, and nothing links libudev.
+//!
+//! [`pad`] is flint-runtime's (#748): the ordinary gamepad path and a
+//! script's general `rumble()` live there, and this crate is the rhythm
+//! layer's alone.
 
+#![cfg_attr(
+    any(target_arch = "wasm32", not(feature = "gamepad")),
+    allow(dead_code, unused_imports)
+)]
+
+pub use flint_runtime::pad;
 pub mod rumble;
 
 use flint_music::clock_bridge::ClockBridge;
-use flint_music::input_stream::{
+use flint_rhythm::input_stream::{
     InputEvent, LeanSample, PressureSample, PressureSide, PulseEvent, SwaySample,
 };
-use gilrs::{Axis, Button, EventType, Gilrs};
+use pad::{Axis, Button, EventType, Gilrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
+use web_time::{Instant, SystemTime};
 
 /// Which physical→verb mapping the capture thread speaks (ADR 0030).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -164,6 +184,27 @@ pub fn spawn(
 /// ~1 ms resolution, directly via XInput (ADR 0025 — the gilrs ff server's
 /// 50 ms tick is bypassed). With no ff-capable pad the channel accepts
 /// commands and warns once; input capture is unaffected.
+///
+/// On wasm32 there is no thread to spawn, so this is always `Err` and a
+/// session plays without high-rate capture (see [`attach_session_input`]).
+#[cfg(not(all(feature = "gamepad", not(target_arch = "wasm32"))))]
+pub fn spawn_with_rumble(
+    _bridge: ClockBridge,
+    _cfg: CaptureConfig,
+) -> flint_core::Result<(
+    CaptureHandle,
+    mpsc::Receiver<InputEvent>,
+    mpsc::Sender<rumble::RumbleCommand>,
+)> {
+    let why = if cfg!(target_arch = "wasm32") {
+        "the 1 kHz capture thread is native only; a browser has no threads to spawn"
+    } else {
+        "gamepad backend unavailable: built without the `gamepad` feature"
+    };
+    Err(flint_core::FlintError::InputError(why.into()))
+}
+
+#[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
 pub fn spawn_with_rumble(
     bridge: ClockBridge,
     cfg: CaptureConfig,
@@ -209,7 +250,7 @@ pub fn spawn_with_rumble(
 /// sink/prefix (CLI bare, player `[music] `-prefixed). Lines never embed
 /// newlines so prefixes apply cleanly.
 pub fn attach_session_input(
-    session: &mut flint_music::chart_session::ChartSession,
+    session: &mut flint_rhythm::chart_session::ChartSession,
     verb_map: VerbMap,
     offset_samples: i64,
 ) -> Vec<String> {
@@ -278,6 +319,7 @@ pub fn connected_gamepads() -> flint_core::Result<Vec<String>> {
         .collect())
 }
 
+#[cfg(all(feature = "gamepad", not(target_arch = "wasm32")))]
 fn capture_loop(
     bridge: ClockBridge,
     cfg: CaptureConfig,
@@ -552,6 +594,7 @@ const BUCKET_EDGES_MS: [f64; 8] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 33.0, f64::INF
 /// Poll gilrs at `poll_hz` for `duration`, recording inter-event intervals
 /// while the operator wiggles the stick. Blocking; run on a spare thread or
 /// a dedicated CLI mode.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn measure_granularity(
     duration: Duration,
     poll_hz: u32,

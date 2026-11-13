@@ -14,6 +14,7 @@ use flint_animation::{
     WRITER_REST,
 };
 use flint_core::components as comp;
+use flint_core::quat::euler_deg_to_quat;
 use flint_core::{EntityId, Vec3};
 use flint_ecs::FlintWorld;
 use flint_import::{import_gltf, ImportResult, MeshBounds};
@@ -22,7 +23,7 @@ use flint_render::{
     Camera, DebugMode, HeadlessContext, OrbitCameraController, RendererConfig, SceneRenderer,
 };
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -111,6 +112,33 @@ pub struct PreviewArgs {
     /// Start with auto-orbit enabled
     #[arg(long)]
     pub auto_orbit: bool,
+
+    /// `--style` / `--style-time` for --render (#271)
+    #[command(flatten)]
+    pub style: crate::commands::common_args::StyleArgs,
+    /// Turn a joint in its own frame, `joint:x,y,z` in degrees (repeatable):
+    /// a skinned model holds the pose with or without a clip
+    #[arg(long = "pose-bone")]
+    pub pose_bones: Vec<String>,
+
+    /// Draw the skeleton over the model, posed joints in their own colour
+    #[arg(long)]
+    pub show_skeleton: bool,
+
+    /// Motion on twos (#871): the pose changes only this many times a second
+    /// of the clip's own time, playing and scrubbing (12 = on twos at 24 fps;
+    /// 0 = off). The Animation panel's "Hold" switches it live
+    #[arg(long, value_name = "RATE")]
+    pub motion_hold: Option<f32>,
+}
+
+/// `--motion-hold` as the previewer's Hold switch (#871): on at the flag's
+/// rate; off with no flag or a rate of 0, when the switch turns it on at 12.
+fn hold_from_flag(flag: Option<f32>) -> (bool, f32) {
+    match flag {
+        Some(rate) if rate > 0.0 && rate.is_finite() => (true, rate),
+        _ => (false, flint_render::motion_hold::DEFAULT_RATE),
+    }
 }
 
 pub fn run(args: PreviewArgs) -> Result<()> {
@@ -343,7 +371,12 @@ fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 /// Per-joint overlay colour for a visualisation mode.
 fn joint_viz_color(viz: LayerViz, joint: usize, contrib: Option<&LayerContribution>) -> [f32; 4] {
     let Some(c) = contrib else {
-        return BASE_COLOR;
+        // No clip has run: nothing wrote any joint.
+        return if viz == LayerViz::LastWriter {
+            REST_COLOR
+        } else {
+            BASE_COLOR
+        };
     };
     match viz {
         LayerViz::Off => BASE_COLOR,
@@ -498,9 +531,68 @@ fn model_load_config(model_path: &Path, asset_name: &str) -> ModelLoadConfig {
     let mut overrides = HashMap::new();
     overrides.insert(asset_name.to_string(), model_path.to_path_buf());
     ModelLoadConfig {
+        // The model's own folder stands in for a scene's: textures beside
+        // it, and above it up to its project's root, are found.
+        project: flint_core::project::Project::for_scene(model_path),
         scene_dir,
         overrides,
+        asked_first: Vec::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bone posing
+// ---------------------------------------------------------------------------
+
+/// Joints turned by hand: joint index to Euler degrees about its own axes.
+type BonePose = BTreeMap<usize, [f32; 3]>;
+
+/// Colour of a joint turned by hand, and of everything past it.
+const POSED_COLOR: [f32; 4] = [1.0, 0.72, 0.2, 1.0];
+
+/// Parse a `--pose-bone` value: `joint:x,y,z` in degrees.
+fn parse_bone_pose(spec: &str) -> Result<(String, [f32; 3])> {
+    let (joint, angles) = spec
+        .rsplit_once(':')
+        .with_context(|| format!("'{spec}' isn't joint:x,y,z"))?;
+    let angles = crate::commands::common_args::parse_vec3(angles)
+        .map_err(|e| anyhow::anyhow!("'{spec}': {e}"))?;
+    Ok((joint.to_string(), angles))
+}
+
+/// Put the `--pose-bone` turns on `entity`'s skeleton and record them in
+/// `pose`, replacing what was there. Returns what it couldn't do.
+fn seed_bone_pose(
+    animation: &mut AnimationSystem,
+    specs: &[String],
+    entity: EntityId,
+    pose: &mut BonePose,
+) -> Vec<String> {
+    pose.clear();
+    let mut problems = Vec::new();
+    for spec in specs {
+        let (name, angles) = match parse_bone_pose(spec) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                problems.push(e.to_string());
+                continue;
+            }
+        };
+        let Some(joint) = animation
+            .skeleton(&entity)
+            .and_then(|s| s.joint_index(&name))
+        else {
+            problems.push(format!("the model has no joint named '{name}'"));
+            continue;
+        };
+        pose.insert(joint, angles);
+        animation.set_joint_offset(
+            entity,
+            joint,
+            Some(euler_deg_to_quat(angles[0], angles[1], angles[2])),
+        );
+    }
+    problems
 }
 
 // ---------------------------------------------------------------------------
@@ -528,7 +620,10 @@ fn register_animation_data(
         if loaded.is_skinned {
             if let Some(ref import_result) = loaded.import_result {
                 for imported_skel in &import_result.skeletons {
-                    let skeleton = Skeleton::from_imported(imported_skel);
+                    let mut skeleton = Skeleton::from_imported(imported_skel);
+                    // A model with no clip never advances, and the overlay
+                    // and bone posing still need its joints where they are.
+                    skeleton.compute_bone_matrices();
                     if joint_names.is_empty() {
                         joint_names = skeleton.joint_names.clone();
                     }
@@ -692,6 +787,50 @@ fn apply_cli_overrides(camera: &mut Camera, args: &PreviewArgs) {
 // ---------------------------------------------------------------------------
 
 fn run_headless(args: &PreviewArgs, output_path: &str) -> Result<()> {
+    let img = render_image(args)?;
+    img.save(output_path)
+        .context(format!("Failed to save image to {}", output_path))?;
+
+    println!(
+        "Rendered {}x{} preview to {}",
+        args.width, args.height, output_path
+    );
+
+    Ok(())
+}
+
+/// `flint edit model.glb --render` without the file: the model, auto-framed
+/// on the default camera with no grid, at `width` x `height`. The refine
+/// previewer (`flint gen --refine`) shows Claude meshes through this.
+pub fn render_model(model: &Path, width: u32, height: u32) -> Result<image::RgbaImage> {
+    render_image(&PreviewArgs {
+        model: Some(model.to_string_lossy().into_owned()),
+        render: None,
+        width,
+        height,
+        distance: None,
+        yaw: None,
+        pitch: None,
+        target: None,
+        fov: None,
+        no_grid: true,
+        watch: false,
+        no_animate: true,
+        clip: None,
+        anim_speed: 1.0,
+        anim_time: None,
+        layers: Vec::new(),
+        sequence: None,
+        sequence_loop: false,
+        auto_orbit: false,
+        style: Default::default(),
+        pose_bones: Vec::new(),
+        show_skeleton: false,
+        motion_hold: None,
+    })
+}
+
+fn render_image(args: &PreviewArgs) -> Result<image::RgbaImage> {
     let model_str = args
         .model
         .as_deref()
@@ -744,75 +883,86 @@ fn run_headless(args: &PreviewArgs, output_path: &str) -> Result<()> {
         &config,
     );
 
-    // Animation support for --anim-time / --layer / --sequence
-    if let Some(anim_time) = args
+    // Animation support for --anim-time / --layer / --sequence / --pose-bone
+    let sample_at = args
         .anim_time
         .or_else(|| (!args.layers.is_empty() || args.sequence.is_some()).then_some(0.0))
-    {
-        if !args.no_animate {
-            let mut animation = AnimationSystem::new();
-            let (anim_info, skeletal_entity_assets) = register_animation_data(
-                &load_result,
-                &mut animation,
-                &mut world,
-                entity_id,
-                args.clip.as_deref(),
-                args.anim_speed,
-                &args.layers,
-            );
+        .filter(|_| !args.no_animate);
+    if sample_at.is_some() || !args.pose_bones.is_empty() || args.show_skeleton {
+        let mut animation = AnimationSystem::new();
+        let (anim_info, skeletal_entity_assets) = register_animation_data(
+            &load_result,
+            &mut animation,
+            &mut world,
+            entity_id,
+            args.clip.as_deref(),
+            args.anim_speed,
+            &args.layers,
+        );
 
-            if anim_info.is_some() {
-                // Sync and advance to the requested time
-                animation.sync_property_from_world(&world);
-                animation.sync_skeletal_from_world(&world);
-                animation.sync_node_from_world(&world);
+        let mut bone_pose = BonePose::new();
+        let problems = seed_bone_pose(&mut animation, &args.pose_bones, entity_id, &mut bone_pose);
+        if let Some(problem) = problems.first() {
+            anyhow::bail!("--pose-bone: {problem}");
+        }
 
-                let sequence = args.sequence.as_deref().and_then(|p| {
-                    attach_sequence(p, &mut animation, &world, entity_id, args.sequence_loop)
-                });
-                if let Some(seq) = &sequence {
-                    let eid = entity_id;
-                    // Deterministic replay: sequence + skeletal tiers stepped
-                    // together, not one big dt.
-                    let fired = seek_sequence_in_world(
-                        seq,
-                        &mut animation,
-                        &mut world,
-                        eid,
-                        anim_time as f64,
-                    );
-                    println!(
-                        "Sampled sequence '{}' at t={:.3}s ({} events fired)",
-                        seq.name, anim_time, fired
-                    );
-                } else {
-                    // Use update() which handles all three tiers
-                    let _ = flint_runtime::RuntimeSystem::update(
-                        &mut animation,
-                        &mut world,
-                        anim_time as f64,
-                    );
-                }
+        if let (Some(anim_time), true) = (sample_at, anim_info.is_some()) {
+            // Sync and advance to the requested time
+            animation.sync_property_from_world(&world);
+            animation.sync_skeletal_from_world(&world);
+            animation.sync_node_from_world(&world);
 
-                // Upload bone matrices
-                for (eid, asset) in &skeletal_entity_assets {
-                    if let Some(matrices) = animation.bone_matrices(eid) {
-                        renderer.update_bone_matrices(
-                            &ctx.device,
-                            &ctx.queue,
-                            *eid,
-                            asset,
-                            matrices,
-                        );
-                    }
-                }
+            let sequence = args.sequence.as_deref().and_then(|p| {
+                attach_sequence(p, &mut animation, &world, entity_id, args.sequence_loop)
+            });
+            if let Some(seq) = &sequence {
+                let eid = entity_id;
+                // Deterministic replay: sequence + skeletal tiers stepped
+                // together, not one big dt.
+                let fired =
+                    seek_sequence_in_world(seq, &mut animation, &mut world, eid, anim_time as f64);
+                println!(
+                    "Sampled sequence '{}' at t={:.3}s ({} events fired)",
+                    seq.name, anim_time, fired
+                );
+            } else {
+                // Use update() which handles all three tiers
+                let _ = flint_runtime::RuntimeSystem::update(
+                    &mut animation,
+                    &mut world,
+                    anim_time as f64,
+                );
+            }
+            println!("Sampled animation at t={:.3}s", anim_time);
+        }
 
-                println!("Sampled animation at t={:.3}s", anim_time);
+        // Upload bone matrices
+        for (eid, asset) in &skeletal_entity_assets {
+            if let Some(matrices) = animation.bone_matrices(eid) {
+                renderer.update_bone_matrices(&ctx.device, &ctx.queue, *eid, asset, matrices);
+            }
+        }
+
+        if args.show_skeleton {
+            if let Some(skel) = animation.skeleton(&entity_id) {
+                let contrib = animation.skeletal_layer_contribution(&entity_id);
+                let posed = animation.joint_offsets(&entity_id);
+                let mesh = skeleton_overlay_mesh(skel, LayerViz::LastWriter, contrib, posed);
+                renderer.debug_state_mut().show_skeleton = true;
+                renderer.set_skeleton_overlay(&ctx.device, &mesh);
             }
         }
     }
 
     renderer.update_from_world(&world, &ctx.device);
+    args.style.apply_to_renderer(&mut renderer, &ctx.device);
+    // A still is the first frame of its tick, so its pose is the live one;
+    // the whole-frame rate holds the post time styles read (#871)
+    if let Some(rate) = args.motion_hold {
+        let mut config = renderer.post_process_config().clone();
+        config.motion_hold = rate.max(0.0);
+        renderer.set_post_process_config(config);
+    }
 
     // Render
     renderer.render_to(
@@ -825,17 +975,8 @@ fn run_headless(args: &PreviewArgs, output_path: &str) -> Result<()> {
 
     // Read pixels and save
     let pixels = pollster::block_on(ctx.read_pixels()).context("Failed to read rendered pixels")?;
-    let img = image::RgbaImage::from_raw(args.width, args.height, pixels)
-        .context("Failed to create image from pixel data")?;
-    img.save(output_path)
-        .context(format!("Failed to save image to {}", output_path))?;
-
-    println!(
-        "Rendered {}x{} preview to {}",
-        args.width, args.height, output_path
-    );
-
-    Ok(())
+    image::RgbaImage::from_raw(args.width, args.height, pixels)
+        .context("Failed to create image from pixel data")
 }
 
 // ---------------------------------------------------------------------------
@@ -931,6 +1072,7 @@ fn run_interactive(args: PreviewArgs) -> Result<()> {
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let auto_orbit = args.auto_orbit;
+    let (hold_on, hold_rate) = hold_from_flag(args.motion_hold);
 
     let mut app = PreviewApp {
         state,
@@ -965,6 +1107,11 @@ fn run_interactive(args: PreviewArgs) -> Result<()> {
         solo_layer: None,
         muted_layers: Vec::new(),
         sequence: None,
+        bone_pose: BonePose::new(),
+        posed_joint: 0,
+        pose_dirty: false,
+        hold_on,
+        hold_rate,
     };
     app.orbit.auto_orbit = auto_orbit;
 
@@ -1001,6 +1148,16 @@ struct PreviewApp {
     muted_layers: Vec<bool>,
     /// `--sequence` playback (timeline, seek snapshot)
     sequence: Option<SequenceUi>,
+    /// Joints turned by hand, as the sliders show them
+    bone_pose: BonePose,
+    /// The joint the "Pose a bone" sliders act on
+    posed_joint: usize,
+    /// The pose changed outside the UI and hasn't reached the GPU yet
+    pose_dirty: bool,
+    /// Motion on twos (#871): whether the pose is held, and how many
+    /// drawings a second of clip time it holds to (`--motion-hold`, else 12)
+    hold_on: bool,
+    hold_rate: f32,
 
     // egui overlay
     egui_ctx: egui::Context,
@@ -1056,6 +1213,10 @@ impl PreviewApp {
                 ..Default::default()
             },
         );
+        if self.args.show_skeleton {
+            renderer.debug_state_mut().show_skeleton = true;
+            self.layer_viz = LayerViz::LastWriter;
+        }
 
         // Load model if we have one
         if has_model {
@@ -1090,6 +1251,15 @@ impl PreviewApp {
                         );
                         self.anim_info = info;
                         self.skeletal_entity_assets = skel_assets;
+                        for problem in seed_bone_pose(
+                            &mut self.animation,
+                            &self.args.pose_bones,
+                            eid,
+                            &mut self.bone_pose,
+                        ) {
+                            tracing::warn!("--pose-bone: {problem}");
+                        }
+                        self.pose_dirty = true;
                         if let Some(p) = self.args.sequence.clone() {
                             self.sequence = attach_sequence(
                                 &p,
@@ -1128,6 +1298,7 @@ impl PreviewApp {
         self.window = Some(window);
         self.render_context = Some(context);
         self.scene_renderer = Some(renderer);
+        self.apply_motion_hold();
 
         if let Some(info) = &self.anim_info {
             println!(
@@ -1169,6 +1340,15 @@ impl PreviewApp {
             );
             self.anim_info = info;
             self.skeletal_entity_assets = skel_assets;
+            for problem in seed_bone_pose(
+                &mut self.animation,
+                &self.args.pose_bones,
+                eid,
+                &mut self.bone_pose,
+            ) {
+                tracing::warn!("--pose-bone: {problem}");
+            }
+            self.pose_dirty = true;
             self.sequence = self.args.sequence.clone().and_then(|p| {
                 attach_sequence(
                     &p,
@@ -1497,7 +1677,9 @@ impl PreviewApp {
 
     /// Upload every skinned entity's bone matrices to the renderer.
     fn upload_bone_matrices(&mut self) {
+        let motion_time = self.motion_time();
         if let (Some(renderer), Some(ctx)) = (&mut self.scene_renderer, &self.render_context) {
+            renderer.set_motion_time(motion_time);
             for (entity_id, asset_name) in &self.skeletal_entity_assets {
                 if let Some(matrices) = self.animation.bone_matrices(entity_id) {
                     renderer.update_bone_matrices(
@@ -1509,6 +1691,49 @@ impl PreviewApp {
                     );
                 }
             }
+        }
+    }
+
+    /// The clock motion on twos ticks by (#871): the clip's own playback
+    /// time (the one the timeline shows), so a paused scrub steps through
+    /// held drawings as playing does, and a slowed clip draws fewer a
+    /// second, as slowing film does. Wraps with the clip's loop.
+    fn motion_time(&self) -> f64 {
+        let Some(eid) = self.state.lock().ok().and_then(|s| s.entity_id) else {
+            return self.anim_time_accumulator;
+        };
+        // The timeline's order: a node clip's time wins over a skeletal one
+        if let Some(ps) = self.animation.node_playback_state(&eid) {
+            return ps.time;
+        }
+        if let Some(ps) = self.animation.skeletal_playback_state(&eid) {
+            return ps.time;
+        }
+        self.anim_time_accumulator
+    }
+
+    /// Write the Hold switch into the renderer as the whole-frame rate
+    /// (`PostProcessConfig::motion_hold`, #871): the model and its bones are
+    /// held on ticks, and taking it off shows the live pose at once.
+    fn apply_motion_hold(&mut self) {
+        let rate = if self.hold_on { self.hold_rate } else { 0.0 };
+        let Some(renderer) = &mut self.scene_renderer else {
+            return;
+        };
+        if renderer.post_process_config().motion_hold != rate {
+            let mut config = renderer.post_process_config().clone();
+            config.motion_hold = rate;
+            renderer.set_post_process_config(config);
+        }
+    }
+
+    /// The pose changed by hand, not by time (a layer, a posed bone, a clip
+    /// switch): let it through the hold now rather than at the next tick,
+    /// which while paused never comes (#871).
+    fn release_hold(&mut self) {
+        let eid = self.state.lock().ok().and_then(|s| s.entity_id);
+        if let (Some(renderer), Some(eid)) = (&mut self.scene_renderer, eid) {
+            renderer.release_motion_hold(eid);
         }
     }
 
@@ -1532,7 +1757,8 @@ impl PreviewApp {
         if let Some(eid) = entity_id {
             if let Some(skel) = self.animation.skeleton(&eid) {
                 let contrib = self.animation.skeletal_layer_contribution(&eid);
-                let mesh = skeleton_overlay_mesh(skel, self.layer_viz, contrib);
+                let posed = self.animation.joint_offsets(&eid);
+                let mesh = skeleton_overlay_mesh(skel, self.layer_viz, contrib, posed);
                 renderer.set_skeleton_overlay(&context.device, &mesh);
                 return;
             }
@@ -1617,6 +1843,7 @@ impl PreviewApp {
 
         // Snapshot animation state
         let anim_paused = self.anim_paused;
+        let (hold_on, hold_rate) = (self.hold_on, self.hold_rate);
         let anim_clip_names: Vec<String> = self
             .anim_info
             .as_ref()
@@ -1635,12 +1862,21 @@ impl PreviewApp {
             .as_ref()
             .map(|i| i.skeletal_clip_names.clone())
             .unwrap_or_default();
+        let preview_eid = self.state.lock().ok().and_then(|s| s.entity_id);
+        // A skinned model with no clips has no `anim_info`, and still a skeleton.
         let joint_names: Vec<String> = self
             .anim_info
             .as_ref()
             .map(|i| i.joint_names.clone())
+            .or_else(|| {
+                let skeleton = self.animation.skeleton(&preview_eid?)?;
+                Some(skeleton.joint_names.clone())
+            })
             .unwrap_or_default();
-        let preview_eid = self.state.lock().ok().and_then(|s| s.entity_id);
+        let bone_pose = self.bone_pose.clone();
+        let mut posed_joint = self.posed_joint.min(joint_names.len().saturating_sub(1));
+        let mut new_bone_angles: Option<[f32; 3]> = None;
+        let mut reset_bone_pose = false;
         let layers: Vec<AnimLayer> = preview_eid
             .and_then(|eid| self.animation.skeletal_layers(&eid))
             .map(|l| l.to_vec())
@@ -1787,6 +2023,7 @@ impl PreviewApp {
         let mut seq_seek: Option<f64> = None;
         let mut seq_restart = false;
         let mut seq_loop: Option<bool> = None;
+        let mut new_hold: Option<(bool, f32)> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             // ── Left panel: model info ──
@@ -1984,6 +2221,9 @@ impl PreviewApp {
                                             ui.colored_label(to_color32(c), "\u{25a0}");
                                             ui.label(label);
                                         };
+                                        if !bone_pose.is_empty() {
+                                            swatch(ui, POSED_COLOR, "posed");
+                                        }
                                         match layer_viz {
                                             LayerViz::LastWriter => {
                                                 swatch(ui, BASE_COLOR, "base");
@@ -2009,6 +2249,43 @@ impl PreviewApp {
                                             LayerViz::Off => {}
                                         }
                                     });
+                                }
+                            }
+
+                            // Bone posing: what a skinned model does under a
+                            // pose, with no clip needed
+                            if has_skeleton {
+                                ui.add_space(4.0);
+                                ui.label("Pose a bone");
+                                egui::ComboBox::from_label("Bone")
+                                    .selected_text(joint_names[posed_joint].as_str())
+                                    .show_ui(ui, |ui| {
+                                        for (j, name) in joint_names.iter().enumerate() {
+                                            let label = if bone_pose.contains_key(&j) {
+                                                format!("{name} *")
+                                            } else {
+                                                name.clone()
+                                            };
+                                            ui.selectable_value(&mut posed_joint, j, label);
+                                        }
+                                    });
+                                let mut angles =
+                                    bone_pose.get(&posed_joint).copied().unwrap_or_default();
+                                let mut turned = false;
+                                for (angle, axis) in angles.iter_mut().zip(["X", "Y", "Z"]) {
+                                    turned |= ui
+                                        .add(
+                                            egui::Slider::new(angle, -120.0..=120.0)
+                                                .text(axis)
+                                                .suffix("\u{b0}"),
+                                        )
+                                        .changed();
+                                }
+                                if turned {
+                                    new_bone_angles = Some(angles);
+                                }
+                                if !bone_pose.is_empty() && ui.button("Back to rest").clicked() {
+                                    reset_bone_pose = true;
                                 }
                             }
 
@@ -2068,6 +2345,37 @@ impl PreviewApp {
                             }
                             if ui.small_button("1x").clicked() {
                                 new_speed = Some(1.0);
+                            }
+                        });
+
+                        // Motion on twos (#871): the pose drawn `rate` times
+                        // a second of the clip's time, playing or scrubbed
+                        ui.horizontal(|ui| {
+                            let mut on = hold_on;
+                            let mut rate = hold_rate;
+                            let toggled = ui
+                                .checkbox(&mut on, "Hold")
+                                .on_hover_text(
+                                    "Motion on twos: the pose changes only this many \
+                                     times a second of the clip's own time (12 = on \
+                                     twos at 24 fps), playing and scrubbing",
+                                )
+                                .changed();
+                            let drag = egui::DragValue::new(&mut rate)
+                                .range(1.0..=60.0)
+                                .speed(0.25)
+                                .suffix("/s");
+                            let dragged = ui.add_enabled(on, drag).changed();
+                            if toggled || dragged {
+                                new_hold = Some((on, rate));
+                            }
+                            if on {
+                                // Which drawing the timeline is on
+                                if let Some(n) =
+                                    flint_render::motion_hold::tick(anim_time as f32, rate)
+                                {
+                                    ui.weak(format!("drawing {}", n + 1));
+                                }
                             }
                         });
 
@@ -2587,6 +2895,12 @@ impl PreviewApp {
         }
         if let Some(idx) = new_clip_index {
             self.switch_clip(idx);
+            self.release_hold();
+        }
+        if let Some((on, rate)) = new_hold {
+            self.hold_on = on;
+            self.hold_rate = rate;
+            self.apply_motion_hold();
         }
         if let Some(spd) = new_speed {
             if let Ok(mut state) = self.state.lock() {
@@ -2598,6 +2912,13 @@ impl PreviewApp {
             }
         }
         let mut repose = false;
+        // Everything below but the scrub changes the pose by hand (#871)
+        let by_hand = new_layers.is_some()
+            || new_solo.is_some()
+            || new_mutes.is_some()
+            || (new_bone_angles.is_some() && preview_eid.is_some())
+            || (reset_bone_pose && preview_eid.is_some())
+            || self.pose_dirty;
         if let Some(t) = scrub_time {
             if let Ok(state) = self.state.lock() {
                 if let Some(eid) = state.entity_id {
@@ -2622,6 +2943,29 @@ impl PreviewApp {
         }
         if let Some(mutes) = new_mutes {
             self.muted_layers = mutes;
+            repose = true;
+        }
+        self.posed_joint = posed_joint;
+        if let (Some(angles), Some(eid)) = (new_bone_angles, preview_eid) {
+            self.bone_pose.insert(posed_joint, angles);
+            self.animation.set_joint_offset(
+                eid,
+                posed_joint,
+                Some(euler_deg_to_quat(angles[0], angles[1], angles[2])),
+            );
+            repose = true;
+        }
+        if let (true, Some(eid)) = (reset_bone_pose, preview_eid) {
+            for joint in std::mem::take(&mut self.bone_pose).into_keys() {
+                self.animation.set_joint_offset(eid, joint, None);
+            }
+            repose = true;
+        }
+        if std::mem::take(&mut self.pose_dirty) {
+            // The sliders open on the joint `--pose-bone` named.
+            if let Some((&joint, _)) = self.bone_pose.last_key_value() {
+                self.posed_joint = joint;
+            }
             repose = true;
         }
         if let Some(viz) = new_layer_viz {
@@ -2664,6 +3008,11 @@ impl PreviewApp {
             repose = false;
         }
         if repose {
+            // A scrub is time, and a hold keeps it to its tick; anything
+            // else changed the pose by hand and shows now (#871)
+            if by_hand {
+                self.release_hold();
+            }
             // dt = 0 re-pose so dials and scrubs show immediately, even paused
             self.recompute_pose_now();
         }
@@ -2676,19 +3025,37 @@ fn skeleton_overlay_mesh(
     skel: &Skeleton,
     viz: LayerViz,
     contrib: Option<&LayerContribution>,
+    posed: Option<&BTreeMap<usize, [f32; 4]>>,
 ) -> flint_render::Mesh {
     let positions: Vec<[f32; 3]> = skel
         .global_matrices
         .iter()
         .map(|g| [g[3][0], g[3][1], g[3][2]])
         .collect();
-    if viz == LayerViz::Off {
+    let posed = posed.filter(|p| !p.is_empty());
+    if viz == LayerViz::Off && posed.is_none() {
         return flint_render::generate_skeleton_lines(&positions, &skel.parents);
     }
+    let moved = posed.map(|p| joints_moved_by(&skel.parents, p));
     let colors: Vec<[f32; 4]> = (0..positions.len())
-        .map(|j| joint_viz_color(viz, j, contrib))
+        .map(|j| {
+            if moved.as_ref().is_some_and(|m| m[j]) {
+                POSED_COLOR
+            } else {
+                joint_viz_color(viz, j, contrib)
+            }
+        })
         .collect();
     flint_render::generate_skeleton_lines_colored(&positions, &skel.parents, &colors)
+}
+
+/// Each joint turned by hand, and everything past it. Parents come first.
+fn joints_moved_by(parents: &[Option<usize>], posed: &BTreeMap<usize, [f32; 4]>) -> Vec<bool> {
+    let mut moved: Vec<bool> = Vec::with_capacity(parents.len());
+    for (j, parent) in parents.iter().enumerate() {
+        moved.push(posed.contains_key(&j) || parent.is_some_and(|p| moved[p]));
+    }
+    moved
 }
 
 /// Invert a row-major 4x4 matrix (for extracting world transforms from inverse bind matrices).
@@ -3079,6 +3446,7 @@ impl ApplicationHandler for PreviewApp {
                     }
                 }
 
+                let motion_time = self.motion_time();
                 let context = match &self.render_context {
                     Some(c) => c,
                     None => return,
@@ -3090,6 +3458,9 @@ impl ApplicationHandler for PreviewApp {
 
                 // Bone upload + overlay run every frame (cheap) so a paused
                 // pose still reflects layer dials after a dt=0 re-pose.
+                // Under a hold the clip's time picks the frames they land
+                // on (#871), so it is stamped first.
+                renderer.set_motion_time(motion_time);
                 if self.anim_info.is_some() {
                     for (entity_id, asset_name) in &self.skeletal_entity_assets {
                         if let Some(matrices) = self.animation.bone_matrices(entity_id) {
@@ -3108,7 +3479,9 @@ impl ApplicationHandler for PreviewApp {
                         if let Some(eid) = self.skeletal_entity_assets.keys().next() {
                             if let Some(skel) = self.animation.skeleton(eid) {
                                 let contrib = self.animation.skeletal_layer_contribution(eid);
-                                let mesh = skeleton_overlay_mesh(skel, self.layer_viz, contrib);
+                                let posed = self.animation.joint_offsets(eid);
+                                let mesh =
+                                    skeleton_overlay_mesh(skel, self.layer_viz, contrib, posed);
                                 renderer.set_skeleton_overlay(&context.device, &mesh);
                             }
                         }
@@ -3160,5 +3533,56 @@ impl ApplicationHandler for PreviewApp {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_motion_hold_flag_sets_the_hold_switch() {
+        assert_eq!(hold_from_flag(Some(8.0)), (true, 8.0));
+        assert_eq!(hold_from_flag(Some(12.0)), (true, 12.0));
+        // Off, but the switch still turns it on at twelve
+        assert_eq!(hold_from_flag(None), (false, 12.0));
+        assert_eq!(hold_from_flag(Some(0.0)), (false, 12.0));
+        assert_eq!(hold_from_flag(Some(f32::NAN)), (false, 12.0));
+    }
+
+    #[test]
+    fn a_bone_pose_is_a_joint_and_three_angles() {
+        let (joint, angles) = parse_bone_pose("seg_0001:10,-20,30.5").unwrap();
+        assert_eq!(joint, "seg_0001");
+        assert_eq!(angles, [10.0, -20.0, 30.5]);
+        // Only the last colon splits: glTF joint names can hold one.
+        assert_eq!(
+            parse_bone_pose("mixamorig:Spine:1,2,3").unwrap().0,
+            "mixamorig:Spine"
+        );
+        assert!(parse_bone_pose("seg_0001").is_err());
+        assert!(parse_bone_pose("seg_0001:1,2").is_err());
+        assert!(parse_bone_pose("seg_0001:a,b,c").is_err());
+    }
+
+    #[test]
+    fn a_posed_joint_moves_everything_past_it() {
+        // 0 -> 1 -> 2, and 0 -> 3
+        let parents = [None, Some(0), Some(1), Some(0)];
+        let posed = BTreeMap::from([(1, [0.0, 0.0, 0.0, 1.0])]);
+        assert_eq!(
+            joints_moved_by(&parents, &posed),
+            [false, true, true, false]
+        );
+    }
+
+    /// `flint-procgen` can't see the renderer, so its copy of the limit is
+    /// held to the real one here, in a crate that sees both.
+    #[test]
+    fn procgen_knows_the_renderers_bone_limit() {
+        assert_eq!(
+            flint_procgen::MAX_SKINNED_BONES,
+            flint_render::skinned_pipeline::MAX_BONES
+        );
     }
 }

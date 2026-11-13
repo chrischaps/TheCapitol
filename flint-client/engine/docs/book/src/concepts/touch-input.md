@@ -103,8 +103,9 @@ Touch state is accessible from [Rhai scripts](scripting.md) via these functions:
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `touch_count()` | `i64` | Number of currently active touches |
-| `touch_x(index)` | `f64` | Normalized X position (0--1) of touch at index |
-| `touch_y(index)` | `f64` | Normalized Y position (0--1) of touch at index |
+| `touch_id(index)` | `i64` | The ID of the touch at `index`, `0` to `touch_count() - 1`, lowest ID first (`-1` past the last) |
+| `touch_x(id)` | `f64` | Normalized X position (0--1) of the touch with that ID (`-1.0` if none) |
+| `touch_y(id)` | `f64` | Normalized Y position (0--1) of the touch with that ID (`-1.0` if none) |
 | `is_touching(id)` | `bool` | Whether the given touch ID is currently active |
 | `touch_just_started(id)` | `bool` | Whether the touch ID just became active this frame |
 | `touch_just_ended(id)` | `bool` | Whether the touch ID just ended this frame |
@@ -114,8 +115,8 @@ Touch state is accessible from [Rhai scripts](scripting.md) via these functions:
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `tap_count()` | `i64` | Number of taps detected this frame |
-| `tap_x(index)` | `f64` | Normalized X position of tap at index |
-| `tap_y(index)` | `f64` | Normalized Y position of tap at index |
+| `tap_x(index)` | `f64` | Normalized X position of tap at index (`-1.0` if out of range) |
+| `tap_y(index)` | `f64` | Normalized Y position of tap at index (`-1.0` if out of range) |
 
 ### Swipe Detection
 
@@ -138,11 +139,11 @@ fn on_update() {
     let dt = delta_time();
 
     // Action-based movement works with both keyboard and touch
-    if action_held("move_left") {
+    if is_action_pressed("move_left") {
         let pos = get_position(me);
         set_position(me, pos.x - speed * dt, pos.y, pos.z);
     }
-    if action_held("move_right") {
+    if is_action_pressed("move_right") {
         let pos = get_position(me);
         set_position(me, pos.x + speed * dt, pos.y, pos.z);
     }
@@ -160,8 +161,11 @@ fn on_draw_ui() {
     let h = screen_height();
 
     for i in 0..touch_count() {
-        let tx = touch_x(i) * w;
-        let ty = touch_y(i) * h;
+        // touch_x takes a touch's ID, which isn't its index: the platform
+        // names fingers (a browser's pointer IDs start well above 0)
+        let id = touch_id(i);
+        let tx = touch_x(id) * w;
+        let ty = touch_y(id) * h;
         draw_circle(tx, ty, 20.0, 1.0, 1.0, 1.0, 0.4);
     }
 }
@@ -169,16 +173,18 @@ fn on_draw_ui() {
 
 ## Design Philosophy
 
-The touch system is intentionally minimal. Rather than providing virtual joysticks, gesture recognizers, or complex multi-touch state machines, it gives you:
+The touch system gives you:
 
 1. **Zone-based action bindings** --- works with the existing input config system
 2. **Raw touch state** --- positions, phases, and tap detection exposed to scripts
 3. **Mouse emulation** --- desktop testing without hardware
+4. **On-screen controls** --- a virtual stick, buttons, a menu button and look drag, declared in the input config and drawn by the engine ([On-Screen Touch Controls](touch-controls.md))
 
-Game-specific touch UI (virtual D-pads, on-screen buttons, swipe gestures) belongs in scripts, not the engine. The engine provides the primitives; scripts compose them into the interaction model that fits each game.
+The on-screen controls are the one piece of touch UI the engine draws, because they are input devices: they must take a finger before egui does and drive key-bound actions within the frame. Anything game-specific beyond them (gesture menus, drag-to-aim, a custom D-pad) still belongs in scripts, built from the primitives above.
 
 ## Further Reading
 
+- [On-Screen Touch Controls](touch-controls.md) --- virtual sticks and buttons for key-bound actions
 - [2D Sprites](sprites-2d.md) --- the rendering system for 2D games
 - [Scripting](scripting.md) --- full scripting API reference
 - [Physics and Runtime](physics-and-runtime.md) --- the input system and game loop

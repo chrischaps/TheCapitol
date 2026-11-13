@@ -11,14 +11,32 @@ Flint is a CLI-first, AI-agent-optimized 3D game engine written in Rust. The pri
 ```bash
 cargo build                    # Debug build
 cargo build --release          # Release build
+cargo build -p flint-cli --no-default-features  # Headless CLI: no sound card, gamepads or file dialogs,
+                               #   so no ALSA/libudev headers on Linux (#221; features audio/gamepad/dialogs;
+                               #   `bash scripts/headless-check.sh [--build]` keeps device crates out of its tree)
 cargo run --bin flint -- <cmd> # Run CLI
-cargo run --bin flint -- play demo/phase4_runtime.scene.toml  # Play a scene
-cargo run --bin flint-player -- demo/phase4_runtime.scene.toml --schemas schemas  # Standalone player
+cargo run --bin flint -- play examples/phase4_runtime.scene.toml  # Play a scene
+cargo run --bin flint-player -- examples/phase4_runtime.scene.toml  # Standalone player (schemas: the root flint.toml)
+cargo run --bin flint -- export web examples/  # any game as a folder a static server plays (#106):
+                               #   examples/dist/web = player + games/<id>/ bundles + games.json;
+                               #   --out, --player <trunk dist> (else trunk builds it), --meta k=v, --clean
 cargo test                     # Run all tests
 cargo test -p flint-core       # Test a single crate
 cargo clippy                   # Lint
-cargo fmt --check              # Check formatting
+cargo fmt --all                # Format (rustfmt.toml pins the edition; `rustfmt <file>` for one file)
+bash scripts/ci.sh             # What a PR must pass: formatting and a record for every cited ADR
+                               #   (scripts/adr-check.sh), in seconds. `issue.sh land` runs it.
+bash scripts/ci.sh --full      #   ...plus what CI's clippy and wasm jobs run (two builds)
 ```
+
+## Build output across worktrees
+
+Every agent worktree builds its own `target/`, and parallel worktrees are how this repo is worked, so disk is what runs out (#762):
+
+- **Keep `target/` per worktree; never point several at one `CARGO_TARGET_DIR`.** Cargo names a workspace crate's output by its path inside the workspace, so two worktrees' `flint-render` share one output and a branch can build against the other's (2026-10-30: a branch failed on a method its own source defines). One target dir also has one build lock, so parallel agents queue, and tests that write into it collide (#421). An A/B against another revision gets its own dir.
+- **The dev profile is lean** (`Cargo.toml`): line tables for workspace crates, no debug info for dependencies. A cold `cargo build` plus `cargo test --no-run` measures 6.6 GB and 150 s. Locals in a debugger: `CARGO_PROFILE_DEV_DEBUG=full`. What loads a texture is built at `opt-level = 3` even in debug (#326): the image decoders, glTF, SHA-256 and `flint-pixels`, where the texel loops live so `flint-render` stays unoptimized. A debug render of a scene with a 32 MB model takes about 2.6 s; a new per-texel loop on load goes in `flint-pixels`.
+- **sccache is optional, per machine, not in `.cargo/config.toml`** (a wrapper that isn't installed fails every build). With `RUSTC_WRAPPER=sccache` a cold-cache build measured no slower (96 s); what a warm cache saves the next worktree is unmeasured (the run was stopped for low memory). It can cache only dependencies, since the workspace crates build incrementally.
+- **Disk is guarded** by `scripts/build-space.sh`. A hook refuses `issue.sh claim` under 30 GB free (`FLINT_DISK_FLOOR_GB`), and the SessionStart hook deletes the `target/` of worktrees whose issue is closed (not the worktree, not one built in the last hour). `report` lists every worktree's `target/` by size. A release build adds several GB: before one, check `df -h .`, and delete your own worktree's `target/release` when you're done with it.
 
 ## Development Workflow
 
@@ -26,94 +44,63 @@ Flint uses an **edit -> validate -> play** loop:
 
 1. **`flint render`** -- Headless scene-to-PNG snapshot. Primary validation tool for AI agents.
    ```bash
-   flint render levels/demo.scene.toml --output test.png --schemas schemas --width 1280 --height 720
-   flint render levels/demo.scene.toml --output test.png --schemas schemas \
+   flint render levels/demo.scene.toml --output test.png --width 1280 --height 720
+   flint render levels/demo.scene.toml --output test.png \
      --distance 20 --pitch 30 --yaw 45 --target 0,1,0 --no-grid
-   # Debug/post-processing flags:
-   #   --debug-mode wireframe|normals|depth|uv|unlit|metalrough
-   #   --wireframe-overlay    --show-normals    --no-tonemapping
-   #   --no-shadows           --shadow-resolution 2048
-   #   --no-postprocess       --bloom-intensity 0.08  --bloom-threshold 1.0
-   #   --exposure 1.5         --ssao-radius 0.5       --ssao-intensity 1.0
-   #   --ssao-samples 64      (1-64; SSAO is the heaviest per-pixel pass — 16 is ~4x cheaper)
-   #   --fog-density 0.02     --fog-color 0.7,0.75,0.82  --fog-height-falloff 0.1
-   #   --dither-intensity 0.03   --desaturate 0.85
-   #   --dof 0.6  --dof-focus 10  --dof-range 5
-   #   --volumetric-density 1.0  --volumetric-samples 32
-   #   --kuwahara-radius 4       --kuwahara-sharpness 8.0
-   #   --kuwahara-hardness 8.0   --kuwahara-anisotropy 1.0
-   #   --oren-nayar 0.7          --sheen-strength 0.15  --sheen-color 1,0.9,0.8
-   #   --grade-lift 0.03,0.02,0.015  --grade-gamma 1,1,1  --grade-gain 1.04,1,0.94
-   #   --film-grain 0.03         --grain-time 0  --fxaa
-   #   --particle-time 2.0    (step emitters/effects deterministically before
-   #                           capture; default none = no particles. ADR 0068)
-   #   --msaa 4               (1|4; default 1 keeps pixel gates single-sample.
-   #                           Also on flint-player. ADR 0058)
-   # Note: --shadow-resolution defaults to 2048 (the renderer's construction
-   # default) and is a real control since the texel-size upload (ADR 0049).
-   #   --render-mode 1 --mode-mix 1.0 --mode-params 3,0,6,0
-   #     (modes: 1=matrix 2=blood 3=drunk 4=tron [reality tears; params =
-   #      mask scale, mask style 0 fbm/1 iris, rate, spare] 5=underwater
-   #      [params = signed eye depth m, sea energy 0-1, daylight 0-1,
-   #      biolum 0-1; masks by per-pixel waterline, not the tear mask])
    ```
+   Every flag: `flint render --help`, `--list-styles --json`, `--look help`, and `crates/flint-cli/CLAUDE.md`.
 
 2. **`flint edit <file>`** -- Unified interactive editor. Auto-detects file type and opens the right tool:
    ```bash
    flint edit levels/demo.scene.toml              # Scene viewer (hot-reload)
-   flint edit levels/demo.scene.toml --spline      # Spline/track editor
    flint edit models/character.glb                 # Model previewer (orbit camera)
-   flint edit models/character.glb --watch         # Model previewer with file watching
    flint edit specs/oak_tree.procgen.toml          # Procgen previewer (mesh/texture)
-   flint edit specs/stone_wall.procgen.toml        # Texture pipeline editor (if pipeline pattern)
-   flint edit terrain.terrain.toml                 # Terrain editor
-   flint edit fx/fire.particles.toml               # Particle effect editor (curves, forces, bursts, scrub timeline;
-                                                   #   --preset fire|smoke|sparks|rain creates a missing file;
-                                                   #   --render out.png --anim-time 1.5 = deterministic snapshot)
    ```
-   Supported extensions: `.scene.toml`, `.chunk.toml`, `.procgen.toml`, `.terrain.toml`, `.particles.toml`, `.glb`, `.gltf`.
-   Common flags: `--width`, `--height`, `--no-grid`, `--watch`, `--seed`, `--no-inspector`, `--auto-orbit`.
-   Scene viewer applies the scene's `[post_process]` block on load. **F4 opens the Rendering & Effects menu** (ADR 0053) — every render/post toggle plus its non-binary parameters (SSAO radius/samples, DoF, bloom, fog, grade/grain/FXAA, kuwahara, render modes, shadows + resolution, lighting levers, FOV, debug shading mode), an authored-vs-viewer-default post toggle, DoF-follow (focus plane tracks the last selected entity; values are plain view distances since the ADR 0055 depth fix), and a Particles section (the viewer simulates `particle_emitter` / `particle_effect` entities live; ADR 0068). WASD orbit, Q/E zoom — while an entity is selected, W/E/R switch gizmo mode instead of orbiting. It also seeds the orbit camera from the scene's authored `[camera]` block (Space returns to that framing; ADR 0051 in game repos using this pattern), and supports `--auto-orbit` turntable with O toggle and [ / ] speed like the model previewer.
-   Model flags: `--clip <name>`, `--layer clip[:weight[:mask[:mode]]]` (repeatable), `--sequence <file.sequence.toml>`, `--sequence-loop`, `--anim-time <s>` (with `--render`; replays a sequence deterministically), `--anim-speed <f32>`, `--render <path.png>`, `--no-animate`, `--distance`, `--yaw`, `--pitch`, `--target`, `--fov`.
-   A `*.sequence.toml` lists timestamped animator events (`blend`/`layer`/`speed`/`cue`); the previewer gets a Sequence panel (seek slider + event markers, R = restart), the player auto-loads them from `animations/` and scripts use `play_sequence` / `on_sequence_cue`. Layer weights can ramp via `fade_target`/`fade_duration` (`fade_anim_layer`).
-   The model previewer has a Layers stack (clip/weight/Add-Over/mask/solo-mute per row) and a "Skeleton colour" combo that paints the armature by last writer / layer weight / mask / keyed joints.
-   Scene flags: `--spline` (opens spline/track editor).
-   Old commands (`serve`, `preview`, `gen-preview`, `tex-edit`, `terrain-edit`) still work as hidden aliases.
+   More: `crates/flint-cli/CLAUDE.md`.
 
 3. **`flint gen`** -- Run a procedural generation spec to produce meshes (GLB) or textures (PNG).
    ```bash
    flint gen specs/oak_tree.procgen.toml -o tree.glb
    flint gen specs/stone_wall.procgen.toml -o wall.png
    flint gen specs/oak_tree.procgen.toml --dry-run
-   flint gen specs/oak_tree.procgen.toml --seed 42 -o tree.glb
    ```
+   More, and the goldens: `crates/flint-cli/CLAUDE.md`.
 
 4. **`flint play`** -- Full game runtime with physics, scripting, audio, and input.
+   ```bash
+   flint play examples/phase4_runtime.scene.toml
+   flint play examples/phase4_runtime.scene.toml --width 1920 --height 1080
+   ```
+   More: `crates/flint-player/CLAUDE.md`.
 
-**For AI agents:** After visual changes, always run `flint render` to verify before moving on. The render command loads models (searches `scene_dir/models/` then `../models/`), generates geometry, and computes the full transform hierarchy.
+**For AI agents:** Before playing, rendering or bundling, `flint check <dir|scene> [--json]` is the pre-flight (#687): every problem of a project in one run, each with its file, entity, field, a hint and the paths tried, exit 1 on an error, scripts included (`flint script check` alone gives each script's mistakes as `file:line:col`, #694; `crates/flint-cli/CLAUDE.md`). After visual changes, always run `flint render` to verify before moving on. The render command loads models (found by the project's one asset search: `models/` beside the scene, beside each directory up to the project root, then `engine/`; `flint asset where models <name> --scene <scene>` shows it), generates geometry, and computes the full transform hierarchy.
 
 ## Architecture
 
-26-crate Cargo workspace (plus `tools/arch-analyzer`, a syn-based dependency/metrics extractor feeding the `tools/arch-viewer` web graph; neither is a default member):
+31-crate Cargo workspace (plus `tools/arch-analyzer`, a syn-based dependency/metrics extractor feeding the `tools/arch-viewer` web graph and the book's crate table, checked in CI; neither is a default member):
 
 ```
-flint-cli           CLI binary (clap). Commands: init, entity, scene, query, schema, edit, play, validate, asset, render, gen, prefab,
-  │                 validate-suite, play-suite, calibrate, play-chart, replay-chart, render-suite, spike-rumble
+flint-cli           CLI binary (clap). Commands: init, entity, scene, query, schema, script, edit, serve, preview, play, check,
+  │                 validate, examples, asset, render, style, gen, gen-preview, prefab, bundle, export, spline-edit,
+  │                 terrain-edit, tex-edit, validate-suite, play-suite, calibrate, play-chart, replay-chart, render-suite,
+  │                 goldens, spike-rumble
   ├── flint-asset-gen AI asset generation: pluggable providers (Flux, Meshy, ElevenLabs, Mock)
   ├── flint-procgen   Procedural generation: Generator trait, registry, specs, GLB export
   └── flint-procgen-ai AI-assisted procgen: ProcGenAgent trait, spec creation/refinement
 flint-android       Android entry point (NativeActivity, APK asset extraction)
 flint-player        Standalone player (game loop, physics, audio, animation, scripting, egui HUD)
-  ├── flint-music    Rhythm sessions: suite manifests, charts, tempo maps, ladder/seam/reintegration, replay, offline render
+  ├── flint-rhythm   The rhythm layer: charts, judgment, coherence, ladder/seam/reintegration, replay, haptics
+  ├── flint-music    Music: suite manifests with manifest-named buses, tempo maps, conductor, scheduler, offline render
   ├── flint-input-capture 1 kHz gamepad capture thread (gilrs XInput) stamped against the audio clock; verb maps
-  ├── flint-debug-ui DebugPanel trait + F3/F4 panel roster (Rendering & Effects, ocean, sky, camera, grass, particles...); shared `widgets` (drag helpers, CurveEditor, GradientEditor); optional via debug-hud
+  ├── flint-debug-ui DebugPanel trait + F3/F4 panel roster (Rendering & Effects, ocean, sky, camera, grass, particles, Living Props...); shared `widgets` (drag helpers, CurveEditor, GradientEditor); optional via debug-hud
   ├── flint-script   Rhai scripting with hot-reload
   ├── flint-particles Particle sim: effect assets, curves, forces, bursts, sub-emitters, deterministic stepping
   ├── flint-animation Property tween + skeletal animation
   ├── flint-audio    Kira spatial audio
+  ├── flint-audio-worklet Kira mixer for the browser's AudioWorklet (its own wasm, `--profile worklet`)
   ├── flint-terrain  Heightmap terrain with splat-map blending
   ├── flint-physics  Rapier 3D (character controller, static/kinematic/dynamic bodies, impulse joints)
-  ├── flint-runtime  GameClock, InputState, InputConfig, EventBus, GameStateMachine, PersistentStore
+  ├── flint-runtime  GameClock, InputState, InputConfig, EventBus, GameStateMachine, PersistentStore, pad (gilrs), PadRumble
   ├── flint-viewer   egui inspector with transform gizmos, undo/redo, TOML write-back
   ├── flint-import   glTF model importer
   ├── flint-asset    Content-addressed asset catalog
@@ -121,81 +108,113 @@ flint-player        Standalone player (game loop, physics, audio, animation, scr
   ├── flint-query    PEG query language (pest parser)
   ├── flint-scene    TOML scene serialization/deserialization
   ├── flint-render   wgpu PBR renderer (winit 0.30, wgpu 23, HDR post-processing, bloom, SSAO, fog)
+  ├── flint-pixels   Texel loops on load (RGBA widening, mip chains); no deps, optimized in debug builds
   ├── flint-ecs      hecs wrapper with stable EntityId mapping (BiMap)
   ├── flint-schema   Component/archetype schema system
-  └── flint-core     EntityId, ContentHash, Transform, Vec3, Color, FlintError
+  ├── flint-wooze    The wooze field (how woozy a place is, as a function of position and time) and the boil clock
+  ├── flint-geometry Gerstner ocean spectrum, spline sampling, rays against drawn meshes; their component names
+  └── flint-core     EntityId, ContentHash, Transform, Vec3, Color, FlintError, vfs (read-only file layer)
 ```
+
+## Where the detail lives
+
+Feature notes go in the nearest scoped CLAUDE.md, not in this file. When a ticket says 'update CLAUDE.md', it means the scoped file for the code you changed; add to this root file only what every session needs.
+
+| Scoped file | Covers |
+|---|---|
+| `crates/flint-cli/CLAUDE.md` | `flint render` flags, `edit`, `gen`, goldens, export, Linux |
+| `crates/flint-render/CLAUDE.md` | post-processing, quality, boil, shallow wooze, glyph atlas, caches, lights |
+| `crates/flint-render/src/stylize/CLAUDE.md` | styles, style mask, per-entity and user styles |
+| `crates/flint-procgen/CLAUDE.md` | living props, wooze field, Woozy Grove |
+| `crates/flint-player/CLAUDE.md` | extensions, UI, input, touch, capture, perf, web |
+| `crates/flint-script/CLAUDE.md` | Rhai detail |
+| `crates/flint-core/CLAUDE.md` | vfs, hot reload, shear |
+| `crates/flint-audio/CLAUDE.md` | audio clock, decoding, device features |
+| `crates/flint-{physics,animation,particles,terrain}/CLAUDE.md` | joints, IK, particles, terrain |
+| `tools/showcase/CLAUDE.md` | film rig |
+| `docs/CLAUDE.md` | book build and publish |
+
+A bullet below that names a feature in a line or two has its full text in one of these.
 
 ## Key Design Principles
 
 - **Dynamic components** stored as `toml::Value` -- archetypes defined at runtime in schema TOML files, not Rust types
 - **Stable EntityIds** via atomic counter (never recycled), persisted across save/load
 - **Scene format is TOML** -- `[scene]` metadata + `[entities.<name>]` sections; reload is full re-parse
-- **Schemas in `schemas/`** -- `components/*.toml` for field types, `archetypes/*.toml` for bundles. Multiple `--schemas` paths; later overrides earlier (game overrides engine)
-- **Scripting via Rhai** -- `script` component with `.rhai` files in `scripts/`; callbacks: `on_init`, `on_update`, `on_collision`, `on_trigger_enter/exit`, `on_action`, `on_interact`, `on_draw_ui`, `on_scene_exit/enter`, `on_animation_end`, `on_sequence_cue`, `on_event` (custom events from `fire_event_data`, the engine or `ExtensionCtx::fire_event`); `ScriptCommand` for deferred effects; `DrawCommand` for immediate-mode 2D UI
-- **Particles** -- inline `particle_emitter` or reusable `particles/*.particles.toml` effects via `particle_effect` (multi-emitter, curves, forces, bursts, sub-emitters; ADR 0068). Deterministic: per-emitter seeds from entity *names*, fixed-step `simulate_to`, `flint render --particle-time`. One shared `ParticleInstance` type; every consumer uploads through `SceneRenderer::update_particles_from` after `ParticleSystem::pack`. Scripts: `play_effect`/`stop_effect`/`set_effect_param`. F3 Particles panel in the player; F4 Particles section in the viewer
+- **Schemas in `schemas/`** -- `components/*.toml` for field types, `archetypes/*.toml` for bundles, `scene/*.toml` for scene-level tables (`[table.<name>]`: `[post_process]`, a game's own `[weather]`; #686, `crates/flint-core/CLAUDE.md`). Several directories load in order, later overriding earlier (game overrides engine). One resolver names them for every command, the viewer and the player (ADR 0114; `crates/flint-core/CLAUDE.md`): repeatable `--schemas` flags if given (the whole list), else `[project] schemas` in the project's `flint.toml`, else `schemas/` in the working directory, beside the scene and one level up
+- **Scripting via Rhai** -- `script` component with `.rhai` files in `scripts/`; callbacks: `on_init`, `on_update`, `on_collision`, `on_trigger_enter/exit`, `on_action`, `on_interact`, `on_draw_ui`, `on_scene_exit/enter`, `on_animation_end`, `on_sequence_cue`, `on_event`, `on_expression(state)`, `on_persist_migrate(from)`; `ScriptCommand` for deferred effects; `DrawCommand` for immediate-mode 2D UI
 - **All game UI is script-driven** -- no hardcoded HUD; `hud_controller` entity + `hud.rhai` pattern; engine provides draw primitives (`draw_text/rect/circle/line/sprite`), scripts compose UI
-- **Game project pattern** -- games in own repos with engine as git subtree at `engine/`; `--schemas engine/schemas --schemas schemas` for layered overrides
-- **Player extensions** (ADRs 0071-0075) -- a game binary embeds `PlayerApp` and installs `PlayerExtension`s (`add_extension`): `register_script_api` (native Rhai fns; same signature replaces Flint's), `pre_update(ExtensionCtx)` before scripts' `on_update` (world, clock, input, last frame's camera, `gpu` for `upload_mesh`/`remove_mesh`, `attach_mesh`, `fire_event` -> scripts' `on_event` same frame), `on_window_event` (only input events consumable) and `ui(egui)` drawn between script UI and the Foreground debug panels. `fonts(&mut FontDefinitions)` edits egui's fonts before each install (ADR 0081); `fonts/fonts.toml` `[egui] proportional/monospace` names egui's default faces, and every named family falls back to egui's fonts. With any extension installed, egui sees input first; a release follows its press. Runtime meshes are frustum-culled per draw by their AABBs (every game). Picking: `Camera::screen_to_ground` / Rhai `screen_to_ground`. Book: guides/player-extensions.md
+- **Game project pattern** -- games in own repos with engine as git subtree at `engine/`; `schemas = ["engine/schemas", "schemas"]` under `[project]` in the game's `flint.toml` layers the game's schemas over the engine's with no flags, and `--schemas engine/schemas --schemas schemas` overrides it for a run
+- **Player extensions** (ADRs 0071-0075) -- a game binary embeds `PlayerApp` and installs `PlayerExtension`s (`add_extension`): native Rhai fns, `pre_update` before scripts' `on_update`, window events, egui UI. Book: guides/player-extensions.md
+- **Every runtime read goes through `flint_core::vfs`** (#97) -- `vfs::read` / `read_to_string` / `read_dir` / `exists` / `is_file` / `is_dir`, never `std::fs` or `Path::exists` in a runtime crate. Decode images with `flint_render::open_image` and glTF through `flint_import::import_gltf`. Tests and the CLI keep `std::fs`
 - **Fixed-timestep physics** (1/60s) via accumulator; animation/particles run at variable rate
-- **Physics joints** (ADR 0069) -- `joint` component (hinge/prismatic/spherical/fixed) on a dynamic entity, attached to `joint.parent` or the transform parent. Bodies are placed from `get_world_matrix` and dynamic poses write back as local `position` + `rotation_quat`; unit scale is assumed on the physics chain. TOML units are degrees/metres, converted to Rapier radians at sync. Scripts drive `motor_target` via `set_joint_target` and pose rest-quaternion nodes with `rotate_local` / `set_rotation_quat` (`set_rotation` still deletes the quaternion). Bench: `demo/joint_test.scene.toml`
-- **Two-bone IK** (ADR 0070) -- `ik_two_bone` component on the second bone of a transform chain names `target`, `pole` and `tip` entities; `IkPass` (flint-animation) solves after scripts/physics/animation each frame and before the renderer reads world matrices, writing only the two bones' `rotation_quat` from their captured rest. Lengths come from the model's rest offsets. `flint render` runs it once
-- **Post-processing** -- HDR pipeline (`Rgba16Float`) with bloom, SSAO, fog, volumetric (god rays), Kuwahara (anisotropic painterly filter), vignette; `[post_process]` TOML block; F4 opens the Rendering & Effects debug menu in the player and viewer (all toggles + parameters, ADR 0053); when active, PBR shaders output linear HDR
-- **Scene transitions** -- `TransitionPhase` lifecycle with script-driven visuals; `PersistentStore` survives transitions; `GameStateMachine` pushdown automaton with per-system `SystemPolicy`
-- **Input system** -- TOML-based `InputConfig` with layered loading (built-in -> game -> user overrides -> CLI); keyboard/mouse/gamepad/touch unified via `Binding` enum
 
 ## Critical Gotchas
 
 - `toml::toml!` macro produces `Map<String, Value>` not `Value` -- needs `.into()` in tests
 - wgpu v23: `Instance::new()` takes owned `InstanceDescriptor`; max 4 bind groups (0-3); `wgpu::Queue` is not `Clone` -- pass `&Queue` through, do not stash one in a struct
-- wgpu v23 on DX12: the shader-visible sampler heap has 2048 slots and every bind group's samplers are copied into it, with no sharing, so samplers in a per-entity or per-material bind group cap how many can live ("Not enough memory left" in `create_bind_group`, DX12 only; test with `WGPU_BACKEND=dx12`). Keep samplers in groups bound once a frame: PBR materials sample with the light group's `material_sampler` (group 2, binding 4), and a material bind group holds none
 - winit v0.30: `ApplicationHandler` trait with `run_app()`; `DeviceEvent::MouseMotion` for raw mouse delta
 - Rapier v0.22: character controller types in `rapier3d::control`, NOT `rapier3d::prelude`
 - Kira v0.11: `Decibels(f32)` and `PlaybackRate(f64)` are tuple structs; uses `glam` via `mint`
 - `AudioManager::new()` / `Gilrs::new()` may fail in headless/CI -- wrap in `Option`
-- Rhai v1.24 `sync`: `call_fn()` Scope visible only to direct callee, NOT sub-functions; entity IDs as `i64`; no implicit numeric coercion (`0.0` is NOT `0`); draw `_ex` functions take `layer` as int (`0`), not float (`0.0`)
-- `ScriptCallContext` uses raw `*mut FlintWorld` -- only valid during `call_update()`/`process_events()` scope
-- `on_update()` is parameterless -- use `delta_time()` API; `on_interact` checks `interactable.range` + `.enabled`
-- `on_draw_ui()` ALWAYS runs even when scripts paused (pause menus need it)
-- HDR format `Rgba16Float` -- all pipelines must use this when post-processing active; `resize_postprocess()` on window resize
-- `render_draw_commands()` is a free function to avoid borrow conflicts; `load_pending_sprites()` before egui borrow
-- Screen size for draw commands must be egui logical points, NOT physical pixels
-- Skeletal animation: separate `SkinnedVertex`/`skinned_pipeline`; bone matrices in storage buffer (bind group 3)
-- Particles: no depth write; one shared storage buffer indexed by `first_instance`; skip draw for 0 alive; `bytemuck::cast_slice` for zero-copy
-- `flint-terrain` does NOT depend on `flint-render`; uses standard `Vertex` format so reuses shadow pipeline
+- Rhai v1.24 `sync`: `call_fn()` Scope visible only to direct callee, NOT sub-functions; entity IDs as `i64`
 - `flint-android` excluded from `default-members` -- use `cargo ndk -p flint-android`; min API 26. `cargo test --workspace` fails on `ndk-sys` on Windows; use plain `cargo test`
 - Windows links a 1 MB main-thread stack; debug builds of flint-cli's clap parser overflow it -- `.cargo/config.toml` links with `/STACK:8388608`. Don't remove it, and don't grow `Commands` assuming stack is free.
 - Scene entity `merge_component()` does field-level merge INTO archetype defaults, not full replacement
-- `flint_core::toml_util` -- use `toml_f64`/`toml_f32`/`toml_vec3`/etc. instead of inline coercion patterns
-- Never use `archetype = "furniture"` on non-visual entities -- furniture includes `bounds`, renders teal boxes
-- Per-frame GPU allocations are the renderer's CPU cliff: `update_from_world` rebuilds the draw lists every frame, so anything it needs per entity must come from a cache (`draw_bind_cache` for transform/material binds keyed by entity + sub-mesh with a material hash, `box_mesh_cache` for procedural boxes, `GpuMesh` buffers shared via `Arc`, one dynamic-offset uniform buffer for all shadow draws). Never `create_buffer`/`create_bind_group` inside a per-entity loop; a 270-entity scene went from ~17 ms to ~4 ms when those were removed
-- Offline capture: `flint-player --frame-step S` advances the clock exactly S seconds per frame (wall time ignored), and with `--screenshot-every S` every frame is written; `--input-script FILE` plays timed `down`/`up`/`tap` keys, `axis` values and gamepad `press`/`release` (on pad slot 9) at game times (format in `player_app/input_script.rs`); a scripted key also goes through the debug keys (`handle_debug_key`), so `tap F2` opens the stats overlay, and `--stats` opens it from the first frame. Together they make deterministic, smooth gameplay footage and scripted regression runs
-- Perf switches: `flint-player --exit-after N` prints `[perf] avg ms/frame`, the spread of dt and of present-to-present times (p50/p90/p99/max and frames over 1.5x p50), and the average draw calls, entity draws, culled draws and triangles on exit; `FLINT_VSYNC=0|mailbox` picks the present mode (Fifo can pace at a virtual display's rate, e.g. 7 Hz with Virtual Desktop attached); `FLINT_FRAME_LATENCY=1..3` sets the swapchain's frame latency (default 2); `FLINT_PACING=0` turns off vsync pacing; `FLINT_SHADOWS=0` disables the shadow pass at start
-- Vsync pacing: under Fifo the player gives `GameClock` the monitor's refresh period (`set_vsync_period`, re-read when the window moves), and `delta_time` comes in whole refresh periods that keep game time on the wall clock. On a hybrid-GPU laptop Fifo lets frames through in bursts (6, 6, 6, then 45 ms at a 60 Hz mean); paced, every frame steps 16.7 ms. Stalls over 250 ms pass through, and frames faster than the refresh on average fall back to raw time. `raw_delta_time` is the unpaced wall time. See the book's Profiling guide
+- Read a component through `world.view(id, comp::COLLIDER)` (`.f32("friction", 0.5)`, `.choice("shape", &[..], "box")`, `.opt_f32(..)`; ADR 0115, `crates/flint-core/CLAUDE.md`): it takes an integer as a number and reports a wrong type or unknown choice once per entity and field. Any other TOML goes through `flint_core::toml_util` (`toml_f64`/`toml_f32`/`toml_vec3`/...). Never `toml::Value::as_float` in a runtime crate: it reads `8` as nothing, and `scripts/wasm-check.sh` denies it
+- `furniture`, `wall`, `floor`, `ceiling`, `pillar`, `room`, `door` (and the `door` component) are not the engine's: they are the examples' layer, `schemas/examples/` (#681). The root `flint.toml` lists it after `schemas/`, so every scene in this checkout resolves them with no flag; a `--schemas` flag is the whole list, so `--schemas schemas` alone leaves them out (add `--schemas schemas/examples`), and a game has none of them unless its own `flint.toml` lists `engine/schemas/examples`. In an example, never put `furniture` on a non-visual entity: it includes `bounds` and draws a teal box. The renderer still colours a `bounds` box by these names (`default_archetype_visuals`)
+- Every `flint_core::components` constant has a schema in `schemas/components/`, and every schema a reader: `cargo test -p flint-schema --test engine_schemas` holds it (ADR 0115; what it checks: `crates/flint-core/CLAUDE.md`). A schema field's `default` is written into the component at load, so give one only where the reader falls back to that same value
+- Per-frame GPU allocations are the renderer's CPU cliff: never `create_buffer`/`create_bind_group` inside a per-entity loop; what a draw needs per entity comes from a cache (`crates/flint-render/CLAUDE.md`)
+- One submission a frame (#139): `SceneRenderer::encode_to` records the whole frame (grass, shadows, scene, post-process, depth upscale, world lines) into the caller's encoder, the player adds its HUD and the GPU timer's resolve (`encode_gpu_timings`), submits once, then calls `frame_submitted` (grass and timer read-backs). `render_to` is that with its own submit.
+- CI (`.github/workflows/ci.yml`, #757) runs `rustfmt` (the tree is formatted; an unformatted file fails the PR and `issue.sh land`), `clippy (native)` (`cargo clippy --all-targets`: warnings pass, a deny-level lint or code that doesn't compile fails), the wasm and headless checks, and the GPU tests on WARP, which don't block while they fail on main (`continue-on-error`). No unit tests run in CI yet
+- CI's `wasm32 check` (`.github/workflows/ci.yml`) builds `flint-player` and every crate it links for `wasm32-unknown-unknown` on each PR. Run it locally with `bash scripts/wasm-check.sh` before pushing runtime-crate changes. It also denies `Instant::now`/`SystemTime::now` and their `elapsed()`, which compile on wasm but panic there: runtime code uses the `web-time` crate (a workspace dep: `web-time = { workspace = true }`), which #100 moved every older site to. Desktop-only deps in a runtime crate go under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`, as in flint-player's Cargo.toml (docs/design/web.md)
 - `FlintWorld::spawn` ids come from a process-wide counter and scenes load from a `HashMap`, so entity ids differ run to run -- derive anything reproducible (seeds) from entity **names**, never ids
+- Lights are `[entities.x.light]` with a `type`, and a directional `direction` points *toward* the light. `flint schema light` lists the fields. A `directional_light` table is not a light: no system reads it, `flint validate` and `flint check` warn about it as an unknown component (with a hint naming `[light] type`), and a scene with only that gets `default_scene_lights`. The frozen fixtures under `tests/fixtures/scenes/` keep one on purpose (#681).
 
 ## Documentation Pipeline
 
-The book is `docs/book` (mdBook), published to docs.chaps.dev. It is kept in sync by a deterministic checker plus an agent playbook; do not sweep it by hand from memory.
+The changelog is for games that carry the engine as a subtree (#765): a change a game can notice (a scene or schema key, a script function, a CLI flag, a format, a Cargo feature, a change in look or behaviour) gets an entry saying what changed and what to do. Each PR adds its own file, `bash scripts/changelog.sh new <issue> <slug>` (`changelog.d/<issue>-<slug>.md`, about 150 words), never an edit to `CHANGELOG.md` or `changelog/` (#788): after the merge the `Changelog` workflow moves it into `changelog/YYYY-MM.md` and `CHANGELOG.md` stays a short page linking the months. `changelog.sh since <date>` prints what is new. CI's `changelog` job (`scripts/changelog-check.sh`) fails a PR that touches `schemas/`, the script API or the scene format with no fragment; a commit-message line `Changelog: none (reason)` waives it for a change no game can notice.
 
-```bash
-python tools/docs-check/check.py              # drift report; exit 0 clean, 1 drift
-python tools/docs-check/check.py --report md  # same, as a PR-body block
-mdbook build docs/book                        # must be clean before any docs commit
-```
+The book is `docs/book` (mdBook), published to docs.chaps.dev by hand from this machine. CI checks its generated parts, the script API (`flint script api --check-book`) and the crate table (`flint-arch-analyzer --check-book`), and `python scripts/docs-check.py` (#375) checks what the prose names against a built `flint`: every `--flag` on a `flint` command line (book and CLAUDE.md files), every `[post_process.styles.<name>]`, every image a page links. Nothing checks what the prose says a flag or key does. When a change alters a command, flag, key or component the book describes, update the book in the same PR, checking against the code rather than memory. There is no `tools/docs-check`, `DOCS_SYNC.md` or `.synced-to` (#175, #375): a ticket that names them is wrong.
 
-- `docs/book/.synced-to` holds the engine SHA the book was last verified against. Update it in every `docs:` commit.
-- `docs/DOCS_SYNC.md` is the playbook (ownership map, rules against inventing keys, commit style). The `docs-sync` skill and `.github/workflows/docs-sync.yml` both follow it: a push to `main` touching `crates/`, `schemas/`, `CLAUDE.md` or `Cargo.toml` runs the checker, and on drift Claude Code opens or refreshes a `docs-sync` PR.
-- `.github/workflows/docs-publish.yml` rebuilds mdBook + rustdoc and pushes docs.chaps.dev when `docs/book/**` lands on `main`. `docs/build.ps1` remains for local `-Serve` previews.
-- Renders for the book are produced locally (no GPU in CI) via the `flint-render` skill and land in `docs/book/src/images/` in kebab-case; `renders/` is scratch and gitignored.
-- When a keybinding is retired, add it to `DEAD_PATTERNS` in the checker so it cannot creep back.
+Build, preview and publish commands: `docs/CLAUDE.md`.
 
 ## Project Structure
 
 - `crates/` -- All workspace crates
-- `schemas/` -- Engine component and archetype TOML definitions
-- `styles/` -- Style guide TOML definitions for AI generation
-- `demo/` -- Showcase scenes, scripts, audio, animations, `particles/` effect assets
-- `testGame/` -- Test project (levels/, schemas/)
-- `docs/book/` -- mdBook source; `docs/DOCS_SYNC.md` -- docs playbook; `tools/docs-check/` -- drift checker
+- `schemas/` -- Engine component, archetype and scene-table TOML definitions; `schemas/examples/` -- the room-builder layer the examples are written in, not part of the engine's set
+- `flint.toml` -- the checkout as a project: `schemas = ["schemas", "schemas/examples"]`, read by everything run from this tree (a game with the engine as a subtree never reads it)
+- `styles/` -- AI style guides (`*.styleguide.toml`, #420; `*.style.toml` is a UI class file) and looks (`*.look.toml`)
+- `examples/` -- Curated example scenes and their assets (was `demo/`, #763); `examples/index.toml` gives each a topic and purpose, `flint examples` lists them, `flint examples --check` (CI) holds the index to the folder and validates each. Improve them freely: nothing pins their pixels
+- `tests/fixtures/scenes/` -- Frozen copies of the scenes the goldens and CLI tests load, with their assets. No golden may load from `examples/` (`no_golden_case_loads_an_example`); a change here is a change to a test
+- `crates/flint-cli/templates/` -- What `flint init` writes (#707): the game-project scaffold, compiled into the binary; `tests/init_cli.rs` builds and runs each
+- `docs/book/` -- mdBook source; `docs/build.ps1` / `docs/publish.sh` -- build, preview and publish it
 - `docs/design/flint-design-doc.md` -- Full design document for remaining phases
+- `docs/adr/` -- Architecture decision records from ADR 0111 on (earlier numbers live only in commit messages); `README.md` says how to take a number
+
+<!-- claims:begin (from chrischaps/Dashboard skills/setup-claims; re-run its install.sh to update) -->
+
+## Claiming issues
+
+Agents on several machines work this repo, all as the same GitHub user, so an issue is claimed before anyone works on it. A claim is the branch `claim/issue-<n>` on origin, holding one empty commit that names the agent and host. Git accepts only the first push of a new branch, so exactly one claimant wins. `scripts/issue.sh` does the whole cycle (bash; on Windows it runs under Git Bash):
+
+```bash
+scripts/issue.sh list                  # who holds what, on every machine, and for how long
+scripts/issue.sh claim <n>             # claim and make the worktree ../Flint-<n>; exit 2: taken, pick another
+scripts/issue.sh claim <n> --here      # claim for the worktree you're already in (a desktop-app worktree)
+scripts/issue.sh claim <n> --base <b>  # branch from, and land on, the feature branch <b>; adds to either form above
+scripts/issue.sh renew <n>             # at the start of each session on long work
+scripts/issue.sh land <n>              # verify, push the branch and open a PR to main; the merge closes the issue and that releases the claim
+scripts/issue.sh release <n>           # giving up: push your branch and comment where it stands first
+scripts/issue.sh reap [--dry-run]      # delete the claims whose issue is closed; the SessionStart hook runs it
+```
+
+A claim ends when its issue closes: `.github/workflows/release-claim.yml` reaps it within a minute of the merge (or of any close), whichever machine held it, so nobody runs `release` after a merge.
+
+- **A hook enforces it.** `.claude/settings.json` runs `scripts/issue-guard.sh` before every `git commit` and `git push`. It refuses issue work (a branch named `issue-<n>`, or a commit saying `Closes #<n>`) unless this session holds the claim, from the worktree it was claimed for. A chore with no issue (a typo, a dependency bump) needs no claim: keep it off `issue-<n>` branches and out of `Closes` lines. A branch built on a sibling's carries the sibling's `Closes` line; once that issue is closed (the sibling merged), the push passes without its claim. A SessionStart hook reaps the claims on closed issues, then lists the rest.
+- **Only the session that claimed an issue renews, releases or lands it,** and only from its worktree. An existing worktree for an issue you didn't claim is another session's: leave it alone. Never delete another agent's `claim/*` branch, with one exception: a claim on a closed issue guards nothing, and `scripts/issue.sh reap` is the one way to clear it.
+- **Work on a feature branch is claimed with `--base <branch>`,** never by changing `scripts/issue.conf`, which would ride into the default branch with the merge. The claim commit records the base, and `renew`, `--steal`, `land` and the hook all follow it. GitHub closes issues only for merges to the default branch, so merging the PR into the claim's base closes the issue, with a comment naming the PR and the branch, and releases the claim. Cut the feature branch from a default branch that already holds the release-claim workflow.
+- **Claims go stale after 24 hours.** `claim <n> --steal` takes over a stale one; check the issue's comments and `origin/issue-<n>` for work in progress first, and continue from it. Taking a younger claim is Chris's call only: `claim <n> --steal --override "<his reason>"`.
+- Settings for this repo are in `scripts/issue.conf`. The tool is vendored from `skills/setup-claims` in chrischaps/Dashboard: change it there, not here. `bash scripts/issue-test.sh` tests it against a throwaway remote.
+
+<!-- claims:end -->

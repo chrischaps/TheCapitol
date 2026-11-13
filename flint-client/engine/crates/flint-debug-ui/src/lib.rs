@@ -1,10 +1,15 @@
 mod camera_panel;
 mod dead_calm_panel;
 mod grass_panel;
+#[cfg(feature = "living")]
+mod living_props_panel;
 mod ocean_panel;
 mod particles_panel;
 mod reality_panel;
 mod render_panel;
+mod style_errors;
+mod styles_panel;
+mod styles_ui;
 mod tod_panel;
 mod visitor_panel;
 mod weather_panel;
@@ -13,12 +18,21 @@ pub mod widgets;
 pub use camera_panel::{CameraDebugPanel, CameraPanelConfig};
 pub use dead_calm_panel::DeadCalmDebugPanel;
 pub use grass_panel::GrassDebugPanel;
+#[cfg(feature = "living")]
+pub use living_props_panel::{
+    pick_prop, Knob, KnobFlags, KnobSources, LivingAbState, LivingHealth, LivingKnobs,
+    LivingPanelAction, LivingPanelState, LivingPickedState, LivingPropRow, LivingPropsDebugPanel,
+    LivingSpeciesState, PanelScope, LIVING_PROPS_DEBUG_PANEL,
+};
 pub use ocean_panel::{OceanDebugPanel, OceanPanelConfig};
 pub use particles_panel::{
     EmitterRow, ParticlePanelAction, ParticlesDebugPanel, PARTICLES_DEBUG_PANEL,
 };
 pub use reality_panel::{RealityDebugPanel, RealityPanelConfig};
 pub use render_panel::{RenderDebugPanel, RenderPanelFlags, RENDER_DEBUG_PANEL};
+pub use style_errors::paint_style_errors;
+pub use styles_panel::{StyledEntityRow, StylesDebugPanel, STYLES_DEBUG_PANEL};
+pub use styles_ui::{StylesEdit, StylesEditor};
 pub use tod_panel::{TimeOfDayDebugPanel, TimeOfDayPanelConfig};
 pub use visitor_panel::VisitorDebugPanel;
 pub use weather_panel::{WeatherDebugPanel, WeatherPanelConfig};
@@ -75,10 +89,12 @@ fn panel_weight(name: &str) -> u32 {
     match name {
         "Rendering & Effects" => 60,
         "Ocean Debug" => 46,
+        "Living Props" => 40,
         "Grass Debug" => 22,
         "Reality" => 20,
         "Weather" => 15,
         "Particles" => 14,
+        "Styles" => 24,
         "Day / Time" => 10,
         _ => 6,
     }

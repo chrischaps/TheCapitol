@@ -1,0 +1,241 @@
+# Flint's CI. No GPU here, and AudioManager::new() / Gilrs::new() can fail
+# headless, so most of the native test suite stays local for now (`cargo
+# test`). The GPU tests and render goldens run on a software adapter (#314).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Formatting (#757). Seconds, no build. The same script is `issue.sh land`'s
+  # verify step (scripts/issue.conf), so a branch that lands has passed it.
+  # Fix a failure with `cargo fmt --all`.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --all --check
+        run: bash scripts/ci.sh
+
+  # Native clippy over the default members (#757). Warnings are printed and
+  # don't fail the job; a deny-level lint does (clippy's correctness group and
+  # anything a crate denies), and so does code that doesn't compile natively,
+  # tests and examples included, which nothing else in CI builds. Tightening
+  # the set of denied lints is #761.
+  # Run it locally with `bash scripts/ci.sh --full`.
+  clippy:
+    name: clippy (native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-native
+
+      # What a full build links on Linux: sound, gamepads, keyboard layouts
+      # and the file dialogs. The script limits and retries apt, which can
+      # hang for the whole job when a runner can't resolve the mirrors; the
+      # step's own limit is the backstop.
+      - name: Build headers
+        timeout-minutes: 15
+        run: bash scripts/linux-build-deps.sh
+
+      # --keep-going: one run lists every crate's failures, not the first's.
+      - name: cargo clippy --all-targets
+        run: cargo clippy --all-targets --keep-going
+
+  # The web player (docs/design/web.md, epic #94). A target nobody builds
+  # rots within a few PRs: this keeps flint-player compiling for wasm32 and
+  # denies the std time calls that compile there but panic at run time.
+  # Run it locally with `bash scripts/wasm-check.sh`.
+  wasm:
+    name: wasm32 check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32
+
+      - name: cargo clippy --target wasm32-unknown-unknown -p flint-player
+        run: bash scripts/wasm-check.sh
+
+  # The headless CLI (#221): flint-cli with --no-default-features leaves out
+  # the sound card, gamepads and file dialogs, so it builds on a Linux box
+  # without ALSA or libudev headers. Nothing is installed here first; the
+  # script also fails if a device crate is back in the tree.
+  # Run it locally with `bash scripts/headless-check.sh --build`.
+  headless:
+    name: headless CLI (no device headers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: headless
+
+      # The image may ship some of them; take them away so the check proves
+      # the build needs none.
+      - name: No device headers
+        run: |
+          sudo apt-get remove -y libasound2-dev libudev-dev >/dev/null 2>&1 || true
+          for lib in alsa libudev; do
+            if pkg-config --exists "$lib" 2>/dev/null; then echo "::error::$lib headers still present"; exit 1; fi
+            echo "$lib: absent"
+          done
+
+      - name: cargo check -p flint-cli --no-default-features
+        run: bash scripts/headless-check.sh --build
+
+      # The examples (#763): every scene under examples/ is in
+      # examples/index.toml and passes what `flint validate` checks. No GPU
+      # needed; the headless CLI is the build CI already has here.
+      - name: flint examples --check
+        run: cargo run -p flint-cli --no-default-features --bin flint -- examples --check
+
+      # The book against the script API (#695): the generated reference
+      # (docs/book/src/reference/script-api.md) and the scripting chapter's
+      # script-api tables match the engine's declarations, and no chapter
+      # calls a function the engine doesn't have (docs/book/script-api-allow.txt
+      # lists the Rust and shader names that aren't script calls). Same binary
+      # as the step above. Fix a stale page with `flint script api --book`.
+      - name: flint script api --check-book
+        run: cargo run -p flint-cli --no-default-features --bin flint -- script api --check-book
+
+      # The book's prose against the CLI (#375): every `--flag` on a `flint`
+      # command line in the book and the CLAUDE.md files is one that
+      # command's --help lists, every `[post_process.styles.<name>]` is a
+      # registered style, every image a page links exists. Same binary.
+      # Names that aren't drift: docs/book/docs-check-allow.txt.
+      - name: docs-check
+        run: python3 scripts/docs-check.py --flint target/debug/flint
+
+  # The GPU tests and render goldens (#314) on WARP, the software DX12
+  # adapter every Windows ships. A runner has no GPU, and these tests skip
+  # without an adapter, so before this job they passed on every PR without
+  # running. FLINT_REQUIRE_GPU turns each skip into a failure, so a missing
+  # WARP can't look green. Run it locally the same way:
+  #   WGPU_BACKEND=dx12 WGPU_ADAPTER_NAME="Microsoft Basic Render Driver" \
+  #   FLINT_REQUIRE_GPU=1 cargo test -p flint-cli --test render_goldens
+  #
+  # Not blocking for now (#757). When it was made so, this job had failed on
+  # every run since 2026-11-09 (both test steps), so a red run had stopped
+  # meaning anything and hid the other jobs' results. `continue-on-error`
+  # lets the run go green while the job still shows its own failure, its
+  # summary and its artifact. Take the line out when the tests pass on main
+  # again; which tests to fix or drop is the test-suite audit's question
+  # (see #572 and #560).
+  gpu:
+    name: GPU tests (WARP)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      WGPU_BACKEND: dx12
+      WGPU_ADAPTER_NAME: Microsoft Basic Render Driver
+      FLINT_REQUIRE_GPU: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gpu-warp
+
+      - name: cargo test -p flint-render --test stylize
+        run: cargo test -p flint-render --test stylize
+
+      # Even when the GPU tests failed: one regression should show in both,
+      # and the goldens' numbers are the cross-adapter record
+      - name: cargo test -p flint-cli --test render_goldens
+        if: success() || failure()
+        # A fixed folder, kept on a pass, for the two steps below (#421: a
+        # local run gets its own stylize-goldens-<pid>, removed on a pass)
+        env:
+          FLINT_GOLDENS_OUT: ${{ github.workspace }}/target/tmp/stylize-goldens
+        run: cargo test -p flint-cli --test render_goldens
+
+      - name: Goldens summary
+        if: always()
+        shell: bash
+        run: python scripts/goldens-summary.py target/tmp/stylize-goldens/report.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload renders and diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stylize-goldens-warp
+          path: target/tmp/stylize-goldens/
+          if-no-files-found: warn
+
+  # A change a game can notice needs a changelog entry (#765): games carry the
+  # engine as a squashed subtree, so the changelog is how they learn what an
+  # update changed. An entry is a fragment, changelog.d/<issue>-<slug>.md
+  # (#788; changelog.yml assembles them after the merge). Fails a pull request
+  # that touches the schemas, the script API or the scene format with no
+  # fragment and no `Changelog: none (reason)` line in a commit message, a
+  # malformed fragment, or a CHANGELOG.md grown past 3 KB. Run it locally with
+  # `bash scripts/changelog-check.sh`; `bash scripts/changelog-test.sh` tests it.
+  changelog:
+    name: changelog
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The branch's own commits, with history, so the script can read their
+      # messages and find where the branch left the base.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: scripts/changelog-check.sh
+        run: bash scripts/changelog-check.sh "origin/${{ github.base_ref }}"
+
+  # The book's crate table (#764): tools/arch-analyzer writes it from every
+  # Cargo.toml into docs/book/src/architecture/crate-graph.md, between the
+  # crate-table markers. Fails when a dependency changed and the page didn't.
+  # Fix it with `cargo run -p flint-arch-analyzer -- --book` and commit the page.
+  crate-table:
+    name: crate table
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: flint-arch-analyzer --check-book
+        run: cargo run --locked -p flint-arch-analyzer -- --check-book

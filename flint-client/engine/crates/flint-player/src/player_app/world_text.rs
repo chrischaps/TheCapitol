@@ -8,12 +8,14 @@
 //! depth, and text on a plane is laid in that plane and projected corner by
 //! corner. They're drawn onto the HUD's target before the HUD, against the
 //! scene's resolved depth (`LessEqual`, no depth write), sampling egui's
-//! font atlas. Colours, strokes and shadows are the HUD's, and so is the
+//! font atlas (and, for a wide stroke or a glow, the HUD's halo picture,
+//! #626). Colours, strokes, glows and shadows are the HUD's, and so is the
 //! blend, so a name looks the same as it would drawn with `draw_text_opts`.
 //! Fog, bloom and tonemapping don't touch it.
 
 use super::fonts::{resolve_font_id, text_layout_job};
 use super::hud_render::to_color32;
+use super::text_halo::{stamp_offsets, wants_halo, HaloSpec, TextHalos};
 use bytemuck::{Pod, Zeroable};
 use flint_core::world_text::WorldText;
 use flint_render::world_line_pipeline::DEPTH_SLACK;
@@ -114,6 +116,7 @@ pub(super) fn lay_out(
     view: &TextView,
     fonts: &HashSet<String>,
     warned: &mut HashSet<String>,
+    halos: &mut TextHalos,
 ) -> Vec<Laid> {
     let mut out = Vec::new();
     for t in texts {
@@ -141,19 +144,35 @@ pub(super) fn lay_out(
             -size.x * f32::from(t.align.min(2)) * 0.5,
             -size.y * f32::from(t.valign.min(2)) * 0.5,
         );
-        // The HUD's order: shadow, then the stroke's eight offsets, then
-        // the text itself.
+        // The HUD's order: shadow, then the stroke (eight offsets, or a
+        // picture with the glow), then the text itself.
         let mut shapes = Vec::new();
         if let Some((color, dx, dy)) = t.shadow {
             let c = to_color32(&color);
-            shapes.push(egui::Shape::galley(pos + egui::vec2(dx, dy) * scale, galley(c), c));
+            shapes.push(egui::Shape::galley(
+                pos + egui::vec2(dx, dy) * scale,
+                galley(c),
+                c,
+            ));
         }
-        if let Some((color, width)) = t.stroke {
+        // Lengths in the label's own units, as points of its layout.
+        let stroke = t.stroke.map(|(c, w)| (c, w * scale));
+        let glow = t.glow.map(|(c, r)| (c, r * scale));
+        if wants_halo(stroke, glow) {
+            // Wide strokes and glows are one picture, as on the HUD (#626).
+            let key = (t.text.as_str(), &font_id, (t.spacing * scale).to_bits());
+            if let Some(shape) = halos.shape(ctx, &body, key, pos, HaloSpec { stroke, glow }) {
+                shapes.push(shape);
+            }
+        } else if let Some((color, w)) = stroke {
             let c = to_color32(&color);
             let stroke = galley(c);
-            let w = width * scale;
-            for (dx, dy) in [(-w, 0.0), (w, 0.0), (0.0, -w), (0.0, w), (-w, -w), (w, -w), (-w, w), (w, w)] {
-                shapes.push(egui::Shape::galley(pos + egui::vec2(dx, dy), stroke.clone(), c));
+            for (dx, dy) in stamp_offsets(w) {
+                shapes.push(egui::Shape::galley(
+                    pos + egui::vec2(dx, dy),
+                    stroke.clone(),
+                    c,
+                ));
             }
         }
         shapes.push(egui::Shape::galley(pos, body, main));
@@ -198,7 +217,16 @@ fn place(t: &WorldText, view: &TextView) -> Option<(Place, f32, f32)> {
             let em_px = em_on_screen(t, right, up, view)?;
             let em_px = em_px.round().clamp(PLANE_EM_PX.0, PLANE_EM_PX.1);
             let points = em_px / view.px_per_point;
-            Some((Place::Plane { at: t.at, right, up, k: t.size / points }, points, points / t.size))
+            Some((
+                Place::Plane {
+                    at: t.at,
+                    right,
+                    up,
+                    k: t.size / points,
+                },
+                points,
+                points / t.size,
+            ))
         }
     }
 }
@@ -277,9 +305,16 @@ pub(super) fn tessellate(ctx: &egui::Context, laid: Vec<Laid>, view: &TextView) 
 /// A layout point (points, anchor at the origin, y down) in clip space.
 fn frame_position(place: &Place, p: [f32; 2], view: &TextView) -> [f32; 4] {
     match *place {
-        Place::Screen { origin, per_point, depth } => {
-            [origin[0] + p[0] * per_point[0], origin[1] + p[1] * per_point[1], depth, 1.0]
-        }
+        Place::Screen {
+            origin,
+            per_point,
+            depth,
+        } => [
+            origin[0] + p[0] * per_point[0],
+            origin[1] + p[1] * per_point[1],
+            depth,
+            1.0,
+        ],
         Place::Plane { at, right, up, k } => {
             let world = add(add(at, right, p[0] * k), up, -p[1] * k);
             project(&view.view_proj, toward(world, view.eye))
@@ -294,7 +329,11 @@ fn add(a: [f32; 3], d: [f32; 3], s: f32) -> [f32; 3] {
 /// `p` moved toward `eye` by the world lines' slack, so text painted on a
 /// surface doesn't fight it for depth.
 fn toward(p: [f32; 3], eye: [f32; 3]) -> [f32; 3] {
-    add(p, [eye[0] - p[0], eye[1] - p[1], eye[2] - p[2]], DEPTH_SLACK)
+    add(
+        p,
+        [eye[0] - p[0], eye[1] - p[1], eye[2] - p[2]],
+        DEPTH_SLACK,
+    )
 }
 
 /// World point to clip space with a column-major view-projection.
@@ -476,7 +515,10 @@ fn upload<'a>(
     bytes: &[u8],
     usage: wgpu::BufferUsages,
 ) -> &'a wgpu::Buffer {
-    if slot.as_ref().is_none_or(|(_, capacity)| *capacity < bytes.len()) {
+    if slot
+        .as_ref()
+        .is_none_or(|(_, capacity)| *capacity < bytes.len())
+    {
         let capacity = bytes.len().next_power_of_two();
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("World Text Buffer"),
@@ -525,12 +567,16 @@ mod tests {
             font: None,
             spacing: 0.0,
             shadow: None,
+            glow: None,
             plane,
         }
     }
 
     fn facing_camera() -> Option<TextPlane> {
-        Some(TextPlane { normal: [0.0, 0.0, 1.0], up: [0.0, 1.0, 0.0] })
+        Some(TextPlane {
+            normal: [0.0, 0.0, 1.0],
+            up: [0.0, 1.0, 0.0],
+        })
     }
 
     fn context() -> egui::Context {
@@ -543,7 +589,14 @@ mod tests {
         let ctx = context();
         let mut laid = Vec::new();
         let _ = ctx.run(Default::default(), |ctx| {
-            laid = lay_out(ctx, texts, v, &HashSet::new(), &mut HashSet::new());
+            laid = lay_out(
+                ctx,
+                texts,
+                v,
+                &HashSet::new(),
+                &mut HashSet::new(),
+                &mut TextHalos::default(),
+            );
         });
         tessellate(&ctx, laid, v)
     }
@@ -612,14 +665,20 @@ mod tests {
 
     #[test]
     fn text_on_a_plane_is_unseen_from_behind() {
-        let away = Some(TextPlane { normal: [0.0, 0.0, -1.0], up: [0.0, 1.0, 0.0] });
+        let away = Some(TextPlane {
+            normal: [0.0, 0.0, -1.0],
+            up: [0.0, 1.0, 0.0],
+        });
         assert!(build(&[text([0.0, 0.0, -10.0], 1.0, away)], &view()).is_empty());
     }
 
     #[test]
     fn text_on_a_plane_reaching_behind_the_camera_is_dropped_whole() {
         // A long name on a wall running past the camera's side.
-        let wall = Some(TextPlane { normal: [1.0, 0.0, 0.0], up: [0.0, 1.0, 0.0] });
+        let wall = Some(TextPlane {
+            normal: [1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+        });
         let mut t = text([-2.0, 0.0, -1.5], 1.0, wall);
         t.text = "A very long name painted along the wall".into();
         assert!(build(&[t], &view()).is_empty());
@@ -646,7 +705,10 @@ mod tests {
     #[test]
     fn several_labels_share_one_draw() {
         let mesh = build(
-            &[text([0.0, 0.0, -10.0], 14.0, None), text([1.0, 1.0, -12.0], 1.0, facing_camera())],
+            &[
+                text([0.0, 0.0, -10.0], 14.0, None),
+                text([1.0, 1.0, -12.0], 1.0, facing_camera()),
+            ],
             &view(),
         );
         assert_eq!(mesh.draws.len(), 1);

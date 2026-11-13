@@ -10,8 +10,8 @@
 #  generated via texture_v1 specs (tavern_brick, cracked_plaster).
 #
 #  Launch:
-#    cargo run --bin flint -- play showcase_game/levels/tavern_hub.scene.toml \
-#      --schemas schemas --schemas showcase_game/schemas
+#    cargo run --bin flint -- play showcase_game/levels/tavern_hub.scene.toml
+#  (its schemas are named by showcase_game/flint.toml)
 #
 #  Controls:
 #    WASD - Move       Space - Jump      Shift - Sprint
@@ -61,9 +61,6 @@ jump_force = 6.0
 height = 1.8
 radius = 0.3
 camera_mode = "first_person"
-
-[entities.player.audio_listener]
-active = true
 
 [entities.player.script]
 source = "footsteps.rhai"
@@ -578,8 +575,7 @@ archetype = "character"
 parent = "main_hall"
 [entities.bartender.transform]
 position = [6.2, 0, 0]
-rotation = [90, -90, 0]
-scale = [0.015, 0.015, 0.015]
+rotation = [0, -90, 0]
 [entities.bartender.model]
 asset = "YBotWithIdle"
 [entities.bartender.skeleton]
@@ -603,8 +599,7 @@ archetype = "character"
 parent = "main_hall"
 [entities.patron_1.transform]
 position = [-1.2, 0, 4.0]
-rotation = [90, 200, 0]
-scale = [0.015, 0.015, 0.015]
+rotation = [0, 200, 0]
 [entities.patron_1.model]
 asset = "YBotWithIdle"
 [entities.patron_1.skeleton]
@@ -628,8 +623,7 @@ archetype = "character"
 parent = "main_hall"
 [entities.patron_2.transform]
 position = [-2.8, 0, 5.0]
-rotation = [90, 20, 0]
-scale = [0.015, 0.015, 0.015]
+rotation = [0, 20, 0]
 [entities.patron_2.model]
 asset = "YBotWithIdle"
 [entities.patron_2.skeleton]
