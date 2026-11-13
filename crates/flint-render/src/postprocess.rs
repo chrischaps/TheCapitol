@@ -10,8 +10,39 @@ use bytemuck::{Pod, Zeroable};
 /// Maximum number of bloom mip levels in the downsample/upsample chain.
 pub const MAX_BLOOM_MIPS: usize = 5;
 
+/// Bytes between the bloom steps' uniform slots: the uniform offset
+/// alignment.
+const BLOOM_SLOT_STRIDE: u64 = crate::bind_cache::SLOT_STRIDE;
+
 /// HDR texture format used for the intermediate scene buffer and bloom chain.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The reality tear's mask and the noise under it (#397), shared by the
+/// composite and the style mask so a `blend_source = "tear"` prop turns
+/// exactly where the composite tears. Prepended to each: WGSL has no include.
+pub const TEAR_MASK_WGSL: &str = include_str!("tear_mask.wgsl");
+
+/// The composite's source: [`TEAR_MASK_WGSL`], then `composite_shader.wgsl`.
+pub const COMPOSITE_WGSL: &str = concat!(
+    include_str!("tear_mask.wgsl"),
+    include_str!("composite_shader.wgsl")
+);
+
+/// The render modes with a reality tear (#397): Matrix (1), blood (2),
+/// drunk (3, which tears nothing it draws), Tron (4) and the tear alone (6),
+/// whose only look is the styled props that follow it. Underwater (5) masks
+/// by its waterline instead.
+pub fn tears(render_mode: u32) -> bool {
+    matches!(render_mode, 1..=4 | 6)
+}
+
+/// Whether `config` draws a reality tear this frame, as the composite sees
+/// it: post-processing on, a tearing mode, and a mix above the composite's
+/// own cut-off. While it doesn't, a `blend_source = "tear"` entity is at
+/// blend 0 everywhere.
+pub fn tear_active(config: &PostProcessConfig) -> bool {
+    config.enabled && tears(config.render_mode) && config.mode_mix > 0.001
+}
 
 /// Post-processing configuration (runtime-adjustable parameters).
 #[derive(Debug, Clone)]
@@ -84,15 +115,32 @@ pub struct PostProcessConfig {
     pub volumetric_density: f32,
     pub volumetric_max_distance: f32,
     pub volumetric_decay: f32,
-    pub kuwahara_enabled: bool,
-    pub kuwahara_radius: u32,
-    pub kuwahara_sharpness: f32,
-    pub kuwahara_hardness: f32,
-    pub kuwahara_anisotropy: f32,
+    /// The shared geometry edges' thresholds (#301): the relative
+    /// view-distance step that is a silhouette, and the rebuilt-normal
+    /// Sobel that is a crease. One pair for every style that reads
+    /// [`StyleFrame::edges`](crate::stylize::StyleFrame::edges), since the
+    /// pass runs once a frame; a style wanting more or fewer lines scales
+    /// the strengths it reads.
+    pub edge_depth: f32,
+    pub edge_normal: f32,
+    /// Film frames each drawing of the shading boil (#214) is held: 1, 2
+    /// or 3. Shared by the boils of the `kuwahara` and `contour` styles,
+    /// whose amounts are their own `boil` parameters (#599).
+    pub boil_on: u32,
+    /// Motion on twos for the whole frame (#405): entities that name no
+    /// `motion_hold` rate of their own are drawn on ticks, this many a
+    /// second, and the post time styles, grain and the tear read holds to
+    /// the start of each tick. 0 = off. See [`crate::motion_hold`].
+    pub motion_hold: f32,
+    /// This frame's drawing, from the wooze field. Whoever owns the clock stamps
+    /// it each frame with `SceneRenderer::set_boil`; a scene with no field never
+    /// does, and its amount of 0 turns both boils off.
+    pub boil: flint_wooze::BoilFrame,
     /// Stylized render mode: 0 = none, 1 = Matrix code, 2 = blood ocean
     /// grade, 3 = drunk, 4 = Tron wireframe (reality tears), 5 = underwater
     /// (submerged-eye moments; masks by a per-pixel waterline, not the
-    /// tear mask).
+    /// tear mask), 6 = the tear alone (#397: no look of its own, so only
+    /// styled props with `blend_source = "tear"` show where it tears).
     pub render_mode: u32,
     /// Blend strength for the active render mode (0 = normal view).
     pub mode_mix: f32,
@@ -116,6 +164,10 @@ pub struct PostProcessConfig {
     /// pixel-diff gates run single-path without it; ADR 0050, the cheap
     /// interim for tech-debt #13 until the MSAA workstream).
     pub fxaa_enabled: bool,
+    /// Registered stylize passes' settings by style name (#262), from a
+    /// scene's `[post_process.styles.<name>]` (Kuwahara's included, #298:
+    /// a scene's old `kuwahara_*` keys are folded in on the way).
+    pub styles: crate::stylize::StyleSettings,
 }
 
 impl Default for PostProcessConfig {
@@ -165,11 +217,11 @@ impl Default for PostProcessConfig {
             volumetric_density: 1.0,
             volumetric_max_distance: 100.0,
             volumetric_decay: 0.98,
-            kuwahara_enabled: false,
-            kuwahara_radius: 4,
-            kuwahara_sharpness: 8.0,
-            kuwahara_hardness: 8.0,
-            kuwahara_anisotropy: 1.0,
+            edge_depth: 0.6,
+            edge_normal: 2.5,
+            boil_on: 2,
+            motion_hold: 0.0,
+            boil: Default::default(),
             render_mode: 0,
             mode_mix: 0.0,
             mode_params: [0.0; 4],
@@ -178,6 +230,7 @@ impl Default for PostProcessConfig {
             grade_gamma: [1.0; 3],
             grade_gain: [1.0; 3],
             fxaa_enabled: false,
+            styles: Default::default(),
         }
     }
 }
@@ -189,6 +242,26 @@ impl PostProcessConfig {
     /// trusted to be bit-exact across drivers.
     pub fn grade_active(&self) -> bool {
         self.grade_lift != [0.0; 3] || self.grade_gamma != [1.0; 3] || self.grade_gain != [1.0; 3]
+    }
+
+    /// The shading boil's two amounts (#214): Kuwahara's paint and the
+    /// contour's ink, each its style's `boil` parameter (#599).
+    pub fn boil_amounts(&self) -> (f32, f32) {
+        let boil = |style: &str| crate::stylize::find(style).map_or(0.0, |d| d.param(self, "boil"));
+        (boil("kuwahara"), boil("contour"))
+    }
+
+    /// Set the shading boil's two amounts ([`boil_amounts`](Self::boil_amounts)).
+    /// Neither style is switched on or off, and an amount already held
+    /// writes nothing, so a style with no table doesn't get one.
+    pub fn set_boil_amounts(&mut self, paint: f32, ink: f32) {
+        let (was_paint, was_ink) = self.boil_amounts();
+        if paint != was_paint {
+            self.styles.set_param("kuwahara", "boil", paint);
+        }
+        if ink != was_ink {
+            self.styles.set_param("contour", "boil", ink);
+        }
     }
 }
 
@@ -237,16 +310,22 @@ pub fn post_process_config_from_def(pp_def: &flint_scene::PostProcessDef) -> Pos
     config.volumetric_density = pp_def.volumetric_density;
     config.volumetric_max_distance = pp_def.volumetric_max_distance;
     config.volumetric_decay = pp_def.volumetric_decay;
-    config.kuwahara_enabled = pp_def.kuwahara_enabled;
-    config.kuwahara_radius = pp_def.kuwahara_radius;
-    config.kuwahara_sharpness = pp_def.kuwahara_sharpness;
-    config.kuwahara_hardness = pp_def.kuwahara_hardness;
-    config.kuwahara_anisotropy = pp_def.kuwahara_anisotropy;
+    config.edge_depth = pp_def.edge_depth;
+    config.edge_normal = pp_def.edge_normal;
+    config.boil_on = pp_def.boil_on;
+    config.motion_hold = pp_def.motion_hold;
     config.film_grain = pp_def.film_grain;
     config.grade_lift = pp_def.grade_lift;
     config.grade_gamma = pp_def.grade_gamma;
     config.grade_gain = pp_def.grade_gain;
     config.fxaa_enabled = pp_def.fxaa;
+    // The old `kuwahara_*` (#298) and `contour_*` (#599) keys arrive folded
+    // into their styles' tables
+    let (styles, warnings) = crate::stylize::StyleSettings::from_tables(&pp_def.style_tables());
+    for warning in warnings {
+        tracing::warn!("{warning}");
+    }
+    config.styles = styles;
     config
 }
 
@@ -387,432 +466,8 @@ pub struct SsaoBlurUniforms {
     pub _pad: [f32; 2],
 }
 
-/// Uniform data for the structure tensor pass.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct KuwaharaTensorUniforms {
-    pub texel_size: [f32; 2],
-    pub _pad: [f32; 2],
-}
-
-/// Uniform data for the structure tensor blur pass.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct KuwaharaTensorBlurUniforms {
-    pub texel_size: [f32; 2],
-    pub _pad: [f32; 2],
-}
-
-/// Uniform data for the anisotropic Kuwahara filter pass.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct KuwaharaUniforms {
-    pub texel_size: [f32; 2],
-    pub radius: f32,
-    pub sharpness: f32,
-    pub hardness: f32,
-    pub anisotropy: f32,
-    pub _pad: [f32; 2],
-}
-
 /// SSAO texture format (single-channel occlusion).
 const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
-
-/// GPU resources for the Kuwahara filter (created on demand).
-pub struct KuwaharaTextures {
-    pub tensor_texture: wgpu::Texture,
-    pub tensor_view: wgpu::TextureView,
-    pub tensor_blur_texture: wgpu::Texture,
-    pub tensor_blur_view: wgpu::TextureView,
-    pub output_texture: wgpu::Texture,
-    pub output_view: wgpu::TextureView,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Pipelines and bind group layouts for the Kuwahara filter (created on demand).
-pub struct KuwaharaPipelines {
-    pub tensor_pipeline: wgpu::RenderPipeline,
-    pub tensor_uniform_bgl: wgpu::BindGroupLayout,
-    pub tensor_texture_bgl: wgpu::BindGroupLayout,
-    pub tensor_uniform_buffer: wgpu::Buffer,
-    pub tensor_blur_pipeline: wgpu::RenderPipeline,
-    pub tensor_blur_uniform_bgl: wgpu::BindGroupLayout,
-    pub tensor_blur_texture_bgl: wgpu::BindGroupLayout,
-    pub tensor_blur_uniform_buffer: wgpu::Buffer,
-    pub pipeline: wgpu::RenderPipeline,
-    pub uniform_bgl: wgpu::BindGroupLayout,
-    pub hdr_bgl: wgpu::BindGroupLayout,
-    pub tensor_input_bgl: wgpu::BindGroupLayout,
-    pub uniform_buffer: wgpu::Buffer,
-}
-
-impl KuwaharaTextures {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
-        let tensor_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Kuwahara Tensor Texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let tensor_view = tensor_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let tensor_blur_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Kuwahara Tensor Blur Texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let tensor_blur_view =
-            tensor_blur_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Kuwahara Texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        Self {
-            tensor_texture,
-            tensor_view,
-            tensor_blur_texture,
-            tensor_blur_view,
-            output_texture,
-            output_view,
-            width: width.max(1),
-            height: height.max(1),
-        }
-    }
-}
-
-impl KuwaharaPipelines {
-    /// Create Kuwahara pipelines. Panics if the GPU driver cannot compile
-    /// the shaders — callers should use catch_unwind.
-    pub fn new(device: &wgpu::Device) -> Self {
-        let kuwahara_tensor_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Kuwahara Tensor Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("kuwahara_tensor_shader.wgsl").into()),
-        });
-
-        let tensor_uniform_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Kuwahara Tensor Uniform BGL"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let tensor_texture_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Kuwahara Tensor Texture BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let tensor_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Kuwahara Tensor Pipeline Layout"),
-                bind_group_layouts: &[&tensor_uniform_bgl, &tensor_texture_bgl],
-                push_constant_ranges: &[],
-            });
-
-        let tensor_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Kuwahara Tensor Pipeline"),
-            layout: Some(&tensor_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &kuwahara_tensor_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &kuwahara_tensor_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let tensor_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Kuwahara Tensor Uniform Buffer"),
-            size: std::mem::size_of::<KuwaharaTensorUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let kuwahara_tensor_blur_shader =
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Kuwahara Tensor Blur Shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("kuwahara_tensor_blur_shader.wgsl").into(),
-                ),
-            });
-
-        let tensor_blur_uniform_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Kuwahara Tensor Blur Uniform BGL"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let tensor_blur_texture_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Kuwahara Tensor Blur Texture BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let tensor_blur_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Kuwahara Tensor Blur Pipeline Layout"),
-                bind_group_layouts: &[&tensor_blur_uniform_bgl, &tensor_blur_texture_bgl],
-                push_constant_ranges: &[],
-            });
-
-        let tensor_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Kuwahara Tensor Blur Pipeline"),
-            layout: Some(&tensor_blur_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &kuwahara_tensor_blur_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &kuwahara_tensor_blur_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let tensor_blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Kuwahara Tensor Blur Uniform Buffer"),
-            size: std::mem::size_of::<KuwaharaTensorBlurUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let kuwahara_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Kuwahara Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("kuwahara_shader.wgsl").into()),
-        });
-
-        let uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Kuwahara Uniform BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let hdr_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Kuwahara HDR BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let tensor_input_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Kuwahara Tensor Input BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let kuwahara_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Kuwahara Pipeline Layout"),
-                bind_group_layouts: &[&uniform_bgl, &hdr_bgl, &tensor_input_bgl],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Kuwahara Pipeline"),
-            layout: Some(&kuwahara_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &kuwahara_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &kuwahara_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Kuwahara Uniform Buffer"),
-            size: std::mem::size_of::<KuwaharaUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        Self {
-            tensor_pipeline,
-            tensor_uniform_bgl,
-            tensor_texture_bgl,
-            tensor_uniform_buffer,
-            tensor_blur_pipeline,
-            tensor_blur_uniform_bgl,
-            tensor_blur_texture_bgl,
-            tensor_blur_uniform_buffer,
-            pipeline,
-            uniform_bgl,
-            hdr_bgl,
-            tensor_input_bgl,
-            uniform_buffer,
-        }
-    }
-}
 
 /// Intermediate target for the FXAA pass (ADR 0050) — only allocated when
 /// `fxaa_enabled` (Kuwahara lazy pattern). The composite pass renders into
@@ -980,10 +635,13 @@ pub struct PostProcessResources {
     pub volumetric_view: wgpu::TextureView,
     pub volumetric_blur_texture: wgpu::Texture,
     pub volumetric_blur_view: wgpu::TextureView,
-    // Kuwahara textures (full resolution, Rgba16Float) — only allocated when enabled
-    pub kuwahara: Option<KuwaharaTextures>,
+    /// The stylize chain's ping-pong targets and the styles' own
+    /// intermediates, made on first use (#262).
+    pub styles: crate::stylize::StyleTargets,
     // FXAA intermediate (full resolution, surface format) — only allocated when enabled
     pub fxaa: Option<FxaaResources>,
+    /// The chain's bind groups, kept until a resize replaces it (#139).
+    pub binds: crate::bind_cache::BindCache,
 }
 
 /// A single level in the bloom mip chain.
@@ -1046,21 +704,23 @@ pub struct PostProcessPipeline {
     pub volumetric_blur_uniform_buffer: wgpu::Buffer,
     // 1x1 black HDR fallback when volumetric is disabled
     pub volumetric_black_view: wgpu::TextureView,
-    // Kuwahara filter pipelines and resources — only allocated when enabled
-    pub kuwahara: Option<KuwaharaPipelines>,
+    /// Stylize passes whose pipelines exist (#262): built when a style is
+    /// first switched on, via `SceneRenderer::ensure_style_resources`.
+    pub styles: crate::stylize::StyleSet,
+    /// The composite's target format, which display-stage styles draw in.
+    pub surface_format: wgpu::TextureFormat,
     // FXAA pipeline — only created when enabled (ADR 0050)
     pub fxaa: Option<FxaaPipeline>,
 }
 
 impl PostProcessPipeline {
-    /// Create all post-processing pipelines and shared resources.
-    /// Kuwahara pipelines are only created when `kuwahara_enabled` is true
-    /// to avoid exhausting VRAM on constrained GPUs.
+    /// Create all post-processing pipelines and shared resources. Stylize
+    /// passes (Kuwahara and the rest) are built on demand, so a style that
+    /// is never switched on costs no VRAM and no shader compile.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
-        kuwahara_enabled: bool,
     ) -> Self {
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("PostProcess Linear Sampler"),
@@ -1075,7 +735,7 @@ impl PostProcessPipeline {
         // --- Composite pipeline ---
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Composite Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("composite_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(COMPOSITE_WGSL.into()),
         });
 
         // Group 0: PostProcessUniforms
@@ -1410,9 +1070,10 @@ impl PostProcessPipeline {
                 cache: None,
             });
 
+        // A slot per bloom step (`run_bloom`)
         let bloom_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Bloom Uniform Buffer"),
-            size: std::mem::size_of::<BloomUniforms>() as u64,
+            size: 2 * MAX_BLOOM_MIPS as u64 * BLOOM_SLOT_STRIDE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2012,13 +1673,6 @@ impl PostProcessPipeline {
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // --- Kuwahara pipelines (only when enabled) ---
-        let kuwahara = if kuwahara_enabled {
-            Some(KuwaharaPipelines::new(device))
-        } else {
-            None
-        };
-
         Self {
             composite_pipeline,
             composite_uniform_bgl,
@@ -2059,7 +1713,8 @@ impl PostProcessPipeline {
             volumetric_blur_uniform_buffer,
             volumetric_black_view,
             ground_fog_empty_view,
-            kuwahara,
+            styles: Default::default(),
+            surface_format,
             // FXAA is created on demand via ensure_fxaa_resources (ADR 0050)
             fxaa: None,
         }
@@ -2070,8 +1725,9 @@ impl PostProcessPipeline {
     /// `resources.fxaa` exist (see SceneRenderer::ensure_fxaa_resources).
     pub fn run_fxaa(
         &self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
         resources: &PostProcessResources,
         target_view: &wgpu::TextureView,
         timer: Option<&mut crate::gpu_timer::GpuTimer>,
@@ -2080,298 +1736,210 @@ impl PostProcessPipeline {
             return;
         };
 
-        let uniforms = FxaaUniforms {
-            texel_size: [1.0 / resources.width as f32, 1.0 / resources.height as f32],
-            _pad: [0.0; 2],
-        };
-        queue.write_buffer(&fxaa.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        if resources.binds.first_write("fxaa") {
+            let uniforms = FxaaUniforms {
+                texel_size: [1.0 / resources.width as f32, 1.0 / resources.height as f32],
+                _pad: [0.0; 2],
+            };
+            queue.write_buffer(&fxaa.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        }
 
-        let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("FXAA Uniform BG"),
-            layout: &fxaa.uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: fxaa.uniform_buffer.as_entire_binding(),
-            }],
-        });
-        let texture_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("FXAA Texture BG"),
-            layout: &fxaa.texture_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
+        let uniform_bg = resources.binds.get("fxaa uniform", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("FXAA Uniform BG"),
+                layout: &fxaa.uniform_bgl,
+                entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&fxaa_res.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-            ],
+                    resource: fxaa.uniform_buffer.as_entire_binding(),
+                }],
+            })
+        });
+        let texture_bg = resources.binds.get("fxaa texture", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("FXAA Texture BG"),
+                layout: &fxaa.texture_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&fxaa_res.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                ],
+            })
         });
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("FXAA Encoder"),
-        });
-        // Timed inside this submission, so a wait for the swapchain image
-        // before it runs isn't counted (ADR 0108).
         let timed = timer.map(|t| {
-            let scope = t.begin(&mut encoder, "FXAA");
+            let scope = t.begin(encoder, "FXAA");
             (t, scope)
         });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("FXAA Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&fxaa.pipeline);
-            pass.set_bind_group(0, &uniform_bg, &[]);
-            pass.set_bind_group(1, &texture_bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        fullscreen_pass(
+            encoder,
+            "FXAA Pass",
+            target_view,
+            Some(wgpu::Color::BLACK),
+            &fxaa.pipeline,
+            &[&uniform_bg, &texture_bg],
+        );
         if let Some((timer, scope)) = timed {
-            timer.end(&mut encoder, scope);
+            timer.end(encoder, scope);
         }
-        queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Run the bloom downsample/upsample chain.
-    /// Reads from the HDR scene texture and writes to bloom mip chain.
+    /// Reads `source` (the HDR scene, or the HDR styles' result when one
+    /// of them feeds bloom, #300) and writes to bloom mip chain. The
+    /// threshold's bind group over it is kept, keyed by `source.id`, so
+    /// the view must live as long as `resources` (both do).
+    ///
+    /// Each step reads its own slot of the bloom uniform buffer (#139):
+    /// the steps used to share one, rewritten and submitted step by step.
+    /// Slot 0 is the threshold, `i` the downsample into mip `i`, and
+    /// `mips + i` the upsample into mip `i`.
     pub fn run_bloom(
         &self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
         resources: &PostProcessResources,
         config: &PostProcessConfig,
+        source: &crate::stylize::StyleInput<'_>,
     ) {
-        if resources.bloom_mip_count == 0 {
+        let mips = resources.bloom_mip_count;
+        if mips == 0 {
             return;
         }
-
-        // Step 1: Threshold — extract bright pixels from HDR into mip[0]
-        {
-            let bloom_uniforms = BloomUniforms {
+        let stride = BLOOM_SLOT_STRIDE as usize;
+        let mut slots = vec![0u8; 2 * mips * stride];
+        let mut put = |slot: usize, u: BloomUniforms| {
+            slots[slot * stride..slot * stride + std::mem::size_of::<BloomUniforms>()]
+                .copy_from_slice(bytemuck::bytes_of(&u));
+        };
+        put(
+            0,
+            BloomUniforms {
                 texel_size: [1.0 / resources.width as f32, 1.0 / resources.height as f32],
                 threshold: config.bloom_threshold,
                 soft_threshold: config.bloom_soft_threshold,
-            };
-            queue.write_buffer(
-                &self.bloom_uniform_buffer,
-                0,
-                bytemuck::cast_slice(&[bloom_uniforms]),
-            );
-
-            let hdr_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Threshold Source BG"),
-                layout: &self.bloom_texture_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&resources.hdr_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                ],
-            });
-
-            let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Threshold Uniform BG"),
-                layout: &self.bloom_uniform_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.bloom_uniform_buffer.as_entire_binding(),
-                }],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Bloom Threshold Encoder"),
-            });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Bloom Threshold Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &resources.bloom_mips[0].view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                pass.set_pipeline(&self.bloom_threshold_pipeline);
-                pass.set_bind_group(0, &uniform_bg, &[]);
-                pass.set_bind_group(1, &hdr_bind_group, &[]);
-                pass.draw(0..3, 0..1);
-            }
-
-            queue.submit(std::iter::once(encoder.finish()));
+            },
+        );
+        let texel = |mip: &BloomMip| BloomUniforms {
+            texel_size: [1.0 / mip.width as f32, 1.0 / mip.height as f32],
+            threshold: 0.0,
+            soft_threshold: 0.0,
+        };
+        for i in 1..mips {
+            put(i, texel(&resources.bloom_mips[i - 1]));
         }
+        for i in 0..mips - 1 {
+            put(mips + i, texel(&resources.bloom_mips[i + 1]));
+        }
+        queue.write_buffer(&self.bloom_uniform_buffer, 0, &slots);
+
+        let uniform_bg = |slot: usize| {
+            resources.binds.get("bloom uniform", slot as u64, || {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Bloom Uniform BG"),
+                    layout: &self.bloom_uniform_bgl,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.bloom_uniform_buffer,
+                            offset: slot as u64 * BLOOM_SLOT_STRIDE,
+                            size: wgpu::BufferSize::new(
+                                std::mem::size_of::<BloomUniforms>() as u64
+                            ),
+                        }),
+                    }],
+                })
+            })
+        };
+        // The source of each step: a mip (1 + i), or the threshold's input
+        // under its own name, keyed by the input's id
+        let source_bg = |name: &'static str, variant: u64, view: &wgpu::TextureView| {
+            resources.binds.get(name, variant, || {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Bloom Source BG"),
+                    layout: &self.bloom_texture_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                        },
+                    ],
+                })
+            })
+        };
+
+        // Step 1: Threshold — extract bright pixels from HDR into mip[0]
+        fullscreen_pass(
+            encoder,
+            "Bloom Threshold Pass",
+            &resources.bloom_mips[0].view,
+            Some(wgpu::Color::BLACK),
+            &self.bloom_threshold_pipeline,
+            &[
+                &uniform_bg(0),
+                &source_bg("bloom input", source.id, source.view),
+            ],
+        );
 
         // Step 2: Progressive downsample mip[0] → mip[1] → ... → mip[N-1]
-        for i in 1..resources.bloom_mip_count {
-            let src = &resources.bloom_mips[i - 1];
-            let dst = &resources.bloom_mips[i];
-
-            let bloom_uniforms = BloomUniforms {
-                texel_size: [1.0 / src.width as f32, 1.0 / src.height as f32],
-                threshold: 0.0,
-                soft_threshold: 0.0,
-            };
-            queue.write_buffer(
-                &self.bloom_uniform_buffer,
-                0,
-                bytemuck::cast_slice(&[bloom_uniforms]),
-            );
-
-            let src_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Downsample Source BG"),
-                layout: &self.bloom_texture_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
+        for i in 1..mips {
+            fullscreen_pass(
+                encoder,
+                "Bloom Downsample Pass",
+                &resources.bloom_mips[i].view,
+                Some(wgpu::Color::BLACK),
+                &self.bloom_downsample_pipeline,
+                &[
+                    &uniform_bg(i),
+                    &source_bg("bloom source", i as u64, &resources.bloom_mips[i - 1].view),
                 ],
-            });
-
-            let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Downsample Uniform BG"),
-                layout: &self.bloom_uniform_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.bloom_uniform_buffer.as_entire_binding(),
-                }],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(&format!("Bloom Downsample {} Encoder", i)),
-            });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&format!("Bloom Downsample {} Pass", i)),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &dst.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                pass.set_pipeline(&self.bloom_downsample_pipeline);
-                pass.set_bind_group(0, &uniform_bg, &[]);
-                pass.set_bind_group(1, &src_bg, &[]);
-                pass.draw(0..3, 0..1);
-            }
-
-            queue.submit(std::iter::once(encoder.finish()));
+            );
         }
 
         // Step 3: Progressive upsample mip[N-1] → mip[N-2] → ... → mip[0]
         // Additive blending accumulates the bloom result
-        for i in (0..resources.bloom_mip_count - 1).rev() {
-            let src = &resources.bloom_mips[i + 1];
-            let dst = &resources.bloom_mips[i];
-
-            let bloom_uniforms = BloomUniforms {
-                texel_size: [1.0 / src.width as f32, 1.0 / src.height as f32],
-                threshold: 0.0,
-                soft_threshold: 0.0,
-            };
-            queue.write_buffer(
-                &self.bloom_uniform_buffer,
-                0,
-                bytemuck::cast_slice(&[bloom_uniforms]),
-            );
-
-            let src_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Upsample Source BG"),
-                layout: &self.bloom_texture_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
+        for i in (0..mips - 1).rev() {
+            fullscreen_pass(
+                encoder,
+                "Bloom Upsample Pass",
+                &resources.bloom_mips[i].view,
+                None,
+                &self.bloom_upsample_pipeline,
+                &[
+                    &uniform_bg(mips + i),
+                    &source_bg(
+                        "bloom source",
+                        (i + 2) as u64,
+                        &resources.bloom_mips[i + 1].view,
+                    ),
                 ],
-            });
-
-            let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Upsample Uniform BG"),
-                layout: &self.bloom_uniform_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.bloom_uniform_buffer.as_entire_binding(),
-                }],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(&format!("Bloom Upsample {} Encoder", i)),
-            });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&format!("Bloom Upsample {} Pass", i)),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &dst.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                pass.set_pipeline(&self.bloom_upsample_pipeline);
-                pass.set_bind_group(0, &uniform_bg, &[]);
-                pass.set_bind_group(1, &src_bg, &[]);
-                pass.draw(0..3, 0..1);
-            }
-
-            queue.submit(std::iter::once(encoder.finish()));
+            );
         }
     }
 
     /// Run the SSAO generation and blur passes.
     /// Reads the depth buffer and writes blurred AO to `resources.ssao_blur_view`.
+    /// `depth_key`: who vouches for `depth_view`, so the bind group over it
+    /// can be kept ([`DepthKey`](crate::bind_cache::DepthKey), #379).
+    #[allow(clippy::too_many_arguments)]
     pub fn run_ssao(
         &self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
         resources: &PostProcessResources,
         config: &PostProcessConfig,
         depth_view: &wgpu::TextureView,
+        depth_key: crate::bind_cache::DepthKey,
         camera: &Camera,
     ) {
         // Write SSAO uniforms
@@ -2393,155 +1961,124 @@ impl PostProcessPipeline {
             bytemuck::cast_slice(&[ssao_uniforms]),
         );
 
-        // Create bind groups
-        let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("SSAO Uniform BG"),
-            layout: &self.ssao_uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.ssao_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let depth_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("SSAO Depth BG"),
-            layout: &self.ssao_depth_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
+        let uniform_bg = resources.binds.get("ssao uniform", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSAO Uniform BG"),
+                layout: &self.ssao_uniform_bgl,
+                entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
-                },
-            ],
+                    resource: self.ssao_uniform_buffer.as_entire_binding(),
+                }],
+            })
         });
-
-        let noise_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("SSAO Noise BG"),
-            layout: &self.ssao_noise_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.ssao_noise_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.ssao_noise_sampler),
-                },
-            ],
+        let depth_bg = resources.binds.get_over(depth_key, "ssao depth", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSAO Depth BG"),
+                layout: &self.ssao_depth_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                    },
+                ],
+            })
+        });
+        let noise_bg = resources.binds.get("ssao noise", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSAO Noise BG"),
+                layout: &self.ssao_noise_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.ssao_noise_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.ssao_noise_sampler),
+                    },
+                ],
+            })
         });
 
         // SSAO generation pass → writes to resources.ssao_view
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("SSAO Generation Encoder"),
-        });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("SSAO Generation Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &resources.ssao_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            pass.set_pipeline(&self.ssao_pipeline);
-            pass.set_bind_group(0, &uniform_bg, &[]);
-            pass.set_bind_group(1, &depth_bg, &[]);
-            pass.set_bind_group(2, &noise_bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        queue.submit(std::iter::once(encoder.finish()));
-
-        // Blur pass → reads ssao_view, writes ssao_blur_view
-        let blur_uniforms = SsaoBlurUniforms {
-            texel_size: [1.0 / resources.width as f32, 1.0 / resources.height as f32],
-            _pad: [0.0; 2],
-        };
-        queue.write_buffer(
-            &self.ssao_blur_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[blur_uniforms]),
+        fullscreen_pass(
+            encoder,
+            "SSAO Generation Pass",
+            &resources.ssao_view,
+            Some(wgpu::Color::WHITE),
+            &self.ssao_pipeline,
+            &[&uniform_bg, &depth_bg, &noise_bg],
         );
 
-        let blur_uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("SSAO Blur Uniform BG"),
-            layout: &self.ssao_blur_uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.ssao_blur_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let blur_texture_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("SSAO Blur Texture BG"),
-            layout: &self.ssao_blur_texture_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&resources.ssao_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-            ],
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("SSAO Blur Encoder"),
-        });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("SSAO Blur Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &resources.ssao_blur_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            pass.set_pipeline(&self.ssao_blur_pipeline);
-            pass.set_bind_group(0, &blur_uniform_bg, &[]);
-            pass.set_bind_group(1, &blur_texture_bg, &[]);
-            pass.draw(0..3, 0..1);
+        // Blur pass → reads ssao_view, writes ssao_blur_view
+        if resources.binds.first_write("ssao blur") {
+            let blur_uniforms = SsaoBlurUniforms {
+                texel_size: [1.0 / resources.width as f32, 1.0 / resources.height as f32],
+                _pad: [0.0; 2],
+            };
+            queue.write_buffer(
+                &self.ssao_blur_uniform_buffer,
+                0,
+                bytemuck::cast_slice(&[blur_uniforms]),
+            );
         }
-
-        queue.submit(std::iter::once(encoder.finish()));
+        let blur_uniform_bg = resources.binds.get("ssao blur uniform", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSAO Blur Uniform BG"),
+                layout: &self.ssao_blur_uniform_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.ssao_blur_uniform_buffer.as_entire_binding(),
+                }],
+            })
+        });
+        let blur_texture_bg = resources.binds.get("ssao blur texture", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSAO Blur Texture BG"),
+                layout: &self.ssao_blur_texture_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&resources.ssao_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                ],
+            })
+        });
+        fullscreen_pass(
+            encoder,
+            "SSAO Blur Pass",
+            &resources.ssao_blur_view,
+            Some(wgpu::Color::WHITE),
+            &self.ssao_blur_pipeline,
+            &[&blur_uniform_bg, &blur_texture_bg],
+        );
     }
 
     /// Run the volumetric ray-march and bilateral blur passes.
     /// Reads the depth buffer and shadow maps, writes blurred god rays to
-    /// `resources.volumetric_blur_view`.
+    /// `resources.volumetric_blur_view`. `shadow_id` is the shadow pass's
+    /// [`gpu_id`](crate::bind_cache::gpu_id), `depth_key` as in
+    /// [`run_ssao`](Self::run_ssao).
+    #[allow(clippy::too_many_arguments)]
     pub fn run_volumetric(
         &self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
         resources: &PostProcessResources,
         config: &PostProcessConfig,
         depth_view: &wgpu::TextureView,
+        depth_key: crate::bind_cache::DepthKey,
         camera: &Camera,
-        shadow_view: &wgpu::TextureView,
-        shadow_sampler: &wgpu::Sampler,
-        shadow_uniforms_buffer: &wgpu::Buffer,
-        light_buffer: &wgpu::Buffer,
+        shadow: VolumetricShadow<'_>,
     ) {
         let half_w = (resources.width / 2).max(1);
         let half_h = (resources.height / 2).max(1);
@@ -2564,455 +2101,210 @@ impl PostProcessPipeline {
             bytemuck::cast_slice(&[uniforms]),
         );
 
-        // Create bind groups
-        let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Volumetric Uniform BG"),
-            layout: &self.volumetric_uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.volumetric_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let depth_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Volumetric Depth BG"),
-            layout: &self.volumetric_depth_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
+        let uniform_bg = resources.binds.get("volumetric uniform", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Volumetric Uniform BG"),
+                layout: &self.volumetric_uniform_bgl,
+                entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
-                },
-            ],
+                    resource: self.volumetric_uniform_buffer.as_entire_binding(),
+                }],
+            })
         });
-
-        let shadow_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Volumetric Shadow BG"),
-            layout: &self.volumetric_shadow_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(shadow_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: shadow_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: light_buffer.as_entire_binding(),
-                },
-            ],
+        let depth_bg = resources
+            .binds
+            .get_over(depth_key, "volumetric depth", 0, || {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Volumetric Depth BG"),
+                    layout: &self.volumetric_depth_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(depth_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                        },
+                    ],
+                })
+            });
+        let shadow_bg = resources.binds.get("volumetric shadow", shadow.id, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Volumetric Shadow BG"),
+                layout: &self.volumetric_shadow_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(shadow.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(shadow.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: shadow.uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: shadow.lights.as_entire_binding(),
+                    },
+                ],
+            })
         });
 
         // Ray-march pass → writes to resources.volumetric_view (half-res)
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Volumetric Ray-March Encoder"),
-        });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Volumetric Ray-March Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &resources.volumetric_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            pass.set_pipeline(&self.volumetric_pipeline);
-            pass.set_bind_group(0, &uniform_bg, &[]);
-            pass.set_bind_group(1, &depth_bg, &[]);
-            pass.set_bind_group(2, &shadow_bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        queue.submit(std::iter::once(encoder.finish()));
-
-        // Bilateral blur pass → reads volumetric_view + depth, writes volumetric_blur_view
-        let blur_uniforms = VolumetricBlurUniforms {
-            texel_size: [1.0 / half_w as f32, 1.0 / half_h as f32],
-            depth_threshold: 0.01,
-            _pad: 0.0,
-        };
-        queue.write_buffer(
-            &self.volumetric_blur_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[blur_uniforms]),
+        fullscreen_pass(
+            encoder,
+            "Volumetric Ray-March Pass",
+            &resources.volumetric_view,
+            Some(wgpu::Color::BLACK),
+            &self.volumetric_pipeline,
+            &[&uniform_bg, &depth_bg, &shadow_bg],
         );
 
-        let blur_uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Volumetric Blur Uniform BG"),
-            layout: &self.volumetric_blur_uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.volumetric_blur_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let blur_texture_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Volumetric Blur Texture BG"),
-            layout: &self.volumetric_blur_texture_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&resources.volumetric_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
-                },
-            ],
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Volumetric Blur Encoder"),
-        });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Volumetric Blur Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &resources.volumetric_blur_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            pass.set_pipeline(&self.volumetric_blur_pipeline);
-            pass.set_bind_group(0, &blur_uniform_bg, &[]);
-            pass.set_bind_group(1, &blur_texture_bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        queue.submit(std::iter::once(encoder.finish()));
-    }
-
-    /// Run the anisotropic Kuwahara filter (3 passes: structure tensor, tensor blur, Kuwahara).
-    /// Reads the HDR scene texture and writes the painterly-filtered result to
-    /// `resources.kuwahara.output_view`.
-    /// Returns early (no-op) if Kuwahara pipelines or textures were not allocated.
-    pub fn run_kuwahara(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        resources: &PostProcessResources,
-        config: &PostProcessConfig,
-    ) {
-        let kp = match &self.kuwahara {
-            Some(kp) => kp,
-            None => return,
-        };
-        let kt = match &resources.kuwahara {
-            Some(kt) => kt,
-            None => return,
-        };
-
-        let texel_size = [1.0 / resources.width as f32, 1.0 / resources.height as f32];
-
-        // --- Pass 1: Structure tensor ---
-        {
-            let uniforms = KuwaharaTensorUniforms {
-                texel_size,
-                _pad: [0.0; 2],
+        // Bilateral blur pass → reads volumetric_view + depth, writes volumetric_blur_view
+        if resources.binds.first_write("volumetric blur") {
+            let blur_uniforms = VolumetricBlurUniforms {
+                texel_size: [1.0 / half_w as f32, 1.0 / half_h as f32],
+                depth_threshold: 0.01,
+                _pad: 0.0,
             };
             queue.write_buffer(
-                &kp.tensor_uniform_buffer,
+                &self.volumetric_blur_uniform_buffer,
                 0,
-                bytemuck::cast_slice(&[uniforms]),
+                bytemuck::cast_slice(&[blur_uniforms]),
             );
-
-            let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Kuwahara Tensor Uniform BG"),
-                layout: &kp.tensor_uniform_bgl,
+        }
+        let blur_uniform_bg = resources.binds.get("volumetric blur uniform", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Volumetric Blur Uniform BG"),
+                layout: &self.volumetric_blur_uniform_bgl,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: kp.tensor_uniform_buffer.as_entire_binding(),
+                    resource: self.volumetric_blur_uniform_buffer.as_entire_binding(),
                 }],
-            });
-
-            let texture_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Kuwahara Tensor Texture BG"),
-                layout: &kp.tensor_texture_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&resources.hdr_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                ],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Kuwahara Tensor Encoder"),
-            });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Kuwahara Tensor Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &kt.tensor_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
+            })
+        });
+        let blur_texture_bg =
+            resources
+                .binds
+                .get_over(depth_key, "volumetric blur texture", 0, || {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Volumetric Blur Texture BG"),
+                        layout: &self.volumetric_blur_texture_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &resources.volumetric_view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(depth_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                            },
+                        ],
+                    })
                 });
-
-                pass.set_pipeline(&kp.tensor_pipeline);
-                pass.set_bind_group(0, &uniform_bg, &[]);
-                pass.set_bind_group(1, &texture_bg, &[]);
-                pass.draw(0..3, 0..1);
-            }
-
-            queue.submit(std::iter::once(encoder.finish()));
-        }
-
-        // --- Pass 2: Tensor blur ---
-        {
-            let uniforms = KuwaharaTensorBlurUniforms {
-                texel_size,
-                _pad: [0.0; 2],
-            };
-            queue.write_buffer(
-                &kp.tensor_blur_uniform_buffer,
-                0,
-                bytemuck::cast_slice(&[uniforms]),
-            );
-
-            let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Kuwahara Tensor Blur Uniform BG"),
-                layout: &kp.tensor_blur_uniform_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: kp.tensor_blur_uniform_buffer.as_entire_binding(),
-                }],
-            });
-
-            let texture_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Kuwahara Tensor Blur Texture BG"),
-                layout: &kp.tensor_blur_texture_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&kt.tensor_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                ],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Kuwahara Tensor Blur Encoder"),
-            });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Kuwahara Tensor Blur Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &kt.tensor_blur_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                pass.set_pipeline(&kp.tensor_blur_pipeline);
-                pass.set_bind_group(0, &uniform_bg, &[]);
-                pass.set_bind_group(1, &texture_bg, &[]);
-                pass.draw(0..3, 0..1);
-            }
-
-            queue.submit(std::iter::once(encoder.finish()));
-        }
-
-        // --- Pass 3: Anisotropic Kuwahara filter ---
-        {
-            let uniforms = KuwaharaUniforms {
-                texel_size,
-                radius: config.kuwahara_radius as f32,
-                sharpness: config.kuwahara_sharpness,
-                hardness: config.kuwahara_hardness,
-                anisotropy: config.kuwahara_anisotropy,
-                _pad: [0.0; 2],
-            };
-            queue.write_buffer(&kp.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-            let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Kuwahara Uniform BG"),
-                layout: &kp.uniform_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: kp.uniform_buffer.as_entire_binding(),
-                }],
-            });
-
-            let hdr_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Kuwahara HDR BG"),
-                layout: &kp.hdr_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&resources.hdr_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                ],
-            });
-
-            let tensor_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Kuwahara Tensor Input BG"),
-                layout: &kp.tensor_input_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&kt.tensor_blur_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                ],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Kuwahara Encoder"),
-            });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Kuwahara Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &kt.output_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                pass.set_pipeline(&kp.pipeline);
-                pass.set_bind_group(0, &uniform_bg, &[]);
-                pass.set_bind_group(1, &hdr_bg, &[]);
-                pass.set_bind_group(2, &tensor_bg, &[]);
-                pass.draw(0..3, 0..1);
-            }
-
-            queue.submit(std::iter::once(encoder.finish()));
-        }
+        fullscreen_pass(
+            encoder,
+            "Volumetric Blur Pass",
+            &resources.volumetric_blur_view,
+            Some(wgpu::Color::BLACK),
+            &self.volumetric_blur_pipeline,
+            &[&blur_uniform_bg, &blur_texture_bg],
+        );
     }
 
     /// Run the composite pass: combine HDR scene + bloom + SSAO + volumetric + fog → tonemapped sRGB surface.
+    #[allow(clippy::too_many_arguments)]
     pub fn composite(
         &self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
         resources: &PostProcessResources,
         config: &PostProcessConfig,
         target_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
+        depth_key: crate::bind_cache::DepthKey,
         camera: &Camera,
         time: f32,
         ground_fog: Option<&crate::ground_fog::GroundFogGpu>,
+        scene: &crate::stylize::StyleInput<'_>,
         timer: Option<&mut crate::gpu_timer::GpuTimer>,
     ) {
         // SSAO: use blurred AO if enabled, white fallback otherwise
-        let ssao_view = if config.enabled && config.ssao_enabled {
+        let ssao_on = config.enabled && config.ssao_enabled;
+        let ssao_view = if ssao_on {
             &resources.ssao_blur_view
         } else {
             &self.white_texture_view
         };
 
         // Volumetric: use blurred god rays if enabled, black fallback otherwise
-        let volumetric_view = if config.enabled && config.volumetric_enabled {
+        let volumetric_on = config.enabled && config.volumetric_enabled;
+        let volumetric_view = if volumetric_on {
             &resources.volumetric_blur_view
         } else {
             &self.volumetric_black_view
         };
 
-        let ssao_depth_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Composite SSAO+Depth+Volumetric BG"),
-            layout: &self.composite_ssao_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(ssao_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(volumetric_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(
-                        ground_fog.map_or(&self.ground_fog_empty_view, |g| &g.view),
-                    ),
-                },
-            ],
-        });
+        // The variant: which views it binds, and whose fog map
+        let variant = u64::from(ssao_on)
+            | u64::from(volumetric_on) << 1
+            | ground_fog.map_or(0, |g| g.id) << 2;
+        let ssao_depth_bg =
+            resources
+                .binds
+                .get_over(depth_key, "composite ssao+depth", variant, || {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Composite SSAO+Depth+Volumetric BG"),
+                        layout: &self.composite_ssao_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(ssao_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(depth_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(volumetric_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::TextureView(
+                                    ground_fog.map_or(&self.ground_fog_empty_view, |g| &g.view),
+                                ),
+                            },
+                        ],
+                    })
+                });
         let effects_on = config.enabled;
         let ground_fog = ground_fog.filter(|_| effects_on && config.ground_fog_density > 0.0);
         let falloff = config.ground_fog_falloff.max(1e-3);
@@ -3106,108 +2398,126 @@ impl PostProcessPipeline {
             bytemuck::cast_slice(&[uniforms]),
         );
 
-        let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Composite Uniform BG"),
-            layout: &self.composite_uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.composite_uniform_buffer.as_entire_binding(),
-            }],
+        let uniform_bg = resources.binds.get("composite uniform", 0, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Composite Uniform BG"),
+                layout: &self.composite_uniform_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.composite_uniform_buffer.as_entire_binding(),
+                }],
+            })
         });
 
-        // Kuwahara: use filtered result if enabled and allocated, raw HDR otherwise
-        let scene_view = if config.enabled && config.kuwahara_enabled {
-            match &resources.kuwahara {
-                Some(kt) => &kt.output_view,
-                None => &resources.hdr_view,
-            }
-        } else {
-            &resources.hdr_view
-        };
-
-        let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Composite Scene BG"),
-            layout: &self.composite_scene_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(scene_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-            ],
+        // The scene: the HDR buffer, or the HDR styles' result (#262)
+        let scene_view = scene.view;
+        let scene_bg = resources.binds.get("composite scene", scene.id, || {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Composite Scene BG"),
+                layout: &self.composite_scene_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(scene_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                ],
+            })
         });
 
         // Use bloom mip[0] if available and bloom enabled, otherwise use black texture
-        let bloom_view = if config.bloom_enabled && !resources.bloom_mips.is_empty() {
+        let bloom_on = config.bloom_enabled && !resources.bloom_mips.is_empty();
+        let bloom_view = if bloom_on {
             &resources.bloom_mips[0].view
         } else {
             &self.black_texture_view
         };
-
-        let bloom_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Composite Bloom BG"),
-            layout: &self.composite_bloom_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(bloom_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-            ],
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Composite Encoder"),
-        });
-        // Timed inside this submission, so a wait for the swapchain image
-        // before it runs isn't counted (ADR 0108).
-        let timed = timer.map(|t| {
-            let scope = t.begin(&mut encoder, "Composite");
-            (t, scope)
-        });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Composite Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
+        let bloom_bg = resources
+            .binds
+            .get("composite bloom", u64::from(bloom_on), || {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Composite Bloom BG"),
+                    layout: &self.composite_bloom_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(bloom_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                        },
+                    ],
+                })
             });
 
-            pass.set_pipeline(&self.composite_pipeline);
-            pass.set_bind_group(0, &uniform_bg, &[]);
-            pass.set_bind_group(1, &scene_bg, &[]);
-            pass.set_bind_group(2, &bloom_bg, &[]);
-            pass.set_bind_group(3, &ssao_depth_bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
+        let timed = timer.map(|t| {
+            let scope = t.begin(encoder, "Composite");
+            (t, scope)
+        });
+        fullscreen_pass(
+            encoder,
+            "Composite Pass",
+            target_view,
+            Some(wgpu::Color::BLACK),
+            &self.composite_pipeline,
+            &[&uniform_bg, &scene_bg, &bloom_bg, &ssao_depth_bg],
+        );
         if let Some((timer, scope)) = timed {
-            timer.end(&mut encoder, scope);
+            timer.end(encoder, scope);
         }
-        queue.submit(std::iter::once(encoder.finish()));
     }
+}
+
+/// What the volumetric pass reads of the shadow pass and the lights.
+pub struct VolumetricShadow<'a> {
+    /// The shadow pass's [`gpu_id`](crate::bind_cache::gpu_id).
+    pub id: u64,
+    pub view: &'a wgpu::TextureView,
+    pub sampler: &'a wgpu::Sampler,
+    pub uniforms: &'a wgpu::Buffer,
+    pub lights: &'a wgpu::Buffer,
+}
+
+/// Record one full-screen triangle into `target`, cleared to `clear` first
+/// or blended over what's there, with `groups` bound in order.
+pub(crate) fn fullscreen_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    label: &str,
+    target: &wgpu::TextureView,
+    clear: Option<wgpu::Color>,
+    pipeline: &wgpu::RenderPipeline,
+    groups: &[&wgpu::BindGroup],
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_pipeline(pipeline);
+    for (i, group) in groups.iter().enumerate() {
+        pass.set_bind_group(i as u32, *group, &[]);
+    }
+    pass.draw(0..3, 0..1);
 }
 
 impl PostProcessResources {
     /// Create HDR buffer and bloom mip chain for the given dimensions.
-    /// Kuwahara textures are only allocated when `kuwahara_enabled` is true
-    /// to avoid exhausting VRAM on constrained GPUs.
-    pub fn new(device: &wgpu::Device, width: u32, height: u32, kuwahara_enabled: bool) -> Self {
+    /// Stylize targets are made on first use, so a style that is off
+    /// allocates nothing.
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("HDR Scene Texture"),
             size: wgpu::Extent3d {
@@ -3335,13 +2645,6 @@ impl PostProcessResources {
         let volumetric_blur_view =
             volumetric_blur_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Kuwahara textures (full resolution, Rgba16Float) — only when enabled
-        let kuwahara = if kuwahara_enabled {
-            Some(KuwaharaTextures::new(device, width, height))
-        } else {
-            None
-        };
-
         Self {
             hdr_texture,
             hdr_view,
@@ -3357,9 +2660,10 @@ impl PostProcessResources {
             volumetric_view,
             volumetric_blur_texture,
             volumetric_blur_view,
-            kuwahara,
+            styles: Default::default(),
             // FXAA intermediate is allocated on demand (ADR 0050)
             fxaa: None,
+            binds: Default::default(),
         }
     }
 }
@@ -3434,6 +2738,18 @@ fn generate_ssao_noise() -> [u8; 64] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn old_kuwahara_keys_make_the_same_config_as_the_table() {
+        let old: flint_scene::PostProcessDef =
+            toml::from_str("kuwahara_enabled = true\nkuwahara_radius = 4").unwrap();
+        let table: flint_scene::PostProcessDef =
+            toml::from_str("[styles.kuwahara]\nradius = 4").unwrap();
+        let old = post_process_config_from_def(&old);
+        assert!(old.styles.is_enabled("kuwahara"));
+        assert_eq!(old.styles.param("kuwahara", "radius"), Some(4.0));
+        assert_eq!(old.styles, post_process_config_from_def(&table).styles);
+    }
+
     /// The Rust uniform struct must byte-match the WGSL PostProcessUniforms
     /// in composite_shader.wgsl. Layout: 12 scalars + texel_size vec2 +
     /// fog block (through dither_intensity) = 112 bytes, inv_view_proj mat4
@@ -3445,6 +2761,16 @@ mod tests {
     /// at 272..304 (ADR 0101), ground fog rows (color+density / origin+size
     /// / floor base, ceiling, falloff, steps / texel, max lod, enabled, pad)
     /// at 304..368 (ADR 0106).
+    /// Boil is opt-in twice over: a scene asks for it, and has a field.
+    #[test]
+    fn boil_and_contour_default_off() {
+        let config = PostProcessConfig::default();
+        assert!(!config.styles.is_enabled("contour"));
+        assert_eq!(config.styles.param("kuwahara", "boil"), None);
+        assert_eq!(config.styles.param("contour", "boil"), None);
+        assert_eq!(config.boil, Default::default());
+    }
+
     #[test]
     fn composite_uniforms_match_wgsl_layout() {
         assert_eq!(std::mem::size_of::<PostProcessUniforms>(), 368);

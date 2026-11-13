@@ -1,0 +1,224 @@
+//! The perf readout on the page (#120, docs/design/web.md): `?perf=1`
+//! shows the numbers `perf.rs` keeps in the page's `#perf` panel, twice a
+//! second, with a button that copies them as one line.
+//!
+//! The frame times are the browser's own: the timestamps rAF hands the
+//! page's frame clock (`web_pacing.rs`), which fall on the display's
+//! frames, taken at each frame the player draws. With pacing (#140) a
+//! skipped refresh isn't a frame. The player's callbacks start a little
+//! earlier or later from frame to frame, so timing those would show
+//! jitter that no one sees.
+//!
+//! wgpu can't say which adapter it got on the web (its `AdapterInfo` is
+//! empty there), so the page asks the browser itself, once, with the same
+//! high-performance preference wgpu asks with.
+//!
+//! The WebGPU calls are counted by the page, which wraps `submit`,
+//! `writeBuffer`, `createBindGroup`, `createBuffer` and `beginRenderPass`
+//! under `?perf` and keeps running totals in `window.flintGpuCalls`
+//! (#139). Each readout divides what they moved by the frames since the
+//! last.
+
+use super::pacing::Spread;
+use super::perf::{browser_name, readout, summary_line, TouchSeen, WebGpuCalls, WINDOW_SECS};
+use super::PlayerApp;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+
+/// How often the panel is redrawn, seconds.
+const EVERY: f64 = 0.5;
+
+thread_local! {
+    /// The adapter as the browser describes it, once its answer is in.
+    static ADAPTER: RefCell<Option<String>> = const { RefCell::new(None) };
+    static ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// rAF timestamps of the frames drawn in the last ten seconds, ms.
+    static RAF: RefCell<VecDeque<f64>> = const { RefCell::new(VecDeque::new()) };
+    /// The fingers seen so far (#132), looked at every frame so a quick
+    /// tap between two redraws of the panel still counts.
+    static TOUCHES: RefCell<TouchSeen> = RefCell::new(TouchSeen::default());
+    static RAF_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The page's WebGPU call totals at the last readout, and the frames
+    /// begun by then.
+    static CALLS_THEN: RefCell<Option<(WebGpuCalls, u64)>> = const { RefCell::new(None) };
+}
+
+/// The page's running totals of WebGPU calls, when it counts them.
+fn call_totals() -> Option<WebGpuCalls> {
+    let calls = get(&web_sys::window()?.into(), "flintGpuCalls")?;
+    let n = |k: &str| get(&calls, k).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    Some(WebGpuCalls {
+        submits: n("submit"),
+        writes: n("writeBuffer"),
+        write_bytes: n("writeBytes"),
+        bind_groups: n("createBindGroup"),
+        buffers: n("createBuffer"),
+        passes: n("beginRenderPass"),
+    })
+}
+
+/// The calls a frame made since the last readout.
+fn calls_per_frame(frames_begun: u64) -> Option<WebGpuCalls> {
+    let now = call_totals()?;
+    CALLS_THEN.with(|then| {
+        let mut then = then.borrow_mut();
+        let per_frame = then.as_ref().and_then(|(calls, frames)| {
+            WebGpuCalls::per_frame(&now, calls, frames_begun.saturating_sub(*frames))
+        });
+        *then = Some((now, frames_begun));
+        per_frame
+    })
+}
+
+/// A drawn frame at rAF timestamp `t` (`web_pacing.rs`): its interval
+/// from the last drawn one is a frame on the readout.
+pub(super) fn record_frame(t: f64) {
+    RAF.with(|r| {
+        let mut r = r.borrow_mut();
+        r.push_back(t);
+        while r.front().is_some_and(|&f| f < t - WINDOW_SECS * 1000.0) {
+            r.pop_front();
+        }
+    });
+}
+
+/// The rAF intervals in the window, and the seconds they cover.
+fn raf_frames() -> Option<(Spread, f64)> {
+    RAF.with(|r| {
+        let r = r.borrow();
+        let ms: Vec<f32> = r
+            .iter()
+            .zip(r.iter().skip(1))
+            .map(|(a, b)| (b - a) as f32)
+            .collect();
+        let secs = match (r.front(), r.back()) {
+            (Some(a), Some(b)) => (b - a) / 1000.0,
+            _ => 0.0,
+        };
+        Spread::of(&ms).map(|s| (s, secs))
+    })
+}
+
+fn element(id: &str) -> Option<web_sys::Element> {
+    web_sys::window()?.document()?.get_element_by_id(id)
+}
+
+fn get(object: &wasm_bindgen::JsValue, key: &str) -> Option<wasm_bindgen::JsValue> {
+    js_sys::Reflect::get(object, &key.into())
+        .ok()
+        .filter(|v| !v.is_undefined() && !v.is_null())
+}
+
+/// `navigator.gpu.requestAdapter()`'s `info`: "nvidia ampere" or, where the
+/// browser says more, its description. Browsers keep this vague on purpose.
+async fn ask_adapter() -> String {
+    let unknown = || "adapter not named".to_string();
+    let Some(gpu) = web_sys::window().and_then(|w| get(&w.navigator(), "gpu")) else {
+        return unknown();
+    };
+    let Some(request) =
+        get(&gpu, "requestAdapter").and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+    else {
+        return unknown();
+    };
+    let options = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &options,
+        &"powerPreference".into(),
+        &"high-performance".into(),
+    );
+    let Ok(promise) = request.call1(&gpu, &options) else {
+        return unknown();
+    };
+    let Ok(adapter) = JsFuture::from(js_sys::Promise::from(promise)).await else {
+        return unknown();
+    };
+    let Some(info) = get(&adapter, "info") else {
+        return unknown();
+    };
+    let field = |k: &str| {
+        get(&info, k)
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(description) = field("description") {
+        return description;
+    }
+    let named: Vec<String> = ["vendor", "architecture", "device"]
+        .iter()
+        .filter_map(|k| field(k))
+        .collect();
+    if named.is_empty() {
+        unknown()
+    } else {
+        named.join(" ")
+    }
+}
+
+fn adapter() -> String {
+    if !ASKED.with(|a| a.replace(true)) {
+        wasm_bindgen_futures::spawn_local(async {
+            let name = ask_adapter().await;
+            ADAPTER.with(|a| *a.borrow_mut() = Some(name));
+        });
+    }
+    ADAPTER
+        .with(|a| a.borrow().clone())
+        .unwrap_or_else(|| "asking the browser".to_string())
+}
+
+impl PlayerApp {
+    /// Draw the readout into the page's `#perf` panel when it's due.
+    pub(super) fn show_perf(&mut self) {
+        TOUCHES.with(|t| {
+            t.borrow_mut().observe(
+                self.input
+                    .active_touches()
+                    .values()
+                    .map(|p| (p.id, p.position)),
+            )
+        });
+        if !self.perf_due(EVERY) {
+            return;
+        }
+        let Some(panel) = element("perf") else {
+            return;
+        };
+        let user_agent = web_sys::window()
+            .and_then(|w| w.navigator().user_agent().ok())
+            .unwrap_or_default();
+        let Some((mut summary, mut context)) =
+            self.perf_snapshot(browser_name(&user_agent), adapter())
+        else {
+            return;
+        };
+        let frames_begun = self.stats.perf.as_ref().map_or(0, |p| p.frames_begun);
+        context.webgpu = calls_per_frame(frames_begun);
+        if let Some((frames, secs)) = raf_frames() {
+            summary.frames = frames;
+            summary.secs = secs;
+        }
+        let _ = panel.remove_attribute("hidden");
+        let (touch_rows, touch_part) = TOUCHES.with(|t| {
+            let t = t.borrow();
+            (t.line(), t.part())
+        });
+        if let Some(text) = element("perf-text") {
+            let mut rows = readout(&summary, &context);
+            if let Some(touch) = touch_rows {
+                rows.push('\n');
+                rows.push_str(&touch);
+            }
+            text.set_text_content(Some(&rows));
+        }
+        // The copy button reads it (index.html).
+        let mut line = summary_line(&summary, &context);
+        if let Some(part) = touch_part {
+            line.push_str(" · ");
+            line.push_str(&part);
+        }
+        let _ = panel.set_attribute("data-line", &line);
+    }
+}

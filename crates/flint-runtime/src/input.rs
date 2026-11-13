@@ -5,7 +5,9 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::time::Instant;
+use web_time::Instant;
+
+use crate::touch_controls::{TouchControls, TouchControlsConfig};
 use winit::keyboard::KeyCode;
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,10 @@ pub struct InputConfig {
     pub game_id: String,
     #[serde(default)]
     pub actions: BTreeMap<String, ActionConfig>,
+    /// On-screen sticks and buttons for touch play (#133). A layer that
+    /// has the block replaces the whole of an earlier one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touch_controls: Option<TouchControlsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,7 +267,18 @@ impl InputConfig {
             version: default_config_version(),
             game_id: "flint".into(),
             actions,
+            touch_controls: None,
         }
+    }
+
+    /// Whether any action binds `key`. The player asks this of Escape: a
+    /// game that binds it gets it, and the window doesn't close (#639).
+    pub fn binds_key(&self, key: KeyCode) -> bool {
+        self.actions.values().any(|action| {
+            action.bindings.iter().any(
+                |b| matches!(b, Binding::Key { code, .. } if parse_key_code(code) == Some(key)),
+            )
+        })
     }
 
     pub fn from_toml_str(content: &str) -> Result<Self> {
@@ -273,7 +290,7 @@ impl InputConfig {
 
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|e| {
+        let content = flint_core::vfs::read_to_string(path).map_err(|e| {
             FlintError::RuntimeError(format!(
                 "failed to read input config '{}': {e}",
                 path.display()
@@ -298,6 +315,9 @@ impl InputConfig {
             for binding in &cfg.bindings {
                 validate_binding(binding, action)?;
             }
+        }
+        if let Some(touch) = &self.touch_controls {
+            touch.validate().map_err(FlintError::RuntimeError)?;
         }
         Ok(())
     }
@@ -333,12 +353,15 @@ pub struct InputState {
     screen_size: (f64, f64),
     emulate_touch_from_mouse: bool,
     mouse_touch_active: bool,
+    touch_controls: TouchControls,
 
     config: InputConfig,
     last_frame_pressed_actions: HashSet<String>,
 
     last_device: InputDevice,
     gamepad_connected: bool,
+    /// The host says the device is touch-first (#660).
+    touch_device: bool,
 
     /// While set, every pad reads as idle ([`InputState::hold_gamepads`]).
     gamepads_held: bool,
@@ -380,10 +403,12 @@ impl InputState {
             screen_size: (1280.0, 720.0),
             emulate_touch_from_mouse: true,
             mouse_touch_active: false,
+            touch_controls: TouchControls::new(),
             config: InputConfig::built_in_defaults(),
             last_frame_pressed_actions: HashSet::new(),
             last_device: InputDevice::Keyboard,
             gamepad_connected: false,
+            touch_device: false,
             gamepads_held: false,
             gamepad_buttons_swallowed: HashSet::new(),
         }
@@ -404,6 +429,18 @@ impl InputState {
         self.gamepad_connected = connected;
     }
 
+    /// True on a touch-first device: a web page whose main pointer is a
+    /// finger (`pointer: coarse`), or Android. A fact about the device, not
+    /// about the last input, so it holds from the first frame, before any
+    /// finger lands (#660). The host sets it; the state never infers it.
+    pub fn touch_device(&self) -> bool {
+        self.touch_device
+    }
+
+    pub fn set_touch_device(&mut self, touch_first: bool) {
+        self.touch_device = touch_first;
+    }
+
     pub fn config(&self) -> &InputConfig {
         &self.config
     }
@@ -418,6 +455,8 @@ impl InputState {
 
     pub fn load_bindings(&mut self, config: InputConfig) -> Result<()> {
         config.validate()?;
+        self.touch_controls
+            .set_config(config.touch_controls.clone());
         self.config = config;
         self.last_frame_pressed_actions.clear();
         Ok(())
@@ -431,6 +470,10 @@ impl InputState {
         }
         for (action, cfg) in overlay.actions {
             self.config.actions.insert(action, cfg);
+        }
+        if let Some(touch) = overlay.touch_controls {
+            self.touch_controls.set_config(Some(touch.clone()));
+            self.config.touch_controls = Some(touch);
         }
         self.last_frame_pressed_actions
             .retain(|action| self.config.actions.contains_key(action));
@@ -526,6 +569,7 @@ impl InputState {
 
     pub fn process_key_down(&mut self, key: KeyCode) {
         self.last_device = InputDevice::Keyboard;
+        self.touch_controls.note_other_device();
         if !self.keys_down.contains(&key) {
             self.keys_just_pressed.insert(key);
         }
@@ -546,7 +590,7 @@ impl InputState {
         // Mouse-as-touch emulation: left click starts touch finger 0
         if self.emulate_touch_from_mouse && button == 0 {
             self.mouse_touch_active = true;
-            self.process_touch_start(0, self.mouse_position.0, self.mouse_position.1);
+            self.touch_start(0, self.mouse_position.0, self.mouse_position.1);
         }
         // After the emulated touch start, so the device reads as the mouse
         // it really was.
@@ -608,8 +652,20 @@ impl InputState {
         (x / self.screen_size.0, y / self.screen_size.1)
     }
 
+    /// A real finger landed at (x, y) surface pixels. It brings the
+    /// on-screen controls up, and one of them may take it.
     pub fn process_touch_start(&mut self, id: u64, x: f64, y: f64) {
+        self.touch_controls.note_touch();
+        self.touch_start(id, x, y);
+    }
+
+    /// A finger landed, real or the mouse's emulated one (which drives the
+    /// controls only while they're up, but never brings them up).
+    fn touch_start(&mut self, id: u64, x: f64, y: f64) {
         self.last_device = InputDevice::Touch;
+        if self.touch_controls.touch_start(id, (x, y)) {
+            return;
+        }
         let norm = self.normalize_touch(x, y);
         self.touches.insert(
             id,
@@ -625,6 +681,12 @@ impl InputState {
     }
 
     pub fn process_touch_move(&mut self, id: u64, x: f64, y: f64) {
+        let (held, look) = self.touch_controls.touch_move(id, (x, y));
+        self.raw_mouse_delta.0 += look.0;
+        self.raw_mouse_delta.1 += look.1;
+        if held {
+            return;
+        }
         let norm = self.normalize_touch(x, y);
         if let Some(touch) = self.touches.get_mut(&id) {
             touch.position = norm;
@@ -633,6 +695,9 @@ impl InputState {
     }
 
     pub fn process_touch_end(&mut self, id: u64) {
+        if self.touch_controls.touch_end(id) {
+            return;
+        }
         if let Some(touch) = self.touches.remove(&id) {
             let elapsed = touch.start_time.elapsed().as_millis();
             let dx = (touch.position.0 - touch.start_position.0) * self.screen_size.0;
@@ -666,6 +731,9 @@ impl InputState {
     }
 
     pub fn process_touch_cancel(&mut self, id: u64) {
+        if self.touch_controls.touch_end(id) {
+            return;
+        }
         self.touches.remove(&id);
         self.touches_just_ended.insert(id);
     }
@@ -715,6 +783,21 @@ impl InputState {
         &self.touches_just_ended
     }
 
+    /// The on-screen touch controls (#133): what to draw, and the
+    /// layout metrics and mode the host sets.
+    pub fn touch_controls(&self) -> &TouchControls {
+        &self.touch_controls
+    }
+
+    pub fn touch_controls_mut(&mut self) -> &mut TouchControls {
+        &mut self.touch_controls
+    }
+
+    /// Whether the on-screen touch controls are up.
+    pub fn touch_controls_visible(&self) -> bool {
+        self.touch_controls.visible()
+    }
+
     /// Hold every pad, or let them go (ADR 0110). While held, sticks and
     /// triggers read 0 and buttons read up, so actions bound to a pad
     /// release. The host holds them while a text field has keyboard focus.
@@ -747,6 +830,7 @@ impl InputState {
             return;
         }
         self.last_device = InputDevice::Gamepad;
+        self.touch_controls.note_other_device();
         if !self.gamepad_buttons_down.contains(&key) {
             self.gamepad_buttons_just_pressed.insert(key.clone());
         }
@@ -777,6 +861,7 @@ impl InputState {
         }
         if value > DEVICE_AXIS_DEADZONE {
             self.last_device = InputDevice::Gamepad;
+            self.touch_controls.note_other_device();
         }
         self.gamepad_button_values
             .insert(key, value.clamp(0.0, 1.0));
@@ -785,6 +870,7 @@ impl InputState {
     pub fn process_gamepad_axis(&mut self, gamepad: u32, axis: impl Into<String>, value: f32) {
         if !self.gamepads_held && value.abs() > DEVICE_AXIS_DEADZONE {
             self.last_device = InputDevice::Gamepad;
+            self.touch_controls.note_other_device();
         }
         self.gamepad_axes
             .insert((gamepad, axis.into()), value.clamp(-1.0, 1.0));
@@ -832,12 +918,14 @@ impl InputState {
         self.keys_just_pressed.contains(&key)
     }
 
-    /// True if ANY keyboard key, mouse button, or gamepad button was pressed
-    /// this frame, regardless of action bindings ("press any key" screens).
+    /// True if ANY keyboard key, mouse button, or gamepad button was pressed,
+    /// or a finger landed, this frame, regardless of action bindings ("press
+    /// any key" screens, which a phone must be able to lift: #134).
     pub fn any_just_pressed(&self) -> bool {
         !self.keys_just_pressed.is_empty()
             || !self.mouse_buttons_just_pressed.is_empty()
             || !self.gamepad_buttons_just_pressed.is_empty()
+            || !self.touches_just_started.is_empty()
     }
 
     pub fn is_action_pressed(&self, action: &str) -> bool {
@@ -940,6 +1028,14 @@ impl InputState {
             }
             if self.binding_just_released(binding) {
                 just_released = true;
+            }
+        }
+
+        // On-screen sticks and buttons (#133) count as one more binding.
+        if let Some(touch) = self.touch_controls.action_value(action) {
+            match cfg.kind {
+                ActionKind::Button => value = value.max(touch.abs()),
+                ActionKind::Axis1d => value += touch,
             }
         }
 
@@ -1467,6 +1563,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn binds_key_sees_a_games_escape() {
+        let built_in = InputConfig::built_in_defaults();
+        assert!(!built_in.binds_key(KeyCode::Escape));
+        assert!(built_in.binds_key(KeyCode::KeyW));
+        let game = InputConfig::from_toml_str(
+            r#"
+version = 1
+game_id = "menus"
+[actions.back]
+kind = "button"
+[[actions.back.bindings]]
+type = "key"
+code = "Escape"
+"#,
+        )
+        .unwrap();
+        assert!(game.binds_key(KeyCode::Escape));
+        let mut state = InputState::new();
+        state.merge_bindings(game).unwrap();
+        assert!(state.config().binds_key(KeyCode::Escape));
+    }
+
+    #[test]
     fn every_key_code_name_round_trips() {
         for &(name, key) in KEY_CODES {
             assert_eq!(parse_key_code(name), Some(key), "{name} doesn't parse");
@@ -1769,9 +1888,14 @@ scale = 2.0
         let mut input = InputState::new();
         input.set_screen_size(1000.0, 1000.0);
 
+        assert!(!input.any_just_pressed());
         input.process_touch_start(1, 500.0, 500.0);
         assert!(input.touch_active(1));
         assert!(input.touch_just_started(1));
+        assert!(
+            input.any_just_pressed(),
+            "a finger lifts a press-any-key screen"
+        );
         assert_eq!(input.touch_count(), 1);
 
         let pos = input.touch_position(1).unwrap();
@@ -2061,5 +2185,153 @@ direction = "up"
         input.end_frame();
         assert!(!input.is_action_pressed("jump"));
         assert!(!input.is_action_just_pressed("jump"));
+    }
+
+    /// Only keyboard bindings, plus a touch-controls block (#133).
+    const KEYS_AND_TOUCH: &str = r#"
+version = 1
+game_id = "walk"
+[actions.move_forward]
+bindings = [{ type = "key", code = "KeyW" }]
+[actions.move_right]
+bindings = [{ type = "key", code = "KeyD" }]
+[actions.jump]
+bindings = [{ type = "key", code = "Space" }]
+
+[touch_controls]
+[[touch_controls.sticks]]
+up = "move_forward"
+right = "move_right"
+radius = 50
+[[touch_controls.buttons]]
+action = "jump"
+anchor = "bottom_right"
+offset = [80, 80]
+radius = 30
+[touch_controls.look]
+"#;
+
+    fn walker() -> InputState {
+        let mut input = InputState::new();
+        input.set_screen_size(1000.0, 500.0);
+        input
+            .load_bindings(InputConfig::from_toml_str(KEYS_AND_TOUCH).unwrap())
+            .unwrap();
+        let screen = input.screen_size();
+        input
+            .touch_controls_mut()
+            .set_metrics(screen, 1.0, [0.0; 4]);
+        input
+    }
+
+    #[test]
+    fn a_stick_and_a_button_walk_a_keyboard_only_config() {
+        let mut input = walker();
+        assert!(!input.touch_controls_visible());
+        // Thumb on the stick, pushed up; the other on jump.
+        input.process_touch_start(1, 150.0, 400.0);
+        assert!(input.touch_controls_visible());
+        input.process_touch_move(1, 150.0, 330.0);
+        input.process_touch_start(2, 920.0, 420.0);
+        assert!(input.is_action_pressed("move_forward"));
+        assert!(input.is_action_just_pressed("move_forward"));
+        assert!(input.is_action_pressed("jump"));
+        assert!(!input.is_action_pressed("move_right"));
+        // Held fingers stay out of the game's own touch list.
+        assert_eq!(input.touch_count(), 0);
+        input.end_frame();
+
+        // Jump lets go, the stick keeps walking.
+        input.process_touch_end(2);
+        assert!(input.is_action_just_released("jump"));
+        assert!(input.is_action_pressed("move_forward"));
+        assert!(!input.is_action_just_pressed("move_forward"));
+        assert!(input.touch_taps().is_empty(), "a button press is not a tap");
+        input.end_frame();
+        input.process_touch_end(1);
+        assert!(input.is_action_just_released("move_forward"));
+    }
+
+    #[test]
+    fn a_look_drag_turns_like_the_mouse_and_still_reaches_scripts() {
+        let mut input = walker();
+        input.process_touch_start(5, 700.0, 200.0);
+        input.process_touch_move(5, 730.0, 190.0);
+        assert_eq!(input.raw_mouse_delta(), (60.0, -20.0));
+        assert_eq!(input.touch_count(), 1, "look shares its finger");
+        input.end_frame();
+        assert_eq!(input.raw_mouse_delta(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn keys_and_pads_hide_the_controls_and_a_finger_brings_them_back() {
+        let mut input = walker();
+        input.process_touch_start(1, 150.0, 400.0);
+        input.process_touch_move(1, 150.0, 330.0);
+        assert!(input.touch_controls_visible());
+        input.process_key_down(KeyCode::KeyW);
+        assert!(!input.touch_controls_visible());
+        input.process_key_up(KeyCode::KeyW);
+        input.end_frame();
+        assert!(!input.is_action_pressed("move_forward"), "the stick let go");
+
+        input.process_touch_start(3, 150.0, 400.0);
+        assert!(input.touch_controls_visible());
+        input.process_gamepad_axis(0, "LeftStickX", 0.1);
+        assert!(
+            input.touch_controls_visible(),
+            "stick noise is not a takeover"
+        );
+        input.process_gamepad_button_down(0, "South");
+        assert!(!input.touch_controls_visible());
+        assert!(input.touch_controls().widgets().is_empty());
+
+        // Mouse movement changes nothing either way.
+        input.process_touch_start(4, 150.0, 400.0);
+        input.process_mouse_move(10.0, 10.0);
+        assert!(input.touch_controls_visible());
+    }
+
+    #[test]
+    fn the_mouse_finger_never_brings_the_controls_up() {
+        let mut input = walker();
+        input.process_mouse_move(150.0, 400.0);
+        input.process_mouse_button_down(0);
+        assert!(!input.touch_controls_visible());
+        assert_eq!(input.touch_count(), 1, "plain emulated touch");
+        input.process_mouse_button_up(0);
+        input.end_frame();
+
+        // `--touch-controls always`: the mouse drives them for testing.
+        input
+            .touch_controls_mut()
+            .set_mode(crate::TouchControlsMode::Always);
+        input.process_mouse_button_down(0);
+        input.process_mouse_move(150.0, 330.0);
+        assert!(input.is_action_pressed("move_forward"));
+        assert_eq!(input.last_device(), InputDevice::Mouse);
+    }
+
+    #[test]
+    fn a_later_layer_replaces_the_touch_block() {
+        let mut input = walker();
+        input
+            .merge_bindings(
+                InputConfig::from_toml_str(
+                    "version = 1\n[touch_controls]\nopacity = 0.5\n\
+                     [[touch_controls.buttons]]\naction = \"jump\"\n",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let tc = input.config().touch_controls.as_ref().unwrap();
+        assert!(tc.sticks.is_empty() && tc.look.is_none());
+        assert_eq!(tc.buttons.len(), 1);
+        // A layer without the block keeps it.
+        input
+            .merge_bindings(InputConfig::from_toml_str("version = 1\n").unwrap())
+            .unwrap();
+        assert!(input.config().touch_controls.is_some());
+        assert_eq!(input.touch_controls().opacity(), 0.5);
     }
 }

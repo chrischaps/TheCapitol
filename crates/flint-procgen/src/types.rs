@@ -36,6 +36,14 @@ pub struct MaterialData {
     pub metallic: f32,
     /// Roughness factor (0.0 = mirror, 1.0 = fully rough).
     pub roughness: f32,
+    /// Tangent-space normal map, embedded as the material's `normalTexture`
+    /// on GLB export (named `<material>_normal`).
+    ///
+    /// Always serialized, `None` too: the disk cache (#181) is a binary
+    /// format with no field names, where a skipped field shifts every byte
+    /// after it. `default` still reads text written without the field.
+    #[serde(default)]
+    pub normal_map: Option<ImageData>,
 }
 
 impl Default for MaterialData {
@@ -45,6 +53,7 @@ impl Default for MaterialData {
             base_color: [0.5, 0.5, 0.5, 1.0],
             metallic: 0.0,
             roughness: 0.5,
+            normal_map: None,
         }
     }
 }
@@ -218,6 +227,14 @@ pub struct BranchSegment {
     pub radius_end: f32,
     /// Branching depth (0 = trunk, incremented at each Push).
     pub depth: u32,
+    /// This segment's index in its tree. The tree generator fills it in once
+    /// the tree is grown (`generators::tree::branches::link_segments`), so
+    /// it's 0 on the raw output of an algorithm. On the L-system path the
+    /// same index means the same segment for every seed (#207).
+    pub id: u32,
+    /// The earlier segment whose end this one starts from, or `None` when it
+    /// leaves the trunk. Filled in with `id`.
+    pub parent: Option<u32>,
 }
 
 impl BranchSegment {

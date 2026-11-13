@@ -6,7 +6,7 @@
 //! game steps by) and the wall time from one `present()` returning to the
 //! next (what the swapchain was handed).
 
-use std::time::Instant;
+use web_time::Instant;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pacing {
@@ -93,7 +93,9 @@ mod tests {
     #[test]
     fn bursts_show_as_lumps_at_the_same_mean() {
         // Three 4 ms frames then a 50 ms one: a 60 fps mean, uneven.
-        let ms: Vec<f32> = (0..60).map(|i| if i % 4 == 3 { 50.0 } else { 4.0 }).collect();
+        let ms: Vec<f32> = (0..60)
+            .map(|i| if i % 4 == 3 { 50.0 } else { 4.0 })
+            .collect();
         let s = Spread::of(&ms).unwrap();
         assert_eq!(s.p50, 4.0);
         assert_eq!(s.max, 50.0);

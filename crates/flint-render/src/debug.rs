@@ -20,11 +20,22 @@ pub enum DebugMode {
     Unlit,
     /// Metallic (red) / Roughness (green)
     MetallicRoughness,
+    /// The entity style mask (#263): each `style_mask` style in its own
+    /// hue over the scene, unstyled pixels grey. Drawn by the `mask_view`
+    /// style, so it needs post-processing on.
+    StyleMask,
+    /// The ASCII style's edges (#349): each edge pixel coloured by its
+    /// source (depth, crease, styled outline) and each glyph cell's
+    /// decision (line glyph, yielded, texture, too little) with its edge
+    /// length. Drawn by the `ascii` style in place of its glyphs (switched
+    /// on at its defaults if the scene has none), so it needs
+    /// post-processing on.
+    StyleEdges,
 }
 
 impl DebugMode {
     /// All modes in cycle order, for UI enumeration (combo boxes)
-    pub const ALL: [DebugMode; 8] = [
+    pub const ALL: [DebugMode; 10] = [
         Self::Pbr,
         Self::WireframeOverlay,
         Self::WireframeOnly,
@@ -33,6 +44,8 @@ impl DebugMode {
         Self::UvChecker,
         Self::Unlit,
         Self::MetallicRoughness,
+        Self::StyleMask,
+        Self::StyleEdges,
     ];
 
     /// Cycle to the next debug mode
@@ -45,7 +58,9 @@ impl DebugMode {
             Self::Depth => Self::UvChecker,
             Self::UvChecker => Self::Unlit,
             Self::Unlit => Self::MetallicRoughness,
-            Self::MetallicRoughness => Self::Pbr,
+            Self::MetallicRoughness => Self::StyleMask,
+            Self::StyleMask => Self::StyleEdges,
+            Self::StyleEdges => Self::Pbr,
         }
     }
 
@@ -60,6 +75,8 @@ impl DebugMode {
             Self::UvChecker => 3,
             Self::Unlit => 4,
             Self::MetallicRoughness => 5,
+            Self::StyleMask => 0, // PBR shading; the mask_view style draws over it
+            Self::StyleEdges => 0, // PBR shading; the ascii style draws its edge view
         }
     }
 
@@ -74,6 +91,8 @@ impl DebugMode {
             Self::UvChecker => "UV Checker",
             Self::Unlit => "Unlit",
             Self::MetallicRoughness => "Metal/Rough",
+            Self::StyleMask => "Style Mask",
+            Self::StyleEdges => "Style Edges",
         }
     }
 }

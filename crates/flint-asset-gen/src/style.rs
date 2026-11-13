@@ -68,9 +68,76 @@ struct StyleFile {
     style: StyleGuide,
 }
 
+/// A style guide's file suffix: `styles/<name>.styleguide.toml` (#420).
+pub const SUFFIX: &str = "styleguide.toml";
+
+/// The suffix style guides had before #420. It is also a UI class file's
+/// (`ui/*.style.toml`, read by flint-script), so a `styles/` folder holding
+/// both couldn't be told apart by name. Still found, with a warning.
+pub const LEGACY_SUFFIX: &str = "style.toml";
+
+/// What a `*.style.toml` style guide should be renamed to, or `None` when
+/// the path doesn't have the old suffix. The path is kept as written, so
+/// the warning names it the way the user did.
+pub fn legacy_rename(path: &Path) -> Option<std::path::PathBuf> {
+    let old = format!(".{LEGACY_SUFFIX}");
+    let file = path.file_name()?.to_str()?;
+    if file.len() <= old.len() || !file.ends_with(&old) {
+        return None;
+    }
+    let whole = path.to_str()?.strip_suffix(&old)?;
+    Some(std::path::PathBuf::from(format!("{whole}.{SUFFIX}")))
+}
+
+/// Where [`StyleGuide::find`] looks for `name`, in order: `styles/` and
+/// `.flint/styles/` under the working directory, then under the project
+/// `root`; every new-suffix path first, so a renamed guide wins over a stale
+/// `*.style.toml` left beside it.
+fn candidates(name: &str, root: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for suffix in [SUFFIX, LEGACY_SUFFIX] {
+        let rels = [
+            format!("styles/{name}.{suffix}"),
+            format!(".flint/styles/{name}.{suffix}"),
+        ];
+        let rooted = rels.iter().map(|r| root.join(r).display().to_string());
+        for p in rels.iter().cloned().chain(rooted) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 impl StyleGuide {
-    /// Load a style guide from a TOML file
+    /// The style's constraints in the validator's terms, for both
+    /// `flint gen --validate` and `flint asset validate`: triangle ceiling,
+    /// roughness/metallic ranges, palette, and the UV/normal requirements.
+    /// Texture sizes come from a spec, not a style, and are left unset.
+    pub fn validation_constraints(&self) -> flint_procgen::ValidationConstraints {
+        flint_procgen::ValidationConstraints {
+            max_triangles: self.geometry.max_triangles,
+            roughness_range: self.materials.roughness_range,
+            metallic_range: self.materials.metallic_range,
+            palette: self.palette.clone(),
+            require_uvs: self.geometry.require_uvs.unwrap_or(false),
+            require_normals: self.geometry.require_normals.unwrap_or(false),
+            ..Default::default()
+        }
+    }
+
+    /// Load a style guide from a TOML file. A file still named
+    /// `*.style.toml` loads, with a warning to rename it (#420).
     pub fn load(path: &Path) -> Result<Self> {
+        if let Some(renamed) = legacy_rename(path) {
+            tracing::warn!(
+                "style guide {} uses the old suffix `.{LEGACY_SUFFIX}`, which is also a UI \
+                 class file's: rename it to {} (the old name stops loading in a later release)",
+                path.display(),
+                renamed.display()
+            );
+        }
         let content = std::fs::read_to_string(path)?;
         let file: StyleFile = toml::from_str(&content).map_err(|e| {
             FlintError::GenerationError(format!(
@@ -84,11 +151,10 @@ impl StyleGuide {
 
     /// Find and load a style guide by name, searching standard locations
     pub fn find(name: &str) -> Result<Self> {
-        let candidates = [
-            format!("styles/{}.style.toml", name),
-            format!(".flint/styles/{}.style.toml", name),
-        ];
-
+        // The working directory first (as before), then the project root,
+        // so a style is found from any folder of the project (#179).
+        let root = flint_asset::Project::current()?.root;
+        let candidates = candidates(name, &root);
         for candidate in &candidates {
             let path = Path::new(candidate);
             if path.exists() {
@@ -145,7 +211,7 @@ mod tests {
     fn temp_style(content: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("flint_style_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.style.toml");
+        let path = dir.join("test.styleguide.toml");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
@@ -230,5 +296,49 @@ require_normals = true
     fn test_style_not_found() {
         let result = StyleGuide::find("nonexistent_style_xyz");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn legacy_suffix_names_its_rename() {
+        assert_eq!(
+            legacy_rename(Path::new("styles/medieval_tavern.style.toml")),
+            Some(std::path::PathBuf::from(
+                "styles/medieval_tavern.styleguide.toml"
+            ))
+        );
+        // The new suffix, a look and an unrelated TOML are left alone.
+        for p in [
+            "styles/medieval_tavern.styleguide.toml",
+            "styles/ink_wash.look.toml",
+            "schemas/components/ascii_style.toml",
+        ] {
+            assert_eq!(legacy_rename(Path::new(p)), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn new_suffix_is_searched_before_the_old() {
+        let root = Path::new("project");
+        let c = candidates("tavern", root);
+        let first_legacy = c
+            .iter()
+            .position(|p| p.ends_with(".style.toml"))
+            .expect("the old suffix is still searched");
+        assert!(c[..first_legacy]
+            .iter()
+            .all(|p| p.ends_with(".styleguide.toml")));
+        assert!(c[first_legacy..].iter().all(|p| p.ends_with(".style.toml")));
+        assert_eq!(c[0], "styles/tavern.styleguide.toml");
+        assert_eq!(c.len(), 8);
+    }
+
+    #[test]
+    fn a_style_guide_under_the_old_name_still_loads() {
+        let dir = std::env::temp_dir().join(format!("flint_style_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.style.toml");
+        std::fs::write(&path, "[style]\nname = \"old\"\n").unwrap();
+        assert_eq!(StyleGuide::load(&path).unwrap().name, "old");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

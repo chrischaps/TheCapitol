@@ -70,6 +70,9 @@ pub struct ParticleEditArgs {
     pub target: Option<[f32; 3]>,
     #[arg(long)]
     pub fov: Option<f32>,
+    /// `--style` / `--style-time` for --render (#271)
+    #[command(flatten)]
+    pub style: crate::commands::common_args::StyleArgs,
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────
@@ -164,6 +167,7 @@ fn run_headless(
         camera.position_array(),
     );
 
+    args.style.apply_to_renderer(&mut renderer, &ctx.device);
     renderer.render_to(
         &ctx.device,
         &ctx.queue,
@@ -811,7 +815,7 @@ impl ParticleEditApp {
 
     fn browse_texture(&mut self, emitter: usize) {
         let dir = effect_dir(&self.path);
-        let picked = rfd::FileDialog::new()
+        let picked = crate::file_dialog::FileDialog::new()
             .add_filter("image", &["png", "jpg", "jpeg", "ktx2"])
             .set_directory(&dir)
             .pick_file();

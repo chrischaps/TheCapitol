@@ -176,12 +176,15 @@ The 2D overlay draws in screen-space, but there's no way to visualize 3D informa
 - Script API: `debug_line(from, to, color)`, `debug_box(center, size, color)`, `debug_sphere(center, radius, color)`, `debug_ray(origin, dir, length, color)`
 - Wireframe overlay rendered after scene, before HUD
 - Auto-clear each frame (immediate-mode, like the 2D draw API)
-- Toggle from the F4 Rendering & Effects menu — the per-feature F-keys were retired (ADR 0053) and the bare F-key space is spoken for
+- Toggle from the F4 Rendering & Effects menu — the per-feature F-keys were retired ([ADR 0053](https://github.com/chrischaps/Flint/blob/main/docs/adr/0053-one-rendering-and-effects-menu-on-f4.md)) and the bare F-key space is spoken for
 - Optional built-in modes: visualize physics colliders, trigger volumes, nav meshes
 
 > The skeleton overlay in the model previewer and the wireframe debug modes
-> (which now include skinned meshes) are the first pieces of this; a
-> script-driven 3D line API is still open.
+> (which now include skinned meshes) are the first pieces of this, and
+> scripts already draw world-space lines: `draw_line_3d` on the HUD and
+> `draw_world_line` in the 3D frame, depth-tested ([Lines in the
+> world](concepts/scripting.md#lines-in-the-world)). The `debug_*` shapes and
+> the built-in modes above are still open.
 
 ## Performance Profiler Overlay
 

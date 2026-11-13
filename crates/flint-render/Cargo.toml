@@ -7,12 +7,17 @@ description = "wgpu renderer for Flint"
 
 [dependencies]
 flint-core = { workspace = true }
+flint-wooze = { workspace = true }
+flint-geometry = { workspace = true }
 flint-ecs = { workspace = true }
 flint-scene = { workspace = true }
 flint-import = { workspace = true }
+flint-pixels = { workspace = true }
 flint-terrain = { workspace = true }
 flint-particles = { workspace = true }
 toml = { workspace = true }
+serde = { workspace = true }
+ab_glyph = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }
@@ -24,4 +29,16 @@ profiling = { workspace = true }
 
 [dev-dependencies]
 flint-asset = { workspace = true }
-naga = { version = "23", features = ["wgsl-in"] }
+naga = { version = "23", features = ["wgsl-in", "wgsl-out"] }
+epaint_default_fonts = "0.30"
+serde_json = { workspace = true }
+
+# Native builds decode every format image does by default (with rayon); the
+# web player keeps the workspace's PNG, JPEG and HDR (#123).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+image = { workspace = true, features = ["default"] }
+# User-authored styles (#274) are parsed and validated before wgpu sees
+# them. wgpu already builds naga natively, so this adds nothing there; the
+# web relies on the browser's compiler instead. `wgsl-out` writes the
+# module back out with every user loop guarded (#411).
+naga = { version = "23", features = ["wgsl-in", "wgsl-out"] }

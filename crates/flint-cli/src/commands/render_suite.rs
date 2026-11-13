@@ -3,6 +3,11 @@
 //! script through the same `SuiteSession` used live, and writes 32-bit float
 //! stereo. Prints the same status lines as `play-suite` so offline and
 //! realtime evidence are textually comparable.
+//!
+//! A `*.goldens.toml` (the programmatic eyes, #271) is `flint goldens`
+//! since #327; `render-suite` given one is routed there before parsing
+//! ([`super::render_goldens::route_render_suite_goldens`]), so these flags
+//! are the music suite's alone.
 
 use anyhow::{bail, Context, Result};
 use flint_music::event_script::EventScript;
@@ -13,8 +18,12 @@ use flint_music::{validate_manifest, validate_manifest_assets, Conductor, SuiteM
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
+#[command(
+    after_help = "A `.goldens.toml` (scenes gated against golden PNGs) is \
+    `flint goldens`; given one, this command runs that instead."
+)]
 pub struct RenderSuiteArgs {
-    /// Path to the suite manifest (.suite.toml)
+    /// Path to the music suite manifest (`.suite.toml`)
     pub manifest: String,
 
     /// Event script (.events.toml) of scheduled bus changes and markers
@@ -47,6 +56,7 @@ pub struct RenderSuiteArgs {
 }
 
 pub fn run(args: RenderSuiteArgs) -> Result<()> {
+    let output = args.output.clone();
     let base_dir = args
         .base_dir
         .map(PathBuf::from)
@@ -142,7 +152,7 @@ pub fn run(args: RenderSuiteArgs) -> Result<()> {
             f.action
         );
     }
-    let out_path = Path::new(&args.output);
+    let out_path = Path::new(&output);
     write_wav(out_path, &result.samples, manifest.sample_rate)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!(

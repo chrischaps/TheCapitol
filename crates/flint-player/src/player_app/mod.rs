@@ -2,49 +2,95 @@
 //!
 //! Runs the game loop with physics, input, and first-person camera.
 
-mod debug_panels;
-mod egui_input;
-mod events;
+#[cfg(test)]
+mod asset_search_tests;
+mod camera_cut;
 #[cfg(test)]
 mod capture_gate_tests;
 #[cfg(test)]
 mod debug_key_tests;
+mod debug_panels;
+mod egui_input;
+#[cfg(test)]
+mod event_bus_tests;
+mod events;
+pub mod expression_feed;
+#[cfg(test)]
+mod extension_hooks_tests;
 #[cfg(test)]
 mod extension_tests;
 pub mod fonts;
 mod frame;
+pub mod frame_rate;
+pub mod game_core;
+pub mod headless_animation;
+pub mod headless_game;
+#[cfg(test)]
+mod hold_tests;
 mod hud_render;
 mod init;
 mod input_config;
 pub mod input_script;
-#[cfg(feature = "debug-hud")]
-mod music_guide_panel;
-mod music_session;
+mod key_note;
+#[cfg(feature = "living")]
+mod living_ab;
+#[cfg(feature = "living")]
+mod living_api;
+#[cfg(feature = "living")]
+pub mod living_props;
+#[cfg(feature = "living")]
+mod living_subsystem;
+#[cfg(feature = "living")]
+pub(crate) mod living_tuning;
+mod missing_features;
 mod pacing;
+mod perf;
 mod persist;
+#[cfg(feature = "procgen")]
+pub mod procgen_assets;
+mod quality;
+pub mod render_scale;
+mod scene_entry;
+#[cfg(test)]
+mod scene_entry_tests;
 pub(crate) mod scene_loading;
-mod script_commands;
-#[cfg(feature = "debug-hud")]
-mod timeline_panel;
+mod schemas;
+pub mod script_commands;
+#[cfg(feature = "living")]
+mod shallow_wooze;
+mod state;
+pub mod style_commands;
+pub(crate) mod subsystem;
+#[cfg(test)]
+mod subsystem_tests;
+mod text_halo;
+#[cfg(test)]
+mod touch_controls_tests;
+mod touch_overlay;
 mod transition;
+#[cfg(test)]
+mod transition_tests;
+#[cfg(test)]
+mod vfs_tests;
+#[cfg(target_arch = "wasm32")]
+pub mod web_pacing;
+#[cfg(target_arch = "wasm32")]
+pub mod web_page;
+#[cfg(target_arch = "wasm32")]
+mod web_perf;
+#[cfg(target_arch = "wasm32")]
+pub mod web_startup;
 mod world_text;
 
 #[cfg(target_os = "android")]
 use events::AndroidGamepadTracker;
-use flint_animation::AnimationSystem;
-use flint_asset::{AssetCatalog, ContentStore};
 use flint_audio::AudioSystem;
-use flint_ecs::FlintWorld;
-use flint_particles::ParticleSystem;
-use flint_physics::PhysicsSystem;
 use flint_render::{Camera, RenderContext, SceneRenderer};
-use flint_runtime::{
-    GameClock, GameStateMachine, InputConfig, InputState, PersistentStore, SaveDebounce,
-};
-use flint_script::context::DrawItem;
-use flint_script::ScriptSystem;
-use gilrs::Gilrs;
-use std::collections::{HashMap, HashSet};
+use flint_runtime::pad::Gilrs;
+use flint_runtime::InputState;
+pub use game_core::GameCore;
+pub use state::{LaunchOptions, ProcGenMode, SceneSettings};
+use std::collections::HashMap;
 use std::sync::Arc;
 use transition::TransitionPhase;
 use winit::window::Window;
@@ -75,9 +121,7 @@ const DEAD_CALM_COMPONENT: &str = "dead_calm";
 /// and edited through the F3 Camera panel (see flint-debug-ui camera_panel).
 const CAMERA_TUNING_COMPONENT: &str = "camera_tuning";
 
-/// Panel name for the terrain grass debug overlay (F3) — the engine-side
-/// sibling of `music_guide_panel::MUSIC_GUIDE_PANEL` /
-/// `timeline_panel::MANIFEST_MAP_PANEL`.
+/// Panel name for the terrain grass debug overlay (F3).
 #[cfg(feature = "debug-hud")]
 const GRASS_DEBUG_PANEL: &str = "Grass Debug";
 
@@ -106,6 +150,15 @@ pub struct CaptureConfig {
     pub(crate) taken: bool,
     /// Internal: number of numbered frames written so far.
     pub(crate) sequence: u32,
+    /// Internal: files actually on disk, and attempts that failed, with the
+    /// last failure's reason (#639: a run that asks for a shot writes it or
+    /// says why it didn't).
+    pub(crate) written: u32,
+    pub(crate) failed: u32,
+    pub(crate) last_failure: Option<String>,
+    /// Internal: the last game time a frame reached the capture point,
+    /// so a missing shot can say how far the run got.
+    pub(crate) last_frame_time: Option<f64>,
     /// Internal: game time of the next scheduled interval capture.
     pub(crate) next_due: f64,
     /// Internal: frames presented and game time accumulated after the first
@@ -117,7 +170,10 @@ pub struct CaptureConfig {
     pub(crate) perf_draws: u64,
     pub(crate) perf_entity_draws: u64,
     pub(crate) perf_culled: u64,
+    /// Of those, set aside by level of detail / draw distance (#56)
+    pub(crate) perf_lod_culled: u64,
     pub(crate) perf_triangles: u64,
+    pub(crate) perf_shadow_triangles: u64,
     /// GPU frame times summed over frames that had one (ADR 0108)
     pub(crate) perf_gpu_ms: f64,
     pub(crate) perf_gpu_frames: u64,
@@ -125,6 +181,10 @@ pub struct CaptureConfig {
     /// spread so uneven pacing shows at an even mean.
     pub(crate) perf_pacing: pacing::Pacing,
 }
+
+/// Frames a single screenshot is retried on after a failed read-back or
+/// save before the run gives up on it (#639).
+pub(crate) const CAPTURE_RETRIES: u32 = 30;
 
 /// Game seconds ignored by the `--exit-after` frame-time report (loading,
 /// shader warm-up, first-frame texture uploads).
@@ -138,6 +198,58 @@ impl CaptureConfig {
     /// (ADR 0110's amendment).
     pub fn is_capture(&self) -> bool {
         self.path.is_some() || self.exit_after.is_some() || self.input_script.is_some()
+    }
+
+    /// A single shot is due (its time reached) but not yet on disk, and
+    /// still has retries left: `--exit-after` waits for it (#639).
+    pub(crate) fn shot_pending(&self, now: f64) -> bool {
+        self.path.is_some()
+            && self.every.is_none()
+            && self.written == 0
+            && self.failed <= CAPTURE_RETRIES
+            && now + 1e-6 >= self.at
+    }
+
+    /// Record a capture that didn't reach the disk. A single shot is tried
+    /// again on the next frame until `CAPTURE_RETRIES` run out; a sequence's
+    /// frame is lost, and the run will fail for it.
+    pub(crate) fn note_failure(&mut self, reason: String) {
+        self.failed += 1;
+        self.last_failure = Some(reason);
+        if self.every.is_none() && self.failed <= CAPTURE_RETRIES {
+            self.taken = false;
+        }
+    }
+
+    /// Why a run that asked for screenshots didn't get them all, if it
+    /// didn't: none written, or (in a sequence) any frame lost.
+    pub fn missing(&self) -> Option<String> {
+        let path = self.path.as_ref()?;
+        let why = || match (&self.last_failure, self.last_frame_time) {
+            (Some(reason), _) => reason.clone(),
+            (None, None) => "no frame was drawn".to_string(),
+            (None, Some(t)) => format!(
+                "the run ended at t={t:.3}s, before --screenshot-at {:.3}",
+                self.at
+            ),
+        };
+        if self.written == 0 {
+            return Some(format!(
+                "--screenshot {} was never written: {}",
+                path.display(),
+                why()
+            ));
+        }
+        if self.every.is_some() && self.failed > 0 {
+            return Some(format!(
+                "--screenshot-every lost {} of {} frames of {}: {}",
+                self.failed,
+                self.failed + self.written,
+                path.display(),
+                why()
+            ));
+        }
+        None
     }
 
     /// Build a capture schedule. `every <= 0` means single-shot.
@@ -158,168 +270,91 @@ impl CaptureConfig {
 }
 
 pub struct PlayerApp {
-    // Core state
-    pub world: FlintWorld,
-    pub scene_path: String,
-
-    // Systems
-    pub clock: GameClock,
+    /// The game with no window (ADR 0117 decision 4): the world, its clock,
+    /// scripts, physics, animation, particles, states and the subsystems,
+    /// and the frame order (`game_core::step`). Declared before `audio`, so
+    /// whatever a subsystem holds of the audio engine goes before the
+    /// engine.
+    pub core: GameCore,
     pub input: InputState,
-    pub physics: PhysicsSystem,
-    // Scene-declared music session (F3, ADR 0019): declared before `audio`
-    // so the suite's kira handles drop before the shared AudioManager
-    // (ADR 0017 drop-order rule).
-    music_session: Option<music_session::MusicSession>,
-    /// Set when a session with `quit_on_finish` ends on its own; the event
-    /// loop exits at the end of that frame (checked in RedrawRequested,
-    /// where the ActiveEventLoop is in scope).
-    music_exit_requested: bool,
     pub audio: AudioSystem,
-    pub animation: AnimationSystem,
-    pub particles: ParticleSystem,
-    pub script: ScriptSystem,
+
+    /// What the host asked for before the event loop started (the command
+    /// line, the page's query, a dev profile).
+    pub launch: LaunchOptions,
+    /// What the current scene's file says, replaced whole at a transition.
+    pub scene: SceneSettings,
 
     // Rendering
     window: Option<Arc<Window>>,
     render_context: Option<RenderContext>,
     scene_renderer: Option<SceneRenderer>,
     camera: Camera,
+    /// Camera cuts, style tweens, the style reader and F4's look
+    style: state::StyleState,
+    /// The quality settings in force and the render scale's steps
+    quality: state::QualityState,
+    /// Which refreshes the web player draws (#140, `?fps=`); `None` draws
+    /// every one, as the desktop always does. See `set_frame_rate`.
+    frame_pacer: Option<frame_rate::FramePacer>,
 
     // Skeletal animation: entity_id → asset name for bone matrix updates
     skeletal_entity_assets: HashMap<flint_core::EntityId, String>,
 
-    // HUD + egui overlay
-    egui_ctx: egui::Context,
-    egui_winit: Option<egui_winit::State>,
-    egui_renderer: Option<egui_wgpu::Renderer>,
-
-    // Script-driven 2D draw commands
-    draw_commands: Vec<DrawItem>,
-    /// Depth-tested world text queued this frame (ADR 0104), laid out in
-    /// the egui pass and drawn before the HUD.
-    world_texts: Vec<flint_core::world_text::WorldText>,
-    world_text_pipeline: Option<world_text::WorldTextPipeline>,
-    ui_textures: HashMap<String, egui::TextureHandle>,
-    /// Family names registered from `<project>/fonts/` (file stems + manifest
-    /// aliases). The HUD renderer falls back to the default font for names
-    /// outside this set.
-    ui_fonts: HashSet<String>,
-    /// Unknown font names already warned about (one warn per name).
-    ui_fonts_warned: HashSet<String>,
-    /// The `fonts/` root the current font set was scanned from; rescan on
-    /// scene change only when this differs.
-    ui_fonts_root: Option<std::path::PathBuf>,
-    /// Whether egui has been given the fonts at least once. Until then
-    /// `refresh_project_fonts` always installs them.
-    ui_fonts_installed: bool,
-    /// Set after the first egui pass: `Context::fonts()` panics before then,
-    /// so the script `measure_text` closure falls back to an estimate until
-    /// this flips.
-    egui_fonts_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// egui, the scripts' 2D draw commands and world text, and their fonts
+    hud: state::Hud,
 
     // Asset catalog (optional, for content-addressed asset resolution)
-    catalog: Option<AssetCatalog>,
-    content_store: Option<ContentStore>,
+    assets: state::AssetSources,
 
-    // Window options
-    pub fullscreen: bool,
-    cursor_captured: bool,
-    /// Whether the window has the keyboard focus; real pads are dropped
-    /// and released while it doesn't (ADR 0110).
-    window_focused: bool,
-    /// The `InputState` slots real pads (gilrs) have written, released when
-    /// the window loses focus.
-    real_pad_slots: std::collections::HashSet<u32>,
-    /// The modifiers held now, real or scripted, for `PlayerExtension::on_key`.
-    key_modifiers: winit::keyboard::ModifiersState,
+    /// The window's focus, the cursor and the keys held
+    focus: state::Focus,
 
-    // Environment
-    pub skybox_path: Option<String>,
-    /// Scene-authored hemisphere ambient (sky, ground); None = renderer default
-    pub scene_ambient: Option<([f32; 3], [f32; 3])>,
-    /// MSAA sample count for the scene renderer (1 = off, 4 = on; ADR 0058).
-    /// Set from the --msaa CLI flag before the window/renderer exist.
-    pub msaa_sample_count: u32,
-    /// Scene-authored diffuse terminator wrap; None = 0 = legacy shading
-    pub scene_diffuse_wrap: Option<f32>,
-    pub scene_oren_nayar: Option<f32>,
-    pub scene_sheen: Option<([f32; 3], f32)>,
+    /// The post-processing scripts asked for this frame, stamped over the
+    /// renderer's config before it draws
+    post: state::PostOverrides,
 
-    // Scene-level camera configuration
-    pub scene_camera: Option<flint_scene::CameraDef>,
+    /// `vfs::generation()` when the scene's audio was last loaded. A late
+    /// bundle (#98) installs a grown file source mid-game; when the count
+    /// moves, the audio that couldn't be found before is loaded.
+    pub(super) audio_vfs_generation: u64,
 
-    // Scene-level post-processing overrides
-    pub scene_post_process: Option<flint_scene::PostProcessDef>,
-
-    // Script-driven post-processing overrides (applied per-frame before render)
-    pp_vignette_override: Option<f32>,
-    pp_bloom_override: Option<f32>,
-    pp_exposure_override: Option<f32>,
-    pp_chromatic_aberration_override: Option<f32>,
-    pp_radial_blur_override: Option<f32>,
-    pp_ssao_intensity_override: Option<f32>,
-    pp_fog_density_override: Option<f32>,
-    pp_desaturation_override: Option<f32>,
-    pp_dof_strength_override: Option<f32>,
-    pp_dof_focus_distance_override: Option<f32>,
-    pp_dof_focus_range_override: Option<f32>,
-    pp_fog_color_override: Option<[f32; 3]>,
-    pp_render_mode_override: Option<(u32, f32)>,
-    pp_mode_params_override: Option<[f32; 4]>,
-    /// True while a script-driven reality tear is on screen. Unlike the
-    /// other (sticky) overrides, the mode is zeroed the frame the script
-    /// stops calling set_render_mode — a dead or hot-reloaded script must
-    /// never freeze a tear over the world.
-    pp_mode_was_active: bool,
-
-    /// Rendering & Effects panel's "freeze script post overrides" switch
-    /// (ADR 0053): while true the per-frame script/ladder override stamp is
-    /// skipped so panel edits to contended post fields stick. Cached from
-    /// the panel each frame (one-frame toggle lag, imperceptible).
-    #[cfg(feature = "debug-hud")]
-    pp_debug_freeze: bool,
-
-    // Ladder-driven post params: the scene's authored base, captured at
-    // session start and written back after teardown (ADR 0021).
-    music_pp_base: Option<music_session::LadderPostBase>,
-    music_pp_restore: Option<music_session::LadderPostBase>,
-
-    /// `[scene] preload_audio` — false skips the blanket audio/ preload
-    /// (silent scenes start instantly); audio_source + session stems
-    /// unaffected. Set from the scene file before startup, like msaa.
-    pub scene_preload_audio: bool,
-
-    /// Initial window size in physical pixels (`--width`/`--height`).
-    /// Ignored on Android, where the surface is the screen.
-    pub window_size: (u32, u32),
     /// Screenshot capture driven by `--screenshot` / `--screenshot-at` /
     /// `--screenshot-every` / `--exit-after`. Captures the presented frame
     /// (scene + egui HUD) right before `present()`.
     pub capture: CaptureConfig,
-    /// Set once `--exit-after` elapses; the redraw handler exits the loop.
-    exit_requested: bool,
+    /// How the run ends, and why it failed if it did
+    outcome: state::Outcome,
+    /// A windowless device for the tests that take a scene through a
+    /// transition with a real renderer (#723): `RenderContext` needs a
+    /// surface, so tests hand the renderer's device and queue over here.
+    #[cfg(test)]
+    test_gpu: Option<&'static flint_render::HeadlessContext>,
 
     // Input config layering + remap persistence
-    input_config_override: Option<String>,
-    scene_input_config: Option<String>,
-    input_config_paths: Option<InputConfigPaths>,
-    user_override_config: InputConfig,
-    pending_rebind: Option<PendingRebind>,
+    input_layers: state::InputLayers,
 
     // Optional gamepad backend
     gilrs: Option<Gilrs>,
+    /// A script's `rumble()`s playing now, through `gilrs` (#748).
+    pad_rumble: flint_runtime::PadRumble,
+    /// A subsystem holds the pads (`subsystem::Pads::take`): the frame skips
+    /// the player's polling until it gives them back.
+    pads_lent: bool,
 
-    // State machine + persistence (survive scene transitions)
-    state_machine: GameStateMachine,
-    persistent_store: PersistentStore,
-    /// When to write `save/persist.toml` after a change (see `persist.rs`).
-    persist_debounce: SaveDebounce,
+    // Where the persistent store saves, and when
+    saves: state::Saves,
 
     // Scene transition lifecycle
     transition_phase: TransitionPhase,
 
-    // Schema paths preserved across transitions
-    schema_paths: Vec<String>,
+    // Schema directories and where the list came from (ADR 0114), kept for
+    // transitions and chunks
+    schema_dirs: flint_core::project::SchemaDirs,
+    // The registry itself, read once and kept (ADR 0115, #683): a chunk
+    // uses it as it is, a transition re-reads only for other directories,
+    // and a failed read keeps it
+    schemas: schemas::HeldSchemas,
 
     // Terrain data for height queries
     terrain: Option<(flint_terrain::Terrain, flint_terrain::TerrainConfig)>,
@@ -331,15 +366,8 @@ pub struct PlayerApp {
     /// is uploaded to the renderer (ADR 0068).
     particles_render_enabled: bool,
 
-    // Rendering stats overlay (F2 toggle)
-    show_stats: bool,
-    stats_frame_times: std::collections::VecDeque<f64>,
-    /// The player turned the renderer's GPU timing on for the overlay
-    /// (ADR 0108), so it turns it off again when the overlay closes
-    stats_gpu_timing: bool,
-
-    // Procedural generation resolver for runtime asset resolution
-    procgen_resolver: flint_procgen::ProcGenResolver,
+    /// The F2 stats overlay and the perf readout
+    stats: state::Stats,
 
     // Chunk streaming: chunk_id → spawned entity IDs
     loaded_chunks: HashMap<String, Vec<flint_core::EntityId>>,
@@ -354,8 +382,15 @@ pub struct PlayerApp {
 
     /// Game-installed hooks (`add_extension`), in the order they were added.
     extensions: Vec<Box<dyn crate::extension::PlayerExtension>>,
-    /// Which held keys and buttons belong to egui (game egui layer, ADR 0073).
-    egui_input: egui_input::EguiInputGate,
-}
 
-use input_config::{InputConfigPaths, PendingRebind};
+    /// The device request in flight on the web (#99): `RenderContext::new`
+    /// resolves into it, and startup finishes on the loop.
+    #[cfg(target_arch = "wasm32")]
+    pending_render: web_startup::RenderSlot,
+    /// Wakes the event loop when the device arrives (`set_event_proxy`).
+    #[cfg(target_arch = "wasm32")]
+    event_proxy: Option<winit::event_loop::EventLoopProxy<()>>,
+    /// The browser's pointer lock, followed each frame (#102).
+    #[cfg(target_arch = "wasm32")]
+    pointer_lock: web_page::PointerLock,
+}

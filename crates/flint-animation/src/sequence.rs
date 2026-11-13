@@ -34,7 +34,7 @@
 
 use crate::layer_edit;
 use flint_core::components as comp;
-use flint_core::{EntityId, FlintError, Result};
+use flint_core::{vfs, EntityId, FlintError, Result};
 use flint_ecs::FlintWorld;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -193,7 +193,7 @@ impl AnimSequence {
 
 /// Load a `*.sequence.toml`
 pub fn load_sequence_from_file(path: &Path) -> Result<AnimSequence> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    let content = vfs::read_to_string(path).map_err(|e| {
         FlintError::AnimationError(format!("Failed to read {}: {}", path.display(), e))
     })?;
     load_sequence_from_str(&content, &path.display().to_string())
@@ -290,9 +290,31 @@ pub struct SequenceSync {
     /// Last `animator.sequence` value seen per entity, to detect edges
     last_seen: HashMap<EntityId, String>,
     fired_cues: Vec<SequenceCueEvent>,
+    /// The folders sequence files were read from, for the warning about a
+    /// name none of them gives.
+    searched: Vec<std::path::PathBuf>,
 }
 
 impl SequenceSync {
+    /// Say where the host read sequence files from.
+    pub fn set_searched(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.searched = dirs;
+    }
+
+    /// What the warning about an unknown sequence adds: the folders read.
+    fn searched_text(&self) -> String {
+        if self.searched.is_empty() {
+            return String::new();
+        }
+        let mut text = String::from(". No *.sequence.toml that was loaded gives that name. Tried:");
+        for dir in &self.searched {
+            text.push_str("\n  ");
+            text.push_str(&dir.to_string_lossy().replace('\\', "/"));
+            text.push_str("/*.sequence.toml");
+        }
+        text
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -402,8 +424,10 @@ impl SequenceSync {
                 self.stop(&entity_id);
             } else if !self.play(entity_id, &wanted) {
                 println!(
-                    "WARNING: entity {:?} asked for unknown sequence '{}'",
-                    entity_id, wanted
+                    "WARNING: entity {:?} asked for unknown sequence '{}'{}",
+                    entity_id,
+                    wanted,
+                    self.searched_text()
                 );
             }
             self.last_seen.insert(entity_id, wanted);

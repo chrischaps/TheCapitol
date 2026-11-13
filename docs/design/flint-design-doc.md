@@ -59,7 +59,7 @@ flint/
 │   └── flint-cli/            # CLI application
 │
 ├── schemas/                  # Engine component and archetype definitions
-├── demo/                     # Showcase scenes, scripts, audio, animations
+├── examples/                     # Showcase scenes, scripts, audio, animations
 └── docs/                     # Design docs and mdBook documentation
 ```
 
@@ -827,7 +827,7 @@ See `docs/flint-procgen-implementation-plan.md` for details.
 
 **Deliverables:**
 - flint-procgen-ai: ProcGenAgent trait and MockAgent --- complete
-- Anthropic provider implementation --- pending
+- Anthropic provider implementation (`AnthropicAgent`) --- complete
 - CLI integration with cost tracking --- pending
 
 ---

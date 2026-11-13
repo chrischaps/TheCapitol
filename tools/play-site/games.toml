@@ -1,0 +1,86 @@
+# The games play.chaps.dev serves (#103, epic #94).
+#
+# The deploy (.github/workflows/play.yml, through build.py) fetches each repo
+# at its pinned commit, packs it with `flint bundle --name <id>` into
+# games/<id>/, and writes games.json, which the page reads for its chooser
+# and its no-WebGPU fallback. `?game=<id>` plays one.
+#
+# A commit, not a branch: the site changes only when this file does, and a
+# game's push can't break play.chaps.dev between Flint deploys.
+#
+#   id      the bundle name and the ?game= value: lowercase, digits, - and _
+#   title   shown on the chooser and over the fallback film
+#   line    one sentence under the title
+#   controls  the gate's small line on how it's played (default: sound on ·
+#           mouse to look · Esc frees the pointer)
+#   touch   that line on a phone or tablet, also under the chooser's card
+#           there (default: sound on · the controls come up at a touch · a
+#           paired pad plays it all; #134)
+#   orientation  "landscape" for a game played sideways on a phone or
+#           tablet (FlintKart#27): Begin's full screen locks it there where the
+#           browser can (Chrome on Android), and elsewhere, held upright, a
+#           turn-your-phone prompt holds the game until it's turned. Unset
+#           (the default), the game turns freely with the phone (Float#1)
+#   page    the game's page on chaps.dev
+#   video   a film of the game for browsers without WebGPU: any https URL,
+#           or a path in the game's repo, copied beside its bundle
+#   poster  that film's first frame, also the chooser's picture (URL or path)
+#   film    a line under the film, saying what it shows
+
+[[game]]
+id = "float"
+title = "SET + DRIFT"
+line = "Sit at the edge of a raft at sea, from sunrise to stars. There is nothing to win."
+repo = "chrischaps/Float"
+# master, now that engine-catchup is merged into it: the engine subtree at
+# Flint main, bundle.toml (#102), the early ambience bundle (#124), the touch
+# layout (#134), the iPad pointer-lock fix (#153, Float#4), the raft polish
+# (Float#7) and the body playtest pass (Float#8)
+ref = "3e0b75f4f40fb30fde7247d45ee68e91bd43087d"
+page = "https://chaps.dev/projects/float/"
+video = "https://chaps.dev/projects/float/a-day-at-sea.mp4"
+poster = "https://chaps.dev/projects/float/poster-day.jpg"
+film = "Meanwhile, one whole day at sea, filmed in the game."
+touch = "sound on · drag anywhere to look · ◀ ▶ to scoot along the edge"
+
+[[game]]
+id = "kart"
+title = "Flint Kart"
+line = "Six karts, three laps, one drift-boost at a time. Keys, a pad or a phone."
+controls = "sound on · WASD or a pad · Shift or LB to drift · E or X for items"
+touch = "held sideways, sound on · left thumb steers, up for gas, down to brake · hold DRIFT, tap ITEM"
+orientation = "landscape"
+repo = "chrischaps/FlintKart"
+# master: engine-catchup (bundle.toml and the film under web/, #104; the
+# touch stick, DRIFT and ITEM, #134), the glow-up (FlintKart#14-#25), the
+# HUD, title and sky polish (FlintKart#28-#52), and runtime graphics: tiers
+# Low / Medium / High with Auto picking one from the device and frame time,
+# and distance LODs for set dressing (FlintKart#54-#63). Its engine subtree
+# is Flint main's tree as of #409. The poster and film are the Lighthouse
+# Bay retake (#158), now on master (FlintKart#67).
+ref = "bd910be3aa4eeac18e4a6c7a6594e7af7a1cdc08"
+page = "https://chaps.dev/projects/flint-kart/"
+# Paths, not URLs: build.py copies them from the repo beside the bundle.
+video = "web/kart-race.mp4"
+poster = "web/kart-poster.jpg"
+film = "Meanwhile, the first lap of a race on Lighthouse Bay, filmed in the game."
+
+[[game]]
+id = "afterglow"
+title = "AFTERGLOW"
+line = "Outrun the dark: a neon road, a clock, and fifteen events to win."
+controls = "sound on · WASD or arrows, or a pad · Space handbrake · Shift boost · Enter to choose"
+touch = "held sideways, sound on · left thumb steers, the gas is automatic · right thumb: BRAKE, DRIFT, BOOST · menus are tapped"
+orientation = "landscape"
+repo = "chrischaps/Kandinski"
+# main: the second pass (the two-axle car model, the Grand Tour's fifteen
+# events, the hero car), with bundle.toml and the poster under web/. Its
+# engine subtree is Flint main as of 9886650. No film yet, so a browser
+# without WebGPU sees the poster alone.
+# Now with touch controls: a stick, BRAKE, DRIFT and BOOST, and menus by tap.
+# Then a Settings menu (from the title and the pause menu), the
+# pulse (natively; it stays off on the web), and the engine subtree at Flint
+# main 5224a794 plus #899, with the HUD on the ADR 0116 script names.
+ref = "af91369d89308a3cdb26510f8df17a3491678872"
+# A path, not a URL: build.py copies it from the repo beside the bundle.
+poster = "web/afterglow-poster.jpg"

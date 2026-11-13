@@ -2,23 +2,30 @@
 
 use anyhow::{Context, Result};
 use flint_scene::load_scene;
-use flint_schema::SchemaRegistry;
-use std::path::Path;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 #[derive(clap::Args)]
 pub struct PlayArgs {
-    /// Path to scene file
-    #[arg(required_unless_present = "list_gpus", default_value = "")]
+    /// Path to scene file. Without it: the project's default scene,
+    /// flint.toml's `[project] scene`
+    #[arg(default_value = "")]
     pub scene: String,
 
-    /// Paths to schemas directories (can specify multiple)
-    #[arg(long, default_value = "schemas", action = clap::ArgAction::Append)]
+    /// Schema directories, later ones overriding earlier (repeatable).
+    /// Without it: the project's flint.toml `schemas`, else schemas/ in the
+    /// working directory, beside the scene and one level up
+    #[arg(long, action = clap::ArgAction::Append)]
     pub schemas: Vec<String>,
 
     /// Launch in fullscreen mode
     #[arg(long)]
     pub fullscreen: bool,
+
+    /// `--width`/`--height`, `--position`, `--borderless`, `--always-on-top`
+    /// and `--no-activate`: the window's size and place, its frame, whether
+    /// it stays on top and whether it takes the keyboard (#611)
+    #[command(flatten)]
+    pub window: flint_player::WindowArgs,
 
     /// Optional input config overlay path
     #[arg(long)]
@@ -41,40 +48,97 @@ pub struct PlayArgs {
     /// List available GPU adapters and exit
     #[arg(long)]
     pub list_gpus: bool,
+
+    /// `--style name[:key=value,...]` over every scene's post-processing,
+    /// kept through transitions, and `--style-time` (#328)
+    #[command(flatten)]
+    pub style: crate::commands::common_args::StyleArgs,
+    /// Motion on twos for the whole frame (#405): every entity's drawn position
+    /// and pose change only this many times a second, as does the post time
+    /// styles read (12 = on twos at 24 fps; 0 = off). Over every scene's
+    /// [post_process] motion_hold, kept through transitions
+    #[arg(long, value_name = "RATE")]
+    pub motion_hold: Option<f32>,
+    /// Play expression states from a JSON timeline on the game clock:
+    /// `{"events": [{..., "t": secs}, ...]}`. Scripts read the latest with
+    /// `expression()` and hear each in `on_expression(state)` (Flint#518)
+    #[arg(long, value_name = "FILE")]
+    pub expression_timeline: Option<String>,
+
+    /// Take expression states as newline-delimited JSON objects over TCP at
+    /// this loopback address (e.g. 127.0.0.1:7777). Off unless given; only
+    /// 127.0.0.1 or ::1 can listen (Flint#518)
+    #[arg(long, value_name = "IP:PORT")]
+    pub expression_listen: Option<String>,
+
+    /// Don't watch the game's files for changes (#633): scripts, UI
+    /// documents, user styles, glyph sets and palettes load once and never
+    /// reload, and nothing polls the disk. For captures and shipped builds
+    #[arg(long)]
+    pub no_hot_reload: bool,
+
+    /// Keep this run's save data in DIR, as DIR/<slot>.toml, and read no
+    /// other save (#726). Without it: the OS user directory,
+    /// <config>/<game id>/saves/, or the project's save/ for a game with
+    /// no id
+    #[arg(long, value_name = "DIR")]
+    pub save_dir: Option<std::path::PathBuf>,
 }
 
-pub fn run(args: PlayArgs) -> Result<()> {
+pub fn run(mut args: PlayArgs) -> Result<()> {
     if args.list_gpus {
-        for a in flint_render::list_adapters() {
+        let adapters = flint_render::list_adapters();
+        if adapters.is_empty() {
+            eprintln!("No GPU adapters found: {}", flint_render::no_adapter_hint());
+        }
+        for a in adapters {
             println!("{a}");
         }
         return Ok(());
     }
     flint_render::set_gpu_override(args.gpu.clone());
-    // Merge explicit schemas with auto-discovered dirs from scene path
-    let mut all_schemas = args.schemas.clone();
-    for dir in flint_schema::discover_schema_dirs(&args.scene) {
-        let s = dir.to_string_lossy().into_owned();
-        if !all_schemas.contains(&s) {
-            all_schemas.push(s);
-        }
+    if args.no_hot_reload {
+        flint_core::file_watch::disable();
+    }
+    // No scene named: the manifest's default (ADR 0114), or an error that
+    // says what to pass
+    if args.scene.is_empty() {
+        let project = flint_core::project::Project::current()?;
+        let scene = project.default_scene()?;
+        args.scene = flint_core::project::shown(&scene);
+        println!(
+            "Opening the project's default scene: {} (`[project] scene` in {})",
+            args.scene,
+            flint_core::project::shown(&project.manifest_path())
+        );
+    }
+    // The one resolver (ADR 0114): --schemas, else the manifest, else discovery
+    let (registry, schema_dirs) =
+        super::common_args::load_schemas(Some(&args.scene), &args.schemas)?;
+    super::common_args::warn_dropped_schemas(&schema_dirs);
+    if schema_dirs.dirs.is_empty() {
+        println!("Warning: No schemas directories found");
     }
 
-    // Load schemas from all directories
-    let existing: Vec<&str> = all_schemas
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|p| Path::new(p).exists())
-        .collect();
-    let registry = if !existing.is_empty() {
-        SchemaRegistry::load_from_directories(&existing).context("Failed to load schemas")?
-    } else {
-        println!("Warning: No schemas directories found");
-        SchemaRegistry::new()
-    };
+    // A --style word may name one of the scene's own styles (#274): check
+    // the words once those are registered
+    if !args.style.styles.is_empty() {
+        flint_player::load_user_styles(&args.scene);
+        args.style.check().map_err(anyhow::Error::msg)?;
+    }
+    // Expression sources first, so a bad timeline or a taken port fails
+    // before a window opens
+    let expression_feed = flint_player::ExpressionFeed::open(
+        args.expression_timeline.as_deref(),
+        args.expression_listen.as_deref(),
+    )?;
 
     // Load scene
-    let (world, scene_file) = load_scene(&args.scene, &registry).context("Failed to load scene")?;
+    let (world, mut scene_file) =
+        load_scene(&args.scene, &registry).context("Failed to load scene")?;
+    // Living props' tables: checked, and the preset [wooze] names filled in (#686)
+    flint_procgen::settle_scene(&mut scene_file, std::path::Path::new(&args.scene))
+        .context("Failed to load scene")?;
 
     println!("Loaded scene: {}", scene_file.scene.name);
     println!("Entities: {}", world.entity_count());
@@ -102,7 +166,10 @@ pub fn run(args: PlayArgs) -> Result<()> {
         scene_file.scene.input_config.clone(),
     );
 
-    app.scene_preload_audio = scene_file.scene.preload_audio;
+    app.launch.save_dir = args.save_dir.clone();
+    app.launch.window_size = args.window.size();
+    app.launch.window_options = args.window.clone();
+    app.launch.expression_feed = expression_feed;
 
     // Apply initial mixer bus volumes from CLI
     app.audio
@@ -110,21 +177,24 @@ pub fn run(args: PlayArgs) -> Result<()> {
     app.audio
         .set_bus_volume(flint_player::Bus::Sfx, args.sfx_volume);
 
-    // Pass skybox path from scene environment settings
-    if let Some(env) = &scene_file.environment {
-        app.skybox_path = env.skybox.clone();
-    }
+    app.launch.style_specs = args.style.styles.clone();
+    app.launch.style_time = args.style.style_time;
+    app.launch.motion_hold = args.motion_hold;
 
-    // Pass camera settings from scene
-    app.scene_camera = scene_file.camera.clone();
+    // Everything the scene file says (skybox, ambient and shading levers,
+    // camera, post-processing with its look, living props, wooze and the
+    // scene tables extensions read), taken as flint-player and every
+    // transition take it (#723, #686)
+    app.apply_scene_settings(&scene_file);
 
-    // Pass post-processing settings from scene
-    app.scene_post_process = scene_file.post_process.clone();
-
-    // Preserve schema paths for scene transitions (includes auto-discovered)
-    app.set_schema_paths(all_schemas);
+    // The registry and its directories, kept for transitions and chunks
+    app.set_schemas(registry, schema_dirs);
 
     event_loop.run_app(&mut app)?;
+    // A player that failed to start exits non-zero (#639).
+    if let Some(failure) = app.run_failure() {
+        anyhow::bail!(failure);
+    }
 
     Ok(())
 }

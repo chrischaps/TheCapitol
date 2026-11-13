@@ -13,11 +13,16 @@ pub struct RenderStats {
     // Totals
     pub draw_calls: u32,
     pub triangles: u32,
+    /// Of `draw_calls`: living props' echoes.
+    pub echo_draws: u32,
     // Per-system breakdown
     pub entity_draws: u32,
     /// Opaque and transparent mesh draws skipped because their bounds were
     /// outside the camera frustum. Not counted in `draw_calls`.
     pub culled_draws: u32,
+    /// Of `culled_draws`, those set aside for their level of detail or past
+    /// their draw distance (#56), not by the frustum.
+    pub lod_culled_draws: u32,
     pub skinned_draws: u32,
     pub terrain_draws: u32,
     pub terrain_total_chunks: u32,
@@ -37,8 +42,20 @@ pub struct RenderStats {
     pub gpu_passes: Vec<crate::gpu_timer::GpuPassTime>,
     /// From the frame's first timestamp to its last; 0 when untimed.
     pub gpu_frame_ms: f32,
+    // Stylize memory (#302): the textures the style chain holds (pings,
+    // the display stage's input, styles' own intermediates), made since
+    // the last resize.
+    pub style_targets: u32,
+    pub style_target_bytes: u64,
+    /// Output-size textures in the surface format: the style chain's, any
+    /// a style keeps of its own (watercolor's two washes), and FXAA's
+    /// intermediate. The chain and FXAA together hold two at most.
+    pub full_size_targets: u32,
     // Screen info (set by caller)
     pub resolution: [u32; 2],
+    /// The size the 3D scene is drawn at: `resolution` at render scale 1
+    /// (#122). Set by the renderer.
+    pub scene_resolution: [u32; 2],
 }
 
 /// Format a count for display: 1234 → "1.2K", 1234567 → "1.2M", 42 → "42"

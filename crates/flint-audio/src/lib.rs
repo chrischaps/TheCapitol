@@ -5,13 +5,29 @@
 //! - `AudioSync` — bridges TOML `audio_source` components to Kira spatial tracks
 //! - `AudioTrigger` — maps GameEvents to sound playback (collision, interaction)
 //! - `AudioSystem` — implements `RuntimeSystem` for game loop integration
+//!
+//! In the browser the mix runs in an `AudioWorklet`, off the main thread
+//! (#136): `remote` writes the engine's calls for it, `worklet` opens it,
+//! and `web` is the main-thread stream it falls back to. `page` suspends
+//! both while the page is hidden (#162).
 
+pub mod clock;
+pub mod decode;
 pub mod engine;
+pub mod handle;
+pub mod meter;
+pub mod page;
+pub mod pan;
+pub mod remote;
 pub mod sync;
 pub mod trigger;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+#[cfg(target_arch = "wasm32")]
+pub mod worklet;
 
 use engine::AudioEngine;
-pub use engine::Bus;
+pub use engine::{Bus, MixCounts};
 use flint_core::{Result, Vec3};
 use flint_ecs::FlintWorld;
 use flint_runtime::{GameEvent, RuntimeSystem};
@@ -40,6 +56,26 @@ impl AudioSystem {
         }
     }
 
+    /// Open the audio device if it isn't open, and pick up what
+    /// [`initialize`](RuntimeSystem::initialize) skipped while silent: the
+    /// listener, the trigger rules and every `audio_source` already in the
+    /// world, so looping sources begin from the click. In the browser, call
+    /// it from the user gesture that begins the game; until then the game
+    /// runs silent. Says whether there is sound.
+    pub fn start(&mut self, world: &FlintWorld) -> bool {
+        if !self.engine.start() {
+            return false;
+        }
+        if !self.engine.has_listener() {
+            if let Err(e) = self.engine.create_listener(Vec3::new(0.0, 1.0, 0.0)) {
+                tracing::warn!("{e:?}");
+            }
+            self.triggers.load_rules(world);
+            self.sync.sync_new_sources(world, &mut self.engine);
+        }
+        true
+    }
+
     /// Clear sync and trigger state for a scene transition.
     /// Preserves the AudioEngine and its sound_cache (reusable across scenes).
     pub fn clear(&mut self) {
@@ -53,9 +89,48 @@ impl AudioSystem {
         self.engine.update_listener(position, yaw, pitch);
     }
 
+    /// Read where each `audio_source`'s sound is, once a frame before
+    /// scripts run, paused or not (#658). See [`AudioSync::sample_positions`].
+    pub fn sample_positions(&mut self) {
+        self.sync.sample_positions(&self.engine);
+    }
+
+    /// Seconds into `entity`'s playing sound, wrapped for a loop; `None`
+    /// before it has started. See [`AudioSync::position`].
+    pub fn source_position(&self, entity: flint_core::EntityId) -> Option<f64> {
+        self.sync.position(entity)
+    }
+
+    /// How long after it is mixed a sound is heard, seconds, where that is
+    /// known (the browser). See [`AudioEngine::output_latency`].
+    pub fn output_latency(&self) -> Option<f64> {
+        self.engine.output_latency()
+    }
+
     /// Set the low-pass filter cutoff frequency on the master bus (Hz)
     pub fn set_filter_cutoff(&mut self, hz: f32) {
         self.engine.set_filter_cutoff(hz);
+    }
+
+    /// The voices and spatial tracks kira is mixing, and how many of each
+    /// are paused because nobody can hear them (#138). `None` without a
+    /// device.
+    pub fn mix_counts(&self) -> Option<MixCounts> {
+        let mut counts = self.engine.mix_counts()?;
+        self.sync
+            .add_mix_counts(&mut counts, self.engine.is_remote());
+        Some(counts)
+    }
+
+    /// Mix as before #138, to compare against (the web's `?mix=old`):
+    /// placed sounds on kira spatial tracks, and every sound mixed whether
+    /// anyone can hear it or not. Off by default, which is the lean mix:
+    /// placed sounds as panned voices, loops out of earshot or at volume 0
+    /// paused, one-shots out of earshot skipped and a sound's fifth
+    /// one-shot stealing its oldest. Set it before the scene's sounds start.
+    pub fn set_old_mix(&mut self, old: bool) {
+        self.engine.set_old_mix(old);
+        self.sync.set_old_mix(old);
     }
 
     /// Set a mixer bus volume (linear amplitude; 0.0 mutes the bus)
@@ -101,7 +176,9 @@ impl AudioSystem {
 impl RuntimeSystem for AudioSystem {
     fn initialize(&mut self, world: &mut FlintWorld) -> Result<()> {
         if !self.engine.is_available() {
-            tracing::warn!("No device, running silent");
+            // No device, or (in the browser) no click yet: `start` picks up
+            // the rest.
+            tracing::warn!("No sound yet, running silent");
             return Ok(());
         }
 
@@ -117,14 +194,20 @@ impl RuntimeSystem for AudioSystem {
         Ok(())
     }
 
-    fn fixed_update(&mut self, _world: &mut FlintWorld, _dt: f64) -> Result<()> {
-        // Audio doesn't need fixed timestep
-        Ok(())
-    }
-
     fn update(&mut self, world: &mut FlintWorld, _dt: f64) -> Result<()> {
         if !self.engine.is_available() {
             return Ok(());
+        }
+
+        // The browser's worklet failed after it started and the main thread
+        // took over (#136): what played there is gone, so start it again.
+        self.engine.poll();
+        if self.engine.take_restarted() {
+            tracing::warn!("Audio mix restarted on the main thread; replaying sources");
+            self.sync.clear();
+            if let Err(e) = self.engine.create_listener(Vec3::new(0.0, 1.0, 0.0)) {
+                tracing::warn!("{e:?}");
+            }
         }
 
         // Sync any new audio source entities
@@ -136,6 +219,14 @@ impl RuntimeSystem for AudioSystem {
         // Propagate per-frame pitch/volume changes from ECS to Kira handles
         self.sync.update_parameters(world);
 
+        // Pause loops nobody can hear: out of earshot, or at volume 0
+        self.sync.cull_inaudible(self.engine.listener_position());
+
+        // Steer placed sounds to the listener, once a frame (#138)
+        let ears = self.engine.ears();
+        self.sync.pan_sources(&ears);
+        self.engine.pan_oneshots();
+
         // Reload trigger rules for any new entities
         self.triggers.load_rules(world);
 
@@ -143,15 +234,6 @@ impl RuntimeSystem for AudioSystem {
         self.engine.cleanup_finished_oneshots();
 
         Ok(())
-    }
-
-    fn shutdown(&mut self) -> Result<()> {
-        // Kira cleans up when AudioManager is dropped
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        "audio"
     }
 }
 
@@ -173,12 +255,6 @@ mod tests {
         // Update should not error
         let result = system.update(&mut world, 0.016);
         assert!(result.is_ok());
-
-        // Shutdown should not error
-        let result = system.shutdown();
-        assert!(result.is_ok());
-
-        assert_eq!(system.name(), "audio");
     }
 
     #[test]

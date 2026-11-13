@@ -35,10 +35,14 @@ struct MaterialUniforms {
     // How much of a per-vertex light part is also lit surface (ADR 0096),
     // with its light unchanged.
     glow_surface: f32,
-    _pad_e2: u32,
+    // 1 for a glTF `doubleSided` material (#623): back faces flip N.
+    double_sided: u32,
     // Multiplies the vertex colour, as surface and as per-vertex light
     // (ADR 0102: the entity's `material.vertex_tint_*`). w is unused.
     vertex_tint: vec4<f32>,
+    // Unlit (#627, `material.unlit`): x = 1 skips lighting, drawing the
+    // base colour times y (its `emissive_scale`) plus emission; 0 is lit.
+    unlit: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -49,23 +53,15 @@ var<uniform> material: MaterialUniforms;
 
 @group(1) @binding(1)
 var base_color_texture: texture_2d<f32>;
-@group(1) @binding(2)
-var base_color_sampler: sampler;
 
 @group(1) @binding(3)
 var normal_map_texture: texture_2d<f32>;
-@group(1) @binding(4)
-var normal_map_sampler: sampler;
 
 @group(1) @binding(5)
 var metallic_roughness_texture: texture_2d<f32>;
-@group(1) @binding(6)
-var metallic_roughness_sampler: sampler;
 
 @group(1) @binding(7)
 var emissive_texture: texture_2d<f32>;
-@group(1) @binding(8)
-var emissive_sampler: sampler;
 
 struct DirectionalLight {
     direction: vec3<f32>,
@@ -138,6 +134,12 @@ struct ShadowUniforms {
 
 @group(2) @binding(3)
 var<uniform> shadow: ShadowUniforms;
+
+// Every material's textures share this one sampler (linear, repeating). It
+// lives here, bound once a frame, not in each material's group, so a material
+// bind group spends no DX12 sampler descriptors (Capitol #577).
+@group(2) @binding(4)
+var material_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -471,8 +473,20 @@ fn evaluate_light(
         + (specular + sheen) * radiance * n_dot_l;
 }
 
+// glTF `doubleSided` (#623): a back face is lit as the side the viewer sees,
+// its normal turned round. Single-sided draws cull their back faces, so for
+// them this is the normal as it came.
+fn facing(input: VertexOutput, front: bool) -> VertexOutput {
+    var v = input;
+    if (material.double_sided == 1u && !front) {
+        v.normal = -v.normal;
+    }
+    return v;
+}
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let in = facing(input, front);
     // --- Debug visualization early returns ---
     let dm = material.debug_mode;
 
@@ -537,7 +551,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // `vertex_tint` (ADR 0102) colours its light as it does the surface.
     var emission = material.emissive.rgb;
     if (material.has_emissive_tex == 1u) {
-        emission *= textureSample(emissive_texture, emissive_sampler, scaled_uv).rgb;
+        emission *= textureSample(emissive_texture, material_sampler, scaled_uv).rgb;
     }
     if (material.use_vertex_color == 1u && material.vertex_emission == 1u) {
         let glow = clamp(1.0 - in.color.a, 0.0, 1.0);
@@ -548,7 +562,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Sample base color texture if available
     if (material.has_base_color_tex == 1u) {
-        let tex_color = textureSample(base_color_texture, base_color_sampler, scaled_uv);
+        let tex_color = textureSample(base_color_texture, material_sampler, scaled_uv);
         albedo = tex_color.rgb * albedo;
         alpha = tex_color.a * alpha;
     }
@@ -557,7 +571,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var metallic = material.metallic;
     var roughness = material.roughness;
     if (material.has_metallic_roughness_tex == 1u) {
-        let mr = textureSample(metallic_roughness_texture, metallic_roughness_sampler, scaled_uv);
+        let mr = textureSample(metallic_roughness_texture, material_sampler, scaled_uv);
         // glTF packing: green = roughness, blue = metallic
         roughness = mr.g * material.roughness;
         metallic = mr.b * material.metallic;
@@ -567,7 +581,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Normal from interpolated vertex normal, optionally perturbed by normal map
     var N = normalize(in.normal);
     if (material.has_normal_map == 1u) {
-        let map_sample = textureSample(normal_map_texture, normal_map_sampler, scaled_uv);
+        let map_sample = textureSample(normal_map_texture, material_sampler, scaled_uv);
         let map_normal = map_sample.rgb * 2.0 - 1.0;
         N = perturb_normal(N, in.world_pos, scaled_uv, map_normal);
     }
@@ -659,6 +673,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Emission goes on after lighting and before tonemapping, so it reads the
     // same under any light and bloom picks it up.
     var color = ambient + Lo + emission;
+    // Unlit (#627): the base colour as it is, times `emissive_scale`, with
+    // its emission; no lights, ambient or shadows reach it.
+    if (material.unlit.x > 0.5) {
+        color = albedo * material.unlit.y + emission;
+    }
 
     let final_alpha = alpha * material.opacity;
 
@@ -671,4 +690,47 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     return vec4<f32>(color, final_alpha);
+}
+
+// The style veil (#290): how much of the pixel this transparent surface
+// covers, the same alpha fs_main draws with, for the entity style mask, so
+// glass in front of a styled entity takes that share of the pixel back
+// from the style. Only the material group and the light group's sampler
+// are read; the targets are single-sample R8Unorm with "over" blending.
+@fragment
+fn fs_veil(in: VertexOutput) -> @location(0) vec4<f32> {
+    let scaled_uv = in.uv * material.texture_scale;
+    var alpha = material.base_color.a;
+    if (material.use_vertex_color == 1u) {
+        alpha = in.color.a;
+        if (material.vertex_emission == 1u) {
+            alpha = 1.0;
+        }
+    }
+    if (material.has_base_color_tex == 1u) {
+        alpha = textureSample(base_color_texture, material_sampler, scaled_uv).a * alpha;
+    }
+    return vec4<f32>(clamp(alpha * material.opacity, 0.0, 1.0));
+}
+
+// The style albedo (#869): the surface's own colour, as fs_main builds it
+// before any light reaches it, for a style that wants the light alone (the
+// pencil's `tone = "light"` divides the picture by it). The glowing share of
+// a vertex-emissive surface is no surface, so it is taken out as fs_main
+// takes it out. Alpha 1 says a surface was drawn here; the target clears to 0.
+@fragment
+fn fs_albedo(in: VertexOutput) -> @location(0) vec4<f32> {
+    let scaled_uv = in.uv * material.texture_scale;
+    var albedo = material.base_color.rgb;
+    if (material.use_vertex_color == 1u) {
+        albedo = in.color.rgb * material.vertex_tint.rgb;
+        if (material.vertex_emission == 1u) {
+            let glow = clamp(1.0 - in.color.a, 0.0, 1.0);
+            albedo = albedo * (1.0 - glow * (1.0 - material.glow_surface));
+        }
+    }
+    if (material.has_base_color_tex == 1u) {
+        albedo = textureSample(base_color_texture, material_sampler, scaled_uv).rgb * albedo;
+    }
+    return vec4<f32>(clamp(albedo, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
