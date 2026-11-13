@@ -19,8 +19,8 @@ fn label(x, y, z, text, size, r, g, b) {
     let p = world_to_screen(x, y, z);
     if !p.visible { return; }
     let spacing = size * 0.18;
-    let m = measure_text_ex(text, size, "display", spacing);
-    draw_text_opts(p.x - m.width / 2.0, p.y - m.height / 2.0, text, size, #{
+    let m = measure_text(text, size, #{ font: "display", spacing: spacing });
+    draw_text(p.x - m.width / 2.0, p.y - m.height / 2.0, text, size, #{
         font: "display",
         spacing: spacing,
         color: [r, g, b, 1.0],

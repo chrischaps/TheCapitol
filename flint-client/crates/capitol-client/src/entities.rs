@@ -806,6 +806,7 @@ mod tests {
             rotation: Vec3::ZERO,
             scale: Vec3::ONE,
             rotation_quat: Some(yaw_quat(yaw)),
+            shear: None,
         };
         let m = t.to_matrix();
         // Column-major: the first column is where +X goes.

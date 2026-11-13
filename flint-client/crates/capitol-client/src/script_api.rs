@@ -1577,6 +1577,38 @@ pub fn clamp_to_world(wx: f32, wz: f32) -> [f64; 2] {
 mod tests {
     use super::*;
 
+    /// Every script held to Flint's declared API (ADR 0116) with ours added,
+    /// as `flint script check` would with the game's functions: no unknown
+    /// function, no wrong arity, no misspelled callback, and nothing
+    /// deprecated, since a deprecated name or call shape is gone a release
+    /// later (#630).
+    #[test]
+    fn the_scripts_call_only_what_answers() {
+        use flint_script::check::{Api, Checker, ScriptFile};
+        let mut system = flint_player::script_system();
+        register(system.rhai_engine_mut(), &Shared::default());
+        let api = Api::of(&mut system);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let mut files: Vec<ScriptFile> = std::fs::read_dir(&dir)
+            .expect("flint-client/scripts")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "rhai"))
+            .map(ScriptFile::found)
+            .collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(files.len() >= 5, "found {} scripts in {}", files.len(), dir.display());
+        let checked = Checker::new(api).check(files);
+        let problems: Vec<String> = checked
+            .diagnostics
+            .iter()
+            .map(|d| {
+                let at = d.file.as_deref().map(|f| f.display().to_string());
+                format!("{} {}: {}", d.code, at.unwrap_or_default(), d.message)
+            })
+            .collect();
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
     #[test]
     fn scripts_read_the_note() {
         let shared = Shared::default();

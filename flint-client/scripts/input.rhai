@@ -662,37 +662,37 @@ fn draw_placement(p, now) {
                else { "Click to place" };
     let lc = if p.why != () && !p.asking { [1.0, 0.62, 0.62] } else { [0.95, 0.92, 0.82] };
     let size = 15.0;
-    let m = measure_text_ex(line, size, "strong", 0.0);
+    let m = measure_text(line, size, #{ font: "strong" });
     let top = at.y + 26.0;
-    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, line, size, #{
+    draw_text(at.x - m.width / 2.0 + 1.0, top + 1.0, line, size, #{
         font: "strong", color: [0.0, 0.0, 0.0, 0.6],
     });
-    draw_text_opts(at.x - m.width / 2.0, top, line, size, #{
+    draw_text(at.x - m.width / 2.0, top, line, size, #{
         font: "strong", color: [lc[0], lc[1], lc[2], 0.95],
     });
     // Where it would stand and the room left there (V3.5): indoors,
     // upstairs, the yard or open ground, in the gold of what's yours
     let next = top + m.height + 4.0;
     if p.place != () {
-        let pm = measure_text_ex(p.place, 13.0, "body", 0.0);
-        draw_text_opts(at.x - pm.width / 2.0 + 1.0, next + 1.0, p.place, 13.0, #{
+        let pm = measure_text(p.place, 13.0, #{ font: "body" });
+        draw_text(at.x - pm.width / 2.0 + 1.0, next + 1.0, p.place, 13.0, #{
             font: "body", color: [0.0, 0.0, 0.0, 0.55],
         });
-        draw_text_opts(at.x - pm.width / 2.0, next, p.place, 13.0, #{
+        draw_text(at.x - pm.width / 2.0, next, p.place, 13.0, #{
             font: "body", color: [0.95, 0.84, 0.55, 0.95],
         });
         next += pm.height + 3.0;
     }
     if p.storey != () {
-        let sm = measure_text_ex(p.storey, 12.0, "body", 0.0);
-        draw_text_opts(at.x - sm.width / 2.0, next, p.storey, 12.0, #{
+        let sm = measure_text(p.storey, 12.0, #{ font: "body" });
+        draw_text(at.x - sm.width / 2.0, next, p.storey, 12.0, #{
             font: "body", color: [0.95, 0.84, 0.55, 0.65],
         });
         next += sm.height + 3.0;
     }
     let hint = p.kit + " · right-click or Esc to stop";
-    let hm = measure_text_ex(hint, 12.0, "body", 0.0);
-    draw_text_opts(at.x - hm.width / 2.0, next, hint, 12.0, #{
+    let hm = measure_text(hint, 12.0, #{ font: "body" });
+    draw_text(at.x - hm.width / 2.0, next, hint, 12.0, #{
         font: "body", color: [0.88, 0.88, 0.88, 0.6],
     });
 }
@@ -803,12 +803,12 @@ fn draw_station_ember(s, over, now) {
     if !over { return; }
     let line = s.paused;
     let size = 13.0;
-    let m = measure_text_ex(line, size, "strong", 0.0);
+    let m = measure_text(line, size, #{ font: "strong" });
     let y = p.y + r * 2.0 + 6.0;
-    draw_text_opts(p.x - m.width / 2.0 + 1.0, y + 1.0, line, size, #{
+    draw_text(p.x - m.width / 2.0 + 1.0, y + 1.0, line, size, #{
         font: "strong", color: [0.0, 0.0, 0.0, 0.6],
     });
-    draw_text_opts(p.x - m.width / 2.0, y, line, size, #{
+    draw_text(p.x - m.width / 2.0, y, line, size, #{
         font: "strong", color: [1.0, 0.77, 0.42, 0.95],
     });
 }
@@ -854,12 +854,12 @@ fn draw_station_worn(s, over, now) {
     if !over { return; }
     let line = "Needs repair (" + s.worn + "%)";
     let size = 13.0;
-    let m = measure_text_ex(line, size, "strong", 0.0);
+    let m = measure_text(line, size, #{ font: "strong" });
     let y = cy + r * 1.6 + 6.0;
-    draw_text_opts(cx - m.width / 2.0 + 1.0, y + 1.0, line, size, #{
+    draw_text(cx - m.width / 2.0 + 1.0, y + 1.0, line, size, #{
         font: "strong", color: [0.0, 0.0, 0.0, 0.6],
     });
-    draw_text_opts(cx - m.width / 2.0, y, line, size, #{
+    draw_text(cx - m.width / 2.0, y, line, size, #{
         font: "strong", color: [0.95, 0.62, 0.42, 0.95],
     });
 }
@@ -1072,26 +1072,26 @@ fn draw_yield(y, now) {
     let a = if age < 0.2 { smooth(age / 0.2) } else { 1.0 - smooth((k - 0.6) / 0.4) };
     if a <= 0.0 { return; }
     let size = 17.0;
-    let m = measure_text_ex(y.text, size, "strong", 0.0);
+    let m = measure_text(y.text, size, #{ font: "strong" });
     let pip = 18.0;
     let gap = 6.0;
     let w = m.width + gap + pip;
     let x = p.x - w / 2.0;
     let top = p.y - m.height / 2.0;
     // A soft shadow under the words, so they read over grass and road.
-    draw_text_opts(x + 1.0, top + 1.0, y.text, size, #{
+    draw_text(x + 1.0, top + 1.0, y.text, size, #{
         font: "strong", color: [0.0, 0.0, 0.0, 0.6 * a],
     });
-    draw_text_opts(x, top, y.text, size, #{
+    draw_text(x, top, y.text, size, #{
         font: "strong", color: [0.95, 0.92, 0.82, a],
     });
     let c = y.colour;
     let px = x + m.width + gap;
     let py = p.y - pip / 2.0;
-    draw_rect_ex(px, py, pip, pip, c[0], c[1], c[2], 0.95 * a, pip / 2.0, 0);
-    draw_rect_outline_ex(px, py, pip, pip, 0.0, 0.0, 0.0, 0.3 * a, 1.0, pip / 2.0, 0);
-    let g = measure_text_ex(y.grade, 12.0, "strong", 0.0);
-    draw_text_opts(px + (pip - g.width) / 2.0, p.y - g.height / 2.0, y.grade, 12.0, #{
+    draw_rect(px, py, pip, pip, #{ color: [c[0], c[1], c[2], 0.95 * a], rounding: pip / 2.0 });
+    draw_rect_outline(px, py, pip, pip, #{ color: [0.0, 0.0, 0.0, 0.3 * a], thickness: 1.0, rounding: pip / 2.0 });
+    let g = measure_text(y.grade, 12.0, #{ font: "strong" });
+    draw_text(px + (pip - g.width) / 2.0, p.y - g.height / 2.0, y.grade, 12.0, #{
         font: "strong", color: [0.06, 0.06, 0.1, a],
     });
     if y.grade == "A" { draw_twinkle(px + pip / 2.0, py + pip / 2.0, pip, now - y.born, a); }
@@ -1232,8 +1232,8 @@ fn draw_pad_glyph(x, y, name, h, a) {
         draw_circle(cx + 0.5, cy + 1.5, r, 0.0, 0.0, 0.0, 0.35 * a);
         draw_circle(cx, cy, r - 0.5, 0.10, 0.09, 0.07, 0.86 * a);
         draw_circle_outline(cx, cy, r - 1.0, tint[0], tint[1], tint[2], 0.95 * a, 1.5);
-        let m = measure_text_ex(name, h * 0.62, "strong", 0.0);
-        draw_text_opts(cx - m.width / 2.0, cy - m.height / 2.0, name, h * 0.62, #{
+        let m = measure_text(name, h * 0.62, #{ font: "strong" });
+        draw_text(cx - m.width / 2.0, cy - m.height / 2.0, name, h * 0.62, #{
             font: "strong", color: [tint[0], tint[1], tint[2], a],
         });
         return h;
@@ -1247,24 +1247,23 @@ fn draw_pad_glyph(x, y, name, h, a) {
     };
     if way != () {
         let arm = (h * 0.36).round();
-        draw_rect_ex(x + 0.5, y + r - arm / 2.0 + 1.5, h, arm, 0.0, 0.0, 0.0, 0.35 * a, 2.0, 0);
-        draw_rect_ex(x, y + r - arm / 2.0, h, arm, 0.10, 0.09, 0.07, 0.86 * a, 2.0, 0);
-        draw_rect_ex(cx - arm / 2.0, y, arm, h, 0.10, 0.09, 0.07, 0.86 * a, 2.0, 0);
-        draw_rect_outline_ex(x, y + r - arm / 2.0, h, arm, 0.79, 0.64, 0.15, 0.45 * a, 1.0, 2.0, 0);
-        draw_rect_outline_ex(cx - arm / 2.0, y, arm, h, 0.79, 0.64, 0.15, 0.45 * a, 1.0, 2.0, 0);
-        draw_rect_ex(cx - arm / 2.0 + 1.0, cy - arm / 2.0 + 1.0, arm - 2.0, arm - 2.0, 0.10, 0.09, 0.07, a, 0.0, 0);
+        draw_rect(x + 0.5, y + r - arm / 2.0 + 1.5, h, arm, #{ color: [0.0, 0.0, 0.0, 0.35 * a], rounding: 2.0 });
+        draw_rect(x, y + r - arm / 2.0, h, arm, #{ color: [0.10, 0.09, 0.07, 0.86 * a], rounding: 2.0 });
+        draw_rect(cx - arm / 2.0, y, arm, h, #{ color: [0.10, 0.09, 0.07, 0.86 * a], rounding: 2.0 });
+        draw_rect_outline(x, y + r - arm / 2.0, h, arm, #{ color: [0.79, 0.64, 0.15, 0.45 * a], thickness: 1.0, rounding: 2.0 });
+        draw_rect_outline(cx - arm / 2.0, y, arm, h, #{ color: [0.79, 0.64, 0.15, 0.45 * a], thickness: 1.0, rounding: 2.0 });
+        draw_rect(cx - arm / 2.0 + 1.0, cy - arm / 2.0 + 1.0, arm - 2.0, arm - 2.0, #{ color: [0.10, 0.09, 0.07, a] });
         let lit = arm - 3.0;
         let reach = r - arm / 2.0;
         let c = gold();
-        draw_rect_ex(cx + way[0] * reach - lit / 2.0, cy + way[1] * reach - lit / 2.0, lit, lit,
-                     c[0], c[1], c[2], a, 1.5, 0);
+        draw_rect(cx + way[0] * reach - lit / 2.0, cy + way[1] * reach - lit / 2.0, lit, lit, #{ color: [c[0], c[1], c[2], a], rounding: 1.5 });
         return h;
     }
-    let m = measure_text_ex(name, h * 0.6, "strong", 0.0);
+    let m = measure_text(name, h * 0.6, #{ font: "strong" });
     let w = (m.width + 10.0).max(h);
-    draw_rect_ex(x, y, w, h, 0.10, 0.09, 0.07, 0.86 * a, h / 2.0, 0);
-    draw_rect_outline_ex(x, y, w, h, 0.79, 0.64, 0.15, 0.8 * a, 1.0, h / 2.0, 0);
-    draw_text_opts(x + (w - m.width) / 2.0, y + (h - m.height) / 2.0, name, h * 0.6, #{
+    draw_rect(x, y, w, h, #{ color: [0.10, 0.09, 0.07, 0.86 * a], rounding: h / 2.0 });
+    draw_rect_outline(x, y, w, h, #{ color: [0.79, 0.64, 0.15, 0.8 * a], thickness: 1.0, rounding: h / 2.0 });
+    draw_text(x + (w - m.width) / 2.0, y + (h - m.height) / 2.0, name, h * 0.6, #{
         font: "strong", color: [0.96, 0.90, 0.72, a],
     });
     w
@@ -1294,7 +1293,7 @@ fn draw_act_line(cx, y, line, size, ink, alpha) {
         if p[0] {
             width += draw_pad_glyph_width(p[1], h) + 2.0 * gap;
         } else {
-            let m = measure_text_ex(p[1], size, "strong", 0.0);
+            let m = measure_text(p[1], size, #{ font: "strong" });
             width += m.width;
             tall = tall.max(m.height);
         }
@@ -1306,9 +1305,9 @@ fn draw_act_line(cx, y, line, size, ink, alpha) {
             x += draw_pad_glyph(x, y + tall / 2.0 - h / 2.0, p[1], h, alpha) + gap;
         } else {
             let words = p[1];
-            draw_text_opts(x + 1.0, y + 1.0, words, size, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.6 * alpha] });
-            draw_text_opts(x, y, words, size, #{ font: "strong", color: [ink[0], ink[1], ink[2], alpha] });
-            x += measure_text_ex(words, size, "strong", 0.0).width;
+            draw_text(x + 1.0, y + 1.0, words, size, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.6 * alpha] });
+            draw_text(x, y, words, size, #{ font: "strong", color: [ink[0], ink[1], ink[2], alpha] });
+            x += measure_text(words, size, #{ font: "strong" }).width;
         }
     }
 }
@@ -1317,7 +1316,7 @@ fn draw_act_line(cx, y, line, size, ink, alpha) {
 fn draw_pad_glyph_width(name, h) {
     if pad_tint(name) != () { return h; }
     if ["Up", "Down", "Left", "Right"].contains(name) { return h; }
-    (measure_text_ex(name, h * 0.6, "strong", 0.0).width + 10.0).max(h)
+    (measure_text(name, h * 0.6, #{ font: "strong" }).width + 10.0).max(h)
 }
 
 // What E acts on over the shoulder: a node's ring, a station's in gold, a
@@ -1394,8 +1393,8 @@ fn draw_focus_prompt(f) {
     for k in 0..lines.len() {
         let key = lines[k][0];
         let words = lines[k][1];
-        let km = measure_text_ex(key, 12.0, "strong", 0.0);
-        let wm = measure_text_ex(words, size, "strong", 0.0);
+        let km = measure_text(key, 12.0, #{ font: "strong" });
+        let wm = measure_text(words, size, #{ font: "strong" });
         let kw = if pad { 19.0 } else { km.width + 12.0 };
         let w = kw + gap + wm.width;
         let x = at.x - w / 2.0;
@@ -1404,17 +1403,17 @@ fn draw_focus_prompt(f) {
         if pad {
             draw_pad_glyph(x, y, key, 19.0, a);
         } else {
-            draw_rect_ex(x + 1.0, y + 2.0, kw, 19.0, 0.0, 0.0, 0.0, 0.35 * a, 4.0, 0);
-            draw_rect_ex(x, y, kw, 19.0, 0.10, 0.09, 0.07, 0.82 * a, 4.0, 0);
-            draw_rect_outline_ex(x, y, kw, 19.0, 0.79, 0.64, 0.15, 0.95 * a, 1.0, 4.0, 0);
-            draw_text_opts(x + 6.0, y + (19.0 - km.height) / 2.0, key, 12.0, #{
+            draw_rect(x + 1.0, y + 2.0, kw, 19.0, #{ color: [0.0, 0.0, 0.0, 0.35 * a], rounding: 4.0 });
+            draw_rect(x, y, kw, 19.0, #{ color: [0.10, 0.09, 0.07, 0.82 * a], rounding: 4.0 });
+            draw_rect_outline(x, y, kw, 19.0, #{ color: [0.79, 0.64, 0.15, 0.95 * a], thickness: 1.0, rounding: 4.0 });
+            draw_text(x + 6.0, y + (19.0 - km.height) / 2.0, key, 12.0, #{
                 font: "strong", color: [0.96, 0.90, 0.72, a],
             });
         }
         let tx = x + kw + gap;
         let ty = y + (19.0 - wm.height) / 2.0;
-        draw_text_opts(tx + 1.0, ty + 1.0, words, size, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.6 * a] });
-        draw_text_opts(tx, ty, words, size, #{ font: "strong", color: [0.98, 0.95, 0.88, 0.97 * a] });
+        draw_text(tx + 1.0, ty + 1.0, words, size, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.6 * a] });
+        draw_text(tx, ty, words, size, #{ font: "strong", color: [0.98, 0.95, 0.88, 0.97 * a] });
     }
 }
 
@@ -1448,14 +1447,14 @@ fn draw_hall_prompt(h, over) {
                else if pad_held() { "Click to trade · {Right}" }
                else { "Click to trade · M" };
     let size = 18.0;
-    let m = measure_text_ex(title, size, "display", 0.0);
+    let m = measure_text(title, size, #{ font: "display" });
     // Close up the clock is near the top of the screen: keep the prompt
     // under the header.
     let top = (at.y - 44.0).max(64.0);
-    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
+    draw_text(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
         font: "display", color: [0.0, 0.0, 0.0, 0.6],
     });
-    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
+    draw_text(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.86, 0.92, 1.0, 0.97],
     });
     let ly = top + m.height + 5.0;
@@ -1552,7 +1551,7 @@ fn draw_sign(s) {
     let px = (edge.y - at.y).abs();
     if px < 9.0 { return; }
     let fade = ((px - 9.0) / 6.0).min(1.0);
-    let m = measure_text_ex(s.name, 20.0, "display", 0.0);
+    let m = measure_text(s.name, 20.0, #{ font: "display" });
     let size = (s.sign_w * 20.0 / m.width).min(0.13);
     let d = s.sign_d + 0.004;
     for side in [1.0, -1.0] {
@@ -1579,7 +1578,7 @@ fn draw_hall_sign(s) {
     let fade = ((px - 9.0) / 6.0).min(1.0);
     // Measured with its letter spacing, a twenty-fifth of the em, so a
     // long name still fits the board
-    let m = measure_text_ex(s.name, 20.0, "display", 0.8);
+    let m = measure_text(s.name, 20.0, #{ font: "display", spacing: 0.8 });
     let size = (s.w * 20.0 / m.width).min(s.h * 0.8);
     draw_world_text(s.x, s.y, s.z, s.name, size, #{
         font: "display", color: [0.96, 0.92, 0.82, 0.97 * fade], facing: [s.fx, 0.0, s.fz], spacing: size * 0.04,
@@ -1609,10 +1608,10 @@ fn draw_stall(s, over, walking, now) {
                else if s.near { "Kept by " + s.keeper + " · click to browse" }
                else { "Kept by " + s.keeper + " · click to walk there" };
     let size = 17.0;
-    let m = measure_text_ex(title, size, "display", 0.0);
+    let m = measure_text(title, size, #{ font: "display" });
     let top = (at.y - 44.0).max(64.0);
-    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{ font: "display", color: [0.0, 0.0, 0.0, 0.6] });
-    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{ font: "display", color: [1.0, 0.92, 0.78, 0.97] });
+    draw_text(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{ font: "display", color: [0.0, 0.0, 0.0, 0.6] });
+    draw_text(at.x - m.width / 2.0, top, title, size, #{ font: "display", color: [1.0, 0.92, 0.78, 0.97] });
     let ly = top + m.height + 5.0;
     draw_act_line(at.x, ly, act_words(line), 13.0, [0.95, 0.83, 0.62], 0.92);
 }
@@ -1637,12 +1636,12 @@ fn draw_board(h, over, now) {
         "Wanted, and the Gazette · click to read"
     };
     let size = 16.0;
-    let m = measure_text_ex(title, size, "display", 0.0);
+    let m = measure_text(title, size, #{ font: "display" });
     let top = (at.y - 40.0).max(64.0);
-    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
+    draw_text(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
         font: "display", color: [0.0, 0.0, 0.0, 0.6],
     });
-    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
+    draw_text(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.96, 0.92, 0.82, 0.97],
     });
     let ly = top + m.height + 5.0;
@@ -1663,12 +1662,12 @@ fn draw_office(h, over, now) {
     let title = "The Deeds Office";
     let line = if h.deed_waits { "Your deed waits here · click to look in" } else { "Click to compare the zones" };
     let size = 16.0;
-    let m = measure_text_ex(title, size, "display", 0.0);
+    let m = measure_text(title, size, #{ font: "display" });
     let top = (at.y - 40.0).max(64.0);
-    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
+    draw_text(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
         font: "display", color: [0.0, 0.0, 0.0, 0.6],
     });
-    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
+    draw_text(at.x - m.width / 2.0, top, title, size, #{
         font: "display", color: [0.98, 0.9, 0.84, 0.97],
     });
     let ly = top + m.height + 5.0;

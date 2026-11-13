@@ -389,20 +389,10 @@ fn main() -> Result<()> {
         None,
         scene_file.scene.input_config.clone(),
     );
-    player.window_size = (args.width, args.height);
-    player.scene_camera = scene_file.camera.clone();
-    player.scene_post_process = scene_file.post_process.clone();
-    if let Some(env) = &scene_file.environment {
-        player.skybox_path = env.skybox.clone();
-        if env.ambient_sky.is_some() || env.ambient_ground.is_some() {
-            player.scene_ambient = Some((
-                env.ambient_sky
-                    .unwrap_or(flint_render::LightUniforms::DEFAULT_AMBIENT_SKY),
-                env.ambient_ground
-                    .unwrap_or(flint_render::LightUniforms::DEFAULT_AMBIENT_GROUND),
-            ));
-        }
-    }
+    // The scene file's camera, post-processing, skybox and ambient, as every
+    // Flint host takes them since the player was split (Flint ADR 0117)
+    player.apply_scene_settings(&scene_file);
+    player.launch.window_size = (args.width, args.height);
     player.set_schema_paths(schema_dirs);
     let screenshot = args.screenshot.or_else(|| {
         (args.screenshot_at.is_some() || args.screenshot_every.is_some())
@@ -417,7 +407,7 @@ fn main() -> Result<()> {
         args.screenshot_every,
         args.exit_after,
     );
-    player.clock.frame_step = args.frame_step.filter(|s| *s > 0.0);
+    player.core.clock.frame_step = args.frame_step.filter(|s| *s > 0.0);
     if let Some(path) = &args.input_script {
         player.capture.input_script = Some(flint_player::InputScript::load(path)?);
     }

@@ -43,3 +43,4 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 flint-particles = { workspace = true }
+flint-script = { workspace = true, features = ["check"] }

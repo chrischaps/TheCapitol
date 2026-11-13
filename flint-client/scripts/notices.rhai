@@ -209,8 +209,8 @@ fn body_size() { 14.0 }
 // A toast's size on the screen.
 fn toast_size(q) {
     let spacing = title_size() * 0.12;
-    let tm = measure_text_ex(q.title, title_size(), "display", spacing);
-    let bm = measure_text_ex(q.body, body_size(), "body", 0.0);
+    let tm = measure_text(q.title, title_size(), #{ font: "display", spacing: spacing });
+    let bm = measure_text(q.body, body_size(), #{ font: "body" });
     let extra = if q.count > 1 { 34.0 } else { 0.0 };
     #{ w: (tm.width + 20.0 + extra).max(bm.width) + 48.0, h: tm.height + bm.height + 30.0,
        tw: tm.width, th: tm.height, bw: bm.width, spacing: spacing, extra: extra }
@@ -227,8 +227,8 @@ fn draw_toast(q, bottom, now) {
     let y = bottom - s.h + rise;
     // The panels' glass, rgba(15,15,25,0.95), and their edge.
     // Over the marks on the world, whichever script drew them.
-    draw_rect_ex(x, y, s.w, s.h, 0.059, 0.059, 0.098, 0.9 * a, 10.0, toast_layer());
-    draw_rect_outline_ex(x, y, s.w, s.h, 0.314, 0.314, 0.392, 0.3 * a, 1.0, 10.0, toast_layer());
+    draw_rect(x, y, s.w, s.h, #{ color: [0.059, 0.059, 0.098, 0.9 * a], rounding: 10.0, layer: toast_layer() });
+    draw_rect_outline(x, y, s.w, s.h, #{ color: [0.314, 0.314, 0.392, 0.3 * a], thickness: 1.0, rounding: 10.0, layer: toast_layer() });
     let c = gold();
     let k = kind_colour(q.kind);
     let head = x + (s.w - (s.tw + 20.0 + s.extra)) / 2.0;
@@ -237,18 +237,18 @@ fn draw_toast(q, bottom, now) {
     let d = 4.5;
     draw_polygon([[head + d, dy - d], [head + 2.0 * d, dy], [head + d, dy + d], [head, dy]],
         k[0], k[1], k[2], a, toast_layer() + 1);
-    draw_text_opts(head + 20.0, y + 11.0, q.title, title_size(), #{
+    draw_text(head + 20.0, y + 11.0, q.title, title_size(), #{
         font: "display", spacing: s.spacing, color: [c[0], c[1], c[2], a], layer: toast_layer() + 1,
     });
     if q.count > 1 {
         let n = "×" + q.count;
         let px = head + 20.0 + s.tw + 8.0;
-        draw_rect_ex(px, dy - 9.0, 28.0, 18.0, c[0], c[1], c[2], 0.18 * a, 9.0, toast_layer() + 1);
-        draw_text_opts(px + 14.0, dy - 8.0, n, 13.0, #{
+        draw_rect(px, dy - 9.0, 28.0, 18.0, #{ color: [c[0], c[1], c[2], 0.18 * a], rounding: 9.0, layer: toast_layer() + 1 });
+        draw_text(px + 14.0, dy - 8.0, n, 13.0, #{
             font: "strong", align: "center", color: [c[0], c[1], c[2], a], layer: toast_layer() + 1,
         });
     }
-    draw_text_opts(x + (s.w - s.bw) / 2.0, y + 17.0 + s.th, q.body, body_size(), #{
+    draw_text(x + (s.w - s.bw) / 2.0, y + 17.0 + s.th, q.body, body_size(), #{
         font: "body", color: [0.878, 0.878, 0.878, 0.85 * a], layer: toast_layer() + 1,
     });
 }

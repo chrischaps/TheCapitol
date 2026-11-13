@@ -61,26 +61,28 @@ fn zone_banner() {
     let colour = [lerp(b.r, 0.96, lift), lerp(b.g, 0.93, lift), lerp(b.b, 0.86, lift), a];
 
     let caption = if b.first { "YOU ARRIVE IN" } else { "ENTERING" };
-    draw_text_opts(cx, y - 24.0, caption, 12.0, #{
+    draw_text(cx, y - 24.0, caption, 12.0, #{
         font: "strong", align: "center", spacing: 5.0,
         color: [0.878, 0.878, 0.878, 0.7 * a],
         shadow: [0.0, 1.0, 0.0, 0.0, 0.0, 0.6 * a],
     });
-    draw_text_opts(cx, y, b.name, size, #{
+    draw_text(cx, y, b.name, size, #{
         font: "display", align: "center", spacing: 4.0,
         color: colour,
         shadow: [0.0, 2.0, 0.0, 0.0, 0.0, 0.7 * a],
     });
 
     // The rule, drawn out from the centre under the name, fading at its ends.
-    let m = measure_text_ex(b.name, size, "display", 4.0);
+    let m = measure_text(b.name, size, #{ font: "display", spacing: 4.0 });
     let ry = y + m.height + 10.0;
     let reach = (m.width / 2.0 + 70.0) * smooth((t - 0.15) / 1.1);
     if reach > 1.0 {
-        draw_rect_gradient(cx - reach, ry, reach, 1.5,
-            b.r, b.g, b.b, 0.0, b.r, b.g, b.b, 0.9 * a, false, 10);
-        draw_rect_gradient(cx, ry, reach, 1.5,
-            b.r, b.g, b.b, 0.9 * a, b.r, b.g, b.b, 0.0, false, 10);
+        draw_rect_gradient(cx - reach, ry, reach, 1.5, #{
+            from: [b.r, b.g, b.b, 0.0], to: [b.r, b.g, b.b, 0.9 * a], vertical: false, layer: 10,
+        });
+        draw_rect_gradient(cx, ry, reach, 1.5, #{
+            from: [b.r, b.g, b.b, 0.9 * a], to: [b.r, b.g, b.b, 0.0], vertical: false, layer: 10,
+        });
     }
     let d = 4.0;
     draw_polygon([[cx, ry + 0.75 - d], [cx + d, ry + 0.75], [cx, ry + 0.75 + d], [cx - d, ry + 0.75]],
@@ -151,9 +153,9 @@ fn bubble(b) {
     let round = b.size * 0.45;
     let foot = b.y + b.h;
     // A soft shadow, so the slip lifts off a bright street.
-    draw_rect_ex(b.x + 1.0, b.y + 2.0, b.w, b.h, 0.0, 0.0, 0.0, 0.28 * a, round, 0);
-    draw_rect_ex(b.x, b.y, b.w, b.h, p[0], p[1], p[2], 0.96 * a, round, 0);
-    draw_rect_outline_ex(b.x, b.y, b.w, b.h, e[0], e[1], e[2], 0.9 * a, 1.0, round, 0);
+    draw_rect(b.x + 1.0, b.y + 2.0, b.w, b.h, #{ color: [0.0, 0.0, 0.0, 0.28 * a], rounding: round });
+    draw_rect(b.x, b.y, b.w, b.h, #{ color: [p[0], p[1], p[2], 0.96 * a], rounding: round });
+    draw_rect_outline(b.x, b.y, b.w, b.h, #{ color: [e[0], e[1], e[2], 0.9 * a], thickness: 1.0, rounding: round });
     // Open the edge where the tail leaves, so slip and tail are one.
     let half = tail_half(b) - 1.0;
     draw_rect(b.tip_x - half, foot - 2.0, 2.0 * half, 2.0, p[0], p[1], p[2], 0.96 * a);
@@ -163,13 +165,13 @@ fn bubble(b) {
         if c.glyph != () {
             draw_polygon(lozenge(c.glyph.x, c.glyph.y, c.glyph.r), d[0], d[1], d[2], 0.9 * a, 0);
         }
-        draw_text_opts(c.x, c.y, c.text, c.size, #{
+        draw_text(c.x, c.y, c.text, c.size, #{
             font: "strong",
             color: [d[0], d[1], d[2], a],
         });
     }
     for r in b.rows {
-        draw_text_opts(r.x, r.y, r.text, b.size, #{
+        draw_text(r.x, r.y, r.text, b.size, #{
             align: "center",
             color: [k[0], k[1], k[2], a],
         });
